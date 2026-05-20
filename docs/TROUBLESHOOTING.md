@@ -7,6 +7,7 @@
 - [nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패](#docker-컨테이너에서-vulkan-초기화-실패-linux)
+- [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
 - [lerobot record 키보드 컨트롤이 동작하지 않음](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [카메라 sensor가 raytracing pipeline 생성 실패](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
@@ -432,6 +433,88 @@ docker compose run --rm leisaac-debug bash -c '
 | 47998-48020 | UDP | 동적 미디어 범위 | `omni.services.livestream.nvcf` |
 
 `network_mode: host` 면 별도 포트 매핑 없이 그대로 노출된다. WebRTC 동적 미디어 협상이 NAT 뒤에서 깨지는 경우가 있어 host network 가 가장 안정적이다.
+
+---
+
+## WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)
+
+> ⚠️ 이 항목은 **수정 실패** 결과를 남긴다. 현재 NVIDIA 의 WSL2 GPU 노출 정책상 Docker 컨테이너 안에서 NVIDIA RTX Vulkan 가속을 동작시킬 방법이 없음이 실증으로 확인되었다. 다음 세션이 같은 시도를 반복하지 않도록 기록한다.
+
+**현상**: WSL2 (Windows 11 + Docker Desktop + WSLg) 환경에서 `IsaacLab/docker/container.py start` → `enter base` → `python -c "from isaaclab.app import AppLauncher; AppLauncher()"` 실행 시 GPU 가속이 잡히지 않고 위 [Linux 항목과 동일한 fallback 메시지](#docker-컨테이너에서-vulkan-초기화-실패-linux) 가 출력된다.
+
+> **LeIsaac 도 동일하게 영향받는다.** LeIsaac 의 teleop·정책 평가는 Isaac Lab → Isaac Sim → `omni.gpu_foundation_factory` 체인 위에 있어, GUI/headless 여부와 무관하게 RT-capable Vulkan device 를 요구한다. 따라서 본 항목의 진단·결론은 LeIsaac 컨테이너 경로에도 그대로 적용된다. 이번 세션에서 `AppLauncher(headless=True)` 도 동일 단계 (`No device could be created. ... Your GPUs do not support RayTracing`) 에서 실패하는 것이 확인됐다.
+
+**오류 메시지**:
+
+```log
+[Error] [carb.graphics-vulkan.plugin] VkResult: ERROR_INCOMPATIBLE_DRIVER
+[Error] [carb.graphics-vulkan.plugin] vkCreateInstance failed.
+                Vulkan 1.1 is not supported, or your driver requires an update.
+[Error] [omni.gpu_foundation_factory.plugin] Failed to create any GPU devices,
+                including an attempt with compatibility mode.
+[Error] [gpu.foundation.plugin] No device could be created. Some known system issues:
+                - Your GPUs do not support RayTracing: DXR or Vulkan ray_tracing
+                - For Linux dockers, the setup is not complete.
+                  Install the latest driver, xServer and NVIDIA container runtime.
+[Error] [omni.physx.plugin] CUDA libs are present, but no suitable CUDA GPU was found!
+```
+
+Carb 의 "Vulkan 1.1 is not supported" 는 잘못 라벨된 fallback 메시지다. 실제 원인은 `vkCreateInstance` 단계에서 **사용 가능한 NVIDIA ICD 가 0개** 라는 점이다.
+
+### 원인
+
+NVIDIA WSL CUDA driver (596.x / 595.x 시리즈) 가 WSL2 Linux 측에 노출하는 라이브러리는 **컴퓨트 전용** 이다. 호스트 `/usr/lib/wsl/lib/` 에 존재하는 것:
+
+| 종류 | 노출됨 | 노출 안 됨 |
+|---|---|---|
+| Compute | `libcuda.so.1.1`, `libnvidia-ml.so.1`, `libnvidia-encode.so.1`, `libnvidia-opticalflow.so.1`, `libnvidia-ngx.so.1`, `libnvidia-gpucomp.so.<ver>` | — |
+| Graphics | — | `libGLX_nvidia.so.0`, `libnvidia-glcore.so.<ver>`, `libEGL_nvidia.so.0`, `libnvoptix.so.<ver>` |
+
+NVIDIA 는 WSL2 의 그래픽스 가속을 **D3D12 경로** (Windows 측 `nvoglv64.dll` + WSL 측 `libd3d12.so` + `/dev/dxg`) 로 설계했고, Linux native Vulkan/OpenGL ICD 는 의도적으로 제공하지 않는다. 따라서:
+
+1. `/etc/vulkan/icd.d/nvidia_icd.json` 의 `library_path: libGLX_nvidia.so.0` 은 컨테이너 안에서 dangling pointer.
+2. NVIDIA Container Toolkit 이 `NVIDIA_DRIVER_CAPABILITIES=all` 로도 가져올 graphics 라이브러리가 호스트에 없다 (위 Linux 항목의 `--no-opengl-files` 시나리오와 결과는 같지만, 호스트에 *재설치* 로 채워 넣을 라이브러리 자체가 존재하지 않는다는 점이 다르다).
+3. Mesa `dzn` (D3D12-on-Vulkan) 백엔드는 ICD 로딩까지는 성공하지만 `ID3D12DeviceFactory::CreateDevice` 단계에서 `VK_ERROR_INITIALIZATION_FAILED` 로 실패 (WSL D3D12 shim + NVIDIA UMD 결합 문제).
+4. Mesa `lavapipe` (CPU) 는 instance 까지는 생성되지만 Isaac Sim 의 `gpu.foundation.plugin` 이 RayTracing 가속 GPU 를 hard requirement 로 가지므로 device 단계에서 거부.
+
+### 해결 방법
+
+**컨테이너 우회. WSL2 또는 Windows 에 Isaac Sim 을 네이티브 설치한다.** 다음 우회로는 모두 *시도했고 실패* 했으므로 같은 함정을 반복하지 말 것:
+
+| 시도한 우회 | 결과 |
+|---|---|
+| `docker/container.py` 의 `x11.yaml` 그대로 사용 | xauth 가 빈 cookie 반환 → 빈 XAUTHORITY 마운트로 X 인증 자체가 깨짐. WSLg 가 cookie 미사용이라 업스트림 경로 부적합 |
+| `/usr/lib/wsl` 을 read-only 로 컨테이너에 마운트 | Toolkit 의 동적 라이브러리 주입을 덮어써 오히려 깨뜨림. 호스트에 graphics 라이브러리 자체가 없으므로 마운트해도 얻을 게 없음 |
+| `/tmp/nvidia_icd.json` 수동 작성 + `VK_ICD_FILENAMES` 강제 지정 | ICD JSON 이 가리키는 `libGLX_nvidia.so.0` 자체가 없어 동일 |
+| Mesa `lavapipe` ICD 강제 (`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`) | `vkCreateInstance` 통과, "Vulkan 1.1 not supported" 메시지는 사라지지만 device 단계에서 RayTracing 미지원으로 거부 |
+| `kisak/kisak-mesa` PPA 로 dzn 포함 mesa 빌드 + 호스트 `libd3d12.so`/`libdxcore.so`/`libnvwgf2umx.so` 컨테이너 복사 | dzn ICD 로딩 성공, 그러나 `ID3D12DeviceFactory::CreateDevice failed → VK_ERROR_INITIALIZATION_FAILED` |
+| Isaac Sim 자체 번들 Vulkan loader (`/isaac-sim/extscache/omni.gpu_foundation-*/bin/deps/libvulkan.so.1.3.239`) 우선 사용 | 시스템 loader 와 동일 결과 (ICD 자체가 없으므로 loader 가 무엇이든 무관) |
+| `--/rtx/verifyDriverVersion/enabled=false` (NVIDIA 공식 문서 [`docs.omniverse.nvidia.com/.../technical-requirements.html#known-issues-and-limitations`](https://docs.omniverse.nvidia.com/dev-guide/latest/common/technical-requirements.html#known-issues-and-limitations) "535.256+ on Vulkan") | 이 워크어라운드는 instance 생성 *후* verify 단계용. 우리는 instance 생성 *이전* 에서 막혀서 무관 |
+
+권장 경로:
+
+- **WSL2 native install** — Docker 우회. WSL2 Ubuntu 에 Isaac Sim 을 직접 설치 (`pip install isaacsim` 류). NVIDIA 가 공식 지원하는 경로다.
+- **Windows native install** — WSL 자체 우회. 가장 안정.
+- **현 프로젝트 정책 그대로 유지** — `AGENTS.md` 가 명시한 *"시뮬레이션 경로 임시 비활성"* 상태 유지. 활성 워크플로 (`lerobot` 텔레오퍼레이션·데이터수집·SmolVLA 학습) 는 Isaac Sim 을 쓰지 않으므로 영향 없음.
+
+### 확인 방법
+
+이 시스템에서 이 경로가 막혀있는지 빠르게 재확인하는 명령:
+
+```bash
+# 호스트 측: WSL2 Linux 에 NVIDIA graphics 라이브러리가 정말 없는지
+ls /usr/lib/wsl/lib | grep -E 'libGLX_nvidia|libnvidia-glcore|libEGL_nvidia'
+# → 빈 출력이 정상. 이게 빈 출력인 한 컨테이너 우회는 불가능.
+
+# 컨테이너 측: nvidia ICD 가 dangling 인지
+docker exec isaac-lab-base bash -lc '
+  cat /etc/vulkan/icd.d/nvidia_icd.json &&
+  ls /usr/lib/x86_64-linux-gnu/libGLX_nvidia* 2>&1
+'
+# → ICD 는 libGLX_nvidia.so.0 을 가리키지만 컨테이너 안에 그 파일이 없다고 출력.
+```
+
+NVIDIA 가 향후 WSL2 Linux 측에도 Vulkan ICD 를 노출하기로 정책을 바꾸면 (또는 mesa dzn 의 NVIDIA D3D12 호환이 개선되면) 이 항목을 재검토할 수 있다. 그 전까지 시뮬 경로는 native install 로 처리한다.
 
 ---
 
