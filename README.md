@@ -8,6 +8,8 @@ SO-ARM101 6축 로봇 팔용 **Docker 기반 LeRobot 파이프라인**. `docker/
 호스트에는 Docker / GPU 드라이버 / (Windows의 경우) usbipd-win 만 갖추면 되고, Python·CUDA·LeRobot·서보 SDK 등 일체는 컨테이너 안에 격리되어 있다.
 
 > 시뮬레이션 경로(LeIsaac + Isaac Sim)는 현재 `docker-compose.yaml` 에서 임시 비활성화되어 있다. 관련 Dockerfile (`docker/Dockerfile.leisaac`) 은 보존만 되어 있으며 본 README 는 실기기 경로만 다룬다.
+>
+> Windows 호스트에서 WSL2 / Docker 없이 Git Bash + `uv` 로 실기기 워크플로를 실행할 때는 [Windows Native + uv LeRobot 실행 가이드 (Git Bash)](docs/windows-native-uv-lerobot-guide.md)를 참고한다.
 
 ## 목차 <!-- omit in toc -->
 

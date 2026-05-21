@@ -152,11 +152,11 @@ override-dependencies = [
     "pyarrow>=17,<19",
     # datasets 4.7.0+에서 pa.json_() 사용 (PyArrow 19 이상 필요) → pyarrow<19와 충돌 방지
     "datasets>=4.0.0,<4.7.0",
-    # torchcodec 0.5.x 가 PyTorch 2.7 호환 (torch==2.7.0+cu128 핀과 매칭).
-    # unpinned 으로 두면 최신 (0.10+) 이 설치되어 PyTorch 2.11+ ABI 로 빌드된
-    # libtorchcodec_core*.so 가 c10 cxx11 심볼 (c10::MessageLogger::stream) 을
-    # 찾지 못해 lerobot-dataset-viz / decode_video_frames_torchcodec 가 죽는다.
-    "torchcodec>=0.5,<0.6",
+    # # torchcodec 0.5.x 가 PyTorch 2.7 호환 (torch==2.7.0+cu128 핀과 매칭).
+    # # unpinned 으로 두면 최신 (0.10+) 이 설치되어 PyTorch 2.11+ ABI 로 빌드된
+    # # libtorchcodec_core*.so 가 c10 cxx11 심볼 (c10::MessageLogger::stream) 을
+    # # 찾지 못해 lerobot-dataset-viz / decode_video_frames_torchcodec 가 죽는다.
+    # "torchcodec>=0.5,<0.6",
 ]
 # 빌드 백엔드(setuptools) 버전 고정: setuptools 82+ 에서 발생하는 빌드 오류 회피
 build-constraint-dependencies = [

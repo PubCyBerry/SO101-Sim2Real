@@ -8,6 +8,7 @@
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
+- [Windows 네이티브 bare isaacsim Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [lerobot record 키보드 컨트롤이 동작하지 않음](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [카메라 sensor가 raytracing pipeline 생성 실패](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
@@ -515,6 +516,74 @@ docker exec isaac-lab-base bash -lc '
 ```
 
 NVIDIA 가 향후 WSL2 Linux 측에도 Vulkan ICD 를 노출하기로 정책을 바꾸면 (또는 mesa dzn 의 NVIDIA D3D12 호환이 개선되면) 이 항목을 재검토할 수 있다. 그 전까지 시뮬 경로는 native install 로 처리한다.
+
+---
+
+## Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료
+
+**현상**: Windows 네이티브 uv venv 에 Isaac Sim 5.1.0 / Isaac Lab 2.3.0 이 설치된 상태에서 프로젝트 루트의 bare `isaacsim` entrypoint 만 실행하면 `Isaac-Sim Full` GUI 가 로딩 완료 직후 닫힌다.
+
+```powershell
+.\.venv\Scripts\isaacsim.exe
+```
+
+같은 환경에서 LeIsaac teleop 스크립트는 GUI 를 띄운 채 정상 동작한다.
+
+```powershell
+uv run scripts/environments/teleoperation/teleop_se3_agent.py `
+  --task=LeIsaac-SO101-PickOrange-v0 `
+  --teleop_device=so101leader `
+  --port=COM5 `
+  --num_envs=1 `
+  --device=cuda `
+  --enable_cameras
+```
+
+**오류 메시지**: Kit 로그는 `app ready` 까지 도달하지만 Windows Application 로그가 RTX scene DB access violation 을 기록한다.
+
+```text
+Faulting application name: python.exe
+Faulting module name: rtx.scenedb.plugin.dll
+Exception code: 0xc0000005
+```
+
+### 원인
+
+bare `isaacsim` 은 기본 experience 로 `isaacsim.exp.full.kit` 를 골라 `Isaac-Sim Full` app 을 실행한다. 반면 이 레포의 Isaac Lab 스크립트는 `isaaclab.app.AppLauncher` 로 시뮬레이터를 시작한다. GUI + `--enable_cameras` 조합에서는 AppLauncher 가 Isaac Lab 의 `isaaclab.python.rendering.kit` experience 를 선택하고, 카메라가 없으면 `isaaclab.python.kit` 를 선택한다.
+
+즉 두 명령은 같은 Isaac Sim wheel 을 쓰더라도 같은 app 을 띄우지 않는다. 이 세션에서 확인한 크래시는 Full App 이 `rtx.scenedb.plugin.dll` 을 초기화한 뒤 발생했고, LeIsaac / Isaac Lab task app 경로의 Python import 나 COM teleop 장치 연결 단계에서 발생한 것이 아니다.
+
+같은 Windows 환경에서 신규 viewer 스크립트가 AppLauncher 기본 GUI experience 인 `isaaclab.python.kit` 를 타게 둔 경우도 같은 `rtx.scenedb.plugin.dll` access violation 이 재현됐다. viewer 기본 experience 를 `isaaclab.python.rendering.kit` 로 고정하거나 `--enable_cameras` 로 rendering experience 를 선택하게 하면 URDF import 가 진행되고 GUI 프로세스가 유지됐다.
+
+### 해결 방법
+
+이 레포의 시뮬레이션 GUI 는 bare Full App 대신 Isaac Lab experience 로 띄운다.
+
+```powershell
+# 카메라 sensor 를 쓰는 LeIsaac / Isaac Lab rendering GUI
+.\.venv\Scripts\isaacsim.exe `
+  .\.venv\Lib\site-packages\isaaclab\apps\isaaclab.python.rendering.kit
+
+# 카메라 sensor 없는 기본 Isaac Lab GUI
+.\.venv\Scripts\isaacsim.exe `
+  .\.venv\Lib\site-packages\isaaclab\apps\isaaclab.python.kit
+```
+
+실제 task 를 띄울 때는 해당 스크립트를 계속 사용한다. `teleop_se3_agent.py --enable_cameras` 는 위 rendering experience 선택까지 AppLauncher 가 처리한다.
+
+Full App UI 자체가 필요하면 먼저 사용자 설정을 초기화해 재시도한다. NVIDIA 는 Isaac Sim cache/config 충돌 시 fresh config 와 cache clear 를 점검하라고 안내한다.
+
+```powershell
+.\.venv\Scripts\isaacsim.exe --reset-user
+```
+
+`--reset-user` 뒤에도 bare Full App 이 같은 `rtx.scenedb.plugin.dll` access violation 으로 죽으면 Full App 의 cache/config 문제를 별도로 추적하고, 레포 작업은 Isaac Lab app 경로로 진행한다.
+
+### 확인 방법
+
+1. `.\.venv\Scripts\isaacsim.exe <isaaclab ... rendering.kit>` 실행 시 로그 폴더가 `Kit\Isaac-Sim\5.1\...` 로 잡히고 GUI 프로세스가 유지되는지 확인.
+2. teleop task 는 `--enable_cameras` 를 둔 기존 명령으로 실행해 PickOrange scene 과 camera observation 이 뜨는지 확인.
+3. bare Full App 재검증이 필요하면 `Get-WinEvent -LogName Application` 에 새 `rtx.scenedb.plugin.dll` / `0xc0000005` APPCRASH 가 추가되지 않았는지 확인.
 
 ---
 
