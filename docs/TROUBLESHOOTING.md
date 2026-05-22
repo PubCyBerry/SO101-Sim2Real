@@ -2,15 +2,15 @@
 
 ## 목차 <!-- omit in toc -->
 
-- [WSL2 NTFS 마운트에서 uv sync 실패](#wsl2-ntfs-마운트에서-uv-sync-실패-operation-not-permitted)
-- [uv-compile Too many open files panic (다코어 호스트)](#uv-compile-too-many-open-files-panic-다코어-호스트-모든-uv-run)
-- [nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
+- [WSL2 NTFS 마운트에서 uv sync 실패 (Operation not permitted)](#wsl2-ntfs-마운트에서-uv-sync-실패-operation-not-permitted)
+- [uv-compile Too many open files panic (다코어 호스트, 모든 uv RUN)](#uv-compile-too-many-open-files-panic-다코어-호스트-모든-uv-run)
+- [`uv pip install torch` 단계에서 nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
-- [Docker 컨테이너에서 Vulkan 초기화 실패](#docker-컨테이너에서-vulkan-초기화-실패-linux)
-- [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
-- [Windows 네이티브 bare isaacsim Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
-- [lerobot record 키보드 컨트롤이 동작하지 않음](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
-- [카메라 sensor가 raytracing pipeline 생성 실패](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
+- [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
+- [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
+- [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
+- [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
+- [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
