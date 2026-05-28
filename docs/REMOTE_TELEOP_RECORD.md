@@ -35,7 +35,7 @@ uv run lerobot-record \
     --robot.cameras="${CAMERAS}" \
     --teleop.type=so101_leader \
     --teleop.port="${LEADER_PORT:-COM8}" \
-    --teleop.id="${LEADER_ID:-konan_teleop}" \
+    --teleop.id="${LEADER_ID:-so101_teleop}" \
     --dataset.repo_id="${DATASET_REPO}" \
     --dataset.single_task="${TASK}" \
     --dataset.root="${DATASET_ROOT}" \
