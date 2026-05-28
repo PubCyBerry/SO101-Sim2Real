@@ -212,10 +212,10 @@ uv run lerobot-find-cameras opencv
 ```bash
 mkdir -p ./datasets ./logs ./outputs
 
-LEADER_PORT="COM5"
-FOLLOWER_PORT="COM6"
-LEADER_ID="so101_teleop"
-FOLLOWER_ID="so101_robot"
+TELEOP_PORT="COM5"
+ROBOT_PORT="COM6"
+TELEOP_ID="so101_teleop"
+ROBOT_ID="so101_robot"
 
 WRIST_CAMERA=0
 FRONT_CAMERA=1
@@ -273,12 +273,12 @@ export HF_HOME="$(pwd -W)/.cache/huggingface"
 # Follower
 uv run lerobot-setup-motors \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}"
+    --robot.port="${ROBOT_PORT}"
 
 # Leader
 uv run lerobot-setup-motors \
     --teleop.type=so101_leader \
-    --teleop.port="${LEADER_PORT}"
+    --teleop.port="${ROBOT_PORT}"
 ```
 
 캘리브레이션. `id` 는 이후 teleop / record / replay 에서 동일하게 유지.
@@ -287,14 +287,14 @@ uv run lerobot-setup-motors \
 # Follower
 uv run lerobot-calibrate \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}"
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}"
 
 # Leader
 uv run lerobot-calibrate \
     --teleop.type=so101_leader \
-    --teleop.port="${LEADER_PORT}" \
-    --teleop.id="${LEADER_ID}"
+    --teleop.port="${TELEOP_PORT}" \
+    --teleop.id="${TELEOP_ID}"
 ```
 
 ### A.6 Teleoperation 과 데이터셋
@@ -304,12 +304,12 @@ uv run lerobot-calibrate \
 ```bash
 uv run lerobot-teleoperate \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}" \
     --teleop.type=so101_leader \
-    --teleop.port="${LEADER_PORT}" \
-    --teleop.id="${LEADER_ID}"
+    --teleop.port="${TELEOP_PORT}" \
+    --teleop.id="${TELEOP_ID}"
 ```
 
 로컬 Rerun 뷰어를 띄우려면 `--display_data=true`. Docker 전용 `--display_ip=host.docker.internal` 은 native 에서 넣지 않는다.
@@ -319,12 +319,12 @@ uv run lerobot-teleoperate \
 ```bash
 uv run lerobot-record \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}" \
     --teleop.type=so101_leader \
-    --teleop.port="${LEADER_PORT}" \
-    --teleop.id="${LEADER_ID}" \
+    --teleop.port="${TELEOP_PORT}" \
+    --teleop.id="${TELEOP_ID}" \
     --dataset.repo_id="${DATASET_REPO}" \
     --dataset.single_task="${TASK}" \
     --dataset.root="${DATASET_ROOT}" \
@@ -351,8 +351,8 @@ uv run lerobot-record \
 ```bash
 uv run lerobot-replay \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
     --dataset.repo_id="${DATASET_REPO}" \
     --dataset.episode=0 \
     --dataset.root="${DATASET_ROOT}" \
@@ -455,8 +455,8 @@ uv run python ./docker/policy-client-shim.py \
     --aggregate_fn_name=weighted_average \
     --fps=30 \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}"
 ```
 

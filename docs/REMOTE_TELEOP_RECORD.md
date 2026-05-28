@@ -7,10 +7,10 @@
 `./.venv/Lib/site-packages/lerobot/scripts/lerobot_record.py`(이하 `lerobot-record`)를 로컬 PC에서 실행해서 SO-101 Leader Arm으로 Follower Arm을 원격 조작하고 데이터셋을 기록한다. 검증된 실행 명령은 다음과 같다.
 
 ```bash
-LEADER_PORT="COM5"
-FOLLOWER_PORT="COM8"
-LEADER_ID="so101_teleop"
-FOLLOWER_ID="so101_robot"
+TELEOP_PORT="COM5"
+ROBOT_PORT="COM8"
+TELEOP_ID="so101_teleop"
+ROBOT_ID="so101_robot"
 
 WRIST_CAMERA=0
 FRONT_CAMERA=1
@@ -30,12 +30,12 @@ CAMERAS="{wrist: {type: opencv, index_or_path: ${WRIST_CAMERA}, width: ${CAMERA_
 
 uv run lerobot-record \
     --robot.type=so101_follower \
-    --robot.port="${FOLLOWER_PORT}" \
-    --robot.id="${FOLLOWER_ID}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}" \
     --teleop.type=so101_leader \
-    --teleop.port="${LEADER_PORT:-COM8}" \
-    --teleop.id="${LEADER_ID:-so101_teleop}" \
+    --teleop.port="${TELEOP_PORT:-COM8}" \
+    --teleop.id="${TELEOP_ID:-so101_teleop}" \
     --dataset.repo_id="${DATASET_REPO}" \
     --dataset.single_task="${TASK}" \
     --dataset.root="${DATASET_ROOT}" \

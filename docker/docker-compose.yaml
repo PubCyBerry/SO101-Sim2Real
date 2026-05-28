@@ -12,7 +12,7 @@ services:
   #        usbipd attach --wsl --busid <LEADER_BUS>
   #        usbipd attach --wsl --busid <FOLLOWER_BUS>
   #   3. WSL2 쪽에서 확인: ls /dev/ttyUSB*
-  #   4. .env 파일에 LEADER_PORT / FOLLOWER_PORT 경로 기입
+  #   4. .env 파일에 TELEOP_PORT / ROBOT_PORT 경로 기입
   #
   # ■ 실행 - working directory에서:
   #   docker compose --env-file .env -f docker/docker-compose.yaml up lerobot
