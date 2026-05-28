@@ -184,7 +184,7 @@ COPY --from=policy-deps /opt/venv /opt/venv
 COPY --from=policy-deps /root/.local/share/uv/python /root/.local/share/uv/python
 
 # 정책 서버 전용 진입점 (prepare-model / policy-server / info / bash / python).
-COPY docker/server-entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/policy-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # HF_HOME 을 /workspace/.cache/huggingface 로 옮긴 이유: lerobot 서비스와 동일.
 # 컨테이너를 호스트 UID (non-root) 로 실행하면 /root 를 traverse 못하기 때문.

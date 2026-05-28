@@ -78,11 +78,11 @@ teleop = [
     "packaging>=25.0",
 ]
 
-# ── smolvla: SmolVLA policy 추론/학습 보조 의존성 ────────────────────────────
+# ── policy: VLA policy 추론/학습 보조 의존성 ────────────────────────────
 # `lerobot[smolvla]` extras 가 transformers / num2words / accelerate / safetensors
-# 를 끌어오며, 본 그룹은 추가 핀과 함께 정책 서버 이미지(Dockerfile.smolvla) 에서만
+# 를 끌어오며, 본 그룹은 추가 핀과 함께 정책 서버 이미지(Dockerfile.policy) 에서만
 # 설치된다. teleop 이미지(Dockerfile.lerobot) 에는 포함하지 않음.
-smolvla = [
+policy = [
     "lerobot[smolvla]>=0.4.2",
     "num2words>=0.5.14,<0.6.0",
     "accelerate>=1.7.0,<2.0.0",
