@@ -20,8 +20,15 @@
 #   Dockerfile.teleop 에서 --only-group teleop 으로 teleop 의존성만 설치
 # =============================================================================
 
+[build-system]
+requires      = ["setuptools<82"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project]
-name        = "robotics-manipulation"
+name        = "sim_to_real"
 version     = "0.1.0"
 description = "SO-101 robot manipulation: teleoperation & Isaac Sim training"
 readme      = "README.md"
@@ -48,6 +55,9 @@ dependencies = [
     # PyTorch — CUDA 12.8 빌드 (pytorch-cu128 index 에서 설치, 아래 sources 참조)
     "torch>=2.7",
     "torchvision>=0.22",
+    # USD Python API (scripts/author_pick_pen_scene.py 가 .usda→.usdc 변환에 사용).
+    # 순수 Python 패키지라 isaac 그룹 없이도 씬 author/검증이 가능하도록 공용에 배치.
+    "usd-core>=26.5",
 ]
 
 
@@ -118,13 +128,7 @@ torchvision = [{ index = "pytorch-cu128" }]
 # isaacsim → NVIDIA 전용 PyPI
 isaacsim    = [{ index = "nvidia" }]
 # leisaac → GitHub 소스 (v0.4.0 태그 고정)
-leisaac = [
-    {
-        git          = "https://github.com/LightwheelAI/leisaac",
-        subdirectory = "source/leisaac",
-        tag          = "v0.4.0"
-    },
-]
+leisaac = [{ git = "https://github.com/LightwheelAI/leisaac", subdirectory = "source/leisaac", tag = "v0.4.0" }]
 
 [[tool.uv.index]]
 name     = "pytorch-cu128"

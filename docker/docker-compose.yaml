@@ -57,7 +57,7 @@ services:
     #   OpenCV 는 캡처 노드만 사용하지만, UVC 드라이버가 메타데이터 노드도
     #   함께 열려 있어야 정상 스트리밍되는 경우가 있어 둘 다 마운트.
     #
-    #   belly cam  → /dev/video0 (캡처), /dev/video1 (메타)  — 전면부 시점
+    #   front cam  → /dev/video0 (캡처), /dev/video1 (메타)  — 전면부 시점
     #   wrist cam  → /dev/video2 (캡처), /dev/video3 (메타)  — 손목 시점
     #   top   cam  → /dev/video4 (캡처), /dev/video5 (메타)  — 탑뷰 시점 (선택)
     #
@@ -69,9 +69,9 @@ services:
       # Arm 직렬 포트
       - "${TELEOP_PORT}:${TELEOP_PORT}"                                              # /dev/ttyACM0
       - "${ROBOT_PORT}:${ROBOT_PORT}"                                                # /dev/ttyACM1
-      # belly cam (전면부 시점)
-      - "${BELLY_CAM_PORT:-/dev/null}:${BELLY_CAM_PORT:-/dev/null}"                  # /dev/video0
-      - "${BELLY_CAM_META_PORT:-/dev/null}:${BELLY_CAM_META_PORT:-/dev/null}"        # /dev/video1
+      # front cam (전면부 시점)
+      - "${FRONT_CAM_PORT:-/dev/null}:${FRONT_CAM_PORT:-/dev/null}"                  # /dev/video0
+      - "${FRONT_CAM_META_PORT:-/dev/null}:${FRONT_CAM_META_PORT:-/dev/null}"        # /dev/video1
       # wrist cam (손목 시점)
       - "${WRIST_CAM_PORT:-/dev/null}:${WRIST_CAM_PORT:-/dev/null}"                  # /dev/video2
       - "${WRIST_CAM_META_PORT:-/dev/null}:${WRIST_CAM_META_PORT:-/dev/null}"        # /dev/video3

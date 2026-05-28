@@ -11,6 +11,18 @@
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
+- [Isaac Lab `RigidObject` spawn 에서 parent prim 경로 누락](#isaac-lab-rigidobject-spawn-에서-parent-prim-경로-누락)
+- [Sim-to-Real 펜이 그리퍼에 잡히지 않음 (USD Cube scale + 얇은 code-spawn pen)](#sim-to-real-펜이-그리퍼에-잡히지-않음-usd-cube-scale--얇은-code-spawn-pen)
+- [Sim-to-Real USD 펜이 관통하며 미끄러짐 (pen contact tuning)](#sim-to-real-usd-펜이-관통하며-미끄러짐-pen-contact-tuning)
+- [Sim-to-Real SO-101 base 가 desk 위에서 떠 보임 (mat 배치)](#sim-to-real-so-101-base-가-desk-위에서-떠-보임-mat-배치)
+- [Sim-to-Real 씬이 로봇 위치와 어긋남 (scene origin shift)](#sim-to-real-씬이-로봇-위치와-어긋남-scene-origin-shift)
+- [Sim-to-Real 에피소드 리셋 시 펜이 한 번 튀어오름 (mat z slack)](#sim-to-real-에피소드-리셋-시-펜이-한-번-튀어오름-mat-z-slack)
+- [Sim-to-Real 펜이 닿지 않았는데 그리퍼가 잡음 (pen collider 부풀림)](#sim-to-real-펜이-닿지-않았는데-그리퍼가-잡음-pen-collider-부풀림)
+- [Sim-to-Real 펜 collision 형상이 visual 과 어긋남 (Cube collider → visual primitive)](#sim-to-real-펜-collision-형상이-visual-과-어긋남-cube-collider--visual-primitive)
+- [Sim-to-Real B/R 리셋 후 동적 RigidBody 가 이전 위치 유지 (env subasset 등록 누락)](#sim-to-real-br-리셋-후-동적-rigidbody-가-이전-위치-유지-env-subasset-등록-누락)
+- [Sim-to-Real 그리퍼·펜이 매트/책상을 관통하거나 reset 시 튀어오름 (정적 객체 contactOffset 디폴트)](#sim-to-real-그리퍼펜이-매트책상을-관통하거나-reset-시-튀어오름-정적-객체-contactoffset-디폴트)
+- [Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)](#sim-to-real-펜이-펜통-안에서-spawn-되어-겹침-펜펜통-sampling-영역-분리-누락)
+- [Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)](#sim-to-real-펜통-호-sampling-이-매트책상-밖으로-나감-radius-와-default-좌표-불일치)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -711,6 +723,771 @@ GPU 별 RT 코어 유무 빠른 가이드 (NVIDIA 공식 시스템 요구사항 
 | GeForce RTX 4080 (최소) / 5080 (양호) / PRO 6000 Blackwell (이상적) | 컨슈머·Pro | ✓ | NVIDIA **권장** |
 | GeForce RTX 30 시리즈 | Ampere | ✓ | 권장 라인업 미만이지만 RT 코어·16GB(3080 12GB는 미달) 충족 시 동작 |
 
+
+---
+
+## Isaac Lab `RigidObject` spawn 에서 parent prim 경로 누락
+
+**현상**: `InteractiveScene` 에 동적 물체를 추가한 뒤 scene 생성 단계에서 GUI 가 ready 로그까지 가지 못하고 `RigidObjectCfg` spawn 이 즉시 실패한다. 예를 들어 `prim_path="{ENV_REGEX_NS}/Pens/white_pen"` 처럼 아직 존재하지 않는 중간 그룹 prim 을 포함한 경로에서 재현된다.
+
+**오류 메시지**:
+
+```text
+RuntimeError: Unable to find source prim path: '/World/envs/env_.*/Pens'.
+Please create the prim before spawning.
+```
+
+### 원인
+
+Isaac Lab shape spawner 는 leaf prim 은 만들지만 `RigidObjectCfg.prim_path` 의 미존재 parent prim 까지 자동으로 author 하지 않는다. USD scene 이 `/Pens` prim 을 먼저 만들지 않은 상태에서 regex env path 아래 자식 rigid object 를 바로 spawn 하려고 하면 source parent lookup 이 실패한다.
+
+### 해결 방법
+
+둘 중 하나로 경로 소유권을 명확히 한다.
+
+1. scene USD 나 setup 코드에서 `{ENV_NS}/Pens` parent prim 을 먼저 author 한 뒤 자식 rigid object 를 spawn 한다.
+2. 그룹 prim 이 꼭 필요하지 않으면 `prim_path="{ENV_REGEX_NS}/white_pen"` 처럼 이미 존재하는 env root 바로 아래에 동적 물체를 둔다.
+
+`Sim-to-Real` 펜 task 는 이후 LeIsaac scene 방식으로 옮겨져, 펜 prim 을
+`assets/scenes/so101_pick_pen/pick_pen_scene.usd` 안에 author 하고
+`parse_usd_and_create_subassets()` 로 등록한다. 코드 shape spawner 로 다시
+되돌릴 때는 위 parent prim 규칙을 지켜야 한다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\view_pick_pen_scene.py
+```
+
+stdout 에 `[INFO]: SO-101 pen Pick-and-Place scene is ready.` 가 찍히고 desk scene 의 펜들이 나타나면 parent prim 경로 문제는 해결된 상태다.
+
+---
+
+## Sim-to-Real 펜이 그리퍼에 잡히지 않음 (USD Cube scale + 얇은 code-spawn pen)
+
+**현상**: `scripts/record_pick_pen.py` 의 초기 pen scene 에서
+SO-101 그리퍼를 내려 펜을 닫아도 펜이 잡히지 않는다. 책상 면에 닿는 높이도
+직관과 어긋나 보여 robot zero 가 잘못된 것처럼 보인다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서는 얇은 pen proxy 가 책상 면과 겹치거나 stable pinch contact 를 만들지 못한다.
+```
+
+### 원인
+
+초기 authored table USD 는 `UsdGeomCube` 의 `xformOp:scale` 값을 치수처럼
+썼지만 Cube 기본 size 는 2 다. 예를 들어 z scale `0.04` desk top 은 실제로
+두께 `0.08` 이 되어 의도한 작업면 `z=0` 보다 위로 올라간다. 동시에 펜은 코드
+`CapsuleCfg` 로 반지름 `6.5 mm`, center z `0.014` 에 따로 spawn 되어 desk/mat
+collision 과 겹치기 쉬웠고 SO-101 finger mesh 가 안정적으로 집을 폭도 작았다.
+
+SO-101 의 reach 자체가 문제였던 것은 아니다. joint-limit sample 에서
+`gripper`/`jaw` body origin 은 작업면 아래(`z=-0.1325` 샘플)까지 내려간다.
+다만 local runtime follower USD 는 asset root `z=0` 에서 base visual bound 의
+최저점이 `z=0.030081` 이므로 table scene 에서는 별도 base-surface offset 도
+맞춰야 한다.
+
+### 해결 방법
+
+LeIsaac `PickOrange` 방식으로 scene 소유권을 바꾼다.
+
+1. 책상, 매트, 컵, 펜 rigid bodies 를 하나의 USD scene 에 author 한다.
+2. Cube prim 은 `size = 1` 을 명시해 authored scale 과 실제 치수를 맞추고
+   desk surface 를 `z=0` 으로 둔다.
+3. 펜은 scene USD 의 `PhysicsRigidBodyAPI` + `PhysicsCollisionAPI` capsule
+   subasset 으로 두고, 위에서 pinching 가능한 marker-size barrel 로 만든다.
+4. env cfg 에서는 LeIsaac 와 같이 `parse_usd_and_create_subassets()` 로 pen
+   rigid prim 을 Isaac Lab reset/recorder manager 에 등록한다.
+
+현재 구현:
+
+- USD scene: `assets/scenes/so101_pick_pen/pick_pen_scene.usd`
+- USD load + subasset 등록: `src/sim_to_real/scenes/pick_pen_scene.py`
+
+### 확인 방법
+
+```powershell
+uv run scripts\record_pick_pen.py `
+  --teleop_device so101leader `
+  --port COM5 `
+  --record `
+  --dataset_file outputs\datasets\so101_pick_pen_contact_check.hdf5
+```
+
+task 기동 후 env 진단에서 rigid objects 가 `PenWhite`, `PenGray`, `PenBlack`,
+`PenBlue` 로 등록되고 local follower 의 base 가 desk surface 에 맞춰져 있으면
+USD subasset/zero 정렬은 맞다. GUI 에서 `B` 로 control 을 시작한 뒤 pen
+barrel 을 위에서 감싸도록 jaw 를 정렬해 닫아 contact 가 생기는지 확인한다.
+
+---
+
+## Sim-to-Real USD 펜이 관통하며 미끄러짐 (pen contact tuning)
+
+**현상**: LeIsaac 방식의 authored USD pen scene 으로 옮긴 뒤에도 SO-101
+그리퍼로 pen barrel 을 닫을 때 표면에서 바로 버티지 못하고 약간 관통하거나
+고무처럼 밀렸다 튀는 느낌이 난다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 pen visual 과 jaw 가 겹쳐 보이고 pinch 중 pen 이 쉽게 밀려난다.
+```
+
+이 증상을 줄이려고 scene/robot 전체 `UsdFileCfg` 에 collision modifier 를
+덮어쓴 실험 경로에서는 smoke run 에서 다음 로그도 확인됐다.
+
+```text
+[Warning] [isaaclab.sim.utils] Could not perform 'modify_collision_properties' on any prims under: '/World/envs/env_0/Robot'.
+[Error] [omni.physx.plugin] PhysX error: Fetching GPU Narrowphase failed! 700
+```
+
+### 원인
+
+pen visual 은 barrel/tip/clip 으로 세분화되어 있지만 실제 접촉은 scene USD 의
+단일 capsule collider 가 담당한다. 이 collider 가 rigid body 여도 기본 contact
+offset, solver iteration, friction 만 쓰면 작은 cylindrical object 를 SO-101 jaw
+mesh 사이에서 집을 때 surface contact 가 늦게 풀리거나 미끄러짐이 두드러질 수
+있다.
+
+scene spawn 이나 `SO101_FOLLOWER_CFG` 의 `UsdFileCfg.collision_props` 로
+collision 설정을 전체 USD 에 덮는 방식도 적절하지 않다. SO-101 runtime USD 의
+jaw/gripper collision prim 은 instanced prim 이라 Isaac Lab modifier 가 적용되지
+않고, desk/cup 전체 collider 까지 같은 PhysX contact 튜닝 범위에 들어가 spawn
+범위만 커진다.
+
+### 해결 방법
+
+1. pen root 는 USD 에 `PhysicsRigidBodyAPI`, `PhysicsMassAPI`,
+   `PhysxRigidBodyAPI` 를 author 하고 gravity 를 켠 dynamic rigid body 로 둔다.
+2. pinch 를 담당하는 invisible capsule collider 에만 `PhysxCollisionAPI` 를
+   추가해 `contactOffset=0.0015`, `restOffset=0`, torsional patch radius 를
+   명시한다.
+3. pen collider 에 `PenGripPhysics` physics material 을 bind 해 static/dynamic
+   friction 을 높이고 restitution 은 0 으로 둔다.
+4. pen rigid body 에 CCD 와 solver position/velocity iteration count 를 author
+   한다. env 기본 physics material 도 같은 high-friction 방향으로 맞춘다.
+5. desk/cup/robot 전체에 collision modifier 를 덮지 않고 pen contact tuning 은
+   `scripts/author_pick_pen_scene.py` 의 pen collider authoring 에
+   국한한다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+uv run scripts\record_pick_pen.py --teleop_device keyboard --max_loops 1 --headless
+```
+
+smoke run 이 종료된 뒤 generated USD 에서 `PenWhite/Collision` 같은 pen
+collider 만 `PhysxCollisionAPI`, `physxCollision:contactOffset`,
+`material:binding:physics = </Scene/Looks/PenGripPhysics>` 를 가진다. GUI
+recording 에서는 jaw 를 barrel 양옆에 맞추고 닫았을 때 pen 이 visual 중심까지
+관통하지 않고 capsule surface 에서 미끄러짐이 줄어드는지 확인한다.
+
+---
+
+## Sim-to-Real SO-101 base 가 desk 위에서 떠 보임 (mat 배치)
+
+**현상**: `Sim-to-Real` pen scene GUI 에서 fixed SO-101 base 아래로 그림자
+간격이 도드라져 로봇이 검은 작업면 위에 떠 있는 것처럼 보인다. 실제 촬영 장면은
+SO-101 base 가 desk 전면의 나무 상판에 놓이고 mat 는 pens 쪽으로 뒤에서
+시작한다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 SO-101 base 지지면이 검은 DeskMat 로 보이고 base 가 떠 보인다.
+```
+
+### 원인
+
+초기 pen scene 은 robot root 와 desk surface 를 모두 `z=0` 으로 두었지만
+runtime follower USD 의 base visual bound 최저점은 asset root 기준
+`z=0.030081` 이다. local URDF source 의 base bound 만 보고 USD 도 같은
+surface origin 이라고 가정하면 fixed robot 이 약 3 cm 뜬 채 배치된다.
+`DeskMat` 도 root 아래까지 펼쳐 둔 상태라 실제 사진과 다른 mat overlap 과 RTX
+shadow 가 간격을 더 도드라지게 만든다.
+
+### 해결 방법
+
+1. desk surface 는 계속 `z=0` 으로 둔다.
+2. `SO101_FOLLOWER_CFG` fixed root 에 `-0.0301 m` base-surface z offset 을
+   적용해 authored USD base 최저점을 desk surface 에 맞춘다.
+3. `DeskMat` 의 전면 edge 를 robot base 뒤로 밀어 실제 사진처럼 base 아래에
+   bare desk top 이 보이게 한다.
+4. 컵의 perforated render mesh 와 안정적인 collision wall, 펜의 visual detail 과
+   capsule collider 를 `scripts/author_pick_pen_scene.py` 에서
+   분리 author 한다.
+
+현재 생성 USD 는
+`assets/scenes/so101_pick_pen/pick_pen_scene.usd` 이다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+uv run scripts\view_pick_pen_scene.py
+```
+
+GUI 에서 arm base 아래 지지면이 desk wood 로 보이고, pen cup wall 은 구멍이
+보이는 wire mesh 이며 pens 는 barrel/tip/clip detail 을 유지하면 scene authoring
+배치가 반영된 상태다.
+
+---
+
+## Sim-to-Real 씬이 로봇 위치와 어긋남 (scene origin shift)
+
+**현상**: `teleop_se3_agent.py` 로 `SimToReal-SO101-PickPen-v0` 를 띄우면 책상,
+마우스패드, 펜통, 펜이 origin (0, 0, 0) 부근에 모여 있고 SO-101 follower 는
+2 m 떨어진 위치에서 공중에 떠 있는 것처럼 보인다. y 또는 z 축만 어긋난 경우
+로봇이 책상 옆이나 책상 위 허공에 떠 있는 형태로도 나타난다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 robot 과 desk 가 서로 다른 영역에 떨어져 렌더링된다.
+```
+
+### 원인
+
+`SO101_FOLLOWER_CFG.init_state.pos = (2.2, -0.61, 0.89)` 으로 환경 컨피그가
+follower 를 절대 위치에 스폰하지만 `assets/scenes/pen_desk/scene.usd` 는
+origin 기준 좌표로 author 되어 있다. 환경이 scene USD 와 robot USD 를 같은
+world frame 으로 합치므로 두 좌표계가 일치하지 않으면 둘이 떨어진 채 보인다.
+또한 desk top 의 z 가 robot base z 와 같으면 RTX shadow 한 픽셀 차이로 robot
+이 떠 보일 수 있어 약간의 z slack 이 필요하다.
+
+### 해결 방법
+
+`scripts/author_pick_pen_scene.py` 에 `SCENE_OFFSET` 상수를 두고 모든 top-level
+translate 를 `_shift()` 헬퍼로 한 번에 옮긴다. scene.usd 의 자식 prim 상대
+좌표는 보존하고 부모만 시프트한다.
+
+```python
+# robot base = (2.2, -0.61, 0.89)
+# desk front edge ≈ robot.y  → clamp 위치
+# desk top z = robot.z + 0.03 ~ 0.05  → 떠 보임 방지
+SCENE_OFFSET = (2.2, -0.57, 0.92)
+```
+
+값은 시각 확인을 통해 미세조정한다. 책상 정면 가장자리가 robot.y 와 같으면
+로봇이 클램프 위치, robot.y 보다 +y 로 멀어지면 로봇이 책상 중앙이다.
+
+`mdp.pen_in_cup` 같이 좌표를 직접 비교하는 task 로직이 있다면 함께 갱신한다.
+
+- `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py` 의 `PEN_CUP_CENTER_XY`
+- `src/sim_to_real/datagen/state_machine/pick_pen.py` 의 같은 상수
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+C:\OpenUSD\scripts\usdcat.bat --loadOnly assets\scenes\pen_desk\scene.usd
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+GUI 에서 robot mount 가 책상 정면 모서리에 클램프된 모습으로 보이고 펜과
+펜통이 robot 의 전방 reach 안에 들어와 있으면 정합된 상태다.
+
+---
+
+## Sim-to-Real 에피소드 리셋 시 펜이 한 번 튀어오름 (mat z slack)
+
+**현상**: `B` 로 에피소드를 시작하면 펜 중 하나가 한 번 펄떡 튀어 오르며 그 후
+정상 안착한다. 사용자 입력 없이도 재현된다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 reset 직후 한 펜이 짧게 0.5 ~ 1 cm 솟았다 떨어진다.
+```
+
+### 원인
+
+펜 collider box 의 z half-extent 와 마우스패드 윗면 z 가 부동소수점 오차
+범위에서 정확히 같거나 살짝 겹치도록 author 되어 있으면, PhysX 는 reset 시
+contact penetration 을 한 step 에 풀려고 impulse 를 가한다. 펜 4 개 중 가장
+penetration 이 큰 한 개가 이 impulse 로 튀어오르고 나머지는 안 튀는 식으로
+보인다.
+
+### 해결 방법
+
+`PENS` 튜플의 z 를 `mat_top + collider_half_thickness + 0.001 m` 로 두어
+1 mm 의 slack 을 확보한다.
+
+```python
+# mat top z = 0.006, collider half-thickness = 0.0077 → 0.0137, slack 1 mm
+PENS = (
+    ("PenWhite", (-0.20, 0.05, 0.0147), 25.0, ...),
+    ...
+)
+```
+
+mat 또는 collider 두께를 바꿀 때마다 z 도 같이 갱신해야 같은 증상이 재발하지
+않는다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+`B` 를 눌러 reset 한 직후 펜 4 개가 모두 mat 표면에 안정적으로 놓이고 튀어오름
+이 없으면 slack 이 충분한 상태다.
+
+---
+
+## Sim-to-Real 펜이 닿지 않았는데 그리퍼가 잡음 (pen collider 부풀림)
+
+**현상**: SO-101 그리퍼가 펜 visual 에서 1 cm 가까이 떨어진 채로 jaw 를 닫아도
+펜이 잡힌다. GUI 에서는 jaw 와 펜 시각 표면 사이에 명백한 공간이 있다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 그리퍼가 펜 옆/위에서 closing 했는데 펜이 finger 위로 살짝 떨어진 채
+끌려간다.
+```
+
+### 원인
+
+`scripts/author_pick_pen_scene.py` 의 펜 collider 가 visual capsule 보다
+부풀려 author 되어 있었다.
+
+| | 두께 (X/Z) | 길이 (Y) |
+|---|---|---|
+| Visual capsule | 0.0154 m (= 2 × radius 0.0077) | 0.1334 m (= height 0.118 + 2 × radius) |
+| Collider box (이전) | 0.0184 m | 0.1504 m |
+
+길이 축으로 약 1.7 cm, 두께 축으로 약 3 mm 더 큰 보이지 않는 box 가 펜 위로
+튀어나와 있어 그리퍼가 시각 표면에 닿기 전에 contact 가 trigger 된다.
+
+### 해결 방법
+
+collider box 크기를 visual capsule 과 동일하게 맞춘다.
+
+```python
+PEN_BARREL_RADIUS = 0.0077
+PEN_BARREL_HEIGHT = 0.118
+PEN_COLLIDER_LENGTH = PEN_BARREL_HEIGHT + 2 * PEN_BARREL_RADIUS   # 0.1334
+PEN_COLLIDER_THICKNESS = 2 * PEN_BARREL_RADIUS                    # 0.0154
+```
+
+`PEN_COLLIDER_THICKNESS` 가 바뀌면 펜 안착 높이의 collider half-thickness 도
+같이 변하므로 `PENS` z 값을 `mat_top + thickness/2 + 0.001` 로 재계산한다.
+
+펜의 grip / accent ring 같은 부속 부품이 capsule 보다 약간 굵어도 (예:
+AccentRing radius 0.0083), 사용자가 시각 일치를 우선시했으므로 collider 는
+capsule 두께에만 맞춘다. 잡는 위치가 너무 좁다고 느껴지면 thickness 를 굵은
+부품 기준으로 조금 늘리는 방식으로 trade-off 한다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+그리퍼 jaw 를 펜 barrel 옆면에 시각적으로 닿도록 정렬한 뒤 `O` 로 닫았을 때
+잡히고, 1 cm 떨어진 위치에서는 닫아도 잡히지 않으면 collider 가 visual 에
+일치한 상태다.
+
+> **후속**: 위 해결은 collider Cube 의 *치수* 만 맞춘 v2. 사각형 collider 가 둥근
+> capsule 끝부분을 표현 못 해 여전히 visual 과 어긋남이 남는다. v3 해결책은
+> 아래 *"펜 collision 형상이 visual 과 어긋남"* 항목 참고.
+
+---
+
+## Sim-to-Real 펜 collision 형상이 visual 과 어긋남 (Cube collider → visual primitive)
+
+**현상**: 펜 collider Cube 의 크기를 visual capsule 과 동일하게 맞춘 뒤에도,
+펜의 둥근 끝부분에서 그리퍼가 사각 모서리를 따라 접촉하거나, capsule 본체보다
+약간 굵은 Grip 부분 표면에서 시각적으로 닿는데도 잡히지 않는 경우가 남는다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 펜 capsule 둥근 끝은 부드럽게 보이지만 그리퍼 접촉은 사각 박스 모서리를
+따라 발생. 굵은 grip 부분에서는 시각 접촉 대비 contact 가 늦게 trigger.
+```
+
+### 원인
+
+`scripts/author_pick_pen_scene.py` 의 펜 author 가 visual primitive (Capsule
+barrel, Cylinder grip 등) 와 별도로 invisible `Cube "Collision"` 을 두고 그
+사각 박스 하나로 모든 contact 를 처리했다. Cube 는 capsule 의 둥근 끝과
+Grip / BackPlug / Clip 의 굵은 부분을 모두 단일 단순 박스로 뭉뚱그린다.
+
+SO-101 robot USD (`assets/robots/so101_follower.usda`) 는 같은 문제를 visual
+mesh 를 그대로 collider 로 재사용해 해결한다:
+
+```text
+def Xform "collisions" (
+    prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+    prepend references = </colliders/base>      # visual mesh 와 동일
+)
+{
+    uniform token physics:approximation = "convexDecomposition"
+}
+```
+
+### 해결 방법
+
+1. invisible `Cube "Collision"` 제거.
+2. 외곽선을 만드는 각 visual primitive (Capsule barrel, Cylinder grip,
+   Cylinder backplug, Cube clip) 에 직접 `PhysicsCollisionAPI` +
+   `PhysxCollisionAPI` 를 부여. USD analytic primitive 는 PhysX 가 네이티브
+   지원하므로 mesh approximation 불필요.
+3. Cone primitive (TipSleeve, Nib) 에는 collision 부여 금지. PhysX 가 analytic
+   cone 을 지원하지 않아 silently coarse convexHull 로 fallback → 형상이 어긋남.
+4. 굴러감 방지는 Clip Cube 가 자연스럽게 담당 (외부로 0.0065 m 돌출 → 실제 펜
+   클립과 같은 원리). 이전 invisible 박스의 stopper 효과를 자연스럽게 대체.
+
+`scripts/author_pick_pen_scene.py::author_pen_usda` 에서:
+
+```python
+_capsule(
+    lines, 1, "Barrel", radius=PEN_BARREL_RADIUS, height=PEN_BARREL_HEIGHT,
+    material_path=barrel_path, collision=True,
+    physics_material_path=grip_phys_path, contact_tuning=True,
+)
+_cylinder(lines, 1, "Grip", axis="Y", radius=0.0081, height=0.025, ...,
+          collision=True, physics_material_path=grip_phys_path, contact_tuning=True)
+# Clip Cube 와 BackPlug Cylinder 동일. AccentRing/TipSleeve/Nib 은 visual-only.
+```
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+```
+
+생성된 펜 USD 에서 `Cube "Collision"` 이 사라지고, 각 펜 객체마다 4 개의
+`PhysicsCollisionAPI` 가 visual primitive (Barrel/Grip/BackPlug/Clip) 에
+부여돼 있으면 v3 패턴이 적용된 상태:
+
+```text
+Grep "PhysicsCollisionAPI" assets/scenes/pen_desk/objects/PenWhite/PenWhite.usda  # → 4 occurrences
+```
+
+GUI 에서 그리퍼가 펜 barrel 둥근 끝에 접근할 때 사각 모서리가 아닌 곡면을 따라
+접촉하고, 굵은 Grip 부분에서 시각 표면과 동시에 잡히면 정상.
+
+---
+
+## Sim-to-Real B/R 리셋 후 동적 RigidBody 가 이전 위치 유지 (env subasset 등록 누락)
+
+**현상**: PenCup 처럼 동적 RigidBody 로 author 된 객체가 GUI 에서 `B`/`R` 키로
+에피소드를 리셋해도 author 한 초기 위치로 돌아가지 않고 이전 에피소드 끝
+지점에 그대로 머문다. 펜은 정상적으로 초기 위치로 복원된다.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 PenCup 만 매 reset 마다 이전 위치 유지. 펜은 정상 복원.
+```
+
+### 원인
+
+`leisaac.utils.general_assets.parse_usd_and_create_subassets()` 는 인자로 받은
+`specific_name_list` 와 prim path 가 매칭되는 RigidBody 만 env 의 RigidObject
+슬롯으로 등록한다. 등록되지 않은 RigidBody 는 시뮬레이션 자체는 정상 동작
+하지만 Isaac Lab 의 event manager 가 그 객체의 root state 를 모르기 때문에
+reset 이벤트가 걸리지 않는다.
+
+```python
+# 기존 — PenCup 누락
+parse_usd_and_create_subassets(SCENE_USD_PATH, self, specific_name_list=PEN_NAMES)
+```
+
+펜은 등록되어 있고 `randomize_object_uniform` reset 이벤트가 걸려 있어 매
+reset 마다 `default_root_state + sampled_pose` 로 복원된다. PenCup 은 슬롯
+자체가 없어 event 등록 시점에 `SceneEntityCfg("PenCup")` lookup 이 실패하거나
+조용히 무시된다.
+
+### 해결 방법
+
+두 가지 모두 해야 한다:
+
+1. `specific_name_list` 에 PenCup 추가 → RigidObject 슬롯 생성.
+2. `randomize_object_uniform(PEN_CUP_NAME, range=(0,0))` reset 이벤트 추가 →
+   매 reset 마다 author 위치로 복원 (range=(0,0) 이면 랜덤화 없이 default
+   pose 그대로 복원).
+
+```python
+# src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py
+parse_usd_and_create_subassets(
+    PEN_DESK_USD_PATH, self,
+    specific_name_list=[*PEN_NAMES, PEN_CUP_NAME],
+)
+
+domain_randomization(self, random_options=[
+    *[randomize_object_uniform(name, pose_range={"x": (-0.03, 0.03), ...})
+      for name in PEN_NAMES],
+    randomize_object_uniform(
+        PEN_CUP_NAME,
+        pose_range={"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0)},
+    ),
+    ...
+])
+```
+
+### 확인 방법
+
+```powershell
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+`B` 로 제어를 시작한 뒤 펜컵을 그리퍼로 옆으로 밀고 `R` 또는 `N` 으로 리셋.
+펜컵이 author 한 초기 위치로 돌아오면 정상.
+
+---
+
+## Sim-to-Real 그리퍼·펜이 매트/책상을 관통하거나 reset 시 튀어오름 (정적 객체 contactOffset 디폴트)
+
+**현상**: Pick 동작 중 그리퍼나 펜이 가끔 데스크매트나 책상 상판을 살짝
+관통하고 빠져나오지 못한다. 또는 에피소드 리셋 직후 펜이 매트 표면에서
+0.5 ~ 1 cm 튀어오른 뒤 안착하는 일이 잦다 (이전 *"펜 z slack"* 항목보다 더
+강한 증상).
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 그리퍼 fingertip 이 매트 표면 아래로 들어가 멈추거나, reset 직후 펜이
+매트 위로 튀어오르는 게 4 개 중 1~2 개 비율로 재현.
+```
+
+### 원인
+
+`scripts/author_pick_pen_scene.py` 의 `_scene_desk()` 가 `DeskTop`, `DeskMat`
+을 `_cube(..., collision=True)` 로만 author 하고 `contact_tuning` 파라미터를
+주지 않아 `PhysxCollisionAPI` 가 부여되지 않았다. 결과:
+
+- PhysX 디폴트 `contactOffset = 0.02 m` (2 cm) 가 적용 — 매트 두께 (6 mm) 보다
+  훨씬 큰 contact margin 이 객체 표면 양쪽에 부풀어 있다.
+- 매트와 책상 상판이 z 방향으로 맞닿아 있는데, 둘 다 contact margin 2 cm 가
+  부풀어 있어 broadphase 에서 서로 깊이 겹쳐 보임.
+- 펜 (contactOffset 0.0015) 이 매트 표면 위 1 mm slack 으로 author 됐어도, 매트
+  쪽 contact margin 이 펜 위치까지 침범 → reset 첫 step 에 PhysX 가 강한 분리
+  impulse 를 가함 → 펜 튀어오름.
+- 빠른 그리퍼 접근 시 매트/책상 contact 가 늦게 trigger 되어 한 step 안에
+  통과해버림.
+
+### 해결 방법
+
+정적 환경 객체 (책상, 매트) 에도 `PhysxCollisionAPI` 를 명시하고 펜과 동일한
+`contactOffset = 0.0015`, `restOffset = 0` 으로 맞춘다.
+
+```python
+_cube(
+    lines, 1, "DeskTop",
+    translate=_shift((0.0, 0.31, -0.02)),
+    scale=(1.20, 0.78, 0.04),
+    material_path=desk_mat,
+    collision=True,
+    contact_tuning=True,        # ← 추가
+)
+_cube(
+    lines, 1, "DeskMat",
+    translate=_shift((-0.02, 0.35, 0.003)),
+    scale=(1.04, 0.57, 0.006),
+    material_path=mat_mat,
+    collision=True,
+    contact_tuning=True,        # ← 추가
+)
+```
+
+`_cube` 헬퍼의 `contact_tuning=True` 가 `_collision_attrs()` 내부에서
+`physxCollision:contactOffset`, `restOffset`, `torsionalPatchRadius`,
+`minTorsionalPatchRadius` 4 개를 명시한다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+```
+
+생성된 `assets/scenes/pen_desk/scene.usd` 에서 `DeskTop`, `DeskMat` 둘 다
+`["PhysicsCollisionAPI", "PhysxCollisionAPI"]` 와 `contactOffset = 0.0015` 를
+가지면 적용된 상태.
+
+```text
+Grep "DeskMat" -A 4 assets/scenes/pen_desk/scene.usda
+# →
+# def Cube "DeskMat" (
+#     prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
+# )
+# {
+#     bool physics:collisionEnabled = 1
+#     float physxCollision:contactOffset = 0.0015
+```
+
+GUI 에서 `B`/`R` 반복 리셋해도 펜 튀어오름이 없고, 빠른 그리퍼 접근에도 매트
+관통이 발생하지 않으면 정상.
+
+---
+
+## Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)
+
+**현상**: 에피소드 시작 시 펜 한 개가 펜통 안에 박힌 채로 spawn 되고, 그 펜이
+펜통의 walls collider 와 contact 가 발생해 펜이나 펜통이 튀어오른다. 참고
+사진: `docs/pics/펜통_펜_배치_1.jpg`.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 첫 step 직후 펜 1 개가 펜컵 wire mesh 안쪽에 박혀 있다가 contact
+impulse 로 펜과 컵 둘 다 튀어 오르는 모습.
+```
+
+### 원인
+
+펜의 author + jitter 영역과 펜통의 author + sampling 영역이 xy 평면에서
+겹쳤다. 예를 들어:
+
+- 펜 default 영역: scene-local x ∈ [0.05, 0.20], y ∈ [0.13, 0.25]
+- 펜통 default: scene-local (0.0, 0.18) — 펜 default 영역과 같은 y 대역
+
+펜 4 개 중 한 펜의 sampling 결과가 펜통 반경 (0.052 m) 안에 떨어지면 펜
+collider 와 펜통 wall collider 가 동일 좌표에서 겹친 채로 reset 된다. PhysX
+는 첫 step 에 penetration 을 한꺼번에 풀려고 강한 분리 impulse 를 가하므로
+펜이나 펜통이 튀어 오른다.
+
+### 해결 방법
+
+펜 sampling 영역과 펜통 sampling 영역이 **xy 평면에서 절대 겹치지 않게**
+author. 가장 단순한 방법은 둘을 y 축으로 분리:
+
+```text
+scene-local y 축 (robot scene-local y = -0.04)
+  │
+0.65 ┤  매트 안쪽 끝
+     │
+0.40 ┤  ◀── 펜통 default (호 정점)
+0.34 ┤  ◀── 펜통 호 양 끝 (sampling 최저 y)
+     │       ⇡
+     │       y 분리 마진 ≥ 0.08 m
+     │       ⇣
+0.28 ┤  ◀── 펜 sampling 최고 y (default 0.26 + jitter 0.02)
+0.20 ┤  ◀── 펜 sampling 최저 y
+     │
+0.07 ┤  매트 robot 쪽 끝
+```
+
+코드 변경:
+
+```python
+# scripts/author_pick_pen_scene.py
+PEN_CUP_LOCAL = (0.0, 0.40, 0.006)   # 매트 안쪽 깊은 곳으로 이동
+PENS = (
+    ("PenWhite", (-0.15, 0.22, 0.0147), 25.0, ...),
+    ("PenGray",  ( 0.15, 0.22, 0.0147), -30.0, ...),
+    ("PenBlack", ( 0.05, 0.26, 0.0147),  60.0, ...),
+    ("PenBlue",  (-0.05, 0.26, 0.0147), -10.0, ...),
+)
+```
+
+각 sampling 함수의 영역도 마진 안에 들어가는지 cross-check 한다 — 펜의
+`y_radius` 와 펜통 호 양 끝 y 의 차이가 충돌 안전 거리 (≥ 펜 길이 절반
+0.067 + 펜통 반경 0.052 = 0.119) 보다 작으면 안 된다.
+
+### 확인 방법
+
+```powershell
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+`B`/`R` 로 reset 을 10 회 이상 반복해도 펜 4 개가 모두 펜통 *바깥* 매트 위에
+놓이고, 펜이나 펜통이 첫 step 에 튀어오르지 않으면 영역 분리가 충분.
+
+---
+
+## Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)
+
+**현상**: `randomize_object_on_arc(PEN_CUP_NAME, radius=R, angle_range_deg=(-X, X))`
+의 R 만 변경하면 펜통의 sampling 호가 매트를 벗어나 책상 가장자리, 심지어
+바닥으로 떨어진다. 예: `radius=1.0, angle=±30°` 일 때 양 끝이 scene-local
+`(±0.5, 0.83)` 로 매트 y 범위 `[0.065, 0.635]` 밖.
+
+**오류 메시지**:
+
+```text
+Python traceback 없음.
+GUI 에서 reset 후 펜통이 매트 너머 책상 빈 공간이나 책상 가장자리 너머로
+spawn 되어 떨어지는 모습.
+```
+
+### 원인
+
+`randomize_object_on_arc` 의 호 중심은 **author 한 펜통 default 좌표에서
+forward (-y) 방향으로 `radius` 만큼 떨어진 점** 이다. 즉:
+
+```
+center_y = default_y - radius
+arc point (angle θ): x = radius * sin(θ),  y = center_y + radius * cos(θ)
+```
+
+`radius` 만 키우면 호 자체가 더 큰 원이 되지만 *호의 정점* (= default 위치)
+은 그대로다. 결과적으로 호 양 끝이 default 보다 훨씬 더 robot 쪽 (-y) 으로
+밀려나 매트 시작점 (`y = 0.065`) 보다 더 앞쪽 — 책상 위 또는 책상 밖 — 으로
+나간다.
+
+`radius` 와 `default_y` 는 **함께** 잡아야 한다.
+
+### 해결 방법
+
+호의 정점 (= default_y) 과 양 끝의 y 차이가 매트 안에 들어가도록 다음 조건을
+같이 푼다:
+
+```
+default_y                ≤ 매트 y 끝 (0.635)
+default_y - radius (1 - cos(X))   ≥ 매트 y 시작 (0.065) + 마진
+radius * sin(X)           ≤ 매트 x 절반 - 마진
+robot 에서 호 양 끝 거리 = radius
+```
+
+robot scene-local y = -0.04 일 때, 호 정점이 robot 정면 SO-101 reach 가장자리에
+오도록 두 변수를 잡으면 다음이 자연스럽다:
+
+```
+robot scene-local y = -0.04
+SO-101 reach     ≈ 0.34 ~ 0.44 m
+default_y        = robot_y + radius
+radius           = 0.44      (default y = 0.40, 매트 안)
+angle_range_deg  = (-30, 30) (양 끝 x = ±0.22, 매트 안)
+```
+
+이전 빨간 호 (`radius=1.0`) → 새 주황 호 (`radius=0.44, default_y=0.40`).
+호 양 끝 y = `0.40 - 0.44 + 0.44 * cos(30°) = 0.34` 로 매트 안 + reach
+한계에 정확히 위치.
+
+### 확인 방법
+
+```powershell
+uv run scripts\author_pick_pen_scene.py
+uv run scripts\environments\teleoperation\teleop_se3_agent.py `
+    --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard
+```
+
+`B`/`R` reset 을 20 회 반복하며 펜통이 매번 매트 검은 영역 안에 떨어지고,
+정면 0° 부근부터 좌우 30° 가장자리까지 골고루 sampling 되면 정상.
 
 ---
 

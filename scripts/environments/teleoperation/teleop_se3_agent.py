@@ -93,6 +93,7 @@ import os
 import time
 
 import gymnasium as gym
+import sim_to_real  # noqa: F401 — 환경 등록 트리거
 import torch
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import DatasetExportMode, TerminationTermCfg

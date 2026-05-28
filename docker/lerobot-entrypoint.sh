@@ -27,7 +27,7 @@
 #
 # ■ 환경 변수 요약 (docker-compose.yaml ↔ .env 에서 주입)
 #   하드웨어 : TELEOP_PORT  TELEOP_ID  ROBOT_PORT  ROBOT_ID
-#             ENABLED_CAMERAS  BELLY_CAM_PORT  WRIST_CAM_PORT  TOP_CAM_PORT
+#             ENABLED_CAMERAS  FRONT_CAM_PORT  WRIST_CAM_PORT  TOP_CAM_PORT
 #             CAM_WIDTH  CAM_HEIGHT  CAM_FPS  CAM_WARMUP_S  CAM_FOURCC
 #   record  : HF_DATASET_REPO_ID  SINGLE_TASK  NUM_EPISODES
 #             EPISODE_TIME_S  RESET_TIME_S  RECORD_FPS  PUSH_TO_HUB
@@ -47,9 +47,9 @@ TELEOP_PORT="${TELEOP_PORT:-/dev/ttyACM0}"
 TELEOP_ID="${TELEOP_ID:-so101_teleop}"
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"
 ROBOT_ID="${ROBOT_ID:-so101_robot}"
-# 활성 카메라 부분집합 (콤마 구분, 순서 보존). 예: "wrist,belly" / "wrist,belly,top" / "wrist"
-ENABLED_CAMERAS="${ENABLED_CAMERAS:-wrist,belly}"
-BELLY_CAM_PORT="${BELLY_CAM_PORT:-/dev/video0}"
+# 활성 카메라 부분집합 (콤마 구분, 순서 보존). 예: "wrist,front" / "wrist,front,top" / "wrist"
+ENABLED_CAMERAS="${ENABLED_CAMERAS:-wrist,front}"
+FRONT_CAM_PORT="${FRONT_CAM_PORT:-/dev/video0}"
 WRIST_CAM_PORT="${WRIST_CAM_PORT:-/dev/video2}"
 TOP_CAM_PORT="${TOP_CAM_PORT:-/dev/video4}"
 CAM_WIDTH="${CAM_WIDTH:-640}"
@@ -295,7 +295,7 @@ case "$CMD" in
   #   TELEOP_PORT    → --teleop.port
   #   TELEOP_ID      → --teleop.id
   #   WRIST_CAM_PORT  → --robot.cameras wrist index_or_path
-  #   BELLY_CAM_PORT  → --robot.cameras belly index_or_path
+  #   FRONT_CAM_PORT  → --robot.cameras front index_or_path
   #   TOP_CAM_PORT  → --robot.cameras top index_or_path
   #   CAM_WIDTH/HEIGHT/FPS → cameras 해상도·FPS
   #
@@ -340,7 +340,7 @@ case "$CMD" in
   # [env var → CLI arg 매핑]
   #   ROBOT_PORT/ID        → --robot.port / --robot.id
   #   TELEOP_PORT/ID          → --teleop.port / --teleop.id
-  #   WRIST/BELLY/TOP_CAM_PORT     → --robot.cameras (teleop 와 동일)
+  #   WRIST/FRONT/TOP_CAM_PORT     → --robot.cameras (teleop 와 동일)
   #   CAM_WIDTH/HEIGHT/FPS    → cameras 해상도·FPS
   #   HF_DATASET_REPO_ID      → --dataset.repo_id        (필수)
   #   SINGLE_TASK             → --dataset.single_task
@@ -669,7 +669,7 @@ case "$CMD" in
   #   AGGREGATE_FN_NAME        → --aggregate_fn_name       (weighted_average 등)
   #   POLICY_CLIENT_FPS        → --fps                     (제어 FPS, 기본 30)
   #   ROBOT_TYPE/PORT/ID       → --robot.type/.port/.id
-  #   WRIST_CAM_PORT/BELLY...  → --robot.cameras           (teleop 와 동일 매핑)
+  #   WRIST_CAM_PORT/FRONT...  → --robot.cameras           (teleop 와 동일 매핑)
   #
   # 예시:
   #   # 같은 호스트에 정책 서버를 띄워 둔 뒤
