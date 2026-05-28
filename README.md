@@ -259,10 +259,10 @@ export HF_HOME="$(pwd -W)/.cache/huggingface"
 | `lerobot dataset-viz` | `uv run lerobot-dataset-viz ...` |
 | `lerobot edit-dataset` | `uv run lerobot-edit-dataset ...` |
 | `lerobot info` | `uv run lerobot-info` |
-| `lerobot-policy-server prepare-model` | `uv run hf download <repo_id>` |
-| `lerobot-policy-server train` | `uv run lerobot-train ...` |
-| `lerobot-policy-server eval` | `uv run lerobot-eval ...` |
-| `lerobot-policy-server policy-server` | `uv run python -m lerobot.async_inference.policy_server ...` |
+| `policy-server prepare-model` | `uv run hf download <repo_id>` |
+| `policy-server train` | `uv run lerobot-train ...` |
+| `policy-server eval` | `uv run lerobot-eval ...` |
+| `policy-server policy-server` | `uv run python -m lerobot.async_inference.policy_server ...` |
 | `lerobot policy-client` | `uv run python ./docker/policy-client-shim.py ...` |
 
 ### A.5 모터 설정과 보정
@@ -396,7 +396,7 @@ export ACCELERATE_MIXED_PRECISION="bf16"
 uv run lerobot-train \
     --dataset.repo_id="${DATASET_REPO}" \
     --dataset.root="${DATASET_ROOT}" \
-    --policy.type=smolvla \
+    --policy.type=${TRAIN_POLICY_TYPE} \
     --policy.path="${POLICY_PATH}" \
     --policy.repo_id="${POLICY_REPO}" \
     --policy.push_to_hub=true \
@@ -445,7 +445,7 @@ LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 �
 ```bash
 uv run python ./docker/policy-client-shim.py \
     --server_address=127.0.0.1:8080 \
-    --policy_type=smolvla \
+    --policy_type=${POLICY_CLIENT_TYPE} \
     --pretrained_name_or_path="${POLICY_REPO}" \
     --policy_device=cuda \
     --client_device=cpu \
@@ -500,7 +500,7 @@ flowchart LR
             T["🔵 teleop / record / replay / dataset-viz"]:::teleopNode
             PC["🟣 policy-client (gRPC)"]:::teleopNode
         end
-        subgraph SRV["📦 lerobot-policy-server 컨테이너 (Dockerfile.smolvla)"]
+        subgraph SRV["📦 policy-server 컨테이너 (Dockerfile.smolvla)"]
             PS["🔴 policy-server (gRPC :8080)<br/>train / eval"]:::policyNode
         end
     end
@@ -528,7 +528,7 @@ flowchart LR
 
 핵심:
 
-- **서비스별 진입점 분리**: `lerobot-entrypoint.sh` 는 `lerobot` 서비스(로봇 직결 워크플로) 의 모드 디스패처, `server-entrypoint.sh` 는 `lerobot-policy-server` 서비스(추론 서버) 의 모드 디스패처. 각 스크립트의 첫 인자가 모드를 결정한다.
+- **서비스별 진입점 분리**: `lerobot-entrypoint.sh` 는 `lerobot` 서비스(로봇 직결 워크플로) 의 모드 디스패처, `policy-entrypoint.sh` 는 `policy-server` 서비스(추론 서버) 의 모드 디스패처. 각 스크립트의 첫 인자가 모드를 결정한다.
 - **이미지 분리**: SmolVLA / GR00T 추론과 학습 관련 의존성은 정책 서버 이미지에 격리한다.
 - **HF 캐시 공유**: 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/root/.cache/huggingface` 에 마운트되어 한 번 받은 모델을 양쪽이 모두 사용.
 
@@ -537,14 +537,14 @@ flowchart LR
 | 이미지 | Dockerfile | 의존성 그룹 | 사용 서비스 |
 |---|---|---|---|
 | `lerobot-so101:0.4.4` | `docker/Dockerfile.lerobot` | `teleop` (lerobot[feetech] + evdev) | `lerobot` (teleop / record / replay / train / ...) |
-| `lerobot-policy-server:0.4.4` | `docker/Dockerfile.smolvla` | `smolvla` + `async` (lerobot[smolvla] + grpcio) | `lerobot-policy-server` (async inference) |
+| `policy-server:0.4.4` | `docker/Dockerfile.smolvla` | `smolvla` + `async` (lerobot[smolvla] + grpcio) | `policy-server` (async inference) |
 
 ```bash
 # teleop / record / replay 용 이미지
 docker compose -f docker/docker-compose.yaml build lerobot
 
 # Async inference policy server 용 이미지
-docker compose -f docker/docker-compose.yaml build lerobot-policy-server
+docker compose -f docker/docker-compose.yaml build policy-server
 ```
 
 ### B.3 (WSL) USB 포트 연결
@@ -604,12 +604,12 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot <m
 | `bash` \| `shell` | 컨테이너 인터랙티브 쉘 | - | - |
 | `python <args>` | 컨테이너 내 Python 실행 | - | - |
 
-#### `lerobot-policy-server` 서비스 — Async inference 서버 (`server-entrypoint.sh`)
+#### `policy-server` 서비스 — Async inference 서버 (`policy-entrypoint.sh`)
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server <mode> [args...]
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server <mode> [args...]
 # 또는 (CMD 기본값 = policy-server 로 즉시 서버 기동):
-docker compose --env-file .env -f docker/docker-compose.yaml up -d lerobot-policy-server
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 ```
 
 | 모드 | 설명 | 필요 하드웨어 | 핵심 env var |
@@ -718,17 +718,17 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot ba
 | NUM_PROCESSES | 사용 GPU 수. 2+ 지정 시 `accelerate launch --num_processes` DDP 자동 전환 |
 | MIXED_PRECISION | 혼합 정밀도 (기본 `bf16`, Ampere+ 권장. 구형 GPU `fp16`) |
 
-**호출 컨테이너는 `lerobot-policy-server`** — Dockerfile.smolvla 에만 transformers / accelerate / num2words 가 설치됨 (lerobot 이미지에서 SmolVLA 학습 불가).
+**호출 컨테이너는 `policy-server`** — Dockerfile.smolvla 에만 transformers / accelerate / num2words 가 설치됨 (lerobot 이미지에서 SmolVLA 학습 불가).
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server train
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train
 ```
 
 추가 인자는 env var 빌드 값 뒤에 붙어 last-wins 로 덮어쓴다:
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server train --resume=true
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server train --steps=5000
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train --resume=true
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train --steps=5000
 ```
 
 ### B.9 Policy 평가 및 추론
@@ -762,7 +762,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
 **시뮬 평가** — `eval` 모드는 `lerobot-eval` 에 인자 완전 위임:
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server eval \
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server eval \
     --policy.path=${POLICY_PATH} \
     --env.type=pusht \
     --eval.n_episodes=20 \
@@ -775,10 +775,10 @@ HF 캐시는 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/root/.ca
 
 ```bash
 # .env 의 MODEL_REPO_ID 로 다운로드 (기본 lerobot/smolvla_base)
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server prepare-model
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model
 
 # 위치 인자로 다른 모델 받기
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server prepare-model nvidia/GR00T-N1.5-3B
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model nvidia/GR00T-N1.5-3B
 ```
 
 다른 머신으로 캐시를 옮기려면 (명명 볼륨 특성상 rsync 불가, tarball 경유):
@@ -822,10 +822,10 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot da
 - **Linux 학습 서버** (RTX PRO 5000 Blackwell 48 GB, 권장 — 빠른 회전): 정책 서버 이미지만 빌드. 데이터셋은 HF Hub pull 또는 `rsync -av datasets/ user@<server>:/path/datasets/`
 - **Windows A4000 (16 GB)** (느림, batch_size 4–8): 데이터셋 로컬
 
-**4) Fine-tune 실행** (`lerobot-policy-server` 컨테이너):
+**4) Fine-tune 실행** (`policy-server` 컨테이너):
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server train \
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train \
     --policy.path=lerobot/smolvla_base \
     --policy.repo_id=${HF_USER}/smolvla_pick_pen \
     --policy.push_to_hub=true \
@@ -842,13 +842,13 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-po
 
 ```bash
 # .env 의 POLICY_PATH=${HF_USER}/smolvla_pick_pen
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot-policy-server prepare-model ${HF_USER}/smolvla_pick_pen
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model ${HF_USER}/smolvla_pick_pen
 ```
 
 **6) 정책 서버 재기동 + 실기기 추론**:
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml up -d lerobot-policy-server
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
@@ -872,8 +872,8 @@ fine-tuned 체크포인트의 `input_features` 가 `wrist/front/top` 이므로 �
 서버 기동:
 
 ```bash
-docker compose --env-file .env -f docker/docker-compose.yaml up -d lerobot-policy-server
-docker compose logs -f lerobot-policy-server   # gRPC bind 로그
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+docker compose logs -f policy-server   # gRPC bind 로그
 ```
 
 클라이언트는 `lerobot` 서비스의 `policy-client` 모드. `.env` 의 `POLICY_*` / `TASK` / `ROBOT_*` / `*_CAM_*` 변수가 robot_client CLI 인자로 자동 매핑된다.

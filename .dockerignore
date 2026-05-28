@@ -7,7 +7,7 @@
 #
 # ■ Dockerfile.lerobot / Dockerfile.smolvla 이 실제로 COPY 하는 파일 (제외 금지)
 #     pyproject.toml
-#     docker/lerobot-entrypoint.sh, docker/server-entrypoint.sh
+#     docker/lerobot-entrypoint.sh, docker/policy-entrypoint.sh
 #     docker/99-feetech.rules, docker/lerobot_keyboard_stdin.*
 #     docker/policy-client-shim.py, docker/sample_calibrations/
 # =============================================================================

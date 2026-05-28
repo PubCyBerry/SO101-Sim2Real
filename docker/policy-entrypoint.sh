@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# server-entrypoint.sh — `lerobot-policy-server` 서비스 (Dockerfile.smolvla) 진입점
+# policy-entrypoint.sh — `policy-server` 서비스 (Dockerfile.smolvla) 진입점
 #
 # Async inference 정책 서버 전용 진입점. 로봇 직결 워크플로(teleop / record /
 # replay / calibrate / train 등)는 `docker/lerobot-entrypoint.sh` 에 분리되어
@@ -30,7 +30,7 @@ set -euo pipefail
 
 # ── prepare-model 환경 변수 ─────────────────────────────────────────────────
 # 명명 볼륨 `lerobot_hf_cache` (= /root/.cache/huggingface) 에 모델 가중치를
-# 미리 받아 두는 모드. 같은 볼륨을 lerobot 과 lerobot-policy-server 가
+# 미리 받아 두는 모드. 같은 볼륨을 lerobot 과 policy-server 가
 # 공유하므로 한 번만 받으면 양쪽이 모두 사용한다.
 MODEL_REPO_ID="${MODEL_REPO_ID:-lerobot/smolvla_base}"
 MODEL_REVISION="${MODEL_REVISION:-main}"
@@ -136,7 +136,7 @@ case "$CMD" in
   # prepare-model — HF 캐시 명명 볼륨에 모델 가중치 사전 다운로드
   #
   # 명명 볼륨 `lerobot_hf_cache` 가 컨테이너의 `/root/.cache/huggingface` 로
-  # 마운트되어 있어, 두 서비스(lerobot, lerobot-policy-server) 가 동일 볼륨을
+  # 마운트되어 있어, 두 서비스(lerobot, policy-server) 가 동일 볼륨을
   # 공유한다. 한 번만 받으면 양쪽이 모두 사용한다. 다른 머신으로 옮기려면
   # `docker run ... -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
   #
@@ -151,16 +151,16 @@ case "$CMD" in
   # 예시:
   #   # 기본(env): SmolVLA 베이스 받기
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server prepare-model
+  #     policy-server prepare-model
   #
   #   # 위치 인자로 다른 모델 받기
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server prepare-model nvidia/GR00T-N1.5-3B
+  #     policy-server prepare-model nvidia/GR00T-N1.5-3B
   #
   #   # 추가 인자 전달 (특정 파일 패턴만)
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
   #     -e PREPARE_MODEL_EXTRA_ARGS='--include *.safetensors *.json' \
-  #     lerobot-policy-server prepare-model
+  #     policy-server prepare-model
   # ────────────────────────────────────────────────────────────────────────────
   prepare-model)
     shift || true
@@ -208,7 +208,7 @@ case "$CMD" in
   #
   # 예시:
   #   docker compose --env-file .env -f docker/docker-compose.yaml \
-  #     up -d lerobot-policy-server
+  #     up -d policy-server
   #
   # 클라이언트 예시 (같은 호스트의 lerobot 컨테이너 안에서):
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot \
@@ -262,7 +262,7 @@ case "$CMD" in
   #
   # 예시 (SmolVLA fine-tune):
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server train \
+  #     policy-server train \
   #       --policy.path=lerobot/smolvla_base \
   #       --policy.repo_id=${HF_USER}/smolvla_pick_pen \
   #       --policy.push_to_hub=true \
@@ -331,7 +331,7 @@ case "$CMD" in
   #
   # 예시:
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server eval \
+  #     policy-server eval \
   #       --policy.path=${HF_USER}/smolvla_pick_pen \
   #       --env.type=pusht --eval.n_episodes=20
   # ────────────────────────────────────────────────────────────────────────────

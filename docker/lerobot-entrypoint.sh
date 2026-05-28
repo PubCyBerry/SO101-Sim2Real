@@ -5,7 +5,7 @@
 # 본 스크립트는 로봇 직결 워크플로(teleop / record / replay / calibrate /
 # find-* / dataset-viz / policy-client / edit-dataset) 만 다룬다.
 # 정책 학습/평가(`train`, `eval`)와 정책 서버(`prepare-model`, `policy-server`)는
-# `docker/server-entrypoint.sh` (Dockerfile.smolvla 가 사용) 에 분리되어 있다 —
+# `docker/policy-entrypoint.sh` (Dockerfile.smolvla 가 사용) 에 분리되어 있다 —
 # 이 이미지에는 smolvla deps (transformers/accelerate 등) 가 설치되지 않기 때문.
 #
 # ■ 실행 모드 (CMD 첫 번째 인자)
@@ -75,7 +75,7 @@ RECORD_FPS="${RECORD_FPS:-30}"
 # HuggingFace Hub 업로드 여부 (true / false)
 PUSH_TO_HUB="${PUSH_TO_HUB:-true}"
 # 로컬 저장 루트 디렉터리 (비어 있으면 HF 캐시 폴더 사용)
-DATASET_ROOT="${DATASET_ROOT:-/workspace/data}"
+DATASET_ROOT="${DATASET_ROOT:-/workspace/datasets}"
 # 추가 lerobot-record 인자 (예: "--dataset.video=false --resume=true")
 RECORD_EXTRA_ARGS="${RECORD_EXTRA_ARGS:-}"
 
@@ -102,7 +102,7 @@ VIZ_MODE="${VIZ_MODE:-local}"
 VIZ_WS_PORT="${VIZ_WS_PORT:-9087}"
 
 # ── policy-client 환경 변수 (async inference 클라이언트) ────────────────────
-# 정책 서버 (`lerobot-policy-server` 서비스 또는 원격 H100 서버) 에 gRPC 로 붙어
+# 정책 서버 (`policy-server` 서비스 또는 원격 H100 서버) 에 gRPC 로 붙어
 # 관측을 보내고 액션을 받아 SO-101 follower arm 을 구동한다.
 # 같은 호스트에 정책 서버가 떠 있으면 127.0.0.1:8080, 원격 inference 라면
 # H100 서버 IP:포트 (예: "10.0.0.5:8080") 를 지정.
@@ -140,7 +140,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 # ── GPU 확인 (선택적) ─────────────────────────────────────────────────────────
 # lerobot 이미지의 모든 모드(teleop / record / replay / calibrate / policy-client)는
-# 로컬 GPU 를 직접 사용하지 않는다. GPU 추론은 lerobot-policy-server 가 담당.
+# 로컬 GPU 를 직접 사용하지 않는다. GPU 추론은 policy-server 가 담당.
 # LEROBOT_SHOW_GPU_INFO=1 로 설정할 때만 nvidia-smi 를 호출해 cold start 오버헤드를 줄인다.
 check_gpu_optional() {
     [[ "${LEROBOT_SHOW_GPU_INFO:-0}" != "1" ]] && return 0
@@ -652,7 +652,7 @@ case "$CMD" in
   # policy-client — Async inference 클라이언트 (실제 SO-101 follower 구동)
   #
   # `lerobot.async_inference.robot_client` 를 띄워 정책 서버
-  # (`lerobot-policy-server` 또는 원격 H100) 의 gRPC :PORT 에 접속한다.
+  # (`policy-server` 또는 원격 H100) 의 gRPC :PORT 에 접속한다.
   # 클라이언트가 SendPolicyInstructions RPC 로 policy_type / pretrained_name_or_path
   # / policy_device 를 전달 → 서버가 해당 정책을 로드 → 클라이언트가 카메라/state
   # 관측을 송신 → 서버가 액션 청크를 비동기 반환 → 클라이언트가 follower 에 적용.
@@ -673,7 +673,7 @@ case "$CMD" in
   #
   # 예시:
   #   # 같은 호스트에 정책 서버를 띄워 둔 뒤
-  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d lerobot-policy-server
+  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
   #   # 클라이언트로 붙어 follower 구동
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
   #
@@ -718,15 +718,15 @@ case "$CMD" in
     ;;
 
   # train / eval ────────────────────────────────────────────────────────────
-  # 이 두 모드는 lerobot-policy-server 서비스 (Dockerfile.smolvla + server-entrypoint.sh)
+  # 이 두 모드는 policy-server 서비스 (Dockerfile.policy + policy-entrypoint.sh)
   # 로 이동되었다. 이유: SmolVLA 등 정책 학습 시 transformers / accelerate /
   # num2words 가 필요하나 본 이미지는 teleop + async 그룹만 설치 (smolvla 그룹 미설치).
   #
-  # 사용 예 (lerobot-policy-server 컨테이너에서 실행):
+  # 사용 예 (policy-server 컨테이너에서 실행):
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server train --dataset.repo_id=... --policy.path=lerobot/smolvla_base ...
+  #     policy-server train --dataset.repo_id=... --policy.path=lerobot/smolvla_base ...
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     lerobot-policy-server eval --policy.path=... --env.type=...
+  #     policy-server eval --policy.path=... --env.type=...
   # ────────────────────────────────────────────────────────────────────────────
 
   # ────────────────────────────────────────────────────────────────────────────

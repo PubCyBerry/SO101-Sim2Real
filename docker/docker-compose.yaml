@@ -153,11 +153,11 @@ services:
   #   추론 의존성은 이 이미지에만 추가하므로 teleop 안정성이 격리된다.
   #
   # ■ 빌드
-  #   docker compose -f docker/docker-compose.yaml build lerobot-policy-server
+  #   docker compose -f docker/docker-compose.yaml build policy-server
   #
   # ■ 실행
   #   docker compose --env-file .env -f docker/docker-compose.yaml \
-  #     up -d lerobot-policy-server
+  #     up -d policy-server
   #
   # ■ 클라이언트 예시 (같은 호스트의 lerobot 컨테이너 안에서)
   #   docker compose --env-file .env -f docker/docker-compose.yaml \
