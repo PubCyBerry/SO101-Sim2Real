@@ -28,11 +28,11 @@ SO-ARM101 6축 로봇 팔용 **LeRobot 파이프라인 + Isaac Lab Sim-to-Real �
 
 ```mermaid
 flowchart TD
-    Q1{"실기기 SO-101 vs<br/>시뮬레이션?"}
-    Q1 -->|시뮬레이션| C["경로 C<br/>Isaac Lab 시뮬"]
-    Q1 -->|실기기| Q2{"격리 환경 /<br/>서버 배포 필요?"}
+    Q1{"실행 환경"}
+    Q1 -->|시뮬레이션| C["경로 C<br/>Isaac Lab 시뮬레이션"]
+    Q1 -->|실기기| Q2{"Docker 사용 여부"}
     Q2 -->|"아니오 (빠른 디버깅)"| A["경로 A<br/>Windows native + uv"]
-    Q2 -->|"예 (재현성·원격 추론)"| B["경로 B<br/>Docker 컨테이너"]
+    Q2 -->|"예 (재현성)"| B["경로 B<br/>Docker 컨테이너"]
 
     classDef path fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
     class A,B,C path
