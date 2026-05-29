@@ -9,7 +9,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 운영 환경: Windows 워크스테이션과 Linux 원격 서버. 자세한 사양은 §환경 사양 참조.
 
-자세한 사용법은 `README.md`에, 트러블슈팅은 `docs/TROUBLESHOOTING.md`에 정리되어 있다. 본 문서는 **README에 없는** 내부 구조·규칙과 자주 쓰는 명령만 다룬다.
+자세한 사용법은 `README.md`(허브)와 경로별 가이드(`docs/PATH_A_NATIVE.md` / `docs/PATH_B_DOCKER.md` / `docs/PATH_C_ISAAC_SIM.md`)에, 트러블슈팅은 `docs/TROUBLESHOOTING.md`에 정리되어 있다. 본 문서는 **README에 없는** 내부 구조·규칙과 자주 쓰는 명령만 다룬다.
 
 ## 환경 사양
 
