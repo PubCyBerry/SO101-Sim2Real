@@ -106,11 +106,15 @@ uv run lerobot-find-cameras opencv
 ```bash
 mkdir -p ./datasets ./logs ./outputs
 
+# ── Arm 직렬 포트 (Windows COM 포트) ──
 TELEOP_PORT="COM5"
 ROBOT_PORT="COM6"
 TELEOP_ID="so101_teleop"
 ROBOT_ID="so101_robot"
+ROBOT_TYPE="so101_follower"
+TELEOP_TYPE="so101_leader"
 
+# ── 카메라 (OpenCV index) ──
 WRIST_CAM_PORT=0
 FRONT_CAM_PORT=1
 TOP_CAM_PORT=2
@@ -126,16 +130,49 @@ CAMERAS="{
     top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
 }"
 
+# ── 태스크 / HuggingFace ──
 SINGLE_TASK="pick the pen"
 TASK="pick the pen"
 HF_USER="your_hf_user"
 HF_DATASET_REPO_ID="${HF_USER}/so101_pick_pen"
 DATASET_ROOT="./datasets/so101_pick_pen"
+
+# ── 정책 ──
 POLICY_PATH="lerobot/smolvla_base"
 POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen"
 TRAIN_POLICY_TYPE=smolvla
 POLICY_CLIENT_TYPE=smolvla
-OUTPUT_DIR="./outputs/train/smolvla_pick_pen"
+
+# ── record ──
+RECORD_FPS=30
+EPISODE_TIME_S=60
+RESET_TIME_S=10
+NUM_EPISODES=10
+PUSH_TO_HUB=true
+EPISODE_INDEX=0
+
+# ── train ──
+TRAIN_STEPS=20000
+BATCH_SIZE=8
+JOB_NAME=smolvla_pick_pen
+OUTPUT_DIR="./outputs/train/${JOB_NAME}"
+NUM_WORKERS=4
+WANDB_ENABLE=true
+DEVICE=cuda
+
+# ── policy server / client ──
+POLICY_SERVER_HOST=127.0.0.1
+POLICY_SERVER_PORT=8080
+POLICY_SERVER_ADDRESS="${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
+POLICY_FPS=30
+INFERENCE_LATENCY=0.033
+OBS_QUEUE_TIMEOUT=2
+POLICY_DEVICE=cuda
+CLIENT_DEVICE=cpu
+ACTIONS_PER_CHUNK=50
+CHUNK_SIZE_THRESHOLD=0.5
+AGGREGATE_FN_NAME=weighted_average
+POLICY_CLIENT_FPS=30
 
 ```
 
@@ -156,13 +193,13 @@ export HF_HOME="$(pwd -W)/.cache/huggingface"
 ```bash
 # Follower
 uv run lerobot-setup-motors \
-    --robot.type=so101_follower \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}"
 
 # Leader
 uv run lerobot-setup-motors \
-    --teleop.type=so101_leader \
-    --teleop.port="${ROBOT_PORT}"
+    --teleop.type="${TELEOP_TYPE}" \
+    --teleop.port="${TELEOP_PORT}"
 ```
 
 캘리브레이션. `id` 는 이후 teleop / record / replay 에서 동일하게 유지.
@@ -170,13 +207,13 @@ uv run lerobot-setup-motors \
 ```bash
 # Follower
 uv run lerobot-calibrate \
-    --robot.type=so101_follower \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}"
 
 # Leader
 uv run lerobot-calibrate \
-    --teleop.type=so101_leader \
+    --teleop.type="${TELEOP_TYPE}" \
     --teleop.port="${TELEOP_PORT}" \
     --teleop.id="${TELEOP_ID}"
 ```
@@ -189,11 +226,11 @@ uv run lerobot-calibrate \
 
 ```bash
 uv run lerobot-teleoperate \
-    --robot.type=so101_follower \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}" \
-    --teleop.type=so101_leader \
+    --teleop.type="${TELEOP_TYPE}" \
     --teleop.port="${TELEOP_PORT}" \
     --teleop.id="${TELEOP_ID}" \
     ${TELEOP_EXTRA_ARGS}
@@ -205,21 +242,21 @@ uv run lerobot-teleoperate \
 
 ```bash
 uv run lerobot-record \
-    --robot.type=so101_follower \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}" \
-    --teleop.type=so101_leader \
+    --teleop.type="${TELEOP_TYPE}" \
     --teleop.port="${TELEOP_PORT}" \
     --teleop.id="${TELEOP_ID}" \
     --dataset.repo_id="${HF_DATASET_REPO_ID}" \
     --dataset.single_task="${SINGLE_TASK}" \
     --dataset.root="${DATASET_ROOT}" \
-    --dataset.fps=30 \
-    --dataset.episode_time_s=60 \
-    --dataset.reset_time_s=10 \
-    --dataset.num_episodes=10 \
-    --dataset.push_to_hub=true \
+    --dataset.fps=${RECORD_FPS} \
+    --dataset.episode_time_s=${EPISODE_TIME_S} \
+    --dataset.reset_time_s=${RESET_TIME_S} \
+    --dataset.num_episodes=${NUM_EPISODES} \
+    --dataset.push_to_hub=${PUSH_TO_HUB} \
     --play_sounds=false \
     ${RECORD_EXTRA_ARGS}
 ```
@@ -238,13 +275,13 @@ uv run lerobot-record \
 
 ```bash
 uv run lerobot-replay \
-    --robot.type=so101_follower \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --dataset.repo_id="${HF_DATASET_REPO_ID}" \
-    --dataset.episode=0 \
+    --dataset.episode=${EPISODE_INDEX} \
     --dataset.root="${DATASET_ROOT}" \
-    --dataset.fps=30 \
+    --dataset.fps=${RECORD_FPS} \
     --play_sounds=false
 ```
 
@@ -253,7 +290,7 @@ uv run lerobot-replay \
 ```bash
 uv run lerobot-dataset-viz \
     --repo-id="${HF_DATASET_REPO_ID}" \
-    --episode-index=0 \
+    --episode-index=${EPISODE_INDEX} \
     --root="${DATASET_ROOT}" \
     --mode=local
 ```
@@ -263,7 +300,15 @@ uv run lerobot-edit-dataset \
     --repo_id="${HF_DATASET_REPO_ID}" \
     --root="${DATASET_ROOT}" \
     --operation.type=delete_episodes \
-    --operation.episode_indices=[0]
+    --operation.episode_indices=[${EPISODE_INDEX}]
+```
+
+### HuggingFace Hub 업로드
+
+`lerobot-record --dataset.push_to_hub=false` 로 로컬에만 저장한 뒤 나중에 올리거나, 수동으로 재업로드할 때:
+
+```bash
+uv run hf upload "${HF_DATASET_REPO_ID}" "${DATASET_ROOT}" --repo-type=dataset
 ```
 
 ---
@@ -289,14 +334,14 @@ uv run lerobot-train \
     --policy.type=${TRAIN_POLICY_TYPE} \
     --policy.path="${POLICY_PATH}" \
     --policy.repo_id="${POLICY_REPO_ID}" \
-    --policy.push_to_hub=true \
-    --policy.device=cuda \
+    --policy.push_to_hub=${PUSH_TO_HUB} \
+    --policy.device=${DEVICE} \
     --output_dir="${OUTPUT_DIR}" \
-    --steps=20000 \
-    --batch_size=8 \
-    --job_name=smolvla_pick_pen \
-    --num_workers=4 \
-    --wandb.enable=true
+    --steps=${TRAIN_STEPS} \
+    --batch_size=${BATCH_SIZE} \
+    --job_name=${JOB_NAME} \
+    --num_workers=${NUM_WORKERS} \
+    --wandb.enable=${WANDB_ENABLE}
 ```
 
 W&B 미사용 시 `--wandb.enable=false`, Hub push 미사용 시 `--policy.push_to_hub=false`. Linux 학습 서버 (RTX PRO 5000 Blackwell 48 GB) 에서 멀티 GPU 가 필요하면 [경로 B](PATH_B_DOCKER.md) 의 docker 학습 또는 별도 Linux native 환경에서 `accelerate launch` 구성.
@@ -321,11 +366,11 @@ uv run lerobot-eval \
 
 ```bash
 uv run python -m lerobot.async_inference.policy_server \
-    --host=127.0.0.1 \
-    --port=8080 \
-    --fps=30 \
-    --inference_latency=0.033 \
-    --obs_queue_timeout=2
+    --host=${POLICY_SERVER_HOST} \
+    --port=${POLICY_SERVER_PORT} \
+    --fps=${POLICY_FPS} \
+    --inference_latency=${INFERENCE_LATENCY} \
+    --obs_queue_timeout=${OBS_QUEUE_TIMEOUT}
 ```
 
 모델 종류와 체크포인트는 서버가 아니라 client 가 넘긴다.
@@ -336,17 +381,17 @@ LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 �
 
 ```bash
 uv run python ./docker/policy-client-shim.py \
-    --server_address=127.0.0.1:8080 \
+    --server_address=${POLICY_SERVER_ADDRESS} \
     --policy_type=${POLICY_CLIENT_TYPE} \
     --pretrained_name_or_path="${POLICY_REPO_ID}" \
-    --policy_device=cuda \
-    --client_device=cpu \
+    --policy_device=${POLICY_DEVICE} \
+    --client_device=${CLIENT_DEVICE} \
     --task="${TASK}" \
-    --actions_per_chunk=50 \
-    --chunk_size_threshold=0.5 \
-    --aggregate_fn_name=weighted_average \
-    --fps=30 \
-    --robot.type=so101_follower \
+    --actions_per_chunk=${ACTIONS_PER_CHUNK} \
+    --chunk_size_threshold=${CHUNK_SIZE_THRESHOLD} \
+    --aggregate_fn_name=${AGGREGATE_FN_NAME} \
+    --fps=${POLICY_CLIENT_FPS} \
+    --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --robot.cameras="${CAMERAS}"
