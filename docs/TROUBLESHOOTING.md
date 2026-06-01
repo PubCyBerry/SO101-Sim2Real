@@ -5,6 +5,9 @@
 - [WSL2 NTFS 마운트에서 uv sync 실패 (Operation not permitted)](#wsl2-ntfs-마운트에서-uv-sync-실패-operation-not-permitted)
 - [uv-compile Too many open files panic (다코어 호스트, 모든 uv RUN)](#uv-compile-too-many-open-files-panic-다코어-호스트-모든-uv-run)
 - [`uv pip install torch` 단계에서 nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
+- [torchcodec `c10::MessageLogger::stream` 심볼 누락으로 학습 DataLoader 크래시](#torchcodec-c10messageloggerstream-심볼-누락으로-학습-dataloader-크래시)
+- [`torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`](#torchcompile-활성화-시-invalidcxxcompiler-no-working-c-compiler-found)
+- [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
@@ -237,6 +240,173 @@ docker compose --env-file .env -f docker/docker-compose.yaml build lerobot --no-
 ```
 
 캐시 마운트는 BuildKit 빌더가 살아 있는 동안만 유지되므로 빌더를 재생성하면 (`docker buildx rm` / 호스트 재부팅) 다시 받아야 한다. 그래도 한 빌더 안에서는 부분 실패 → 재시도가 즉시 통과한다.
+
+---
+
+## torchcodec `c10::MessageLogger::stream` 심볼 누락으로 학습 DataLoader 크래시
+
+**현상**
+
+`policy-server train` 모드에서 DataLoader worker 0이 즉시 크래시하며 학습이 시작되지 않는다.
+
+**오류 메시지**
+
+```
+RuntimeError: Caught RuntimeError in DataLoader worker process 0.
+...
+  File ".../torchcodec/_core/ops.py", line 109, in <module>
+    ffmpeg_major_version, core_library_path = load_torchcodec_shared_libraries()
+RuntimeError: Could not load libtorchcodec. ...
+
+FFmpeg version 6:
+OSError: /opt/venv/.../torchcodec/libtorchcodec_core6.so: undefined symbol: _ZN3c1013MessageLogger6streamB5cxx11Ev
+```
+
+(다른 FFmpeg 버전은 `libavutil.so.5x/5y/60: cannot open shared object file`)
+
+**원인**
+
+torchcodec 의 버전이 고정되지 않으면 PyPI 최신 버전(0.10+)이 설치된다.  
+0.10+ 부터 `libtorchcodec_core*.so` 가 PyTorch 2.11+ C++ ABI 로 빌드되어, 
+`torch==2.7.0` 의 `c10::MessageLogger::stream[abi:cxx11]()` 심볼과 맞지 않는다.  
+Ubuntu 24.04 apt `ffmpeg`는 libavutil.so.58 (FFmpeg 6.1) 을 제공하는데,
+torchcodec 이 libavutil.so.56/57/59/60 을 순서대로 시도하기 때문에 FFmpeg 버전 불일치 오류도 함께 표시된다.
+
+**해결 방법**
+
+`pyproject.toml` `override-dependencies` 에 `torchcodec>=0.5,<0.6` 핀을 추가하고 Docker 이미지를 재빌드한다.
+
+```toml
+# pyproject.toml
+override-dependencies = [
+    ...
+    "torchcodec>=0.5,<0.6",   # torch 2.7 호환 마지막 마이너 시리즈
+]
+```
+
+```bash
+docker compose -f docker/docker-compose.yaml build policy-server
+```
+
+이미지 재빌드 전에 즉시 우회해야 한다면 학습 명령에 `--dataset.video_backend=pyav` 추가:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  policy-server train ... --dataset.video_backend=pyav
+```
+
+**확인 방법**
+
+컨테이너 내부에서 torchcodec import 가 정상인지 검증:
+
+```bash
+docker compose -f docker/docker-compose.yaml run --rm policy-server python \
+  -c "from torchcodec.decoders import VideoDecoder; print('torchcodec OK')"
+```
+
+`torchcodec OK` 가 출력되면 정상. 학습 재실행 시 DataLoader worker 크래시 없이 Training 진행 확인.
+
+---
+
+## `torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`
+
+**현상**
+
+`torch.compile` 이 활성화된 상태(`COMPILE_MODEL=true`)로 학습을 시작하면 첫 번째 forward pass 직후 크래시.
+
+**오류 메시지**
+
+```
+torch._inductor.exc.InductorError: InvalidCxxCompiler:
+  No working C++ compiler found in torch._inductor.config.cpp.cxx: (None, 'g++')
+```
+
+**원인**
+
+`torch.compile` 의 inductor 백엔드는 CPU 커널을 JIT 컴파일할 때 `g++` 를 런타임에 호출한다.
+GPU 학습이라도 inductor 가 CPU-side 퓨전 커널을 생성하는 경로가 존재한다.
+`Dockerfile.policy` 의 `app` 스테이지(slim 런타임)에 `build-essential` / `g++` 를
+제외했기 때문에 컴파일러를 찾지 못한다.
+
+**해결 방법**
+
+`Dockerfile.policy` 의 `app` 스테이지 apt 설치 목록에 `g++` 추가 후 이미지 재빌드:
+
+```dockerfile
+# app 스테이지 RUN apt-get install 블록에 추가
+g++ \
+```
+
+```bash
+docker compose -f docker/docker-compose.yaml build policy-server
+```
+
+**확인 방법**
+
+```bash
+docker compose -f docker/docker-compose.yaml run --rm policy-server python \
+  -c "import subprocess, sys; r=subprocess.run(['g++','--version'],capture_output=True); print('g++ OK' if r.returncode==0 else 'MISSING')"
+```
+
+재빌드 후 `torch.compile` 활성 상태로 학습 재실행 시 첫 번째 스텝에서 수 분간 컴파일이 발생한 후 정상 진행 확인.
+
+---
+
+## lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)
+
+**현상**
+
+`policy-server:0.5.1` 이미지에서 SmolVLA 정책을 직접 import 하는 커스텀 스크립트 실행 시 즉시 실패.
+
+**오류 메시지**
+
+```
+ImportError: cannot import name 'SmolVLAPolicy' from 'lerobot.policies.smolvla' (unknown location)
+```
+
+**원인**
+
+lerobot 0.4.x 에서는 `lerobot/policies/smolvla/__init__.py` 가 `SmolVLAPolicy` 를 re-export 했으나,
+0.5.x 에서 `__init__.py` 가 제거되어 namespace package 로 바뀌었다.
+`lerobot.policies.smolvla` 는 더 이상 직접 import 가 불가능하고 하위 모듈을 명시해야 한다.
+
+`policy-entrypoint.sh` 의 `policy-server` 모드(`python -m lerobot.async_inference.policy_server`)는 내부에서 올바른 경로를 사용하므로 영향 없다. 커스텀 Python 스크립트를 직접 작성할 때만 해당된다.
+
+**해결 방법**
+
+```python
+# ❌ lerobot 0.4.x 방식 — 0.5.x 에서 ImportError
+from lerobot.policies.smolvla import SmolVLAPolicy
+from lerobot.policies.smolvla import SmolVLAConfig
+
+# ✅ lerobot 0.5.x 방식 — 하위 모듈 직접 지정
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+```
+
+같은 패턴이 다른 정책에도 적용된다.
+
+```python
+# ACT
+from lerobot.policies.act.modeling_act import ACTPolicy
+
+# Diffusion
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+
+# GR00T
+from lerobot.policies.groot.modeling_groot import GR00TPolicy
+```
+
+**확인 방법**
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server python -c "
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+print('SmolVLAPolicy OK:', SmolVLAPolicy)
+"
+```
+
+`SmolVLAPolicy OK: <class '...SmolVLAPolicy'>` 가 출력되면 정상.
 
 ---
 

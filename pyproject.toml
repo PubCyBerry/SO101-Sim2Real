@@ -79,14 +79,38 @@ teleop = [
 ]
 
 # ── policy: VLA policy 추론/학습 보조 의존성 ────────────────────────────
-# `lerobot[smolvla]` extras 가 transformers / num2words / accelerate / safetensors
-# 를 끌어오며, 본 그룹은 추가 핀과 함께 정책 서버 이미지(Dockerfile.policy) 에서만
-# 설치된다. teleop 이미지(Dockerfile.lerobot) 에는 포함하지 않음.
+# ※ 실제 설치는 Dockerfile.policy 의 uv pip install 로 수행한다.
+#   pyproject.toml 의 override-dependencies (numpy==1.26.0 등) 가 lerobot 0.5.1
+#   (numpy>=2.0) 과 충돌하므로 Docker 에서는 uv sync 를 사용하지 않는다.
+#   본 그룹은 호스트에서 uv sync --group policy 를 실행할 경우를 위한 참조용.
+#
+# GR00T-N1.5 3B 지원 패키지 (lerobot[groot] extra 내용을 풀어서 명시):
+#   peft / diffusers / dm-tree / timm / decord / ninja / flash-attn
+#   flash-attn 은 uv 가 소스 빌드하며 no-build-isolation 이 필요 →
+#   아래 [tool.uv] no-build-isolation-package 에 선언. 빌드 시 NVCC 필요 →
+#   Dockerfile.policy 의 base 스테이지가 devel 이미지를 사용한다.
 policy = [
-    "lerobot[smolvla]>=0.4.2",
+    "lerobot[smolvla]>=0.5.1",
     "num2words>=0.5.14,<0.6.0",
-    "accelerate>=1.7.0,<2.0.0",
+    "accelerate>=1.10.0,<2.0.0",
     "safetensors>=0.4.3,<1.0.0",
+    # ── GR00T-N1.5 의존성 ────────────────────────────────────────────────
+    # lerobot[groot] extra 를 풀어쓴 것과 동일한 패키지 셋.
+    # peft: LoRA / AdaLoRA 어댑터 (GR00T fine-tune)
+    "peft>=0.18.0,<1.0.0",
+    # diffusers: 확산 모델 유틸리티 (GR00T 디노이징 헤드)
+    "diffusers>=0.27.2,<0.36.0",
+    # dm-tree: 중첩 구조 순회 (GR00T 관측 전처리)
+    "dm-tree>=0.1.8,<1.0.0",
+    # timm: 비전 백본 (GR00T 이미지 인코더)
+    "timm>=1.0.0,<1.1.0",
+    # decord: 고속 비디오 디코더 (데이터로더). x86_64 Linux 전용 빌드만 존재.
+    "decord>=0.6.0,<1.0.0; platform_machine == 'x86_64'",
+    # ninja: C++ 확장 빌드 가속 (flash-attn 컴파일 속도 향상)
+    "ninja>=1.11.1,<2.0.0",
+    # flash-attn: GR00T-N1.5 필수. SmolVLA 는 eager attention 하드코딩으로 미사용.
+    # macOS 는 CUDA 미지원이므로 제외. 소스 빌드 필요 → no-build-isolation-package 선언.
+    "flash-attn>=2.5.9,<3.0.0; sys_platform != 'darwin'",
 ]
 
 # ── async: Async inference policy server (gRPC) ──────────────────────────────
@@ -146,6 +170,12 @@ url      = "https://pypi.nvidia.com"
 # =============================================================================
 [tool.uv]
 
+# flash-attn 은 빌드 시 torch 가 이미 설치된 환경이 필요 (no-build-isolation).
+# uv 는 이 목록의 패키지를 --no-build-isolation 으로 빌드한다.
+# Dockerfile.policy 에서 torch 설치(torch-layer) 이후 uv sync 를 실행하므로
+# torch 헤더를 참조하는 flash-attn 빌드가 정상 동작한다.
+no-build-isolation-package = ["flash-attn"]
+
 # 버전 충돌 방지를 위한 전역 오버라이드
 override-dependencies = [
     # HuggingFace 생태계 호환성 (datasets, transformers 등)
@@ -156,11 +186,11 @@ override-dependencies = [
     "pyarrow>=17,<19",
     # datasets 4.7.0+에서 pa.json_() 사용 (PyArrow 19 이상 필요) → pyarrow<19와 충돌 방지
     "datasets>=4.0.0,<4.7.0",
-    # # torchcodec 0.5.x 가 PyTorch 2.7 호환 (torch==2.7.0+cu128 핀과 매칭).
-    # # unpinned 으로 두면 최신 (0.10+) 이 설치되어 PyTorch 2.11+ ABI 로 빌드된
-    # # libtorchcodec_core*.so 가 c10 cxx11 심볼 (c10::MessageLogger::stream) 을
-    # # 찾지 못해 lerobot-dataset-viz / decode_video_frames_torchcodec 가 죽는다.
-    # "torchcodec>=0.5,<0.6",
+    # torchcodec 0.5.x 가 PyTorch 2.7 호환 (torch==2.7.0+cu128 핀과 매칭).
+    # unpinned 으로 두면 최신 (0.10+) 이 설치되어 PyTorch 2.11+ ABI 로 빌드된
+    # libtorchcodec_core*.so 가 c10 cxx11 심볼 (c10::MessageLogger::stream) 을
+    # 찾지 못해 lerobot-dataset-viz / decode_video_frames_torchcodec 가 죽는다.
+    "torchcodec>=0.5,<0.6",
 ]
 # 빌드 백엔드(setuptools) 버전 고정: setuptools 82+ 에서 발생하는 빌드 오류 회피
 build-constraint-dependencies = [

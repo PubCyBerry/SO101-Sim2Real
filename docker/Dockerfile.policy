@@ -1,44 +1,52 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Dockerfile.smolvla — LeRobot Async Inference Policy Server (SmolVLA)
-# Base  : nvidia/cuda:12.8.0-runtime-ubuntu24.04
-# Python: 3.11 (managed by uv)
-# Deps  : pyproject.toml [dependency-groups.smolvla] + [dependency-groups.async]
+# Dockerfile.policy — LeRobot 0.5.1 Async Inference Policy Server (SmolVLA / GR00T-N1.5)
+# Base  : nvidia/cuda:12.8.0-devel-ubuntu24.04  ← devel: NVCC 포함 (flash-attn 소스 빌드)
+# Python: 3.12 (managed by uv)  ← 0.5.1 requires-python=">=3.12"
+# Deps  : lerobot[smolvla,async]==0.5.1 + GR00T 의존성 + flash-attn
+#         ※ pyproject.toml override-dependencies 미사용 (uv pip install 직접 명세)
 #
-# ■ 이 이미지의 책임
-#   ┌────────────────────────────────────────────────────────────────────────┐
-#   │ docker compose 의 `policy-server` 서비스가 이 이미지를 사용한다.│
-#   │ entrypoint.sh 의 `policy-server` 모드만 실제로 호출되지만, train / eval│
-#   │ / bash 모드도 동일 이미지로 SmolVLA 정책을 다룰 때 재사용 가능.       │
-#   └────────────────────────────────────────────────────────────────────────┘
+# ■ pyproject.toml override-dependencies 미사용 이유
+#   pyproject.toml 의 [tool.uv.override-dependencies] 는 Isaac Sim 5.1 호환용 핀
+#   (numpy==1.26.0, pyarrow<19, datasets<4.7.0) 을 포함한다.
+#   lerobot 0.5.1 은 numpy>=2.0.0 을 요구하므로 이 override 와 충돌 →
+#   uv sync 대신 uv pip install 로 직접 명세해 pyproject.toml override 를 우회한다.
+#   호스트 Isaac 환경 (uv sync --group isaac, Python 3.11) 은 기존 override 그대로 유지.
 #
 # ■ teleop 이미지와의 차이
-#   - 직렬/USB 툴체인(libevdev, libusb, udev, speech-dispatcher) 제거
-#     → 로봇 직결이 없는 순수 추론 서버, 공격면 축소
-#   - lerobot[feetech] → lerobot[smolvla]
-#     → Feetech 서보 SDK 제거, transformers / num2words / accelerate 추가
-#   - grpcio / protobuf 추가 → async_inference.policy_server / robot_client
+#   - Python 3.11 → 3.12 (lerobot 0.5.1 요구)
+#   - uv sync → uv pip install (Isaac override 우회)
+#   - lerobot 0.4.x → 0.5.1 / transformers==5.3.0
+#   - numpy 1.26 → 2.x (lerobot 0.5.1 요구)
+#   - 직렬/USB 툴체인(libevdev, libusb, udev) 제거 → 순수 추론 서버
 #
-# ■ 향후 확장 지점
-#   - GR00T N1.5: flash-attn 휠 필요 — devel 베이스 + build-essential 로 전환,
-#                  ARG TARGET_GPU=(ampere|hopper) 로 휠 분기 예정
-#   - 원격 inference: Linux H100 서버에서 빌드해 도커 레지스트리 push,
-#                      Windows 클라이언트는 record / robot_client 만 실행
+# ■ flash-attn 소스 빌드 전략
+#   - devel 베이스 이미지 사용 → NVCC 포함, 소스 빌드 가능
+#   - TORCH_CUDA_ARCH_LIST="8.6 9.0 12.0" (RTX A4000 / H100 / RTX PRO 5000 Blackwell)
+#   - lerobot 0.5.1: flash-attn>=2.5.9,<3.0.0
+#   - MAX_JOBS=8 로 병렬 컴파일 (128 GB RAM 기준; OOM 시 4로 낮출 것)
+#   - 최종 app 스테이지는 runtime 이미지로 복귀 → 이미지 크기 최소화
 #
-# ■ 레이어 캐시 설계 (Dockerfile.lerobot 과 Stage 1-4 공유)
+# ■ torch 버전 전략
+#   lerobot 0.5.1 호환 범위: torch>=2.7,<2.11.0 / torchvision>=0.22,<0.26
+#   cu128 인덱스에서 사용 가능한 최신 버전을 uv 가 자동 선택.
+#
+# ■ 레이어 캐시 설계
 # ─────────────────────────────────────────
-#   Stage base      : apt 빌드 전용 도구             → 거의 변경 없음
-#   Stage uv        : uv 바이너리                    → 거의 변경 없음
-#   Stage python    : Python 3.11 + venv             → 거의 변경 없음
-#   Stage torch     : torch / torchvision            → PyTorch 버전 변경 시만
-#   Stage policy    : lerobot[smolvla] + grpcio      → lerobot/transformers 변경 시만
-#   Stage app       : 클린 CUDA 베이스 + venv 복사  → 자주 변경 (~400 MB 절감)
+#   Stage base      : apt 빌드 도구          → 거의 변경 없음
+#   Stage uv        : uv 바이너리            → 거의 변경 없음
+#   Stage python    : Python 3.12 + venv    → Python 버전 변경 시만
+#   Stage torch     : torch / torchvision   → PyTorch 버전 변경 시만
+#   Stage policy    : lerobot + flash-attn  → 패키지 변경 시만
+#   Stage app       : 클린 CUDA runtime     → 자주 변경 (~400 MB 절감)
 # =============================================================================
 
 # ── Stage 1: System dependencies ─────────────────────────────────────────────
 # teleop 이미지의 apt 목록에서 USB / serial / speech 패키지를 제외한 minimal 셋.
 # OpenCV / ffmpeg 는 lerobot 패키지가 import 단계에서 의존하므로 유지.
-FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS base
+# devel 이미지 사용 이유: NVCC 포함 → flash-attn 소스 빌드 가능.
+# 최종 app 스테이지는 runtime 이미지로 복귀해 이미지 크기를 최소화한다.
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Seoul
@@ -71,25 +79,22 @@ FROM base AS uv-installer
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv --version
 
-# ── Stage 3: Python 3.11 + virtual-env ───────────────────────────────────────
+# ── Stage 3: Python 3.12 + virtual-env ───────────────────────────────────────
+# lerobot 0.5.1 requires-python = ">=3.12" (PR #3023)
 FROM uv-installer AS python-setup
 
 ENV VIRTUAL_ENV=/opt/venv \
     UV_PYTHON_PREFERENCE=only-managed \
-    UV_PYTHON=3.11 \
+    UV_PYTHON=3.12 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
 # `ulimit -Sn 65536`: 다코어 호스트에서 uv 의 stdlib pyc 컴파일이 fd 를 폭주시켜
-# "Too many open files" 로 panic 하는 문제 회피. Dockerfile.lerobot 의 동일 RUN
-# 주석 참고.
-# ① 크리티컬 작업 — 실패 시 빌드가 실제로 중단되어야 함
+# "Too many open files" 로 panic 하는 문제 회피.
 RUN ulimit -Sn 65536 \
-    && uv python install 3.11 \
-    && uv venv --python 3.11 ${VIRTUAL_ENV}
+    && uv python install 3.12 \
+    && uv venv --python 3.12 ${VIRTUAL_ENV}
 
-# ② stdlib 불필요 모듈 제거 (클린업 — 실패해도 빌드 계속)
-# Dockerfile.lerobot 과 동일 분리 패턴 — 상세 내용은 해당 파일 참고.
 RUN find /root/.local/share/uv/python -type d \
         \( -name test -o -name idlelib -o -name tkinter \
            -o -name turtledemo -o -name lib2to3 -o -name ensurepip \) \
@@ -97,50 +102,77 @@ RUN find /root/.local/share/uv/python -type d \
 
 ENV PATH="${VIRTUAL_ENV}/bin:$PATH"
 
-# ── Stage 4: torch / torchvision (Dockerfile.lerobot 과 동일 핀) ────────────
-# 두 이미지가 동일 RUN 명령을 사용하므로 BuildKit 이 자동으로 캐시 공유.
+# ── Stage 4: torch / torchvision ─────────────────────────────────────────────
+# pyproject.toml 미복사 — Isaac override 의존 없이 cu128 인덱스에서 직접 설치.
+# lerobot 0.5.1 호환 범위: torch>=2.7,<2.11.0 / torchvision>=0.22.0,<0.26.0
+# uv 가 cu128 인덱스에서 사용 가능한 최신 버전을 자동 선택한다.
 FROM python-setup AS torch-layer
 
-WORKDIR /build
-
-COPY pyproject.toml ./
-
-# BuildKit 캐시 마운트 + 동시 다운로드 제한 + 긴 timeout + ulimit raise —
-# Dockerfile.lerobot 의 동일 RUN 주석 참고 (pypi.nvidia.com CDN throttling +
-# uv-compile 의 fd 폭주 둘 다 회피).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     ulimit -Sn 65536 \
     && UV_HTTP_TIMEOUT=600 \
        UV_CONCURRENT_DOWNLOADS=2 \
        uv pip install \
-           "torch==2.7.0" \
-           "torchvision==0.22.0" \
+           "torch>=2.7.0,<2.11.0" \
+           "torchvision>=0.22.0,<0.26.0" \
            --index-url "https://download.pytorch.org/whl/cu128"
 
 
-# ── Stage 5: SmolVLA + async 그룹 설치 ──────────────────────────────────────
-# pyproject.toml [dependency-groups]:
-#   smolvla : lerobot[smolvla] + num2words + accelerate + safetensors
-#   async   : grpcio + protobuf
-# teleop / isaac / dev 그룹은 배제.
+# ── Stage 5: lerobot 0.5.1 + GR00T 의존성 (flash-attn 소스 빌드 포함) ────────
+# pyproject.toml 의 override-dependencies (numpy==1.26.0 등) 를 우회하기 위해
+# uv sync 대신 uv pip install 로 직접 명세한다.
+#
+# 설치 구성:
+#   lerobot[smolvla,async]==0.5.1
+#     smolvla extra → transformers==5.3.0, num2words, accelerate>=1.10, safetensors
+#     async extra   → grpcio==1.73.1, protobuf>=6.31.1,<6.32.0, matplotlib
+#   GR00T-N1.5 보조 패키지 (lerobot[groot] 를 풀어쓴 것, flash-attn 별도 설치)
+#   flash-attn>=2.5.9,<3.0.0 (--no-build-isolation, NVCC 필요)
+#
+# flash-attn 빌드 환경변수:
+#   TORCH_CUDA_ARCH_LIST: sm_86(RTX A4000) / sm_90(H100) / sm_120(Blackwell)
+#   MAX_JOBS: 128 GB RAM 기준 8 권장. OOM 발생 시 4로 낮출 것.
 FROM torch-layer AS policy-deps
 
-# pyproject.toml 은 torch-layer 에서 상속되므로 재복사 불필요.
+# ── lerobot 0.5.1 (smolvla + async) ─────────────────────────────────────────
+# numpy>=2.0.0 등 lerobot 0.5.1 의존성이 Isaac override 없이 정상 해소된다.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     ulimit -Sn 65536 \
     && UV_HTTP_TIMEOUT=600 \
        UV_CONCURRENT_DOWNLOADS=2 \
-       uv sync \
-           --active \
-           --group policy \
-           --group async \
-           --no-install-project
+       uv pip install \
+           "lerobot[smolvla,async]==0.5.1"
 
-# venv 내 런타임 불필요 파일 제거 → COPY --from 전송량 감소:
-#   tests/ / test/ / benchmarks/ : transformers 등 대형 패키지 포함 테스트 디렉터리
-#   *.pyi                         : 타입 스텁 (런타임 미사용)
-#   dist-info/RECORD              : pip 매니페스트 (패키지당 수십 KB, 런타임 불필요)
-RUN sp=/opt/venv/lib/python3.11/site-packages; \
+# ── GR00T-N1.5 보조 패키지 ───────────────────────────────────────────────────
+# decord: x86_64 Linux 전용 바이너리만 존재.
+# ninja: flash-attn C++ 빌드 가속.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    ulimit -Sn 65536 \
+    && UV_HTTP_TIMEOUT=600 \
+       UV_CONCURRENT_DOWNLOADS=2 \
+       uv pip install \
+           "peft>=0.18.0,<1.0.0" \
+           "diffusers>=0.27.2,<0.36.0" \
+           "dm-tree>=0.1.8,<1.0.0" \
+           "timm>=1.0.0,<1.1.0" \
+           "decord>=0.6.0,<1.0.0" \
+           "ninja>=1.11.1,<2.0.0"
+
+# ── flash-attn 소스 빌드 ─────────────────────────────────────────────────────
+# torch 가 이미 venv 에 설치된 상태에서 --no-build-isolation 으로 빌드.
+# flash-attn 2.x 의 공식 sm_120 화이트리스트 미포함 →
+#   TORCH_CUDA_ARCH_LIST 로 강제 지정 (커뮤니티 검증 완료).
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    ulimit -Sn 65536 \
+    && TORCH_CUDA_ARCH_LIST="8.6 9.0 12.0" \
+       MAX_JOBS=8 \
+       UV_HTTP_TIMEOUT=600 \
+       uv pip install \
+           --no-build-isolation \
+           "flash-attn>=2.5.9,<3.0.0"
+
+# venv 내 런타임 불필요 파일 제거 → COPY --from 전송량 감소
+RUN sp=/opt/venv/lib/python3.12/site-packages; \
     find "$sp" -maxdepth 2 -type d \( -name tests -o -name test -o -name benchmarks \) \
         | xargs rm -rf 2>/dev/null; \
     find "$sp" -name "*.pyi" -delete 2>/dev/null; \
@@ -167,6 +199,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxext6 \
         libgl1 \
         libglib2.0-0 \
+        # torch.compile (inductor) 런타임 CPU 커널 컴파일에 필요
+        g++ \
         # uv managed CPython 동적 링크 의존
         libssl3 \
         libffi8 \
@@ -179,17 +213,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# venv (Python 3.11 + 전체 패키지) 및 uv managed CPython 을 빌드 스테이지에서 복사.
+# venv (Python 3.12 + 전체 패키지) 및 uv managed CPython 을 빌드 스테이지에서 복사.
 COPY --from=policy-deps /opt/venv /opt/venv
 COPY --from=policy-deps /root/.local/share/uv/python /root/.local/share/uv/python
 
 # 정책 서버 전용 진입점 (prepare-model / policy-server / info / bash / python).
 COPY docker/policy-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# HF_HOME 을 /workspace/.cache/huggingface 로 옮긴 이유: lerobot 서비스와 동일.
-# 컨테이너를 호스트 UID (non-root) 로 실행하면 /root 를 traverse 못하기 때문.
-# PYTHONNOUSERSITE=1 : user site-packages 경로 스캔 생략 → Python 시작 속도 향상
-# PYTHONUTF8=1       : locale 감지 없이 UTF-8 강제 → Python 시작 시 locale 서브프로세스 생략
+# HF_HOME: /workspace/.cache/huggingface (lerobot 서비스와 동일 명명 볼륨 공유)
+#   non-root UID 로 실행 시 /root 를 traverse 못하므로 /workspace 하위로 이동.
+# PYTHONNOUSERSITE=1: user site-packages 스캔 생략 → 시작 속도 향상
+# PYTHONUTF8=1      : locale 감지 없이 UTF-8 강제 → 시작 시 locale 서브프로세스 생략
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

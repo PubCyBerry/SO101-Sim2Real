@@ -76,6 +76,7 @@ ABI 호환성 핀 (`pyproject.toml`). 임의 업그레이드 / `uv lock --upgrad
 | `datasets>=4.0.0,<4.7.0` (override) | datasets 4.7.0+ 가 `pa.json_()` 사용 (PyArrow 19+ 필요) — pyarrow<19 와 충돌 회피 | uv resolve 실패 |
 | `h5py<3.16` | Isaac Sim 번들 HDF5 1.14.x와 ABI 일치. h5py 3.16+는 HDF5 2.0 번들 | `Windows fatal exception: code 0xc0000139` |
 | `torch==2.7.0+cu128` | Isaac Sim 5.1 번들 CUDA 12.8과 일치 | 기동 시 CUDA 호출 실패 |
+| `torchcodec>=0.5,<0.6` (override) | torch 2.7 호환 마지막 마이너. 0.10+ 는 PyTorch 2.11+ ABI 로 빌드되어 `c10::MessageLogger::stream[abi:cxx11]` 심볼 누락 | DataLoader worker 0 즉시 크래시, 학습 불가 |
 | `packaging>=24.2,<26.0` (override) | 다른 패키지 메타데이터 검증 충돌 회피 | `uv sync` resolve 실패 |
 | `setuptools<82` (build-constraint) | 일부 의존성의 `pkg_resources` 호환 | sdist 빌드 실패 |
 
