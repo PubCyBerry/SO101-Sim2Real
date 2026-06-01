@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# policy-entrypoint.sh — `policy-server` 서비스 (Dockerfile.smolvla) 진입점
+# policy-entrypoint.sh — `policy-server` 서비스 (Dockerfile.policy) 진입점
 #
 # Async inference 정책 서버 전용 진입점. 로봇 직결 워크플로(teleop / record /
 # replay / calibrate / train 등)는 `docker/lerobot-entrypoint.sh` 에 분리되어
@@ -50,6 +50,18 @@ INFERENCE_LATENCY="${INFERENCE_LATENCY:-0.033}"
 OBS_QUEUE_TIMEOUT="${OBS_QUEUE_TIMEOUT:-2}"
 POLICY_SERVER_EXTRA_ARGS="${POLICY_SERVER_EXTRA_ARGS:-}"
 
+# ── policy-server-rtc 환경 변수 ──────────────────────────────────────────────
+# scripts/policy_server_rtc.py (RTCPolicyServer) 기동 시 사용.
+# 위 policy-server 변수(HOST/PORT/FPS/INFERENCE_LATENCY/OBS_QUEUE_TIMEOUT)를 공유하고
+# 아래 RTC 전용 값만 추가한다.
+#
+# execution_horizon : 이전 청크와 일관성 유지 스텝 수 (권장 8-12, 기본 10)
+# max_guidance_weight: 가이던스 강도 (10스텝 flow-matching 최적값 10.0)
+# prefix_attention_schedule: 겹침 구간 가중치 방식 EXP|LINEAR|ONES|ZEROS (기본 EXP)
+RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-10}"
+RTC_MAX_GUIDANCE_WEIGHT="${RTC_MAX_GUIDANCE_WEIGHT:-10.0}"
+RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
+
 # ── train 환경 변수 ──────────────────────────────────────────────────────────
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
@@ -62,6 +74,10 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 JOB_NAME="${JOB_NAME:-}"
 DEVICE="${DEVICE:-cuda}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
+# RENAME_MAP: 데이터셋 카메라 키 → 정책 입력 키 매핑 (JSON 문자열).
+# 데이터셋이 wrist/front/top 키를 사용하고 정책이 camera1/2/3 을 기대할 때 필요.
+# 예: '{"observation.images.wrist":"observation.images.camera1","observation.images.front":"observation.images.camera2","observation.images.top":"observation.images.camera3"}'
+RENAME_MAP="${RENAME_MAP:-}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
 # ── 학습 속도 최적화 환경 변수 ────────────────────────────────────────────────
 # NUM_WORKERS: 데이터로더 병렬 워커 수. 224코어 서버 기준 8이 기본값.
@@ -117,8 +133,9 @@ check_lerobot() {
 }
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
+_LEROBOT_VER=$(cat /opt/lerobot_version.txt 2>/dev/null || echo "unknown")
 echo "========================================================"
-echo "  LeRobot 0.4.4 Policy Server"
+echo "  LeRobot ${_LEROBOT_VER} Policy Server"
 echo "========================================================"
 
 CMD="${1:-policy-server}"
@@ -240,6 +257,56 @@ case "$CMD" in
     ;;
 
   # ────────────────────────────────────────────────────────────────────────────
+  # policy-server-rtc — RTC 통합 Async Inference gRPC 서버
+  #
+  # scripts/policy_server_rtc.py (RTCPolicyServer) 를 기동한다.
+  # 표준 policy-server 와 gRPC 프로토콜·클라이언트 인터페이스가 동일하므로
+  # 기존 policy-client 를 그대로 사용할 수 있다.
+  #
+  # RTC 는 _get_action_chunk 내부에서 투명하게 적용된다:
+  #   - 이전 청크 leftover → prev_chunk_left_over guidance
+  #   - 경과 시각 × fps → inference_delay
+  #   → flow-matching 디노이징 루프에 guidance term 주입
+  #
+  # [env var → CLI arg 매핑]
+  #   (policy-server 변수 전부 공유)
+  #   RTC_EXECUTION_HORIZON          → --rtc_execution_horizon  (기본 10)
+  #   RTC_MAX_GUIDANCE_WEIGHT        → --rtc_max_guidance_weight (기본 10.0)
+  #   RTC_PREFIX_ATTENTION_SCHEDULE  → --rtc_prefix_attention_schedule (기본 EXP)
+  #
+  # 예시:
+  #   # docker-compose.yaml command 를 policy-server-rtc 로 변경 후:
+  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+  #
+  #   # 또는 직접 실행:
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  #     policy-server policy-server-rtc
+  # ────────────────────────────────────────────────────────────────────────────
+  policy-server-rtc)
+    info "── Policy Server + RTC 시작 (gRPC) ───────────────"
+    info "  Bind              → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
+    info "  FPS               → ${POLICY_FPS}"
+    info "  Inference Lat     → ${INFERENCE_LATENCY} s"
+    info "  Obs Queue TO      → ${OBS_QUEUE_TIMEOUT} s"
+    info "  RTC horizon       → ${RTC_EXECUTION_HORIZON} steps"
+    info "  RTC guidance_w    → ${RTC_MAX_GUIDANCE_WEIGHT}"
+    info "  RTC schedule      → ${RTC_PREFIX_ATTENTION_SCHEDULE}"
+    info "  ※ 모델·디바이스는 클라이언트 SendPolicyInstructions 로 주입"
+    shift || true
+    exec python /workspace/scripts/policy_server_rtc.py \
+      --host=${POLICY_SERVER_HOST} \
+      --port=${POLICY_SERVER_PORT} \
+      --fps=${POLICY_FPS} \
+      --inference_latency=${INFERENCE_LATENCY} \
+      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
+      --rtc_execution_horizon=${RTC_EXECUTION_HORIZON} \
+      --rtc_max_guidance_weight=${RTC_MAX_GUIDANCE_WEIGHT} \
+      --rtc_prefix_attention_schedule=${RTC_PREFIX_ATTENTION_SCHEDULE} \
+      ${POLICY_SERVER_EXTRA_ARGS} \
+      "$@"
+    ;;
+
+  # ────────────────────────────────────────────────────────────────────────────
   # train — Policy 학습 (모든 인자를 lerobot-train 에 완전 위임)
   #
   # 본 이미지는 smolvla + async 의존성을 모두 포함하므로 SmolVLA / 기타 정책 학습
@@ -274,6 +341,19 @@ case "$CMD" in
   train)
     info "── Train 시작 ────────────────────────────────────"
     shift
+    # ── CLI 인자 우선 적용: "$@" 가 env var 값을 last-wins 로 덮어쓰므로
+    #    info 출력 전에 로컬 변수를 갱신해 로그가 실제 동작을 반영하도록 함.
+    for _arg in "$@"; do
+        case "${_arg}" in
+            --steps=*)                  TRAIN_STEPS="${_arg#--steps=}" ;;
+            --batch_size=*)             BATCH_SIZE="${_arg#--batch_size=}" ;;
+            --policy.device=*)          DEVICE="${_arg#--policy.device=}" ;;
+            --num_workers=*)            NUM_WORKERS="${_arg#--num_workers=}" ;;
+            --policy.compile_model=*)   COMPILE_MODEL="${_arg#--policy.compile_model=}" ;;
+            --policy.compile_mode=*)    COMPILE_MODE="${_arg#--policy.compile_mode=}" ;;
+        esac
+    done
+    unset _arg
     TRAIN_ARGS=()
     [[ -n "${HF_DATASET_REPO_ID}" ]] && TRAIN_ARGS+=("--dataset.repo_id=${HF_DATASET_REPO_ID}")
     [[ -n "${DATASET_ROOT}" ]]       && TRAIN_ARGS+=("--dataset.root=${DATASET_ROOT}")
@@ -292,6 +372,7 @@ case "$CMD" in
         "--policy.compile_model=true"
         "--policy.compile_mode=${COMPILE_MODE}"
     )
+    [[ -n "${RENAME_MAP}" ]] && TRAIN_ARGS+=("--rename_map=${RENAME_MAP}")
     info "  Dataset      → ${HF_DATASET_REPO_ID:-<미설정>}"
     info "  Policy       → type=${POLICY_TYPE:-<미설정>}  path=${POLICY_PATH:-none}"
     info "  Output       → ${OUTPUT_DIR:-<미설정>}"
