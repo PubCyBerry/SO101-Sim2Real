@@ -43,7 +43,7 @@ flowchart LR
             T["🔵 teleop / record / replay / dataset-viz"]:::teleopNode
             PC["🟣 policy-client (gRPC)"]:::teleopNode
         end
-        subgraph SRV["📦 policy-server 컨테이너 (Dockerfile.smolvla)"]
+        subgraph SRV["📦 policy-server 컨테이너 (Dockerfile.policy)"]
             PS["🔴 policy-server (gRPC :8080)<br/>train / eval"]:::policyNode
         end
     end
@@ -82,7 +82,7 @@ flowchart LR
 | 이미지 | Dockerfile | 의존성 그룹 | 사용 서비스 |
 |---|---|---|---|
 | `lerobot-so101:0.4.4` | `docker/Dockerfile.lerobot` | `teleop` (lerobot[feetech] + evdev) | `lerobot` (teleop / record / replay / train / ...) |
-| `policy-server:0.4.4` | `docker/Dockerfile.smolvla` | `smolvla` + `async` (lerobot[smolvla] + grpcio) | `policy-server` (async inference) |
+| `policy-server:0.5.1` | `docker/Dockerfile.policy` | `smolvla` + `async` + GR00T 보조 deps (flash-attn 포함) | `policy-server` (async inference / train / eval) |
 
 ```bash
 # teleop / record / replay 용 이미지
@@ -147,7 +147,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot <m
 | `find-cameras` | 시스템 카메라 자동 검출 | - | 위치 인자: `opencv` \| `realsense` |
 | `find-port` | 직렬 포트 자동 감지 (인터랙티브) | - | - |
 | `dataset-viz` | Rerun 기반 데이터셋 시각화 | - | `HF_DATASET_REPO_ID`, `EPISODE_INDEX`, `VIZ_MODE`, `VIZ_WS_PORT` |
-| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_CLIENT_TYPE`, `POLICY_REPO_ID`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
+| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_TYPE`, `POLICY_REPO_ID`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
 | `edit-dataset` | 데이터셋 편집 (인자 완전 위임) | - | CLI 인자로 직접 전달 |
 | `info` | LeRobot / Python / 시스템 정보 | - | - |
 | `bash` \| `shell` | 컨테이너 인터랙티브 쉘 | - | - |
@@ -293,17 +293,17 @@ docker run --rm -v lerobot_hf_cache:/cache -v /tmp:/in alpine \
 | 이름 | 설명 |
 |-----|------|
 | HF_DATASET_REPO_ID / DATASET_ROOT | 학습 데이터셋 위치 |
-| TRAIN_POLICY_TYPE / BASE_MODEL / POLICY_REPO_ID | 정책 종류·베이스 체크포인트(`--policy.path`)·결과 push 겸 추론 모델(`--policy.repo_id`) |
+| TRAIN_POLICY_TYPE / BASE_MODEL / POLICY_BASE_MODEL_PATH / POLICY_REPO_ID | 정책 종류·LeRobot 체크포인트(`--policy.path`)·GR00T 베이스(`--policy.base_model_path`)·결과 push 겸 추론 모델(`--policy.repo_id`) |
 | JOB_NAME / BATCH_SIZE / TRAIN_STEPS / OUTPUT_DIR / DEVICE | 일반 학습 인자 |
 | WANDB_ENABLE | W&B 연동 |
-| TRAIN_EXTRA_ARGS | 추가 `lerobot-train` 인자 |
+| DATASET_VIDEO_BACKEND / POLICY_VIDEO_BACKEND / TRAIN_EXTRA_ARGS | LeRobot 0.5.1 비디오 디코더(`torchcodec`/`pyav`/`video_reader`)와 추가 `lerobot-train` 인자 |
 | **학습 속도 최적화** | |
 | NUM_WORKERS | 데이터로더 워커 수 (기본 8) |
 | COMPILE_MODEL / COMPILE_MODE | `torch.compile` 활성화 (10K+ steps 에서 ~20–30% 향상, 첫 스텝 컴파일 비용) |
 | NUM_PROCESSES | 사용 GPU 수. 2+ 지정 시 `accelerate launch --num_processes` DDP 자동 전환 |
 | MIXED_PRECISION | 혼합 정밀도 (기본 `bf16`, Ampere+ 권장. 구형 GPU `fp16`) |
 
-**호출 컨테이너는 `policy-server`** — Dockerfile.smolvla 에만 transformers / accelerate / num2words 가 설치됨 (lerobot 이미지에서 SmolVLA 학습 불가).
+**호출 컨테이너는 `policy-server`** — Dockerfile.policy 에만 transformers / accelerate / num2words / GR00T 의존성이 설치됨 (lerobot 이미지에서 정책 학습 불가).
 
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train

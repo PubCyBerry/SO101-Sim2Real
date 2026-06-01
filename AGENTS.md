@@ -27,8 +27,8 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 - **활성 서비스**:
   - `lerobot` (이미지 `lerobot-so101:0.4.4`, `docker/Dockerfile.lerobot`) — teleop / record / replay / train / eval / dataset-viz. `docker compose -f docker/docker-compose.yaml build lerobot`.
-  - `policy-server` (이미지 `policy-server:0.4.4`, `docker/Dockerfile.policy`) — async inference gRPC 서버 (`policy-entrypoint.sh policy-server`). `docker compose -f docker/docker-compose.yaml build policy-server`. teleop 이미지와 의존성 격리: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
-- **빌드 스테이지** (`Dockerfile.lerobot` / `Dockerfile.policy` 가 Stage 1–4 동일 → BuildKit 캐시 공유): base(`nvidia/cuda:12.8.0-runtime-ubuntu24.04` + apt) → uv → python 3.11 venv → torch 2.7.0/torchvision 0.22.0 (cu128) → `uv sync --group <teleop|policy async> --no-install-project` → app(entrypoint, teleop 만 udev rules).
+  - `policy-server` (이미지 `policy-server:0.5.1`, `docker/Dockerfile.policy`) — async inference gRPC 서버 (`policy-entrypoint.sh policy-server`). `docker compose -f docker/docker-compose.yaml build policy-server`. teleop 이미지와 의존성 격리: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
+- **빌드 스테이지**: `Dockerfile.lerobot` 는 Python 3.11 + LeRobot 0.4.4 실기기 의존성, `Dockerfile.policy` 는 Python 3.12 + LeRobot 0.5.1 policy/async/GR00T 의존성을 사용한다. 두 이미지는 torch/CUDA 계층 일부만 BuildKit 캐시로 공유한다.
 - **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` `${TOP_CAM_PORT}` `{$TOP_CAM_META_PORT}`(UVC 캡처/메타 노드 쌍).
 - **호스트 볼륨**: `./datasets`, `./logs`, `./outputs` → 컨테이너 `/workspace/*`. 명명 볼륨 `lerobot_hf_cache` → `/root/.cache/huggingface` (두 서비스 공유). 다른 머신으로 옮길 때는 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export 후 전송.
 - **권한·네트워크**: `privileged: true` (udev/USB 접근), `network_mode: host` (rerun 뷰어·ROS 브릿지), `ipc: host`. GPU 1장 예약 (`deploy.resources.reservations.devices`).

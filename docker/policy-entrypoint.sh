@@ -20,8 +20,9 @@
 #   prepare-model : MODEL_REPO_ID  MODEL_REVISION  PREPARE_MODEL_EXTRA_ARGS
 #   policy-server : POLICY_SERVER_HOST  POLICY_SERVER_PORT  POLICY_FPS
 #                   INFERENCE_LATENCY   OBS_QUEUE_TIMEOUT   POLICY_SERVER_EXTRA_ARGS
-#   train / eval  : 인자 완전 위임. .env 의 POLICY_TYPE / BASE_MODEL / DATASET / WANDB
-#                   변수를 셸 보간으로 채워 호출한다 (README §Policy 학습 참조).
+#   train / eval  : 인자 완전 위임. .env 의 TRAIN_POLICY_TYPE / BASE_MODEL /
+#                   POLICY_BASE_MODEL_PATH / DATASET / WANDB 변수를 셸 보간으로
+#                   채워 호출한다 (README §Policy 학습 참조).
 #                   NUM_WORKERS(기본 8) / COMPILE_MODEL / MIXED_PRECISION(bf16) /
 #                   NUM_PROCESSES(2 이상이면 accelerate launch DDP 전환) 로 속도 최적화.
 #   공통           : (HF 캐시는 명명 볼륨 lerobot_hf_cache → /root/.cache/huggingface)
@@ -67,9 +68,18 @@ RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
 # ── train 환경 변수 ──────────────────────────────────────────────────────────
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
-POLICY_TYPE="${POLICY_TYPE:-}"
-# BASE_MODEL: fine-tune 출발점이 되는 사전학습 베이스 (--policy.path). 추론 모델 아님.
+TRAIN_POLICY_TYPE="${TRAIN_POLICY_TYPE:-}"
+# BASE_MODEL: LeRobot checkpoint 형식의 fine-tune 출발점 (--policy.path). 추론 모델 아님.
+# LeRobot 0.5.1은 --policy.path 와 --policy.type 동시 지정이 불가하므로,
+# BASE_MODEL이 있으면 TRAIN_POLICY_TYPE은 전달하지 않는다.
 BASE_MODEL="${BASE_MODEL:-}"
+POLICY_BASE_MODEL_PATH="${POLICY_BASE_MODEL_PATH:-}"
+POLICY_TOKENIZER_ASSETS_REPO="${POLICY_TOKENIZER_ASSETS_REPO:-}"
+POLICY_EMBODIMENT_TAG="${POLICY_EMBODIMENT_TAG:-}"
+POLICY_CHUNK_SIZE="${POLICY_CHUNK_SIZE:-}"
+POLICY_N_ACTION_STEPS="${POLICY_N_ACTION_STEPS:-}"
+DATASET_VIDEO_BACKEND="${DATASET_VIDEO_BACKEND:-}"
+POLICY_VIDEO_BACKEND="${POLICY_VIDEO_BACKEND:-}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-100000}"
@@ -320,8 +330,9 @@ case "$CMD" in
   # [주요 CLI 인자]
   #   --dataset.repo_id=<str>         : 학습 데이터셋 HF Hub ID (필수)
   #   --dataset.root=<path>           : 로컬 저장 루트 (기본 /workspace/datasets/...)
-  #   --policy.type=<str>             : 모델 타입 (act / diffusion / smolvla / ...)
-  #   --policy.path=<str>             : 사전학습 체크포인트 (e.g. lerobot/smolvla_base)
+  #   --policy.type=<str>             : 모델 타입 (act / diffusion / smolvla / groot / ...)
+  #   --policy.path=<str>             : LeRobot 체크포인트 (e.g. lerobot/smolvla_base)
+  #   --policy.base_model_path=<str>  : GR00T 등 policy-specific 베이스 모델
   #   --policy.repo_id=<str>          : 결과 체크포인트 push 대상
   #   --policy.push_to_hub=true|false : HF Hub 자동 푸시 (기본 false)
   #   --output_dir=<path>             : 체크포인트·로그 출력
@@ -340,6 +351,14 @@ case "$CMD" in
   #       --output_dir=${OUTPUT_DIR} \
   #       --steps=20000 --batch_size=64 \
   #       --job_name=smolvla_pick_pen --wandb.enable=true
+  #
+  # 예시 (GR00T N1.5 fine-tune):
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  #     policy-server train \
+  #       --policy.type=groot \
+  #       --policy.base_model_path=nvidia/GR00T-N1.5-3B \
+  #       --policy.chunk_size=16 --policy.n_action_steps=16 \
+  #       --dataset.video_backend=torchcodec
   # ────────────────────────────────────────────────────────────────────────────
   train)
     info "── Train 시작 ────────────────────────────────────"
@@ -358,17 +377,27 @@ case "$CMD" in
     done
     unset _arg
     TRAIN_ARGS=()
-    [[ -n "${HF_DATASET_REPO_ID}" ]] && TRAIN_ARGS+=("--dataset.repo_id=${HF_DATASET_REPO_ID}")
-    [[ -n "${DATASET_ROOT}" ]]       && TRAIN_ARGS+=("--dataset.root=${DATASET_ROOT}")
-    [[ -n "${POLICY_TYPE}" ]]        && TRAIN_ARGS+=("--policy.type=${POLICY_TYPE}")
-    [[ -n "${BASE_MODEL}" ]]         && TRAIN_ARGS+=("--policy.path=${BASE_MODEL}")
-    [[ -n "${POLICY_REPO_ID}" ]]     && TRAIN_ARGS+=("--policy.repo_id=${POLICY_REPO_ID}")
-    [[ -n "${OUTPUT_DIR}" ]]         && TRAIN_ARGS+=("--output_dir=${OUTPUT_DIR}")
-    [[ -n "${TRAIN_STEPS}" ]]        && TRAIN_ARGS+=("--steps=${TRAIN_STEPS}")
-    [[ -n "${BATCH_SIZE}" ]]         && TRAIN_ARGS+=("--batch_size=${BATCH_SIZE}")
-    [[ -n "${JOB_NAME}" ]]           && TRAIN_ARGS+=("--job_name=${JOB_NAME}")
-    [[ -n "${WANDB_ENABLE}" ]]       && TRAIN_ARGS+=("--wandb.enable=${WANDB_ENABLE}")
-    [[ -n "${DEVICE}" ]]             && TRAIN_ARGS+=("--policy.device=${DEVICE}")
+    [[ -n "${HF_DATASET_REPO_ID}" ]]     && TRAIN_ARGS+=("--dataset.repo_id=${HF_DATASET_REPO_ID}")
+    [[ -n "${DATASET_ROOT}" ]]           && TRAIN_ARGS+=("--dataset.root=${DATASET_ROOT}")
+    [[ -n "${DATASET_VIDEO_BACKEND}" ]]  && TRAIN_ARGS+=("--dataset.video_backend=${DATASET_VIDEO_BACKEND}")
+    if [[ -n "${BASE_MODEL}" ]]; then
+        TRAIN_ARGS+=("--policy.path=${BASE_MODEL}")
+    elif [[ -n "${TRAIN_POLICY_TYPE}" ]]; then
+        TRAIN_ARGS+=("--policy.type=${TRAIN_POLICY_TYPE}")
+    fi
+    [[ -n "${POLICY_BASE_MODEL_PATH}" ]]     && TRAIN_ARGS+=("--policy.base_model_path=${POLICY_BASE_MODEL_PATH}")
+    [[ -n "${POLICY_TOKENIZER_ASSETS_REPO}" ]] && TRAIN_ARGS+=("--policy.tokenizer_assets_repo=${POLICY_TOKENIZER_ASSETS_REPO}")
+    [[ -n "${POLICY_EMBODIMENT_TAG}" ]]      && TRAIN_ARGS+=("--policy.embodiment_tag=${POLICY_EMBODIMENT_TAG}")
+    [[ -n "${POLICY_CHUNK_SIZE}" ]]          && TRAIN_ARGS+=("--policy.chunk_size=${POLICY_CHUNK_SIZE}")
+    [[ -n "${POLICY_N_ACTION_STEPS}" ]]      && TRAIN_ARGS+=("--policy.n_action_steps=${POLICY_N_ACTION_STEPS}")
+    [[ -n "${POLICY_VIDEO_BACKEND}" ]]       && TRAIN_ARGS+=("--policy.video_backend=${POLICY_VIDEO_BACKEND}")
+    [[ -n "${POLICY_REPO_ID}" ]]             && TRAIN_ARGS+=("--policy.repo_id=${POLICY_REPO_ID}")
+    [[ -n "${OUTPUT_DIR}" ]]                 && TRAIN_ARGS+=("--output_dir=${OUTPUT_DIR}")
+    [[ -n "${TRAIN_STEPS}" ]]                && TRAIN_ARGS+=("--steps=${TRAIN_STEPS}")
+    [[ -n "${BATCH_SIZE}" ]]                 && TRAIN_ARGS+=("--batch_size=${BATCH_SIZE}")
+    [[ -n "${JOB_NAME}" ]]                   && TRAIN_ARGS+=("--job_name=${JOB_NAME}")
+    [[ -n "${WANDB_ENABLE}" ]]               && TRAIN_ARGS+=("--wandb.enable=${WANDB_ENABLE}")
+    [[ -n "${DEVICE}" ]]                     && TRAIN_ARGS+=("--policy.device=${DEVICE}")
     # ── 속도 최적화 인자 ──────────────────────────────────────────────────────
     TRAIN_ARGS+=("--num_workers=${NUM_WORKERS}")
     [[ "${COMPILE_MODEL}" == "true" ]] && TRAIN_ARGS+=(
@@ -377,7 +406,7 @@ case "$CMD" in
     )
     [[ -n "${RENAME_MAP}" ]] && TRAIN_ARGS+=("--rename_map=${RENAME_MAP}")
     info "  Dataset      → ${HF_DATASET_REPO_ID:-<미설정>}"
-    info "  Policy       → type=${POLICY_TYPE:-<미설정>}  base=${BASE_MODEL:-none}"
+    info "  Policy       → train_type=${TRAIN_POLICY_TYPE:-<미설정>}  path=${BASE_MODEL:-none}  base_model_path=${POLICY_BASE_MODEL_PATH:-none}"
     info "  Output       → ${OUTPUT_DIR:-<미설정>}"
     info "  Steps        → ${TRAIN_STEPS}  Batch → ${BATCH_SIZE}  Device → ${DEVICE}"
     info "  Workers      → ${NUM_WORKERS}"

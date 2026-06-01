@@ -171,6 +171,91 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
            --no-build-isolation \
            "flash-attn>=2.5.9,<3.0.0"
 
+# ── LeRobot 0.5.1 GR00T compatibility patches ───────────────────────────────
+# transformers 5.3 + torch 2.10 조합에서 LeRobot 0.5.1 의 GR00T wrapper 가
+# 네 지점에서 즉시 실패한다.
+#   1) FlowmatchingActionHead 초기화 중 torch.distributions.Beta 의 기본 validation 이
+#      meta tensor 에서 Tensor.item() 을 호출
+#   2) GR00TN15 가 transformers 5.3 이 기대하는 all_tied_weights_keys 속성을 미정의
+#   3) Eagle processor 의 return_tensors 가 image processor 로 전달되지 않아 pixel_values 가
+#      list 로 남음
+#   4) meta 초기화 중 생성된 Beta 분포가 학습 forward 에서도 meta tensor 로 남음
+# upstream 패치 전까지 이미지 빌드 시 site-packages 를 최소 수정한다.
+RUN python - <<'PY'
+from pathlib import Path
+
+action_head = Path("/opt/venv/lib/python3.12/site-packages/lerobot/policies/groot/action_head/flow_matching_action_head.py")
+text = action_head.read_text()
+old = "self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)"
+new = "self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta, validate_args=False)"
+if old in text:
+    text = text.replace(old, new)
+elif new not in text:
+    raise RuntimeError("Unexpected GR00T action head Beta initialization")
+old = '''    def sample_time(self, batch_size, device, dtype):
+        sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
+        return (self.config.noise_s - sample) / self.config.noise_s
+'''
+new = '''    def sample_time(self, batch_size, device, dtype):
+        def _as_float(value, fallback):
+            if isinstance(value, torch.Tensor):
+                if value.is_meta:
+                    return fallback
+                value = value.detach().cpu().item()
+            return float(value)
+
+        alpha = torch.tensor(_as_float(self.config.noise_beta_alpha, 1.5), device=device, dtype=torch.float32)
+        beta = torch.tensor(_as_float(self.config.noise_beta_beta, 1.0), device=device, dtype=torch.float32)
+        sample = Beta(alpha, beta, validate_args=False).sample([batch_size]).to(dtype=dtype)
+        return (self.config.noise_s - sample) / self.config.noise_s
+'''
+if old in text:
+    text = text.replace(old, new)
+elif "Beta(alpha, beta, validate_args=False)" not in text:
+    raise RuntimeError("Unexpected GR00T sample_time layout")
+action_head.write_text(text)
+
+groot_n1 = Path("/opt/venv/lib/python3.12/site-packages/lerobot/policies/groot/groot_n1.py")
+text = groot_n1.read_text()
+needle = "class GR00TN15(PreTrainedModel):\n    supports_gradient_checkpointing = True\n"
+replacement = (
+    "class GR00TN15(PreTrainedModel):\n"
+    "    supports_gradient_checkpointing = True\n"
+    "    all_tied_weights_keys = {}\n"
+)
+if needle in text:
+    groot_n1.write_text(text.replace(needle, replacement))
+elif "all_tied_weights_keys = {}" not in text:
+    raise RuntimeError("Unexpected GR00T model class layout")
+
+processor_groot = Path("/opt/venv/lib/python3.12/site-packages/lerobot/policies/groot/processor_groot.py")
+text = processor_groot.read_text()
+old = '''            eagle_inputs = eagle_processor(
+                text=text_list,
+                images=image_inputs,
+                images_kwargs={"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False},
+                return_tensors="pt",
+                padding=True,
+            )
+'''
+new = '''            eagle_inputs = eagle_processor(
+                text=text_list,
+                images=image_inputs,
+                text_kwargs={"padding": True, "return_tensors": "pt"},
+                images_kwargs={
+                    "min_dynamic_tiles": 1,
+                    "max_dynamic_tiles": 1,
+                    "use_thumbnail": False,
+                    "return_tensors": "pt",
+                },
+            )
+'''
+if old in text:
+    processor_groot.write_text(text.replace(old, new))
+elif '"return_tensors": "pt"' not in text:
+    raise RuntimeError("Unexpected GR00T processor collate layout")
+PY
+
 # venv 내 런타임 불필요 파일 제거 → COPY --from 전송량 감소
 RUN sp=/opt/venv/lib/python3.12/site-packages; \
     find "$sp" -maxdepth 2 -type d \( -name tests -o -name test -o -name benchmarks \) \

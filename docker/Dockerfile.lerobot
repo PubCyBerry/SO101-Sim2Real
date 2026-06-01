@@ -5,7 +5,7 @@
 # Python: 3.11 (managed by uv)
 # Deps  : pyproject.toml [dependency-groups.teleop] 만 설치
 #
-# ※ SmolVLA / GR00T 등 정책 서버용 의존성은 Dockerfile.smolvla 에서 별도 빌드.
+# ※ SmolVLA / GR00T 등 정책 서버용 의존성은 Dockerfile.policy 에서 별도 빌드.
 #   teleop 이미지에는 추론 모델 의존성을 포함하지 않는다 (안정성 격리).
 #
 # ■ 레이어 캐시 설계 (변경 빈도 낮은 순)
@@ -146,7 +146,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 #            서버에 gRPC 로 붙어 follower arm 을 구동하는 `policy-client` 모드에 필요.
 #            패키지 크기 ~50 MB 로 가볍고 transformers 등 무거운 의존성을 끌어오지
 #            않아 teleop 안정성에 영향이 없다 (smolvla / GR00T 본체 의존성은 여전히
-#            Dockerfile.smolvla 에만 설치).
+#            Dockerfile.policy 에만 설치).
 FROM torch-layer AS teleop-deps
 
 # uv.lock 없이 pyproject.toml constraints 만으로 설치 (로컬 lock 환경에 종속되지 않음).

@@ -81,8 +81,8 @@ flowchart TD
 |---|---|---|
 | Python | 3.11 | (필수) |
 | torch | 2.7.0+cu128 | (공용) |
-| lerobot | 0.4.4 | (공용 `[feetech]`) |
-| lerobot[smolvla] | ≥0.4.2 | `smolvla` |
+| lerobot | 0.4.4 | 실기기 `lerobot` 이미지 (`[feetech]`) |
+| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
 | grpcio | 1.73.1 | `async` |
 | isaacsim | 5.1.0 `[all,extscache]` | `isaac` |
 | isaaclab | 2.3.0 | `isaac` (leisaac extras) |

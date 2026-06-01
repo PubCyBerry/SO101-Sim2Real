@@ -8,6 +8,7 @@
 - [torchcodec `c10::MessageLogger::stream` 심볼 누락으로 학습 DataLoader 크래시](#torchcodec-c10messageloggerstream-심볼-누락으로-학습-dataloader-크래시)
 - [`torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`](#torchcompile-활성화-시-invalidcxxcompiler-no-working-c-compiler-found)
 - [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
+- [LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패](#lerobot-051-gr00t-n15-학습-smoke가-단계별로-실패)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
@@ -123,7 +124,7 @@ Docker 컨테이너의 기본 file descriptor soft limit 은 **1024** (hard limi
 
 ### 해결 방법
 
-`Dockerfile.lerobot` / `Dockerfile.smolvla` 의 **uv 를 호출하는 모든 RUN 명령** 안에서 `ulimit -Sn` 으로 soft 한도를 직접 끌어올린다. hard 한도가 이미 1048576 이므로 soft 만 raise 하면 된다.
+`Dockerfile.lerobot` / `Dockerfile.policy` 의 **uv 를 호출하는 모든 RUN 명령** 안에서 `ulimit -Sn` 으로 soft 한도를 직접 끌어올린다. hard 한도가 이미 1048576 이므로 soft 만 raise 하면 된다.
 
 > ⚠ **`ulimit` 은 RUN 경계를 넘지 못한다.** Dockerfile 의 RUN 은 매번 새 sh 프로세스를 띄우므로 직전 RUN 에서 올린 soft 한도가 다음 RUN 으로 상속되지 않는다. ENV 도 ulimit 에는 영향을 못 준다. 따라서 Stage 3 뿐 아니라 Stage 4 (`uv pip install torch ...`), Stage 5 (`uv sync ...`) **각 RUN 마다 동일 prefix 를 다시 적어줘야 한다**. 처음 발견했을 때 Stage 3 만 패치하고 Stage 4 에서 같은 panic 이 재발하는 패턴이 흔하다.
 
@@ -204,7 +205,7 @@ uv 는 기본적으로 **8개 이상을 동시에 다운로드**한다. `pypi.nv
 
 ### 해결 방법
 
-`docker/Dockerfile.lerobot` / `docker/Dockerfile.smolvla` 의 Stage 4 (`torch-layer`) 와 Stage 5 (`teleop-deps` / `policy-deps`) RUN 에 세 가지를 함께 적용한다.
+`docker/Dockerfile.lerobot` / `docker/Dockerfile.policy` 의 Stage 4 (`torch-layer`) 와 Stage 5 (`teleop-deps` / `policy-deps`) RUN 에 세 가지를 함께 적용한다.
 
 ```dockerfile
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
@@ -408,6 +409,124 @@ print('SmolVLAPolicy OK:', SmolVLAPolicy)
 ```
 
 `SmolVLAPolicy OK: <class '...SmolVLAPolicy'>` 가 출력되면 정상.
+
+---
+
+## LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패
+
+**현상**
+
+`policy-server:0.5.1` 컨테이너에서 `TRAIN_POLICY_TYPE=groot`,
+`POLICY_BASE_MODEL_PATH=nvidia/GR00T-N1.5-3B` 설정으로 SO-101 데이터셋 fine-tune smoke를 돌리면,
+모델 생성 또는 첫 batch 전처리/forward 단계에서 연쇄적으로 실패한다.
+
+**오류 메시지**
+
+```text
+argparse.ArgumentError: Cannot specify both --policy.path and --policy.type
+```
+
+```text
+RuntimeError: Tensor.item() cannot be called on meta tensors
+```
+
+```text
+AttributeError: 'GR00TN15' object has no attribute 'all_tied_weights_keys'
+```
+
+```text
+ValueError: Unsupported video backend: decord
+```
+
+```text
+AttributeError: 'list' object has no attribute 'shape'
+```
+
+```text
+NotImplementedError: aten::_sample_dirichlet: attempted to run this operator with Meta tensors
+```
+
+**원인**
+
+여러 호환성 문제가 겹친다.
+
+- LeRobot 0.5.1 parser는 `--policy.path`와 `--policy.type` 동시 지정을 금지한다. SmolVLA fine-tune용 `BASE_MODEL=lerobot/smolvla_base`가 남아 있으면 GR00T의 `--policy.type=groot`와 충돌한다.
+- LeRobot 0.5.1 dataset decoder가 지원하는 video backend는 `torchcodec`, `pyav`, `video_reader`다. `decord`는 GR00T policy 내부 기본값으로 보이지만 `--dataset.video_backend=decord`에는 사용할 수 없다.
+- Transformers 5.3 + torch 2.10 조합에서 LeRobot 0.5.1의 GR00T wrapper가 기대 속성과 tensor 초기화 흐름을 맞추지 못한다. `GR00TN15.all_tied_weights_keys`가 없고, `FlowmatchingActionHead`의 `Beta` 분포가 meta tensor 상태로 생성되어 validation/sampling에서 실패한다.
+- Eagle2.5 processor 호출에서 `return_tensors="pt"`가 tokenizer 쪽으로만 전달되고 image processor에는 전달되지 않아 `pixel_values`가 tensor가 아닌 list로 남는다.
+
+**해결 방법**
+
+`.env` / `.env.example` / `docker/policy-entrypoint.sh`의 학습 계약을 LeRobot 0.5.1 기준으로 분리한다.
+
+```dotenv
+# SmolVLA fine-tune
+BASE_MODEL=lerobot/smolvla_base
+TRAIN_POLICY_TYPE=
+
+# GR00T N1.5 fine-tune
+BASE_MODEL=
+TRAIN_POLICY_TYPE=groot
+POLICY_BASE_MODEL_PATH=nvidia/GR00T-N1.5-3B
+POLICY_TOKENIZER_ASSETS_REPO=lerobot/eagle2hg-processor-groot-n1p5
+POLICY_EMBODIMENT_TAG=new_embodiment
+POLICY_CHUNK_SIZE=16
+POLICY_N_ACTION_STEPS=16
+DATASET_VIDEO_BACKEND=torchcodec
+POLICY_VIDEO_BACKEND=
+```
+
+`policy-entrypoint.sh`는 `BASE_MODEL`이 있을 때만 `--policy.path`, 없고 `TRAIN_POLICY_TYPE`이 있을 때만 `--policy.type`을 전달한다. GR00T용 `POLICY_BASE_MODEL_PATH`, tokenizer assets, embodiment tag, chunk/action step, dataset video backend도 명시적으로 CLI에 매핑한다.
+
+`docker/Dockerfile.policy`에서는 upstream 패치 전까지 LeRobot site-packages에 최소 호환 패치를 적용한다.
+
+- `FlowmatchingActionHead`: `Beta(..., validate_args=False)`로 meta tensor validation 회피.
+- `FlowmatchingActionHead.sample_time`: 학습 forward 시 실제 device tensor로 `Beta` 분포를 재생성.
+- `GR00TN15`: `all_tied_weights_keys = {}` 추가.
+- `processor_groot.collate`: `text_kwargs={"padding": True, "return_tensors": "pt"}`와 `images_kwargs={"return_tensors": "pt", ...}`를 분리 전달.
+
+이미지 재빌드:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml build policy-server
+```
+
+**확인 방법**
+
+이미지 패치 확인:
+
+```bash
+docker run --rm -i --entrypoint python policy-server:0.5.1 - <<'PY'
+from pathlib import Path
+root = Path("/opt/venv/lib/python3.12/site-packages/lerobot/policies/groot")
+ah = (root / "action_head/flow_matching_action_head.py").read_text()
+gn = (root / "groot_n1.py").read_text()
+pg = (root / "processor_groot.py").read_text()
+print("beta_init_patch", "validate_args=False" in ah)
+print("sample_time_patch", "Beta(alpha, beta, validate_args=False)" in ah)
+print("tied_keys_patch", "all_tied_weights_keys = {}" in gn)
+print("image_tensor_patch", 'text_kwargs={"padding": True, "return_tensors": "pt"}' in pg)
+PY
+```
+
+100-step smoke:
+
+```bash
+JOB="smoke_groot_n15_pick_pen_100_$(date +%Y%m%d_%H%M%S)"
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e JOB_NAME="${JOB}" \
+  -e OUTPUT_DIR="outputs/train/${JOB}" \
+  -e TRAIN_STEPS=100 \
+  -e BATCH_SIZE=16 \
+  -e WANDB_ENABLE=false \
+  policy-server train \
+    --save_freq=100 \
+    --policy.push_to_hub=false
+
+jq -r .type "outputs/train/${JOB}/checkpoints/000100/pretrained_model/config.json"
+```
+
+`groot`가 출력되고 `End of training` 로그가 나오면 정상.
 
 ---
 

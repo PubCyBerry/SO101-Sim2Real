@@ -141,7 +141,7 @@ DATASET_ROOT="./datasets/so101_pick_pen"
 BASE_MODEL="lerobot/smolvla_base"            # train --policy.path (fine-tune 출발점)
 POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen" # fine-tune 결과 = 추론·배포 모델
 TRAIN_POLICY_TYPE=smolvla
-POLICY_CLIENT_TYPE=smolvla
+POLICY_TYPE=smolvla
 
 # ── record ──
 RECORD_FPS=30
@@ -386,7 +386,7 @@ LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 �
 ```bash
 uv run python ./docker/policy-client-shim.py \
     --server_address=${POLICY_SERVER_ADDRESS} \
-    --policy_type=${POLICY_CLIENT_TYPE} \
+    --policy_type=${POLICY_TYPE} \
     --pretrained_name_or_path="${POLICY_REPO_ID}" \
     --policy_device=${POLICY_DEVICE} \
     --client_device=${CLIENT_DEVICE} \

@@ -5,7 +5,7 @@
 # 본 스크립트는 로봇 직결 워크플로(teleop / record / replay / calibrate /
 # find-* / dataset-viz / policy-client / edit-dataset) 만 다룬다.
 # 정책 학습/평가(`train`, `eval`)와 정책 서버(`prepare-model`, `policy-server`)는
-# `docker/policy-entrypoint.sh` (Dockerfile.smolvla 가 사용) 에 분리되어 있다 —
+# `docker/policy-entrypoint.sh` (Dockerfile.policy 가 사용) 에 분리되어 있다 —
 # 이 이미지에는 smolvla deps (transformers/accelerate 등) 가 설치되지 않기 때문.
 #
 # ■ 실행 모드 (CMD 첫 번째 인자)
