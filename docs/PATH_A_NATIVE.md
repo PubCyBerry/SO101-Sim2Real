@@ -195,7 +195,8 @@ uv run lerobot-teleoperate \
     --robot.cameras="${CAMERAS}" \
     --teleop.type=so101_leader \
     --teleop.port="${TELEOP_PORT}" \
-    --teleop.id="${TELEOP_ID}"
+    --teleop.id="${TELEOP_ID}" \
+    ${TELEOP_EXTRA_ARGS}
 ```
 
 로컬 Rerun 뷰어를 띄우려면 `--display_data=true`. Docker 전용 `--display_ip=host.docker.internal` 은 native 에서 넣지 않는다.
@@ -218,8 +219,9 @@ uv run lerobot-record \
     --dataset.episode_time_s=60 \
     --dataset.reset_time_s=10 \
     --dataset.num_episodes=10 \
-    --dataset.push_to_hub=false \
-    --play_sounds=false
+    --dataset.push_to_hub=true \
+    --play_sounds=false \
+    ${RECORD_EXTRA_ARGS}
 ```
 
 녹화 조작:
