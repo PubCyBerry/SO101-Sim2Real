@@ -15,7 +15,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 | | Windows 워크스테이션 | Linux 학습 서버  |
 |---|---|---|
-| **OS** | Windows 11 Pro | Ubuntu 24.04.3 LTS (kernel 6.17 oem), Dell Pro Max Tower T2 FCT2250, bare-metal |
+| **OS** | Windows 11 Pro | Ubuntu 24.04.3 LTS (kernel 6.14.0-1014-oem), Dell Pro Max Tower T2 FCT2250, bare-metal |
 | **CPU** | Intel Xeon W-2245 @ 3.90GHz (8 cores / 16 threads, L3 16.5 MB) | Intel Core Ultra 5 245K (Arrow Lake, 14 cores / 14 threads, L3 24 MB) |
 | **RAM** | 64 GB | 128 GB DDR5 (+ swap 8 GB) |
 | **Storage** | NVMe SSD 512 GB + SATA HDD 1 TB | NVMe SSD 477 GB (ext4 `/`) + SATA HDD 3.6 TB (`/DISK1`) |
