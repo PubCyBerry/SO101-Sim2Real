@@ -24,6 +24,42 @@ import lerobot.robots.bi_so_follower.config_bi_so_follower  # noqa: F401
 import lerobot.robots.koch_follower.config_koch_follower  # noqa: F401
 import lerobot.robots.omx_follower.config_omx_follower  # noqa: F401
 
+import os
+
+# ── (선택) rerun viewer — DISPLAY_DATA=true 일 때 control loop 데이터 로깅 ──
+# robot_client 0.4.4 는 teleop/record 와 달리 rerun 옵션이 없다. control loop 이
+# 매 틱 반환하는 raw_observation(카메라 + follower state) / performed_action 을
+# monkey patch 로 가로채 log_rerun_data 에 흘려 실시간 시각화한다.
+#   DISPLAY_DATA=true            → 활성화 (rr.spawn 로컬 뷰어)
+#   DISPLAY_IP / DISPLAY_PORT    → 설정 시 원격 rerun 서버로 송출 ("null"/빈값이면 무시)
+if os.getenv("DISPLAY_DATA", "false").lower() == "true":
+    from lerobot.async_inference.robot_client import RobotClient
+    from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+
+    _ip = os.getenv("DISPLAY_IP") or None
+    _port = os.getenv("DISPLAY_PORT") or None
+    _ip = None if _ip in (None, "", "null") else _ip
+    _port = int(_port) if _port not in (None, "", "null") else None
+    init_rerun(session_name="policy_client", ip=_ip, port=_port)
+
+    _orig_obs = RobotClient.control_loop_observation
+    _orig_act = RobotClient.control_loop_action
+
+    def _obs_with_rerun(self, task, verbose=False):
+        raw = _orig_obs(self, task, verbose)
+        if raw is not None:
+            log_rerun_data(observation=raw)
+        return raw
+
+    def _act_with_rerun(self, verbose=False):
+        act = _orig_act(self, verbose)
+        if act is not None:
+            log_rerun_data(action=act)
+        return act
+
+    RobotClient.control_loop_observation = _obs_with_rerun
+    RobotClient.control_loop_action = _act_with_rerun
+
 import runpy
 
 # robot_client 의 ``if __name__ == "__main__":`` 블록을 그대로 실행한다.

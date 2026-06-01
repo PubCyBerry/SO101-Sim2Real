@@ -20,7 +20,7 @@
 #   prepare-model : MODEL_REPO_ID  MODEL_REVISION  PREPARE_MODEL_EXTRA_ARGS
 #   policy-server : POLICY_SERVER_HOST  POLICY_SERVER_PORT  POLICY_FPS
 #                   INFERENCE_LATENCY   OBS_QUEUE_TIMEOUT   POLICY_SERVER_EXTRA_ARGS
-#   train / eval  : 인자 완전 위임. .env 의 POLICY_TYPE / POLICY_PATH / DATASET / WANDB
+#   train / eval  : 인자 완전 위임. .env 의 POLICY_TYPE / BASE_MODEL / DATASET / WANDB
 #                   변수를 셸 보간으로 채워 호출한다 (README §Policy 학습 참조).
 #                   NUM_WORKERS(기본 8) / COMPILE_MODEL / MIXED_PRECISION(bf16) /
 #                   NUM_PROCESSES(2 이상이면 accelerate launch DDP 전환) 로 속도 최적화.
@@ -32,7 +32,9 @@ set -euo pipefail
 # 명명 볼륨 `lerobot_hf_cache` (= /root/.cache/huggingface) 에 모델 가중치를
 # 미리 받아 두는 모드. 같은 볼륨을 lerobot 과 policy-server 가
 # 공유하므로 한 번만 받으면 양쪽이 모두 사용한다.
-MODEL_REPO_ID="${MODEL_REPO_ID:-lerobot/smolvla_base}"
+# 기본 다운로드 대상은 POLICY_REPO_ID(배포·추론 모델). 베이스를 받으려면
+# 위치 인자로 덮어쓴다: `prepare-model lerobot/smolvla_base`.
+MODEL_REPO_ID="${MODEL_REPO_ID:-${POLICY_REPO_ID:-lerobot/smolvla_base}}"
 MODEL_REVISION="${MODEL_REVISION:-main}"
 PREPARE_MODEL_EXTRA_ARGS="${PREPARE_MODEL_EXTRA_ARGS:-}"
 
@@ -66,7 +68,8 @@ RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
 POLICY_TYPE="${POLICY_TYPE:-}"
-POLICY_PATH="${POLICY_PATH:-}"
+# BASE_MODEL: fine-tune 출발점이 되는 사전학습 베이스 (--policy.path). 추론 모델 아님.
+BASE_MODEL="${BASE_MODEL:-}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-100000}"
@@ -187,9 +190,9 @@ case "$CMD" in
         shift
     fi
     if [[ -z "${MODEL_REPO_ID}" ]]; then
-        error "MODEL_REPO_ID 가 비어 있습니다."
-        error "  → .env: MODEL_REPO_ID=lerobot/smolvla_base"
-        error "  → 또는: prepare-model <repo_id>"
+        error "다운로드 대상이 비어 있습니다 (MODEL_REPO_ID / POLICY_REPO_ID 모두 미설정)."
+        error "  → .env: POLICY_REPO_ID=<hf_user>/<model>  (기본 다운로드 대상)"
+        error "  → 또는: prepare-model <repo_id>  (예: lerobot/smolvla_base)"
         exit 1
     fi
     info "── Model Download 시작 ───────────────────────────"
@@ -358,7 +361,7 @@ case "$CMD" in
     [[ -n "${HF_DATASET_REPO_ID}" ]] && TRAIN_ARGS+=("--dataset.repo_id=${HF_DATASET_REPO_ID}")
     [[ -n "${DATASET_ROOT}" ]]       && TRAIN_ARGS+=("--dataset.root=${DATASET_ROOT}")
     [[ -n "${POLICY_TYPE}" ]]        && TRAIN_ARGS+=("--policy.type=${POLICY_TYPE}")
-    [[ -n "${POLICY_PATH}" ]]        && TRAIN_ARGS+=("--policy.path=${POLICY_PATH}")
+    [[ -n "${BASE_MODEL}" ]]         && TRAIN_ARGS+=("--policy.path=${BASE_MODEL}")
     [[ -n "${POLICY_REPO_ID}" ]]     && TRAIN_ARGS+=("--policy.repo_id=${POLICY_REPO_ID}")
     [[ -n "${OUTPUT_DIR}" ]]         && TRAIN_ARGS+=("--output_dir=${OUTPUT_DIR}")
     [[ -n "${TRAIN_STEPS}" ]]        && TRAIN_ARGS+=("--steps=${TRAIN_STEPS}")
@@ -374,7 +377,7 @@ case "$CMD" in
     )
     [[ -n "${RENAME_MAP}" ]] && TRAIN_ARGS+=("--rename_map=${RENAME_MAP}")
     info "  Dataset      → ${HF_DATASET_REPO_ID:-<미설정>}"
-    info "  Policy       → type=${POLICY_TYPE:-<미설정>}  path=${POLICY_PATH:-none}"
+    info "  Policy       → type=${POLICY_TYPE:-<미설정>}  base=${BASE_MODEL:-none}"
     info "  Output       → ${OUTPUT_DIR:-<미설정>}"
     info "  Steps        → ${TRAIN_STEPS}  Batch → ${BATCH_SIZE}  Device → ${DEVICE}"
     info "  Workers      → ${NUM_WORKERS}"

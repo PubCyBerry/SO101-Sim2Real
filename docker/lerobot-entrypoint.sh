@@ -35,7 +35,7 @@
 #   replay  : HF_DATASET_REPO_ID  EPISODE_INDEX  REPLAY_EXTRA_ARGS
 #   기기유틸: ROBOT_TYPE  TELEOP_TYPE  CALIBRATE_TARGET  TELEOP_TIME_S
 #   viz     : HF_DATASET_REPO_ID  EPISODE_INDEX  VIZ_MODE  VIZ_WS_PORT
-#   policy-client: POLICY_SERVER_ADDRESS  POLICY_TYPE  POLICY_PATH
+#   policy-client: POLICY_SERVER_ADDRESS  POLICY_TYPE  POLICY_REPO_ID
 #                  POLICY_DEVICE  CLIENT_DEVICE  TASK  ACTIONS_PER_CHUNK
 #                  CHUNK_SIZE_THRESHOLD  AGGREGATE_FN_NAME  POLICY_CLIENT_FPS
 #                  POLICY_CLIENT_EXTRA_ARGS
@@ -111,7 +111,9 @@ POLICY_SERVER_ADDRESS="${POLICY_SERVER_ADDRESS:-127.0.0.1:8080}"
 # 를 받아 해당 정책을 로드한다.
 POLICY_TYPE="${POLICY_TYPE:-smolvla}"
 # 정책 weight: HF Hub repo ID 또는 로컬 경로. 기본은 SmolVLA 베이스.
-POLICY_PATH="${POLICY_PATH:-lerobot/smolvla_base}"
+# 추론(policy-client)에서 로드할 모델 = fine-tune 결과(POLICY_REPO_ID). 미설정 시
+# 베이스로 폴백(파이프라인 검증용 — SO-101 카메라 키 불일치 시 KeyError 주의).
+POLICY_REPO_ID="${POLICY_REPO_ID:-lerobot/smolvla_base}"
 # 정책이 실행될 디바이스 (서버 측). cuda / cpu / mps
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"
 # 클라이언트 측 후처리 디바이스 (보통 cpu)
@@ -660,7 +662,7 @@ case "$CMD" in
   # [env var → CLI arg 매핑]
   #   POLICY_SERVER_ADDRESS    → --server_address          (예: 127.0.0.1:8080)
   #   POLICY_TYPE              → --policy_type             (smolvla 등)
-  #   POLICY_PATH              → --pretrained_name_or_path (lerobot/smolvla_base 등)
+  #   POLICY_REPO_ID           → --pretrained_name_or_path (fine-tune 결과 모델)
   #   POLICY_DEVICE            → --policy_device           (서버 측, cuda)
   #   CLIENT_DEVICE            → --client_device           (클라이언트 측, cpu)
   #   TASK                     → --task                    ("pick the pen" 등)
@@ -688,7 +690,7 @@ case "$CMD" in
 
     info "── Policy Client 시작 (gRPC) ─────────────────────"
     info "  Server  → ${POLICY_SERVER_ADDRESS}"
-    info "  Policy  → ${POLICY_TYPE} @ ${POLICY_PATH} (device=${POLICY_DEVICE})"
+    info "  Policy  → ${POLICY_TYPE} @ ${POLICY_REPO_ID} (device=${POLICY_DEVICE})"
     info "  Robot   → ${ROBOT_TYPE} ID=${ROBOT_ID} PORT=${ROBOT_PORT}"
     info "  Task    → ${TASK}"
     info "  Cameras → ${ENABLED_CAMERAS}"
@@ -701,7 +703,7 @@ case "$CMD" in
     exec python /usr/local/bin/policy-client-shim.py \
       --server_address=${POLICY_SERVER_ADDRESS} \
       --policy_type=${POLICY_TYPE} \
-      --pretrained_name_or_path=${POLICY_PATH} \
+      --pretrained_name_or_path=${POLICY_REPO_ID} \
       --policy_device=${POLICY_DEVICE} \
       --client_device=${CLIENT_DEVICE} \
       --task="${TASK}" \

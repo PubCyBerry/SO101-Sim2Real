@@ -147,7 +147,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot <m
 | `find-cameras` | 시스템 카메라 자동 검출 | - | 위치 인자: `opencv` \| `realsense` |
 | `find-port` | 직렬 포트 자동 감지 (인터랙티브) | - | - |
 | `dataset-viz` | Rerun 기반 데이터셋 시각화 | - | `HF_DATASET_REPO_ID`, `EPISODE_INDEX`, `VIZ_MODE`, `VIZ_WS_PORT` |
-| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_CLIENT_TYPE`, `POLICY_PATH`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
+| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_CLIENT_TYPE`, `POLICY_REPO_ID`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
 | `edit-dataset` | 데이터셋 편집 (인자 완전 위임) | - | CLI 인자로 직접 전달 |
 | `info` | LeRobot / Python / 시스템 정보 | - | - |
 | `bash` \| `shell` | 컨테이너 인터랙티브 쉘 | - | - |
@@ -163,7 +163,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 
 | 모드 | 설명 | 필요 하드웨어 | 핵심 env var |
 |---|---|---|---|
-| `prepare-model` | 호스트 HF 캐시에 모델 가중치 다운로드 | - | `MODEL_REPO_ID`, `MODEL_REVISION`, `PREPARE_MODEL_EXTRA_ARGS` |
+| `prepare-model` | 호스트 HF 캐시에 모델 가중치 다운로드 | - | `POLICY_REPO_ID`(기본 대상), `MODEL_REVISION`, `PREPARE_MODEL_EXTRA_ARGS` |
 | `policy-server` | SmolVLA 등 Async inference gRPC 서버 (기본 CMD) | GPU 권장 | `POLICY_SERVER_HOST`, `POLICY_SERVER_PORT`, `POLICY_FPS`, `INFERENCE_LATENCY`, `OBS_QUEUE_TIMEOUT` |
 | `train` | Policy 학습 (SmolVLA 등 — 인자 완전 위임) | GPU 권장 | CLI 인자로 직접 전달 |
 | `eval` | Policy 평가/롤아웃 (인자 완전 위임) | GPU 권장 | CLI 인자로 직접 전달 |
@@ -263,7 +263,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot ba
 HF 캐시는 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/root/.cache/huggingface` 에 마운트된다. 두 서비스가 동일 볼륨을 공유하므로 한 번 받은 모델을 양쪽이 모두 사용.
 
 ```bash
-# .env 의 MODEL_REPO_ID 로 다운로드 (기본 lerobot/smolvla_base)
+# POLICY_REPO_ID(배포·추론 모델) 로 다운로드. 베이스 등은 위치 인자로 덮어쓰기
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model
 
 # 위치 인자로 다른 모델 받기
@@ -293,7 +293,7 @@ docker run --rm -v lerobot_hf_cache:/cache -v /tmp:/in alpine \
 | 이름 | 설명 |
 |-----|------|
 | HF_DATASET_REPO_ID / DATASET_ROOT | 학습 데이터셋 위치 |
-| TRAIN_POLICY_TYPE / POLICY_PATH / POLICY_REPO_ID | 정책 종류·베이스 체크포인트·결과 push 경로 |
+| TRAIN_POLICY_TYPE / BASE_MODEL / POLICY_REPO_ID | 정책 종류·베이스 체크포인트(`--policy.path`)·결과 push 겸 추론 모델(`--policy.repo_id`) |
 | JOB_NAME / BATCH_SIZE / TRAIN_STEPS / OUTPUT_DIR / DEVICE | 일반 학습 인자 |
 | WANDB_ENABLE | W&B 연동 |
 | TRAIN_EXTRA_ARGS | 추가 `lerobot-train` 인자 |
@@ -343,14 +343,14 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
     --dataset.fps=${RECORD_FPS} \
     --dataset.root=${DATASET_ROOT} \
     ${RECORD_EXTRA_ARGS} \
-    --policy.path=${POLICY_PATH}
+    --policy.path=${POLICY_REPO_ID}
 ```
 
 **시뮬 평가** — `eval` 모드는 `lerobot-eval` 에 인자 완전 위임:
 
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server eval \
-    --policy.path=${POLICY_PATH} \
+    --policy.path=${POLICY_REPO_ID} \
     --env.type=pusht \
     --eval.n_episodes=20 \
     --eval.batch_size=10
@@ -404,7 +404,7 @@ POLICY_SERVER_ADDRESS=10.0.0.5:8080 \
 
 ## 12. Fine-tune 워크플로 (pick_pen)
 
-앞 단계(2~11)를 엮은 end-to-end 시나리오. `lerobot/smolvla_base` 는 `camera1/2/3` 키로 학습된 베이스라 SO-101 (`wrist`/`front`) 클라이언트와 키 불일치 (`KeyError: 'observation.images.wrist'`) 가 발생한다. 정공법은 SO-101 데이터셋으로 SmolVLA 를 fine-tune 해 새 체크포인트의 `input_features` 가 자연스럽게 `wrist/front` 가 되도록 하는 것.
+앞 단계(2~11)를 엮은 end-to-end 시나리오. **SmolVLA 는 backbone 의 canonical 입력 키가 `camera1/2/3`** 라, SO-101 데이터셋(`wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `camera1/camera2/camera3` 가 된다. 따라서 추론 클라이언트의 카메라 키도 `camera1/2/3` 로 맞춰야 한다 (수집 키 `wrist/front/top` 를 그대로 넘기면 `KeyError: 'observation.images.camera1'`).
 
 **1) 데이터셋 수집** (Windows 워크스테이션 `lerobot` 컨테이너):
 
@@ -448,7 +448,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 **5) 체크포인트 배포** (Windows 워크스테이션):
 
 ```bash
-# .env 의 POLICY_PATH=${HF_USER}/smolvla_pick_pen
+# .env 의 POLICY_REPO_ID=${HF_USER}/smolvla_pick_pen
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model ${HF_USER}/smolvla_pick_pen
 ```
 
@@ -459,4 +459,4 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
-fine-tuned 체크포인트의 `input_features` 가 `wrist/front/top` 이므로 카메라 키 매핑 자동 일치.
+fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2/3` 다. 추론 클라의 카메라 키를 `camera1/camera2/camera3` 로 맞춘다 (물리 매핑 `camera1=wrist, camera2=front, camera3=top`). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.

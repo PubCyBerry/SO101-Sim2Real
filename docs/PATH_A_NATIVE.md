@@ -138,8 +138,8 @@ HF_DATASET_REPO_ID="${HF_USER}/so101_pick_pen"
 DATASET_ROOT="./datasets/so101_pick_pen"
 
 # ── 정책 ──
-POLICY_PATH="lerobot/smolvla_base"
-POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen"
+BASE_MODEL="lerobot/smolvla_base"            # train --policy.path (fine-tune 출발점)
+POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen" # fine-tune 결과 = 추론·배포 모델
 TRAIN_POLICY_TYPE=smolvla
 POLICY_CLIENT_TYPE=smolvla
 
@@ -323,7 +323,7 @@ uv run hf download lerobot/smolvla_base
 
 ### Fine-tune
 
-SO-101 카메라 키 (`wrist` / `front` / `top`) 가 들어간 데이터셋으로 fine-tune 해야 체크포인트의 `input_features` 가 일치한다. Windows A4000 은 작은 batch 부터:
+SO-101 카메라 키 (`wrist` / `front` / `top`) 가 들어간 데이터셋으로 fine-tune 한다. 단 **SmolVLA 는 backbone 의 canonical 입력 키(`camera1/2/3`)로 자동 rename** 하므로 결과 체크포인트의 `input_features` 는 `wrist/front/top` 이 아니라 `camera1/camera2/camera3` 가 된다 (train_config 의 `rename_map`: `wrist→camera1, front→camera2, top→camera3`). 추론(policy-client) 시 카메라 키를 여기에 맞춰야 한다 ([§7](#7-async-policy-server--client)). Windows A4000 은 작은 batch 부터:
 
 ```bash
 export ACCELERATE_MIXED_PRECISION="bf16"
@@ -332,7 +332,7 @@ uv run lerobot-train \
     --dataset.repo_id="${HF_DATASET_REPO_ID}" \
     --dataset.root="${DATASET_ROOT}" \
     --policy.type=${TRAIN_POLICY_TYPE} \
-    --policy.path="${POLICY_PATH}" \
+    --policy.path="${BASE_MODEL}" \
     --policy.repo_id="${POLICY_REPO_ID}" \
     --policy.push_to_hub=${PUSH_TO_HUB} \
     --policy.device=${DEVICE} \
@@ -379,6 +379,10 @@ uv run python -m lerobot.async_inference.policy_server \
 
 LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 회귀가 있어 본 저장소의 shim 을 먼저 거친다.
 
+> ⚠️ **카메라 키 정합**: SmolVLA fine-tune 체크포인트는 `camera1/2/3` 키를 기대한다(위 §6 `rename_map`). 추론 클라의 `--robot.cameras` 키를 `camera1/camera2/camera3` 로 맞추고, 물리 매핑(`camera1=wrist, camera2=front, camera3=top`)에 따라 index 를 배치한다. 수집용 `CAMERAS`(wrist/front/top)를 그대로 넘기면 `KeyError: 'observation.images.camera1'` 로 추론이 실패한다.
+>
+> 🖥️ **rerun viewer**: 명령 앞에 `DISPLAY_DATA=true` 를 붙이면 shim 이 control loop 의 관측(카메라·state)·액션을 rerun 에 로깅해 로컬 뷰어를 띄운다. 원격 송출은 `DISPLAY_IP`/`DISPLAY_PORT` 추가.
+
 ```bash
 uv run python ./docker/policy-client-shim.py \
     --server_address=${POLICY_SERVER_ADDRESS} \
@@ -394,7 +398,11 @@ uv run python ./docker/policy-client-shim.py \
     --robot.type="${ROBOT_TYPE}" \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
-    --robot.cameras="${CAMERAS}"
+    --robot.cameras="{
+        camera1: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        camera2: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        camera3: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    }"
 ```
 
 원격 정책 서버는 `--server_address=<server-ip>:8080` 으로 변경. async server 는 pickle deserialization RCE 위험 (CVE-2026-25874) 이 있으니 SSH 터널·방화벽·mTLS 래퍼 등으로 신뢰 범위를 제한할 것.

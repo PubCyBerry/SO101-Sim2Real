@@ -13,6 +13,7 @@
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
+- [SmolVLA fine-tune 추론 시 카메라 키 불일치 (KeyError: observation.images.camera1)](#smolvla-fine-tune-추론-시-카메라-키-불일치-keyerror-observationimagescamera1)
 - [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
 - [Isaac Lab `RigidObject` spawn 에서 parent prim 경로 누락](#isaac-lab-rigidobject-spawn-에서-parent-prim-경로-누락)
 - [Sim-to-Real 펜이 그리퍼에 잡히지 않음 (USD Cube scale + 얇은 code-spawn pen)](#sim-to-real-펜이-그리퍼에-잡히지-않음-usd-cube-scale--얇은-code-spawn-pen)
@@ -837,6 +838,52 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
 ```
 
 stdin 패치가 X 의존성을 완전히 우회하므로 WSLg 가 아닌 헤드리스 Linux 서버 (디스플레이 없음) 에서도 동일하게 동작한다. ① 의 docker-compose X11 노출은 pynput import 자체가 시작 시 트레이스를 뱉지 않게 하는 안전망 역할만 한다 (없어도 패치는 동작하지만 헤드리스 폴백 메시지가 한 번 찍힘).
+
+---
+
+## SmolVLA fine-tune 추론 시 카메라 키 불일치 (KeyError: observation.images.camera1)
+
+**현상**: SmolVLA fine-tune 모델을 async policy-client 로 추론하면 follower 가 전혀 움직이지 않고, policy server 가 첫 관측부터 계속 같은 에러를 반복한다.
+
+**오류 메시지** (policy server 로그):
+
+```
+INFO  y_server.py:226 Running inference for observation #0 (must_go: True)
+ERROR y_server.py:266 Error in StreamActions: 'observation.images.camera1'
+```
+
+### 원인
+
+SmolVLA 는 backbone(SmolVLM)의 canonical 이미지 입력 키가 `camera1/camera2/camera3` 다. SO-101 데이터셋(카메라 키 `wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `wrist/front/top` 이 아니라 **`camera1/camera2/camera3`** 로 굳는다.
+
+한편 async `robot_client`(0.4.4)는 `RemotePolicyConfig` 의 `rename_map` 을 채우지 않아(빈 dict) 서버 측 rename 이 무력화된다. 추론 파이프라인 1단계(`helpers.py:prepare_raw_observation`)가 클라이언트가 보낸 카메라 키로 `policy_image_features[key]` 를 직접 조회하는데, 이 조회는 preprocessor(rename 단계)보다 **먼저** 실행된다. 따라서 클라가 보낸 카메라 키(`--robot.cameras` 의 dict key)와 모델 `input_features` 키가 글자 그대로 일치하지 않으면 `KeyError`. 수집용 `wrist/front/top` 키를 그대로 추론에 넘기면 모델이 기대하는 `camera1` 을 못 찾는다.
+
+추가로, 추론 모델을 가리키는 변수(`--pretrained_name_or_path`)가 fine-tune 결과가 아닌 다른 레포를 가리켜도 동일 증상이 난다.
+
+### 해결 방법
+
+1. 추론 클라의 `--robot.cameras` **키를 모델 `input_features` 와 일치**시킨다. SmolVLA fine-tune 이면 `camera1/camera2/camera3`, 물리 매핑은 `rename_map` 대로 `camera1=wrist, camera2=front, camera3=top`:
+
+```bash
+--robot.cameras="{
+    camera1: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera2: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera3: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+}"
+```
+
+2. `--pretrained_name_or_path`(= `.env` 의 `POLICY_REPO_ID`)가 **fine-tune 결과 모델**을 가리키는지 확인한다. 베이스(`lerobot/smolvla_base`)나 다른 레포면 키가 어긋난다.
+
+### 확인 방법
+
+모델이 기대하는 카메라 키를 직접 출력해 클라 키와 대조:
+
+```bash
+uv run python -c "from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy; p=SmolVLAPolicy.from_pretrained('<hf_user>/<model>'); print(list(p.config.image_features))"
+# → ['observation.images.camera1', 'observation.images.camera2', 'observation.images.camera3']
+```
+
+정상 동작 시 policy server 로그에 `Action chunk #N generated` 가 찍히고 follower 가 움직인다.
 
 ---
 
