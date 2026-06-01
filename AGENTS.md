@@ -4,7 +4,7 @@
 
 SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim-to-Real 시뮬레이션**.
 
-- **실기기 경로 (Docker)**: `docker/docker-compose.yaml` 의 두 서비스가 각자의 진입점을 사용한다. `lerobot` (Dockerfile.lerobot + `lerobot-entrypoint.sh`, teleop deps) 가 텔레오퍼레이션·데이터 수집·정책 학습·시각화를, `policy-server` (Dockerfile.smolvla + `policy-entrypoint.sh`, smolvla+async deps) 가 async inference gRPC 서버를 담당. SmolVLA 가 기본 정책이며 GR00T N1.5(flash-attn 필요) 등은 정책 서버 이미지에만 의존성을 추가한다.
+- **실기기 경로 (Docker)**: `docker/docker-compose.yaml` 의 두 서비스가 각자의 진입점을 사용한다. `lerobot` (Dockerfile.lerobot + `lerobot-entrypoint.sh`, teleop deps) 가 텔레오퍼레이션·데이터 수집·정책 학습·시각화를, `policy-server` (Dockerfile.policy + `policy-entrypoint.sh`, policy+async deps) 가 async inference gRPC 서버를 담당. SmolVLA 가 기본 정책이며 GR00T N1.5(flash-attn 필요) 등은 정책 서버 이미지에만 의존성을 추가한다.
 - **시뮬 경로 (Host uv)**: `src/sim_to_real/` 가 `SimToReal-SO101-PickPen-v0` Gym 환경을 등록하고, `scripts/environments/teleoperation/teleop_se3_agent.py` 등이 Isaac Lab `ManagerBasedRLEnv` 로 진입한다. 호스트의 `uv run scripts/...` 로 실행하며, Isaac Sim 5.1 / IsaacLab 2.3 / leisaac 0.4.0 (git tag) 가 `isaac` 의존성 그룹으로 설치된다. Docker 시뮬 이미지는 현재 미연결 (`Dockerfile.leisaac` 부활 시 별도 진입점 신설 예정).
 
 운영 환경: Windows 워크스테이션과 Linux 원격 서버. 자세한 사양은 §환경 사양 참조.
@@ -27,14 +27,14 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 - **활성 서비스**:
   - `lerobot` (이미지 `lerobot-so101:0.4.4`, `docker/Dockerfile.lerobot`) — teleop / record / replay / train / eval / dataset-viz. `docker compose -f docker/docker-compose.yaml build lerobot`.
-  - `policy-server` (이미지 `policy-server:0.4.4`, `docker/Dockerfile.smolvla`) — async inference gRPC 서버 (`policy-entrypoint.sh policy-server`). `docker compose -f docker/docker-compose.yaml build policy-server`. teleop 이미지와 의존성 격리: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
-- **빌드 스테이지** (`Dockerfile.lerobot` / `Dockerfile.smolvla` 가 Stage 1–4 동일 → BuildKit 캐시 공유): base(`nvidia/cuda:12.8.0-runtime-ubuntu24.04` + apt) → uv → python 3.11 venv → torch 2.7.0/torchvision 0.22.0 (cu128) → `uv sync --group <teleop|smolvla async> --no-install-project` → app(entrypoint, teleop 만 udev rules).
+  - `policy-server` (이미지 `policy-server:0.4.4`, `docker/Dockerfile.policy`) — async inference gRPC 서버 (`policy-entrypoint.sh policy-server`). `docker compose -f docker/docker-compose.yaml build policy-server`. teleop 이미지와 의존성 격리: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
+- **빌드 스테이지** (`Dockerfile.lerobot` / `Dockerfile.policy` 가 Stage 1–4 동일 → BuildKit 캐시 공유): base(`nvidia/cuda:12.8.0-runtime-ubuntu24.04` + apt) → uv → python 3.11 venv → torch 2.7.0/torchvision 0.22.0 (cu128) → `uv sync --group <teleop|policy async> --no-install-project` → app(entrypoint, teleop 만 udev rules).
 - **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` `${TOP_CAM_PORT}` `{$TOP_CAM_META_PORT}`(UVC 캡처/메타 노드 쌍).
 - **호스트 볼륨**: `./datasets`, `./logs`, `./outputs` → 컨테이너 `/workspace/*`. 명명 볼륨 `lerobot_hf_cache` → `/root/.cache/huggingface` (두 서비스 공유). 다른 머신으로 옮길 때는 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export 후 전송.
 - **권한·네트워크**: `privileged: true` (udev/USB 접근), `network_mode: host` (rerun 뷰어·ROS 브릿지), `ipc: host`. GPU 1장 예약 (`deploy.resources.reservations.devices`).
 - **서비스별 진입점**:
   - `docker/lerobot-entrypoint.sh` (lerobot 서비스): `teleop` / `record` / `replay` / `calibrate` / `setup-motors` / `find-port` / `find-cameras` / `find-joint-limits` / `dataset-viz` / `policy-client` / `edit-dataset` / `info` / `bash` / `python`. `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 를 구동 — `async` 의존성 그룹(grpcio + protobuf) 이 teleop 이미지에도 함께 설치된다.
-  - `docker/policy-entrypoint.sh` (policy-server 서비스): `prepare-model` / `policy-server` / `train` / `eval` / `info` / `bash` / `python`. CMD 기본값 `policy-server`. **train/eval 은 이쪽**: SmolVLA 학습이 필요로 하는 transformers / accelerate / num2words 가 `smolvla` 그룹에만 있고 lerobot 이미지에 미설치이기 때문.
+  - `docker/policy-entrypoint.sh` (policy-server 서비스): `prepare-model` / `policy-server` / `train` / `eval` / `info` / `bash` / `python`. CMD 기본값 `policy-server`. **train/eval 은 이쪽**: SmolVLA 학습이 필요로 하는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지에 미설치이기 때문.
   - 모드별 env var 매핑은 각 스크립트 상단 `${VAR:-default}` 블록과 case 분기 주석에 정리되어 있다.
 - **`.env` 주입 경로**: `docker compose --env-file .env` 가 컨테이너에 환경변수로 주입하고, `entrypoint.sh` 가 기본값을 채워 `lerobot-*` CLI 인자로 매핑.
 
@@ -64,7 +64,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 - **패키지 이름** `sim_to_real` (`pyproject.toml`). `[build-system] requires=["setuptools<82"]`, `[tool.setuptools.packages.find] where=["src"]` 로 `src/sim_to_real/` 를 editable 설치.
 - **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, **`usd-core>=26.5`** (순수 Python — isaac 그룹 없이도 씬 author/검증 가능하도록 공용).
-- **의존성 그룹**: `teleop` (실기기, ffmpeg + evdev Linux 한정), `smolvla` (lerobot[smolvla] + accelerate + num2words), `async` (grpcio + protobuf), `isaac` (isaacsim[all,extscache]==5.1.0 + leisaac[isaaclab,gr00t]), `dev` (ipykernel).
+- **의존성 그룹**: `teleop` (실기기, ffmpeg + evdev Linux 한정), `policy` (lerobot[smolvla] + accelerate + num2words), `async` (grpcio + protobuf), `isaac` (isaacsim[all,extscache]==5.1.0 + leisaac[isaaclab,gr00t]), `dev` (ipykernel).
 - **`leisaac`** 는 `[tool.uv.sources]` 의 git tag `v0.4.0` 에서 설치 (vendored 사본 없음).
 
 ABI 호환성 핀 (`pyproject.toml`). 임의 업그레이드 / `uv lock --upgrade` 금지.

@@ -146,7 +146,7 @@ services:
   # 으로 접속한다. 추후 Linux H100 서버에 띄우고 Windows 워크스테이션에서 원격
   # 추론하는 구조도 동일한 이미지로 지원할 예정.
   #
-  # ■ 이미지 분리 (Dockerfile.smolvla)
+  # ■ 이미지 분리 (Dockerfile.policy)
   #   lerobot 서비스(Dockerfile.lerobot, teleop deps) 와 별도 이미지로 빌드한다.
   #   smolvla / async dependency-groups + transformers + grpcio 를 설치하고,
   #   USB / serial / speech 패키지는 제거. 향후 GR00T 의 flash-attn 같은
@@ -174,7 +174,7 @@ services:
   policy-server:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.smolvla
+      dockerfile: docker/Dockerfile.policy
       args:
         BUILDKT_INLINE_CACHE: "1"
     image: policy-server:0.4.4

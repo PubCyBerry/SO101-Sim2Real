@@ -49,8 +49,8 @@ dependencies = [
     # LeRobot >= 0.4.2 + feetech extra
     #   feetech extra 포함 내용: feetech-servo-sdk, pyserial, opencv-python,
     #   huggingface-hub, datasets, draccus, gym, safetensors 등
-    # SmolVLA / async 의존성은 Dockerfile.smolvla 가 dependency-groups
-    # (smolvla, async) 로 별도 설치 → teleop 이미지는 가볍게 유지
+    # policy / async 의존성은 Dockerfile.policy 가 dependency-groups
+    # (policy, async) 로 별도 설치 → teleop 이미지는 가볍게 유지
     "lerobot[feetech]>=0.4.4",
     # PyTorch — CUDA 12.8 빌드 (pytorch-cu128 index 에서 설치, 아래 sources 참조)
     "torch>=2.7",
