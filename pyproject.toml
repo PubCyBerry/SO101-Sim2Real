@@ -90,9 +90,12 @@ teleop = [
 #   아래 [tool.uv] no-build-isolation-package 에 선언. 빌드 시 NVCC 필요 →
 #   Dockerfile.policy 의 base 스테이지가 devel 이미지를 사용한다.
 policy = [
-    "lerobot[smolvla]>=0.5.1",
+    # Docker(Python 3.12)에서는 lerobot 0.5.1이 실제로 설치되지만,
+    # 호스트(Python 3.11)에서 uv resolve 충돌을 피하기 위해 하한만 명시.
+    # (Dockerfile.policy는 uv sync를 쓰지 않으므로 이 값이 Docker 빌드에 영향 없음)
+    "lerobot[smolvla]>=0.4.2",
     "num2words>=0.5.14,<0.6.0",
-    "accelerate>=1.10.0,<2.0.0",
+    "accelerate>=1.7.0,<2.0.0",
     "safetensors>=0.4.3,<1.0.0",
     # ── GR00T-N1.5 의존성 ────────────────────────────────────────────────
     # lerobot[groot] extra 를 풀어쓴 것과 동일한 패키지 셋.
