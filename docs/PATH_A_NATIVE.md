@@ -111,27 +111,35 @@ ROBOT_PORT="COM6"
 TELEOP_ID="so101_teleop"
 ROBOT_ID="so101_robot"
 
-WRIST_CAMERA=0
-FRONT_CAMERA=1
-CAMERA_WIDTH=640
-CAMERA_HEIGHT=480
-CAMERA_FPS=25
-CAMERA_WARMUP_S=5
-CAMERA_FOURCC="MJPG"
+WRIST_CAM_PORT=0
+FRONT_CAM_PORT=1
+TOP_CAM_PORT=2
+CAM_WIDTH=640
+CAM_HEIGHT=480
+CAM_FPS=25
+CAM_WARMUP_S=5
+CAM_FOURCC="MJPG"
 
+CAMERAS="{
+    wrist: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    front: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+}"
+
+SINGLE_TASK="pick the pen"
 TASK="pick the pen"
-DATASET_NAME="so101_pick_pen"
 HF_USER="your_hf_user"
-DATASET_REPO="${HF_USER}/${DATASET_NAME}"
-DATASET_ROOT="./datasets/${DATASET_NAME}"
+HF_DATASET_REPO_ID="${HF_USER}/so101_pick_pen"
+DATASET_ROOT="./datasets/so101_pick_pen"
 POLICY_PATH="lerobot/smolvla_base"
-POLICY_REPO="${HF_USER}/smolvla_pick_pen"
+POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen"
+TRAIN_POLICY_TYPE=smolvla
+POLICY_CLIENT_TYPE=smolvla
 OUTPUT_DIR="./outputs/train/smolvla_pick_pen"
 
-CAMERAS="{wrist: {type: opencv, index_or_path: ${WRIST_CAMERA}, width: ${CAMERA_WIDTH}, height: ${CAMERA_HEIGHT}, fps: ${CAMERA_FPS}, warmup_s: ${CAMERA_WARMUP_S}, fourcc: ${CAMERA_FOURCC}}, front: {type: opencv, index_or_path: ${FRONT_CAMERA}, width: ${CAMERA_WIDTH}, height: ${CAMERA_HEIGHT}, fps: ${CAMERA_FPS}, warmup_s: ${CAMERA_WARMUP_S}, fourcc: ${CAMERA_FOURCC}}}"
 ```
 
-탑뷰 카메라까지 쓰면 같은 dict 에 `top: {...}` 항목을 추가한다.
+탑뷰 카메라가 없을 때는 `CAMERAS` 에서 `top:` 줄을 지우고 `TOP_CAM_PORT` 는 무시한다.
 
 HF 캐시를 사용자 프로필 대신 저장소 아래에 모으려면:
 
@@ -203,8 +211,8 @@ uv run lerobot-record \
     --teleop.type=so101_leader \
     --teleop.port="${TELEOP_PORT}" \
     --teleop.id="${TELEOP_ID}" \
-    --dataset.repo_id="${DATASET_REPO}" \
-    --dataset.single_task="${TASK}" \
+    --dataset.repo_id="${HF_DATASET_REPO_ID}" \
+    --dataset.single_task="${SINGLE_TASK}" \
     --dataset.root="${DATASET_ROOT}" \
     --dataset.fps=30 \
     --dataset.episode_time_s=60 \
@@ -231,7 +239,7 @@ uv run lerobot-replay \
     --robot.type=so101_follower \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
-    --dataset.repo_id="${DATASET_REPO}" \
+    --dataset.repo_id="${HF_DATASET_REPO_ID}" \
     --dataset.episode=0 \
     --dataset.root="${DATASET_ROOT}" \
     --dataset.fps=30 \
@@ -242,7 +250,7 @@ uv run lerobot-replay \
 
 ```bash
 uv run lerobot-dataset-viz \
-    --repo-id="${DATASET_REPO}" \
+    --repo-id="${HF_DATASET_REPO_ID}" \
     --episode-index=0 \
     --root="${DATASET_ROOT}" \
     --mode=local
@@ -250,7 +258,7 @@ uv run lerobot-dataset-viz \
 
 ```bash
 uv run lerobot-edit-dataset \
-    --repo_id="${DATASET_REPO}" \
+    --repo_id="${HF_DATASET_REPO_ID}" \
     --root="${DATASET_ROOT}" \
     --operation.type=delete_episodes \
     --operation.episode_indices=[0]
@@ -274,11 +282,11 @@ SO-101 카메라 키 (`wrist` / `front` / `top`) 가 들어간 데이터셋으�
 export ACCELERATE_MIXED_PRECISION="bf16"
 
 uv run lerobot-train \
-    --dataset.repo_id="${DATASET_REPO}" \
+    --dataset.repo_id="${HF_DATASET_REPO_ID}" \
     --dataset.root="${DATASET_ROOT}" \
     --policy.type=${TRAIN_POLICY_TYPE} \
     --policy.path="${POLICY_PATH}" \
-    --policy.repo_id="${POLICY_REPO}" \
+    --policy.repo_id="${POLICY_REPO_ID}" \
     --policy.push_to_hub=true \
     --policy.device=cuda \
     --output_dir="${OUTPUT_DIR}" \
@@ -295,7 +303,7 @@ W&B 미사용 시 `--wandb.enable=false`, Hub push 미사용 시 `--policy.push_
 
 ```bash
 uv run lerobot-eval \
-    --policy.path="${POLICY_REPO}" \
+    --policy.path="${POLICY_REPO_ID}" \
     --env.type=pusht \
     --eval.n_episodes=20 \
     --eval.batch_size=10
@@ -328,7 +336,7 @@ LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 �
 uv run python ./docker/policy-client-shim.py \
     --server_address=127.0.0.1:8080 \
     --policy_type=${POLICY_CLIENT_TYPE} \
-    --pretrained_name_or_path="${POLICY_REPO}" \
+    --pretrained_name_or_path="${POLICY_REPO_ID}" \
     --policy_device=cuda \
     --client_device=cpu \
     --task="${TASK}" \

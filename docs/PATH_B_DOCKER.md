@@ -147,7 +147,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot <m
 | `find-cameras` | 시스템 카메라 자동 검출 | - | 위치 인자: `opencv` \| `realsense` |
 | `find-port` | 직렬 포트 자동 감지 (인터랙티브) | - | - |
 | `dataset-viz` | Rerun 기반 데이터셋 시각화 | - | `HF_DATASET_REPO_ID`, `EPISODE_INDEX`, `VIZ_MODE`, `VIZ_WS_PORT` |
-| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_TYPE`, `POLICY_PATH`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
+| `policy-client` | 정책 서버에 gRPC 로 붙어 follower arm 구동 | Follower + 카메라 | `POLICY_SERVER_ADDRESS`, `POLICY_CLIENT_TYPE`, `POLICY_PATH`, `POLICY_DEVICE`, `TASK`, `ACTIONS_PER_CHUNK`, `CHUNK_SIZE_THRESHOLD`, `POLICY_CLIENT_FPS` |
 | `edit-dataset` | 데이터셋 편집 (인자 완전 위임) | - | CLI 인자로 직접 전달 |
 | `info` | LeRobot / Python / 시스템 정보 | - | - |
 | `bash` \| `shell` | 컨테이너 인터랙티브 쉘 | - | - |
@@ -293,7 +293,7 @@ docker run --rm -v lerobot_hf_cache:/cache -v /tmp:/in alpine \
 | 이름 | 설명 |
 |-----|------|
 | HF_DATASET_REPO_ID / DATASET_ROOT | 학습 데이터셋 위치 |
-| POLICY_TYPE / POLICY_PATH / POLICY_REPO_ID | 정책 종류·베이스 체크포인트·결과 push 경로 |
+| TRAIN_POLICY_TYPE / POLICY_PATH / POLICY_REPO_ID | 정책 종류·베이스 체크포인트·결과 push 경로 |
 | JOB_NAME / BATCH_SIZE / TRAIN_STEPS / OUTPUT_DIR / DEVICE | 일반 학습 인자 |
 | WANDB_ENABLE | W&B 연동 |
 | TRAIN_EXTRA_ARGS | 추가 `lerobot-train` 인자 |
@@ -335,7 +335,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
     --teleop.port=${TELEOP_PORT} \
     --teleop.id=${TELEOP_ID} \
     --dataset.single_task=${SINGLE_TASK} \
-    --dataset.repo_id=${HF_USER}/${SINGLE_TASK} \
+    --dataset.repo_id=${HF_DATASET_REPO_ID} \
     --dataset.num_episodes=${NUM_EPISODES} \
     --dataset.episode_time_s=${EPISODE_TIME_S} \
     --dataset.reset_time_s=${RESET_TIME_S} \
