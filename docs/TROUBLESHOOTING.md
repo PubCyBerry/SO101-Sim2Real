@@ -9,6 +9,7 @@
 - [`torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`](#torchcompile-활성화-시-invalidcxxcompiler-no-working-c-compiler-found)
 - [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
 - [LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패](#lerobot-051-gr00t-n15-학습-smoke가-단계별로-실패)
+- [GR00T 추론 서버에서 `policy-server-rtc`가 표준 추론으로 fallback](#gr00t-추론-서버에서-policy-server-rtc가-표준-추론으로-fallback)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
@@ -450,7 +451,7 @@ NotImplementedError: aten::_sample_dirichlet: attempted to run this operator wit
 
 여러 호환성 문제가 겹친다.
 
-- LeRobot 0.5.1 parser는 `--policy.path`와 `--policy.type` 동시 지정을 금지한다. SmolVLA fine-tune용 `BASE_MODEL=lerobot/smolvla_base`가 남아 있으면 GR00T의 `--policy.type=groot`와 충돌한다.
+- LeRobot 0.5.1 parser는 `--policy.path`와 `--policy.type` 동시 지정을 금지한다. (과거에는 SmolVLA용 `BASE_MODEL`과 GR00T용 변수를 별도로 두어, SmolVLA 값이 남으면 `--policy.path`와 `--policy.type=groot`가 함께 나가 충돌했다. 지금은 출발 모델을 `POLICY_BASE_MODEL_PATH` 단일 변수로 통일하고 `TRAIN_POLICY_TYPE` 유무로만 둘 중 하나를 emit 하므로 구조적으로 충돌이 없다.)
 - LeRobot 0.5.1 dataset decoder가 지원하는 video backend는 `torchcodec`, `pyav`, `video_reader`다. `decord`는 GR00T policy 내부 기본값으로 보이지만 `--dataset.video_backend=decord`에는 사용할 수 없다.
 - Transformers 5.3 + torch 2.10 조합에서 LeRobot 0.5.1의 GR00T wrapper가 기대 속성과 tensor 초기화 흐름을 맞추지 못한다. `GR00TN15.all_tied_weights_keys`가 없고, `FlowmatchingActionHead`의 `Beta` 분포가 meta tensor 상태로 생성되어 validation/sampling에서 실패한다.
 - Eagle2.5 processor 호출에서 `return_tensors="pt"`가 tokenizer 쪽으로만 전달되고 image processor에는 전달되지 않아 `pixel_values`가 tensor가 아닌 list로 남는다.
@@ -460,12 +461,11 @@ NotImplementedError: aten::_sample_dirichlet: attempted to run this operator wit
 `.env` / `.env.example` / `docker/policy-entrypoint.sh`의 학습 계약을 LeRobot 0.5.1 기준으로 분리한다.
 
 ```dotenv
-# SmolVLA fine-tune
-BASE_MODEL=lerobot/smolvla_base
+# SmolVLA fine-tune (LeRobot 체크포인트에서 출발)
 TRAIN_POLICY_TYPE=
+POLICY_BASE_MODEL_PATH=lerobot/smolvla_base
 
-# GR00T N1.5 fine-tune
-BASE_MODEL=
+# GR00T N1.5 fine-tune (타입 wrapper + native 베이스)
 TRAIN_POLICY_TYPE=groot
 POLICY_BASE_MODEL_PATH=nvidia/GR00T-N1.5-3B
 POLICY_TOKENIZER_ASSETS_REPO=lerobot/eagle2hg-processor-groot-n1p5
@@ -476,7 +476,7 @@ DATASET_VIDEO_BACKEND=torchcodec
 POLICY_VIDEO_BACKEND=
 ```
 
-`policy-entrypoint.sh`는 `BASE_MODEL`이 있을 때만 `--policy.path`, 없고 `TRAIN_POLICY_TYPE`이 있을 때만 `--policy.type`을 전달한다. GR00T용 `POLICY_BASE_MODEL_PATH`, tokenizer assets, embodiment tag, chunk/action step, dataset video backend도 명시적으로 CLI에 매핑한다.
+`policy-entrypoint.sh`는 출발 모델을 `POLICY_BASE_MODEL_PATH` 단일 변수로 받아 `TRAIN_POLICY_TYPE` 유무로 라우팅한다: 비우면 `--policy.path`(LeRobot 체크포인트), 설정하면 `--policy.type` + `--policy.base_model_path`. tokenizer assets, embodiment tag, chunk/action step, dataset video backend도 명시적으로 CLI에 매핑한다.
 
 `docker/Dockerfile.policy`에서는 upstream 패치 전까지 LeRobot site-packages에 최소 호환 패치를 적용한다.
 
@@ -527,6 +527,52 @@ jq -r .type "outputs/train/${JOB}/checkpoints/000100/pretrained_model/config.jso
 ```
 
 `groot`가 출력되고 `End of training` 로그가 나오면 정상.
+
+---
+
+## GR00T 추론 서버에서 `policy-server-rtc`가 표준 추론으로 fallback
+
+**현상**
+
+GR00T N1.5 fine-tune checkpoint 로 async inference server 를 띄울 때 `policy-server-rtc` 모드를 사용하면 서버는 뜨지만 RTC guidance 가 적용되지 않는다.
+
+**오류 메시지**
+
+```text
+[RTC] GrootPolicy 는 init_rtc_processor 를 지원하지 않습니다.
+표준 추론(RTC 없음)으로 동작합니다. (SmolVLA / Pi0 / Pi0.5 만 지원)
+```
+
+**원인**
+
+`scripts/policy_server_rtc.py` 는 `policy.init_rtc_processor()` 를 구현한 flow-matching 정책에만 RTCConfig 를 주입한다. 현재 LeRobot 0.5.1의 `GrootPolicy`는 해당 메서드를 제공하지 않는다. 따라서 `_rtc_available=False` 로 fallback 되고, 매 action chunk 마다 RTC 미지원 분기와 로그만 남는다.
+
+**해결 방법**
+
+GR00T 는 표준 async inference server 를 사용한다.
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+docker compose --env-file .env -f docker/docker-compose.yaml logs -f policy-server
+```
+
+직접 실행:
+
+```bash
+docker rm -f so101-groot-n15-policy-server 2>/dev/null || true
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  --name so101-groot-n15-policy-server \
+  policy-server policy-server
+```
+
+**확인 방법**
+
+```bash
+docker logs --tail 80 so101-groot-n15-policy-server
+ss -ltnp | grep ':8080'
+```
+
+로그에 `PolicyServer started on 0.0.0.0:8080` 가 있고 RTC fallback warning 이 없으면 정상. 클라이언트는 `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 로 접속한다.
 
 ---
 

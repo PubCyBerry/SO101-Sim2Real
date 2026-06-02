@@ -2,7 +2,7 @@
 
 SO-ARM101 6축 로봇 팔용 **LeRobot 파이프라인 + Isaac Lab Sim-to-Real 시뮬레이션** 통합 저장소.
 
-실기기 텔레오퍼레이션·데이터 수집·정책 학습·추론과 Isaac Sim 시뮬을 하나의 `pyproject.toml` 의존성 그룹(`teleop` / `smolvla` / `async` / `isaac`)으로 묶어 세 가지 실행 경로로 제공한다. 실기기는 SmolVLA(기본) / GR00T 등 LeRobot 호환 정책을 모두 학습·추론할 수 있다.
+실기기 텔레오퍼레이션·데이터 수집·정책 학습·추론과 Isaac Sim 시뮬을 세 가지 실행 경로로 제공한다. 호스트 uv 경로(실기기 teleop·Isaac 시뮬)는 `pyproject.toml` 의존성 그룹(`teleop` / `isaac` / `dev`)으로 묶고, `policy-server` Docker 이미지는 LeRobot 0.5.1 을 `pyproject.toml` 과 **독립적으로** 핀한다(Dockerfile.policy 가 `uv pip install` 로 직접 명세 — Isaac override 와 numpy 충돌 회피). `pyproject.toml` 의 `policy` / `async` 그룹은 호스트 참조용. 실기기는 SmolVLA(기본) / GR00T 등 LeRobot 호환 정책을 모두 학습·추론할 수 있다.
 
 ## 목차 <!-- omit in toc -->
 

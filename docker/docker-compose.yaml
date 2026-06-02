@@ -104,7 +104,11 @@ services:
     # 무관한 compose-전용 키만 둔다. 모든 런타임 기본값은 teleop-entrypoint.sh
     # 의 `${VAR:-default}` 블록(라인 37-95)에서 채워진다.
     env_file:
+      # ../.env = 머신·수집·학습·서버·클라 공통값. 그 위에 모델 프로필을 겹쳐 주입한다.
+      # 활성 모델은 .env 의 POLICY_PROFILE 로 선택 (groot | smolvla | ...). 나중 파일이 override.
+      # 새 모델 추가 = env/<name>.env 작성 후 POLICY_PROFILE=<name>.
       - ../.env
+      - ../env/${POLICY_PROFILE:-groot}.env
     environment:
       NVIDIA_VISIBLE_DEVICES:     all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -208,7 +212,11 @@ services:
       - hf_cache:/workspace/.cache/huggingface
     # ── 환경 변수 ────────────────────────────────────────────────────────
     env_file:
+      # ../.env = 머신·수집·학습·서버·클라 공통값. 그 위에 모델 프로필을 겹쳐 주입한다.
+      # 활성 모델은 .env 의 POLICY_PROFILE 로 선택 (groot | smolvla | ...). 나중 파일이 override.
+      # 새 모델 추가 = env/<name>.env 작성 후 POLICY_PROFILE=<name>.
       - ../.env
+      - ../env/${POLICY_PROFILE:-groot}.env
     environment:
       NVIDIA_VISIBLE_DEVICES:     all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video

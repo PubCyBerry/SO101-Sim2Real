@@ -6,6 +6,8 @@
 #   [project].dependencies  : 모든 환경에서 공통으로 필요한 최소 패키지
 #   [dependency-groups]
 #     teleop  : SO-101 실물 Arm Teleoperation (LeRobot + Feetech 서보)
+#     policy  : VLA policy 학습/추론 보조 (lerobot[smolvla] + GR00T deps) — 호스트 참조용
+#     async   : Async inference policy server gRPC 스택 (grpcio + protobuf)
 #     isaac   : Isaac Sim / IsaacLab 시뮬레이션 환경
 #     dev     : 개발 도구 (Jupyter 등)
 #
@@ -17,7 +19,11 @@
 #   공용+dev   : uv sync --group dev
 #
 # ■ Docker 사용
-#   Dockerfile.teleop 에서 --only-group teleop 으로 teleop 의존성만 설치
+#   docker/Dockerfile.lerobot (lerobot 이미지): uv sync --group teleop --group async
+#   docker/Dockerfile.policy  (policy-server 이미지): pyproject.toml 과 독립.
+#     lerobot 0.5.1 (numpy>=2.0) 이 아래 override (numpy==1.26.0 등, Isaac 호환핀) 과
+#     충돌하므로 uv sync 대신 `uv pip install "lerobot[smolvla,async]==0.5.1"` 로 직접
+#     명세한다. 따라서 policy / async 그룹의 lerobot 버전은 Docker 빌드에 영향 없음.
 # =============================================================================
 
 [build-system]
@@ -69,7 +75,7 @@ dependencies = [
 # ── teleop: 실물 Arm Teleoperation ──────────────────────────────────────────
 # SO-101 Leader/Follower Arm을 직렬 포트로 연결해 원격 조작하는 환경.
 # Feetech STS3215 서보 통신을 위해 lerobot[feetech] extra 사용.
-# Docker 이미지(Dockerfile.teleop)는 이 그룹만 설치: --only-group teleop
+# Docker 이미지(docker/Dockerfile.lerobot)는 async 와 함께 설치: --group teleop --group async
 teleop = [
     "ffmpeg>=1.4",
     # evdev: Linux 전용 입력 장치 라이브러리 (gamepad / joystick 텔레op 지원)

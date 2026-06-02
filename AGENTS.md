@@ -30,13 +30,14 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
   - `policy-server` (이미지 `policy-server:0.5.1`, `docker/Dockerfile.policy`) — async inference gRPC 서버 (`policy-entrypoint.sh policy-server`). `docker compose -f docker/docker-compose.yaml build policy-server`. teleop 이미지와 의존성 격리: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
 - **빌드 스테이지**: `Dockerfile.lerobot` 는 Python 3.11 + LeRobot 0.4.4 실기기 의존성, `Dockerfile.policy` 는 Python 3.12 + LeRobot 0.5.1 policy/async/GR00T 의존성을 사용한다. 두 이미지는 torch/CUDA 계층 일부만 BuildKit 캐시로 공유한다.
 - **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` `${TOP_CAM_PORT}` `{$TOP_CAM_META_PORT}`(UVC 캡처/메타 노드 쌍).
-- **호스트 볼륨**: `./datasets`, `./logs`, `./outputs` → 컨테이너 `/workspace/*`. 명명 볼륨 `lerobot_hf_cache` → `/root/.cache/huggingface` (두 서비스 공유). 다른 머신으로 옮길 때는 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export 후 전송.
+- **호스트 볼륨**: `./datasets`, `./logs`, `./outputs` → 컨테이너 `/workspace/*`. 명명 볼륨 `lerobot_hf_cache` → `/workspace/.cache/huggingface` (HF_HOME, 두 서비스 공유; non-root UID 실행 때문에 `/root` 가 아닌 `/workspace` 하위). 다른 머신으로 옮길 때는 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export 후 전송.
 - **권한·네트워크**: `privileged: true` (udev/USB 접근), `network_mode: host` (rerun 뷰어·ROS 브릿지), `ipc: host`. GPU 1장 예약 (`deploy.resources.reservations.devices`).
 - **서비스별 진입점**:
   - `docker/lerobot-entrypoint.sh` (lerobot 서비스): `teleop` / `record` / `replay` / `calibrate` / `setup-motors` / `find-port` / `find-cameras` / `find-joint-limits` / `dataset-viz` / `policy-client` / `edit-dataset` / `info` / `bash` / `python`. `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 를 구동 — `async` 의존성 그룹(grpcio + protobuf) 이 teleop 이미지에도 함께 설치된다.
   - `docker/policy-entrypoint.sh` (policy-server 서비스): `prepare-model` / `policy-server` / `train` / `eval` / `info` / `bash` / `python`. CMD 기본값 `policy-server`. **train/eval 은 이쪽**: SmolVLA 학습이 필요로 하는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지에 미설치이기 때문.
   - 모드별 env var 매핑은 각 스크립트 상단 `${VAR:-default}` 블록과 case 분기 주석에 정리되어 있다.
-- **`.env` 주입 경로**: `docker compose --env-file .env` 가 컨테이너에 환경변수로 주입하고, `entrypoint.sh` 가 기본값을 채워 `lerobot-*` CLI 인자로 매핑.
+- **`.env` 주입 경로**: 서비스 `env_file: [../.env, ../env/${POLICY_PROFILE}.env]` 가 컨테이너에 주입하고(나중 파일이 override), `entrypoint.sh` 가 기본값을 채워 `lerobot-*` CLI 인자로 매핑. `--env-file .env` 는 compose 보간용.
+- **모델 프로필**: 모델 간 값이 다른 변수(POLICY_TYPE / TRAIN_POLICY_TYPE / POLICY_BASE_MODEL_PATH / tokenizer·embodiment·chunk·n_action_steps / ACTIONS_PER_CHUNK / POLICY_REPO_ID / JOB_NAME)는 `env/<name>.env` 로 분리. `.env` 의 `POLICY_PROFILE` 한 줄로 활성 모델 선택. 새 모델 = 프로필 파일 추가. train 출발 모델은 `POLICY_BASE_MODEL_PATH` 단일 변수 + `TRAIN_POLICY_TYPE` 유무로 `--policy.path`(체크포인트) ↔ `--policy.type`+`--policy.base_model_path`(native 베이스) 라우팅.
 
 ## 시뮬레이션 구조 (Isaac Lab 경로)
 

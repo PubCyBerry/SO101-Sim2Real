@@ -18,8 +18,8 @@
 - [8. 모델 가중치 준비](#8-모델-가중치-준비)
 - [9. Policy 학습](#9-policy-학습)
 - [10. Policy 평가 및 추론](#10-policy-평가-및-추론)
-- [11. Async Inference Policy Server (SmolVLA)](#11-async-inference-policy-server-smolvla)
-- [12. Fine-tune 워크플로 (pick_pen)](#12-fine-tune-워크플로-pick_pen)
+- [11. Async Inference Policy Server (SmolVLA / GR00T)](#11-async-inference-policy-server-smolvla--gr00t)
+- [12. Fine-tune 워크플로 (pick\_pen)](#12-fine-tune-워크플로-pick_pen)
 
 ---
 
@@ -73,7 +73,7 @@ flowchart LR
 
 - **서비스별 진입점 분리**: `lerobot-entrypoint.sh` 는 `lerobot` 서비스(로봇 직결 워크플로) 의 모드 디스패처, `policy-entrypoint.sh` 는 `policy-server` 서비스(추론 서버) 의 모드 디스패처. 각 스크립트의 첫 인자가 모드를 결정한다.
 - **이미지 분리**: SmolVLA / GR00T 추론과 학습 관련 의존성은 정책 서버 이미지에 격리한다.
-- **HF 캐시 공유**: 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/root/.cache/huggingface` 에 마운트되어 한 번 받은 모델을 양쪽이 모두 사용.
+- **HF 캐시 공유**: 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/workspace/.cache/huggingface` (HF_HOME) 에 마운트되어 한 번 받은 모델을 양쪽이 모두 사용.
 
 ---
 
@@ -81,8 +81,8 @@ flowchart LR
 
 | 이미지 | Dockerfile | 의존성 그룹 | 사용 서비스 |
 |---|---|---|---|
-| `lerobot-so101:0.4.4` | `docker/Dockerfile.lerobot` | `teleop` (lerobot[feetech] + evdev) | `lerobot` (teleop / record / replay / train / ...) |
-| `policy-server:0.5.1` | `docker/Dockerfile.policy` | `smolvla` + `async` + GR00T 보조 deps (flash-attn 포함) | `policy-server` (async inference / train / eval) |
+| `lerobot-so101:0.4.4` | `docker/Dockerfile.lerobot` | `teleop` (lerobot[feetech] + evdev) | `lerobot` (teleop / record / replay / policy-client / dataset-viz / ...) |
+| `policy-server:0.5.1` | `docker/Dockerfile.policy` | lerobot 0.5.1 `[smolvla,async]` + GR00T 보조 deps (flash-attn 포함) — `uv pip install` 직접 명세, `pyproject.toml` 과 독립 | `policy-server` (async inference / train / eval) |
 
 ```bash
 # teleop / record / replay 용 이미지
@@ -164,8 +164,9 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 | 모드 | 설명 | 필요 하드웨어 | 핵심 env var |
 |---|---|---|---|
 | `prepare-model` | 호스트 HF 캐시에 모델 가중치 다운로드 | - | `POLICY_REPO_ID`(기본 대상), `MODEL_REVISION`, `PREPARE_MODEL_EXTRA_ARGS` |
-| `policy-server` | SmolVLA 등 Async inference gRPC 서버 (기본 CMD) | GPU 권장 | `POLICY_SERVER_HOST`, `POLICY_SERVER_PORT`, `POLICY_FPS`, `INFERENCE_LATENCY`, `OBS_QUEUE_TIMEOUT` |
-| `train` | Policy 학습 (SmolVLA 등 — 인자 완전 위임) | GPU 권장 | CLI 인자로 직접 전달 |
+| `policy-server` | 표준 Async inference gRPC 서버 (RTC 없음) | GPU 권장 | `POLICY_SERVER_HOST`, `POLICY_SERVER_PORT`, `POLICY_FPS`, `INFERENCE_LATENCY`, `OBS_QUEUE_TIMEOUT` |
+| `policy-server-rtc` | RTC 통합 서버 (**compose 기본 CMD**). flow-matching 정책에 guidance 적용, GR00T 는 표준으로 fallback | GPU 권장 | 위 + `RTC_EXECUTION_HORIZON`, `RTC_MAX_GUIDANCE_WEIGHT`, `RTC_PREFIX_ATTENTION_SCHEDULE` |
+| `train` | Policy 학습 (SmolVLA / GR00T — `.env` §1 + CLI 위임) | GPU 권장 | `.env` §1 모델 블록 + §5 학습 변수 |
 | `eval` | Policy 평가/롤아웃 (인자 완전 위임) | GPU 권장 | CLI 인자로 직접 전달 |
 | `info` | LeRobot / Python / 시스템 정보 | - | - |
 | `bash` \| `shell` | 컨테이너 인터랙티브 쉘 | - | - |
@@ -260,7 +261,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot ba
 
 ## 8. 모델 가중치 준비
 
-HF 캐시는 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/root/.cache/huggingface` 에 마운트된다. 두 서비스가 동일 볼륨을 공유하므로 한 번 받은 모델을 양쪽이 모두 사용.
+HF 캐시는 명명 볼륨 `lerobot_hf_cache` 가 두 컨테이너의 `/workspace/.cache/huggingface` (HF_HOME) 에 마운트된다. 두 서비스가 동일 볼륨을 공유하므로 한 번 받은 모델을 양쪽이 모두 사용.
 
 ```bash
 # POLICY_REPO_ID(배포·추론 모델) 로 다운로드. 베이스 등은 위치 인자로 덮어쓰기
@@ -268,6 +269,14 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 
 # 위치 인자로 다른 모델 받기
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model nvidia/GR00T-N1.5-3B
+```
+
+GR00T N1.5 fine-tune 모델은 결과 checkpoint, NVIDIA 베이스, Eagle tokenizer asset 을 모두 미리 받아두면 첫 client 접속 때 model load 지연을 줄일 수 있다.
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model taehunkim/so101_groot_n15_pick_pen
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model nvidia/GR00T-N1.5-3B
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model lerobot/eagle2hg-processor-groot-n1p5
 ```
 
 다른 머신으로 캐시를 옮기려면 (명명 볼륨 특성상 rsync 불가, tarball 경유):
@@ -293,13 +302,13 @@ docker run --rm -v lerobot_hf_cache:/cache -v /tmp:/in alpine \
 | 이름 | 설명 |
 |-----|------|
 | HF_DATASET_REPO_ID / DATASET_ROOT | 학습 데이터셋 위치 |
-| TRAIN_POLICY_TYPE / BASE_MODEL / POLICY_BASE_MODEL_PATH / POLICY_REPO_ID | 정책 종류·LeRobot 체크포인트(`--policy.path`)·GR00T 베이스(`--policy.base_model_path`)·결과 push 겸 추론 모델(`--policy.repo_id`) |
+| TRAIN_POLICY_TYPE / POLICY_BASE_MODEL_PATH / POLICY_REPO_ID | 정책 타입(비우면 체크포인트 출발)·fine-tune 출발 모델(타입 비움→`--policy.path`, 설정→`--policy.base_model_path`)·결과 push 겸 추론 모델(`--policy.repo_id`) |
 | JOB_NAME / BATCH_SIZE / TRAIN_STEPS / OUTPUT_DIR / DEVICE | 일반 학습 인자 |
 | WANDB_ENABLE | W&B 연동 |
 | DATASET_VIDEO_BACKEND / POLICY_VIDEO_BACKEND / TRAIN_EXTRA_ARGS | LeRobot 0.5.1 비디오 디코더(`torchcodec`/`pyav`/`video_reader`)와 추가 `lerobot-train` 인자 |
 | **학습 속도 최적화** | |
 | NUM_WORKERS | 데이터로더 워커 수 (기본 8) |
-| COMPILE_MODEL / COMPILE_MODE | `torch.compile` 활성화 (10K+ steps 에서 ~20–30% 향상, 첫 스텝 컴파일 비용) |
+| COMPILE_MODEL / COMPILE_MODE | `torch.compile` 활성화 (10K+ steps 에서 ~20–30% 향상, 첫 스텝 컴파일 비용). GR00T(`TRAIN_POLICY_TYPE=groot`)는 compile_model config 필드가 없어 entrypoint 가 자동으로 건너뜀 |
 | NUM_PROCESSES | 사용 GPU 수. 2+ 지정 시 `accelerate launch --num_processes` DDP 자동 전환 |
 | MIXED_PRECISION | 혼합 정밀도 (기본 `bf16`, Ampere+ 권장. 구형 GPU `fp16`) |
 
@@ -316,11 +325,49 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train --steps=5000
 ```
 
+> **모델 종류는 `.env` 의 `POLICY_PROFILE` 한 줄로 결정**한다 (`groot` | `smolvla` | ...). 모델별 값은 `env/<name>.env` 프로필에 있고 compose 가 자동으로 겹쳐 주입하며, train 이 이를 `--policy.*` 인자로 매핑한다 (위 표의 변수 출처). 아래 명령은 모델과 무관하게 동일하다.
+
+먼저 100-step smoke 로 모델 생성·dataset decode·첫 checkpoint 저장까지 확인한다. 성공하면 full 학습을 시작한다.
+
+```bash
+JOB="smoke_groot_n15_pick_pen_100_$(date +%Y%m%d_%H%M%S)"
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+    -e JOB_NAME="${JOB}" \
+    -e OUTPUT_DIR="outputs/train/${JOB}" \
+    -e TRAIN_STEPS=100 \
+    -e BATCH_SIZE=16 \
+    -e WANDB_ENABLE=false \
+    policy-server train \
+      --save_freq=100 \
+      --policy.push_to_hub=false
+
+jq -r .type "outputs/train/${JOB}/checkpoints/000100/pretrained_model/config.json"
+```
+
+Full run:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train \
+    --save_freq=1000 \
+    --policy.push_to_hub=true
+```
+
+RTX PRO 5000 Blackwell 48 GB 기준 `BATCH_SIZE=16`, `MIXED_PRECISION=bf16` 로 GR00T N1.5 10K step 학습이 정상 완료됐다.
+
 ---
 
 ## 10. Policy 평가 및 추론
 
-**실기기 추론** — `record` 모드에 `--policy.path=` 를 전달하면 학습된 정책으로 팔로워를 구동하면서 에피소드 기록:
+실기기 추론은 **두 가지 방식**이 있다. 둘 다 같은 fine-tune 체크포인트를 쓴다.
+
+| 방식 | 명령 | 특징 | 언제 |
+|---|---|---|---|
+| **A. 직접 (서버 없이)** | `lerobot record --policy.path=<model>` | 단일 프로세스가 로컬 GPU 에 모델을 직접 로드해 추론+팔로워 구동+에피소드 기록 | 로컬 GPU 로 충분, 간단히 평가 (HuggingFace 공식 평가 방식) |
+| **B. async 서버 경유** | `policy-server` + `policy-client` | 추론을 별도(원격) 서버에 위임, RTC guidance 가능 | 원격 GPU 추론, 저지연/RTC 필요 ([§11](#11-async-inference-policy-server-smolvla--gr00t)) |
+
+### A. 직접 추론 — `lerobot record --policy.path=` (서버 미경유)
+
+학습된 정책으로 팔로워를 구동하면서 에피소드를 기록한다. **별도 서버 불필요.** HuggingFace SmolVLA / GR00T 문서가 권장하는 평가 방식이다. `record` 모드는 추가 CLI 인자를 그대로 `lerobot-record` 로 forward 하므로 `--policy.path` 를 덧붙이면 된다.
 
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot record \
@@ -331,20 +378,17 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
         front: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, warmup_s: ${CAM_WARMUP_S}, fourcc: ${CAM_FOURCC}},
         }" \
     --robot.id=${ROBOT_ID} \
-    --teleop.type=so101_leader \
-    --teleop.port=${TELEOP_PORT} \
-    --teleop.id=${TELEOP_ID} \
-    --dataset.single_task=${SINGLE_TASK} \
-    --dataset.repo_id=${HF_DATASET_REPO_ID} \
-    --dataset.num_episodes=${NUM_EPISODES} \
-    --dataset.episode_time_s=${EPISODE_TIME_S} \
-    --dataset.reset_time_s=${RESET_TIME_S} \
-    --dataset.push_to_hub=${PUSH_TO_HUB} \
-    --dataset.fps=${RECORD_FPS} \
-    --dataset.root=${DATASET_ROOT} \
-    ${RECORD_EXTRA_ARGS} \
-    --policy.path=${POLICY_REPO_ID}
+    --dataset.single_task="pick up the pen and place it in the holder" \
+    --dataset.repo_id=${HF_USER}/eval_pick_pen \
+    --dataset.num_episodes=10 \
+    --dataset.episode_time_s=30 \
+    --dataset.push_to_hub=false \
+    --policy.path=lerobot/smolvla_base   # ← 평가할 체크포인트 (예: HF_USER/so101_smolvla_pick_pen)
 ```
+
+- **leader 불필요**: 정책이 팔로워를 구동하므로 리더 암 없이 동작한다 (위에서 `--teleop.*` 생략). 단 docker `record` 모드는 leader 포트 점검 경고를 띄울 수 있다 — 리더 미연결 평가는 native 경로([PATH_A §6](PATH_A_NATIVE.md#6-smolvla-모델-준비와-학습))가 더 깔끔하다.
+- **모델 지정**: 위처럼 `--policy.path=` 를 직접 적거나, 셸에서 `--policy.path=$(grep …)` 대신 그냥 리포 ID 를 그대로 쓴다. (`.env` 의 `${POLICY_REPO_ID}` 는 컨테이너 안에서만 채워지므로 호스트 셸의 `${POLICY_REPO_ID}` 보간에 의존하지 말 것.)
+- **카메라 key**: SmolVLA fine-tune 은 `camera1/2/3`, GR00T 는 `wrist/front/top` ([§12](#12-fine-tune-워크플로-pick_pen)).
 
 **시뮬 평가** — `eval` 모드는 `lerobot-eval` 에 인자 완전 위임:
 
@@ -358,11 +402,11 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 
 ---
 
-## 11. Async Inference Policy Server (SmolVLA)
+## 11. Async Inference Policy Server (SmolVLA / GR00T)
 
-`lerobot.async_inference.policy_server` 를 gRPC :8080 으로 띄워 SmolVLA 정책을 원격 추론. 동일 호스트의 `record` / `robot_client` 가 관측을 보내면 서버가 액션 청크를 비동기로 반환. 서버는 policy-agnostic 이므로 모델 종류/체크포인트/디바이스는 **클라이언트** 가 `--policy_type=smolvla --pretrained_name_or_path=...` 로 주입.
+compose 기본 command 는 `policy-server-rtc` (async + RTC). `lerobot.async_inference.policy_server` 계열을 gRPC :8080 으로 띄운다. 서버는 policy-agnostic — 모델 종류·checkpoint·device 는 **클라이언트** 가 `SendPolicyInstructions` RPC 로 주입한다.
 
-> 본 레포 기준 권장 체크포인트: **`lerobot/smolvla_base`** (공식 베이스, ~450M params, ~2 GB VRAM). `pick_pen` task 의 SO-101 fine-tune 공개 체크포인트는 없으므로 fine-tune 전에는 베이스 모델로 파이프라인 검증만 가능.
+모델 종류(`POLICY_TYPE`)와 추론 모델(`POLICY_REPO_ID` / `ACTIONS_PER_CHUNK`)은 **`.env` 의 `POLICY_PROFILE`** 가 고르는 `env/<name>.env` 프로필에서 온다. 서버·클라 양쪽 `.env` 의 `POLICY_PROFILE` 을 같은 값으로 맞춘다.
 
 | 이름 | 설명 |
 |---|---|
@@ -373,30 +417,87 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 | OBS_QUEUE_TIMEOUT | 관측 큐 timeout 초 (기본 `2`) |
 | POLICY_SERVER_EXTRA_ARGS | 추가 인자 |
 
-서버 기동:
+### 서버 기동
+
+원격 학습 서버에서 실행:
 
 ```bash
+cd ~/Workspaces/SO101-Sim2Real
+
+# 모델 사전 캐시. 첫 client 접속 지연 감소.
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model ${POLICY_REPO_ID}
+
+# 표준 async inference server. GR00T 는 RTC 미지원이므로 policy-server-rtc 대신 이것을 사용.
 docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
-docker compose logs -f policy-server   # gRPC bind 로그
+
+docker compose --env-file .env -f docker/docker-compose.yaml logs -f policy-server
 ```
 
-클라이언트는 `lerobot` 서비스의 `policy-client` 모드. `.env` 의 `POLICY_*` / `TASK` / `ROBOT_*` / `*_CAM_*` 변수가 robot_client CLI 인자로 자동 매핑된다.
+컨테이너를 이름 고정으로 직접 띄우려면:
+
+```bash
+docker rm -f so101-groot-n15-policy-server 2>/dev/null || true
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+    --name so101-groot-n15-policy-server \
+    policy-server policy-server
+```
+
+확인:
+
+```bash
+docker ps --filter name=policy-server
+ss -ltnp | grep ':8080'
+```
+
+> GR00T 는 현재 `policy-server-rtc` 에서 RTC guidance 가 적용되지 않는다. `GrootPolicy` 가 `init_rtc_processor` 를 지원하지 않아 표준 추론으로 fallback 된다. 불필요한 per-chunk 분기와 로그를 피하려면 `policy-server` 를 쓴다.
+
+### 클라이언트 연결
+
+클라이언트는 Windows/WSL 워크스테이션의 `lerobot` 서비스 `policy-client` 모드. `.env` 의 `POLICY_*` / `TASK` / `ROBOT_*` / `*_CAM_*` 변수가 robot_client CLI 인자로 자동 매핑된다.
 
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
-원격 학습 서버의 정책 서버에 붙으려면:
+원격 학습 서버의 정책 서버에 붙으려면 `POLICY_SERVER_ADDRESS` 를 서버 주소로 덮어쓴다.
 
 ```bash
-POLICY_SERVER_ADDRESS=10.0.0.5:8080 \
+POLICY_SERVER_ADDRESS=<server_ip>:8080 \
+    docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
+```
+
+GR00T N1.5용 `.env` 클라이언트 값:
+
+```dotenv
+POLICY_SERVER_ADDRESS=<server_ip>:8080
+POLICY_TYPE=groot
+POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen
+POLICY_DEVICE=cuda
+CLIENT_DEVICE=cpu
+TASK="pick up the pen and place it in the holder"
+ACTIONS_PER_CHUNK=16
+CHUNK_SIZE_THRESHOLD=0.5
+AGGREGATE_FN_NAME=weighted_average
+POLICY_CLIENT_FPS=30
+```
+
+GR00T fine-tune checkpoint 의 input key 는 `observation.images.wrist/front/top` 이다. 클라이언트 카메라 key 도 `wrist/front/top` 를 그대로 사용한다. SmolVLA fine-tune 은 `camera1/2/3` 를 기대하므로 정책별로 카메라 key 를 혼동하지 않는다.
+
+보안상 직접 포트 노출을 피하려면 SSH 터널을 사용한다.
+
+```bash
+# 로컬 PC 터미널 1
+ssh -N -L 8080:127.0.0.1:8080 <server>
+
+# 로컬 PC 터미널 2
+POLICY_SERVER_ADDRESS=127.0.0.1:8080 \
     docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
 **주의사항**
 
-- **액션 품질**: `lerobot/smolvla_base` 는 SO-101 에 미학습 → 액션 품질 무작위에 가까움. 일차 목적은 **파이프라인 검증** (gRPC 송수신, 카메라/state 매핑, action chunk 적용).
-- **초기 로딩**: 첫 호출 시 VLM 백본 (`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`) 자동 다운로드로 30–60 초 추가 대기. `prepare-model HuggingFaceTB/SmolVLM2-500M-Video-Instruct` 로 미리 받아두면 즉시 로드.
+- **SmolVLA 베이스**: `lerobot/smolvla_base` 는 SO-101 에 미학습 → 액션 품질 무작위에 가까움. 일차 목적은 **파이프라인 검증** (gRPC 송수신, 카메라/state 매핑, action chunk 적용).
+- **초기 로딩**: 첫 호출 시 VLM 백본/GR00T 베이스가 자동 다운로드될 수 있다. `prepare-model ${POLICY_REPO_ID}` 와 필요한 베이스 모델을 미리 받아두면 즉시 로드.
 - **보안**: pickle deserialization RCE 위험 (CVE-2026-25874). 본 구성은 같은 호스트 loopback 한정. 외부 노출 시 SSH 터널 / mTLS 래퍼 / 방화벽 추가.
 - **카메라 키 매핑**: 체크포인트 `input_features` 키와 클라이언트가 보내는 카메라 키가 정확히 일치해야 함. base 모델 직결 시 `KeyError: 'observation.images.wrist'` — fine-tune 정공법으로 해결 ([§12](#12-fine-tune-워크플로-pick_pen)).
 
@@ -404,7 +505,10 @@ POLICY_SERVER_ADDRESS=10.0.0.5:8080 \
 
 ## 12. Fine-tune 워크플로 (pick_pen)
 
-앞 단계(2~11)를 엮은 end-to-end 시나리오. **SmolVLA 는 backbone 의 canonical 입력 키가 `camera1/2/3`** 라, SO-101 데이터셋(`wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `camera1/camera2/camera3` 가 된다. 따라서 추론 클라이언트의 카메라 키도 `camera1/2/3` 로 맞춰야 한다 (수집 키 `wrist/front/top` 를 그대로 넘기면 `KeyError: 'observation.images.camera1'`).
+앞 단계(2~11)를 엮은 end-to-end 시나리오.
+
+- **SmolVLA**: backbone canonical 입력 키가 `camera1/2/3` 이다. SO-101 데이터셋(`wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `camera1/camera2/camera3` 가 된다. 추론 클라이언트 카메라 key 도 `camera1/2/3` 로 맞춘다.
+- **GR00T N1.5**: fine-tune 결과 checkpoint 의 `input_features` 는 `observation.images.wrist/front/top` 그대로다. 추론 클라이언트도 `wrist/front/top` key 를 그대로 쓴다. GR00T action horizon 은 16 이므로 `POLICY_CHUNK_SIZE=16`, `POLICY_N_ACTION_STEPS=16`, `ACTIONS_PER_CHUNK=16` 을 맞춘다.
 
 **1) 데이터셋 수집** (Windows 워크스테이션 `lerobot` 컨테이너):
 
@@ -431,6 +535,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot da
 
 **4) Fine-tune 실행** (`policy-server` 컨테이너):
 
+SmolVLA:
+
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train \
     --policy.path=lerobot/smolvla_base \
@@ -445,11 +551,44 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
     --wandb.enable=true
 ```
 
+GR00T N1.5:
+
+```bash
+# env/groot.env 프로필 핵심값 (POLICY_PROFILE=groot):
+# TRAIN_POLICY_TYPE=groot
+# POLICY_BASE_MODEL_PATH=nvidia/GR00T-N1.5-3B
+# POLICY_TOKENIZER_ASSETS_REPO=lerobot/eagle2hg-processor-groot-n1p5
+# POLICY_EMBODIMENT_TAG=new_embodiment
+# POLICY_CHUNK_SIZE=16
+# POLICY_N_ACTION_STEPS=16
+# DATASET_VIDEO_BACKEND=torchcodec
+# POLICY_REPO_ID=${HF_USER}/so101_groot_n15_pick_pen
+
+# 100-step smoke
+JOB="smoke_groot_n15_pick_pen_100_$(date +%Y%m%d_%H%M%S)"
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+    -e JOB_NAME="${JOB}" \
+    -e OUTPUT_DIR="outputs/train/${JOB}" \
+    -e TRAIN_STEPS=100 \
+    -e BATCH_SIZE=16 \
+    -e WANDB_ENABLE=false \
+    policy-server train \
+      --save_freq=100 \
+      --policy.push_to_hub=false
+
+jq -r .type "outputs/train/${JOB}/checkpoints/000100/pretrained_model/config.json"
+
+# full run
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train \
+    --save_freq=1000 \
+    --policy.push_to_hub=true
+```
+
 **5) 체크포인트 배포** (Windows 워크스테이션):
 
 ```bash
-# .env 의 POLICY_REPO_ID=${HF_USER}/smolvla_pick_pen
-docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model ${HF_USER}/smolvla_pick_pen
+# .env 의 POLICY_REPO_ID=${HF_USER}/smolvla_pick_pen 또는 ${HF_USER}/so101_groot_n15_pick_pen
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server prepare-model ${POLICY_REPO_ID}
 ```
 
 **6) 정책 서버 재기동 + 실기기 추론**:
@@ -460,3 +599,5 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot po
 ```
 
 fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2/3` 다. 추론 클라의 카메라 키를 `camera1/camera2/camera3` 로 맞춘다 (물리 매핑 `camera1=wrist, camera2=front, camera3=top`). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.
+
+GR00T fine-tuned checkpoint 는 `wrist/front/top` key 를 그대로 기대한다. `POLICY_TYPE=groot`, `ACTIONS_PER_CHUNK=16`, `POLICY_REPO_ID=${HF_USER}/so101_groot_n15_pick_pen` 로 맞춘 뒤 같은 `policy-client` 모드를 사용한다.

@@ -73,12 +73,12 @@ nvidia-smi
 
 ```bash
 uv python install 3.11
-uv sync --python 3.11 --group teleop --group async --group smolvla --no-install-project
+uv sync --python 3.11 --group teleop --group async --group policy --no-install-project
 uv run lerobot-info
 uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-학습을 안한다면 `smolvla` 그룹을 빼도 된다.
+학습을 안한다면 `policy` 그룹을 빼도 된다.
 
 ```bash
 uv sync --python 3.11 --group teleop --group async --no-install-project
@@ -138,9 +138,11 @@ HF_DATASET_REPO_ID="${HF_USER}/so101_pick_pen"
 DATASET_ROOT="./datasets/so101_pick_pen"
 
 # ── 정책 ──
-BASE_MODEL="lerobot/smolvla_base"            # train --policy.path (fine-tune 출발점)
-POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen" # fine-tune 결과 = 추론·배포 모델
-TRAIN_POLICY_TYPE=smolvla
+POLICY_BASE_MODEL_PATH="lerobot/smolvla_base" # fine-tune 출발 모델
+POLICY_REPO_ID="${HF_USER}/smolvla_pick_pen"  # fine-tune 결과 = 추론·배포 모델
+# SmolVLA 는 LeRobot 체크포인트에서 출발 → TRAIN_POLICY_TYPE 비움 → --policy.path 사용.
+# LeRobot 0.5.x parser 는 --policy.path 와 --policy.type 동시 지정을 거부한다.
+TRAIN_POLICY_TYPE=
 POLICY_TYPE=smolvla
 
 # ── record ──
@@ -331,8 +333,7 @@ export ACCELERATE_MIXED_PRECISION="bf16"
 uv run lerobot-train \
     --dataset.repo_id="${HF_DATASET_REPO_ID}" \
     --dataset.root="${DATASET_ROOT}" \
-    --policy.type=${TRAIN_POLICY_TYPE} \
-    --policy.path="${BASE_MODEL}" \
+    --policy.path="${POLICY_BASE_MODEL_PATH}" \
     --policy.repo_id="${POLICY_REPO_ID}" \
     --policy.push_to_hub=${PUSH_TO_HUB} \
     --policy.device=${DEVICE} \
@@ -345,6 +346,26 @@ uv run lerobot-train \
 ```
 
 W&B 미사용 시 `--wandb.enable=false`, Hub push 미사용 시 `--policy.push_to_hub=false`. Linux 학습 서버 (RTX PRO 5000 Blackwell 48 GB) 에서 멀티 GPU 가 필요하면 [경로 B](PATH_B_DOCKER.md) 의 docker 학습 또는 별도 Linux native 환경에서 `accelerate launch` 구성.
+
+### 직접 추론 — `lerobot-record --policy.path=` (서버 없이)
+
+학습된 정책을 **async 서버 없이** 곧바로 실기기에서 돌리는 가장 간단한 방법. 단일 프로세스가 로컬 GPU 에 모델을 로드해 팔로워를 구동하면서 에피소드를 기록한다(HuggingFace SmolVLA/GR00T 문서의 평가 방식). 리더 암은 불필요하므로 `--teleop.*` 를 생략한다.
+
+```bash
+uv run lerobot-record \
+    --robot.type="${ROBOT_TYPE}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
+    --robot.cameras="${CAMERAS}" \
+    --dataset.single_task="${TASK}" \
+    --dataset.repo_id="${HF_USER}/eval_pick_pen" \
+    --dataset.num_episodes=10 \
+    --dataset.episode_time_s=30 \
+    --dataset.push_to_hub=false \
+    --policy.path="${POLICY_REPO_ID}"   # fine-tune 결과 체크포인트
+```
+
+> 카메라 key 정합 주의: SmolVLA fine-tune 체크포인트는 `camera1/2/3` 입력 key 를 기대한다(§6 `rename_map`). 그 경우 `--robot.cameras` 의 key 를 `camera1/camera2/camera3` 로 바꾼다([§7](#7-async-policy-server--client) 클라 예시와 동일). GR00T 는 `wrist/front/top` 그대로.
 
 ### Eval
 
@@ -379,7 +400,9 @@ uv run python -m lerobot.async_inference.policy_server \
 
 LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 회귀가 있어 본 저장소의 shim 을 먼저 거친다.
 
-> ⚠️ **카메라 키 정합**: SmolVLA fine-tune 체크포인트는 `camera1/2/3` 키를 기대한다(위 §6 `rename_map`). 추론 클라의 `--robot.cameras` 키를 `camera1/camera2/camera3` 로 맞추고, 물리 매핑(`camera1=wrist, camera2=front, camera3=top`)에 따라 index 를 배치한다. 수집용 `CAMERAS`(wrist/front/top)를 그대로 넘기면 `KeyError: 'observation.images.camera1'` 로 추론이 실패한다.
+> ⚠️ **카메라 키 정합**:
+> - SmolVLA fine-tune 체크포인트는 `camera1/2/3` 키를 기대한다(위 §6 `rename_map`). 추론 클라의 `--robot.cameras` 키를 `camera1/camera2/camera3` 로 맞추고, 물리 매핑(`camera1=wrist, camera2=front, camera3=top`)에 따라 index 를 배치한다. 수집용 `CAMERAS`(wrist/front/top)를 그대로 넘기면 `KeyError: 'observation.images.camera1'` 로 추론이 실패한다.
+> - GR00T N1.5 fine-tune 체크포인트는 `wrist/front/top` 키를 그대로 기대한다. `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 과 함께 `--robot.cameras` 키도 `wrist/front/top` 로 둔다.
 >
 > 🖥️ **rerun viewer**: 명령 앞에 `DISPLAY_DATA=true` 를 붙이면 shim 이 control loop 의 관측(카메라·state)·액션을 rerun 에 로깅해 로컬 뷰어를 띄운다. 원격 송출은 `DISPLAY_IP`/`DISPLAY_PORT` 추가.
 
@@ -406,6 +429,35 @@ uv run python ./docker/policy-client-shim.py \
 ```
 
 원격 정책 서버는 `--server_address=<server-ip>:8080` 으로 변경. async server 는 pickle deserialization RCE 위험 (CVE-2026-25874) 이 있으니 SSH 터널·방화벽·mTLS 래퍼 등으로 신뢰 범위를 제한할 것.
+
+GR00T N1.5 원격 서버에 붙는 최소 예:
+
+```bash
+export POLICY_SERVER_ADDRESS=<server_ip>:8080
+export POLICY_TYPE=groot
+export POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen
+export ACTIONS_PER_CHUNK=16
+
+uv run python ./docker/policy-client-shim.py \
+    --server_address=${POLICY_SERVER_ADDRESS} \
+    --policy_type=${POLICY_TYPE} \
+    --pretrained_name_or_path="${POLICY_REPO_ID}" \
+    --policy_device=cuda \
+    --client_device=cpu \
+    --task="${TASK}" \
+    --actions_per_chunk=${ACTIONS_PER_CHUNK} \
+    --chunk_size_threshold=${CHUNK_SIZE_THRESHOLD} \
+    --aggregate_fn_name=${AGGREGATE_FN_NAME} \
+    --fps=${POLICY_CLIENT_FPS} \
+    --robot.type="${ROBOT_TYPE}" \
+    --robot.port="${ROBOT_PORT}" \
+    --robot.id="${ROBOT_ID}" \
+    --robot.cameras="{
+        wrist: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        front: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    }"
+```
 
 ---
 

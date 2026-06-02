@@ -7,7 +7,7 @@
 # 있으며 본 이미지에서는 호출되지 않는다 (`lerobot[feetech]` 미설치).
 #
 # ■ 실행 모드 (CMD 첫 번째 인자)
-#   prepare-model : huggingface-cli download — 호스트 HF 캐시에 모델 받기
+#   prepare-model : hf download — 호스트 HF 캐시에 모델 받기
 #   policy-server : lerobot.async_inference.policy_server — gRPC 추론 서버
 #   train         : lerobot-train — Policy 학습 (인자 완전 위임, SmolVLA 등)
 #   eval          : lerobot-eval  — Policy 평가 (인자 완전 위임)
@@ -20,18 +20,18 @@
 #   prepare-model : MODEL_REPO_ID  MODEL_REVISION  PREPARE_MODEL_EXTRA_ARGS
 #   policy-server : POLICY_SERVER_HOST  POLICY_SERVER_PORT  POLICY_FPS
 #                   INFERENCE_LATENCY   OBS_QUEUE_TIMEOUT   POLICY_SERVER_EXTRA_ARGS
-#   train / eval  : 인자 완전 위임. .env 의 TRAIN_POLICY_TYPE / BASE_MODEL /
+#   train / eval  : 인자 완전 위임. .env 의 TRAIN_POLICY_TYPE /
 #                   POLICY_BASE_MODEL_PATH / DATASET / WANDB 변수를 셸 보간으로
 #                   채워 호출한다 (README §Policy 학습 참조).
 #                   NUM_WORKERS(기본 8) / COMPILE_MODEL / MIXED_PRECISION(bf16) /
 #                   NUM_PROCESSES(2 이상이면 accelerate launch DDP 전환) 로 속도 최적화.
-#   공통           : (HF 캐시는 명명 볼륨 lerobot_hf_cache → /root/.cache/huggingface)
+#   공통           : (HF 캐시는 명명 볼륨 lerobot_hf_cache → /workspace/.cache/huggingface)
 # =============================================================================
 set -euo pipefail
 
 # ── prepare-model 환경 변수 ─────────────────────────────────────────────────
-# 명명 볼륨 `lerobot_hf_cache` (= /root/.cache/huggingface) 에 모델 가중치를
-# 미리 받아 두는 모드. 같은 볼륨을 lerobot 과 policy-server 가
+# 명명 볼륨 `lerobot_hf_cache` (= /workspace/.cache/huggingface, HF_HOME) 에 모델
+# 가중치를 미리 받아 두는 모드. 같은 볼륨을 lerobot 과 policy-server 가
 # 공유하므로 한 번만 받으면 양쪽이 모두 사용한다.
 # 기본 다운로드 대상은 POLICY_REPO_ID(배포·추론 모델). 베이스를 받으려면
 # 위치 인자로 덮어쓴다: `prepare-model lerobot/smolvla_base`.
@@ -69,10 +69,12 @@ RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
 TRAIN_POLICY_TYPE="${TRAIN_POLICY_TYPE:-}"
-# BASE_MODEL: LeRobot checkpoint 형식의 fine-tune 출발점 (--policy.path). 추론 모델 아님.
-# LeRobot 0.5.1은 --policy.path 와 --policy.type 동시 지정이 불가하므로,
-# BASE_MODEL이 있으면 TRAIN_POLICY_TYPE은 전달하지 않는다.
-BASE_MODEL="${BASE_MODEL:-}"
+# POLICY_BASE_MODEL_PATH: fine-tune 출발 모델 (모든 정책 공통, 단일 변수).
+#   TRAIN_POLICY_TYPE 비움 → LeRobot 체크포인트로 간주 → --policy.path
+#                            (SmolVLA: lerobot/smolvla_base, 또는 직접 만든 LeRobot 체크포인트)
+#   TRAIN_POLICY_TYPE 설정 → 해당 타입 wrapper 로 native 포맷 베이스 적재 → --policy.base_model_path
+#                            (GR00T: groot + nvidia/GR00T-N1.5-3B)
+#   LeRobot 0.5.x parser 는 --policy.path 와 --policy.type 동시 지정을 금지한다.
 POLICY_BASE_MODEL_PATH="${POLICY_BASE_MODEL_PATH:-}"
 POLICY_TOKENIZER_ASSETS_REPO="${POLICY_TOKENIZER_ASSETS_REPO:-}"
 POLICY_EMBODIMENT_TAG="${POLICY_EMBODIMENT_TAG:-}"
@@ -81,10 +83,12 @@ POLICY_N_ACTION_STEPS="${POLICY_N_ACTION_STEPS:-}"
 DATASET_VIDEO_BACKEND="${DATASET_VIDEO_BACKEND:-}"
 POLICY_VIDEO_BACKEND="${POLICY_VIDEO_BACKEND:-}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 JOB_NAME="${JOB_NAME:-}"
+# OUTPUT_DIR 미설정 시 JOB_NAME(프로필) 기준으로 자동 파생.
+# (.env 는 OUTPUT_DIR 을 비워 두고 모델 프로필의 JOB_NAME 만 바꾸면 경로가 따라옴)
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/${JOB_NAME:-run}}"
 DEVICE="${DEVICE:-cuda}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
 # RENAME_MAP: 데이터셋 카메라 키 → 정책 입력 키 매핑 (JSON 문자열).
@@ -154,7 +158,7 @@ echo "========================================================"
 CMD="${1:-policy-server}"
 
 # GPU 가 필요 없는 모드(bash/python/info/prepare-model)는 체크를 건너뜀.
-# prepare-model 은 huggingface-cli download 만 실행하므로 GPU 불필요.
+# prepare-model 은 hf download 만 실행하므로 GPU 불필요.
 case "$CMD" in
   bash|shell|python|info|prepare-model) ;;
   *) check_gpu; check_lerobot ;;
@@ -165,13 +169,13 @@ case "$CMD" in
   # ────────────────────────────────────────────────────────────────────────────
   # prepare-model — HF 캐시 명명 볼륨에 모델 가중치 사전 다운로드
   #
-  # 명명 볼륨 `lerobot_hf_cache` 가 컨테이너의 `/root/.cache/huggingface` 로
+  # 명명 볼륨 `lerobot_hf_cache` 가 컨테이너의 `/workspace/.cache/huggingface` 로
   # 마운트되어 있어, 두 서비스(lerobot, policy-server) 가 동일 볼륨을
   # 공유한다. 한 번만 받으면 양쪽이 모두 사용한다. 다른 머신으로 옮기려면
   # `docker run ... -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
   #
   # [env var → CLI arg 매핑]
-  #   MODEL_REPO_ID            → huggingface-cli download <repo_id>
+  #   MODEL_REPO_ID            → hf download <repo_id>
   #   MODEL_REVISION           → --revision (기본 main)
   #   PREPARE_MODEL_EXTRA_ARGS → 추가 인자 (예: --include "*.safetensors")
   #
@@ -208,7 +212,7 @@ case "$CMD" in
     info "── Model Download 시작 ───────────────────────────"
     info "  Repo     → ${MODEL_REPO_ID}"
     info "  Revision → ${MODEL_REVISION}"
-    info "  Cache    → /root/.cache/huggingface  (명명 볼륨 lerobot_hf_cache)"
+    info "  Cache    → /workspace/.cache/huggingface  (명명 볼륨 lerobot_hf_cache)"
     exec hf download \
         "${MODEL_REPO_ID}" \
         --revision="${MODEL_REVISION}" \
@@ -380,12 +384,16 @@ case "$CMD" in
     [[ -n "${HF_DATASET_REPO_ID}" ]]     && TRAIN_ARGS+=("--dataset.repo_id=${HF_DATASET_REPO_ID}")
     [[ -n "${DATASET_ROOT}" ]]           && TRAIN_ARGS+=("--dataset.root=${DATASET_ROOT}")
     [[ -n "${DATASET_VIDEO_BACKEND}" ]]  && TRAIN_ARGS+=("--dataset.video_backend=${DATASET_VIDEO_BACKEND}")
-    if [[ -n "${BASE_MODEL}" ]]; then
-        TRAIN_ARGS+=("--policy.path=${BASE_MODEL}")
-    elif [[ -n "${TRAIN_POLICY_TYPE}" ]]; then
+    # 출발 모델 라우팅 (POLICY_BASE_MODEL_PATH 단일 변수, TRAIN_POLICY_TYPE 으로 분기):
+    #   타입 설정(GR00T 등 native 포맷 베이스) → --policy.type + --policy.base_model_path
+    #   타입 비움(LeRobot 체크포인트, SmolVLA 포함) → --policy.path
+    #   (LeRobot 0.5.x 는 --policy.path 와 --policy.type 동시 지정 금지)
+    if [[ -n "${TRAIN_POLICY_TYPE}" ]]; then
         TRAIN_ARGS+=("--policy.type=${TRAIN_POLICY_TYPE}")
+        [[ -n "${POLICY_BASE_MODEL_PATH}" ]] && TRAIN_ARGS+=("--policy.base_model_path=${POLICY_BASE_MODEL_PATH}")
+    elif [[ -n "${POLICY_BASE_MODEL_PATH}" ]]; then
+        TRAIN_ARGS+=("--policy.path=${POLICY_BASE_MODEL_PATH}")
     fi
-    [[ -n "${POLICY_BASE_MODEL_PATH}" ]]     && TRAIN_ARGS+=("--policy.base_model_path=${POLICY_BASE_MODEL_PATH}")
     [[ -n "${POLICY_TOKENIZER_ASSETS_REPO}" ]] && TRAIN_ARGS+=("--policy.tokenizer_assets_repo=${POLICY_TOKENIZER_ASSETS_REPO}")
     [[ -n "${POLICY_EMBODIMENT_TAG}" ]]      && TRAIN_ARGS+=("--policy.embodiment_tag=${POLICY_EMBODIMENT_TAG}")
     [[ -n "${POLICY_CHUNK_SIZE}" ]]          && TRAIN_ARGS+=("--policy.chunk_size=${POLICY_CHUNK_SIZE}")
@@ -400,13 +408,23 @@ case "$CMD" in
     [[ -n "${DEVICE}" ]]                     && TRAIN_ARGS+=("--policy.device=${DEVICE}")
     # ── 속도 최적화 인자 ──────────────────────────────────────────────────────
     TRAIN_ARGS+=("--num_workers=${NUM_WORKERS}")
-    [[ "${COMPILE_MODEL}" == "true" ]] && TRAIN_ARGS+=(
-        "--policy.compile_model=true"
-        "--policy.compile_mode=${COMPILE_MODE}"
-    )
+    # compile_model 은 정책별 config 필드다 (smolvla / diffusion / pi0 / pi05 보유).
+    # GR00T(GrootConfig) 에는 해당 필드가 없어 --policy.compile_model 전달 시
+    # draccus 가 "unrecognized arguments" 로 거부한다 → groot 면 건너뛴다.
+    if [[ "${COMPILE_MODEL}" == "true" ]]; then
+        if [[ "${TRAIN_POLICY_TYPE}" == "groot" ]]; then
+            warn "GR00T 정책은 --policy.compile_model 미지원 → compile 건너뜀 (COMPILE_MODEL=true 무시)"
+            COMPILE_MODEL="false"
+        else
+            TRAIN_ARGS+=(
+                "--policy.compile_model=true"
+                "--policy.compile_mode=${COMPILE_MODE}"
+            )
+        fi
+    fi
     [[ -n "${RENAME_MAP}" ]] && TRAIN_ARGS+=("--rename_map=${RENAME_MAP}")
     info "  Dataset      → ${HF_DATASET_REPO_ID:-<미설정>}"
-    info "  Policy       → train_type=${TRAIN_POLICY_TYPE:-<미설정>}  path=${BASE_MODEL:-none}  base_model_path=${POLICY_BASE_MODEL_PATH:-none}"
+    info "  Policy       → type=${TRAIN_POLICY_TYPE:-<checkpoint>}  base=${POLICY_BASE_MODEL_PATH:-none}"
     info "  Output       → ${OUTPUT_DIR:-<미설정>}"
     info "  Steps        → ${TRAIN_STEPS}  Batch → ${BATCH_SIZE}  Device → ${DEVICE}"
     info "  Workers      → ${NUM_WORKERS}"

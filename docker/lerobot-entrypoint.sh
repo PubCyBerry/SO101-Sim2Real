@@ -37,7 +37,7 @@
 #   viz     : HF_DATASET_REPO_ID  EPISODE_INDEX  VIZ_MODE  VIZ_WS_PORT
 #   policy-client: POLICY_SERVER_ADDRESS  POLICY_TYPE  POLICY_REPO_ID
 #                  POLICY_DEVICE  CLIENT_DEVICE  TASK  ACTIONS_PER_CHUNK
-#                  CHUNK_SIZE_THRESHOLD  AGGREGATE_FN_NAME  POLICY_CLIENT_FPS
+#                  CHUNK_SIZE_THRESHOLD  AGGREGATE_FN_NAME  POLICY_FPS(공유)
 #                  POLICY_CLIENT_EXTRA_ARGS
 # =============================================================================
 set -euo pipefail
@@ -126,8 +126,9 @@ ACTIONS_PER_CHUNK="${ACTIONS_PER_CHUNK:-50}"
 CHUNK_SIZE_THRESHOLD="${CHUNK_SIZE_THRESHOLD:-0.5}"
 # 청크 경계 부드럽게 합치는 함수 (weighted_average / latest / average ...)
 AGGREGATE_FN_NAME="${AGGREGATE_FN_NAME:-weighted_average}"
-# 컨트롤 루프 FPS (RECORD_FPS / 서버 POLICY_FPS 와 독립)
-POLICY_CLIENT_FPS="${POLICY_CLIENT_FPS:-30}"
+# 컨트롤 루프 FPS. 서버와 동일 제어율이어야 하므로 POLICY_FPS 를 공유한다.
+# (다르게 하려면 POLICY_CLIENT_EXTRA_ARGS=--fps=N 로 오버라이드)
+POLICY_CLIENT_FPS="${POLICY_FPS:-30}"
 # 추가 robot_client 인자 (예: --debug_visualize_queue_size=true)
 POLICY_CLIENT_EXTRA_ARGS="${POLICY_CLIENT_EXTRA_ARGS:-}"
 
@@ -381,6 +382,7 @@ case "$CMD" in
   #   --resume=true|false               : 기존 데이터셋에 이어서 수집 (기본 false)
   # ────────────────────────────────────────────────────────────────────────────
   record)
+    shift || true   # "record" 제거 → 나머지 인자("$@")를 lerobot-record 에 그대로 forward
     info "── 장치 점검 ─────────────────────────────────────"
     check_port   "$TELEOP_PORT"   "Leader Arm"
     check_port   "$ROBOT_PORT" "Follower Arm"
@@ -410,7 +412,8 @@ case "$CMD" in
       --dataset.reset_time_s=${RESET_TIME_S} \
       --dataset.num_episodes=${NUM_EPISODES} \
       --dataset.push_to_hub=${PUSH_TO_HUB} \
-      ${RECORD_EXTRA_ARGS}
+      ${RECORD_EXTRA_ARGS} \
+      "$@"
     ;;
 
   # ────────────────────────────────────────────────────────────────────────────
@@ -669,7 +672,7 @@ case "$CMD" in
   #   ACTIONS_PER_CHUNK        → --actions_per_chunk       (SmolVLA 기본 50)
   #   CHUNK_SIZE_THRESHOLD     → --chunk_size_threshold    (기본 0.5)
   #   AGGREGATE_FN_NAME        → --aggregate_fn_name       (weighted_average 등)
-  #   POLICY_CLIENT_FPS        → --fps                     (제어 FPS, 기본 30)
+  #   POLICY_FPS               → --fps                     (제어 FPS, 서버와 공유, 기본 30)
   #   ROBOT_TYPE/PORT/ID       → --robot.type/.port/.id
   #   WRIST_CAM_PORT/FRONT...  → --robot.cameras           (teleop 와 동일 매핑)
   #
