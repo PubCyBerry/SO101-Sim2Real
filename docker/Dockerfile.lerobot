@@ -86,23 +86,9 @@ ENV VIRTUAL_ENV=/opt/venv \
 # panic 이 발생. hard 한도(1048576) 범위 안에서 soft 를 끌어올려 회피.
 # 자세한 내용은 docs/TROUBLESHOOTING.md 의 "uv python install Too many open files"
 # 항목 참고.
-# ① 크리티컬 작업 — 실패 시 빌드가 실제로 중단되어야 함
 RUN ulimit -Sn 65536 \
     && uv python install 3.11 \
     && uv venv --python 3.11 ${VIRTUAL_ENV}
-
-# ② stdlib 불필요 모듈 제거 (클린업 — 실패해도 빌드 계속)
-# 이전 RUN 과 분리함으로써 ①의 실패가 '; true' 에 의해 무시되는 버그를 방지.
-#   test/      : CPython 테스트 스위트 (~30 MB)
-#   idlelib/   : IDLE 에디터 (~3 MB)
-#   tkinter/   : GUI 툴킷 (컨테이너에 Tcl/Tk 미설치) (~1 MB)
-#   turtledemo/: Turtle 데모
-#   lib2to3/   : Python 2→3 변환 도구 (3.11에서 deprecated) (~3 MB)
-#   ensurepip/ : pip 번들러 (uv 사용으로 불필요) (~3 MB)
-RUN find /root/.local/share/uv/python -type d \
-        \( -name test -o -name idlelib -o -name tkinter \
-           -o -name turtledemo -o -name lib2to3 -o -name ensurepip \) \
-        -maxdepth 8 | xargs rm -rf 2>/dev/null; true
 
 ENV PATH="${VIRTUAL_ENV}/bin:$PATH"
 
@@ -166,17 +152,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
            --group teleop \
            --group async \
            --no-install-project
-
-# venv 내 런타임 불필요 파일 제거 → COPY --from 전송량 감소:
-#   tests/ / test/ / benchmarks/ : 패키지 테스트 디렉터리
-#   *.pyi                         : 타입 스텁 (mypy/pyright 전용, Python 런타임 미사용)
-#   dist-info/RECORD              : pip 설치 매니페스트 (런타임 불필요, 패키지당 수십 KB)
-RUN sp=/opt/venv/lib/python3.11/site-packages; \
-    find "$sp" -maxdepth 2 -type d \( -name tests -o -name test -o -name benchmarks \) \
-        | xargs rm -rf 2>/dev/null; \
-    find "$sp" -name "*.pyi" -delete 2>/dev/null; \
-    find "$sp" -path "*/dist-info/RECORD" -delete 2>/dev/null; \
-    true
 
 
 # ── Stage 6: Slim runtime (이미지 크기 최적화) ──────────────────────────────
