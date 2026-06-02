@@ -450,6 +450,8 @@ ss -ltnp | grep ':8080'
 ```
 
 > GR00T 는 현재 `policy-server-rtc` 에서 RTC guidance 가 적용되지 않는다. `GrootPolicy` 가 `init_rtc_processor` 를 지원하지 않아 표준 추론으로 fallback 된다. 불필요한 per-chunk 분기와 로그를 피하려면 `policy-server` 를 쓴다.
+>
+> **modality.json / 2-카메라 제약은 이 경로에 없다.** 그건 NVIDIA `Isaac-GR00T` 네이티브 학습(`gr00t_finetune.py` + `--data-config so100_dualcam`)의 요구사항이고, 본 레포는 LeRobot 의 `GrootPolicy` 래퍼(`--policy.type=groot`)를 쓴다. lerobot 은 데이터셋 `input_features` 의 VISUAL 피처를 동적으로 읽으므로 카메라 개수(≥1)·이름(wrist/front/top 등)에 제약이 없고 `modality.json` 도 불필요하다. (README §Reference 의 NVIDIA 블로그는 네이티브 경로 기준이라 그대로 적용되지 않는다.)
 
 ### 클라이언트 연결
 
@@ -507,7 +509,7 @@ POLICY_SERVER_ADDRESS=127.0.0.1:8080 \
 
 앞 단계(2~11)를 엮은 end-to-end 시나리오.
 
-- **SmolVLA**: backbone canonical 입력 키가 `camera1/2/3` 이다. SO-101 데이터셋(`wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `camera1/camera2/camera3` 가 된다. 추론 클라이언트 카메라 key 도 `camera1/2/3` 로 맞춘다.
+- **SmolVLA**: `lerobot/smolvla_base` config 가 입력 키로 `camera1/2/3` 을 명시하므로, SO-101 데이터셋(`wrist/front/top`)을 매핑하는 `--rename_map` 이 **필수**다(자동 생성 아님 — 없으면 학습이 feature mismatch 로 실패). `env/smolvla.env` 의 `RENAME_MAP` 이 논문 표준 슬롯 순서(`top→camera1, wrist→camera2, front→camera3`)로 설정되어 있다. 추론 클라이언트 카메라 key 도 `camera1/2/3` 로 맞추되 물리 매핑(`camera1=top, camera2=wrist, camera3=front`)을 학습과 동일하게 유지한다(SmolVLA 는 순서로 카메라를 구분).
 - **GR00T N1.5**: fine-tune 결과 checkpoint 의 `input_features` 는 `observation.images.wrist/front/top` 그대로다. 추론 클라이언트도 `wrist/front/top` key 를 그대로 쓴다. GR00T action horizon 은 16 이므로 `POLICY_CHUNK_SIZE=16`, `POLICY_N_ACTION_STEPS=16`, `ACTIONS_PER_CHUNK=16` 을 맞춘다.
 
 **1) 데이터셋 수집** (Windows 워크스테이션 `lerobot` 컨테이너):
@@ -598,6 +600,6 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
-fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2/3` 다. 추론 클라의 카메라 키를 `camera1/camera2/camera3` 로 맞춘다 (물리 매핑 `camera1=wrist, camera2=front, camera3=top`). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.
+fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2/3` 다. 추론 클라의 카메라 키를 `camera1/camera2/camera3` 로 맞추되 물리 매핑은 학습 `rename_map` 과 동일하게 `camera1=top, camera2=wrist, camera3=front` (논문 표준 슬롯). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.
 
 GR00T fine-tuned checkpoint 는 `wrist/front/top` key 를 그대로 기대한다. `POLICY_TYPE=groot`, `ACTIONS_PER_CHUNK=16`, `POLICY_REPO_ID=${HF_USER}/so101_groot_n15_pick_pen` 로 맞춘 뒤 같은 `policy-client` 모드를 사용한다.

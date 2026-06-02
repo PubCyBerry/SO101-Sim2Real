@@ -1019,7 +1019,7 @@ ERROR y_server.py:266 Error in StreamActions: 'observation.images.camera1'
 
 ### 원인
 
-SmolVLA 는 backbone(SmolVLM)의 canonical 이미지 입력 키가 `camera1/camera2/camera3` 다. SO-101 데이터셋(카메라 키 `wrist/front/top`)으로 fine-tune 하면 lerobot 이 `rename_map`(`wrist→camera1, front→camera2, top→camera3`)을 자동 생성하고, 결과 체크포인트의 `input_features` 는 `wrist/front/top` 이 아니라 **`camera1/camera2/camera3`** 로 굳는다.
+`lerobot/smolvla_base` 의 config 가 입력 키로 `camera1/camera2/camera3` 을 명시한다. `--policy.path` 로 fine-tune 하면 `make_policy` 가 pretrained 의 `input_features` 를 데이터셋 키로 덮어쓰지 않으므로(자동 rename 아님), SO-101 데이터셋(`wrist/front/top`)을 매핑하는 `--rename_map` 을 직접 줘야 한다(`env/smolvla.env` 의 `RENAME_MAP`, 논문 표준 순서 `top→camera1, wrist→camera2, front→camera3`). 누락 시 학습 단계에서 feature mismatch 로 실패하고, 결과 체크포인트의 `input_features` 는 **`camera1/camera2/camera3`** 로 굳는다.
 
 한편 async `robot_client`(0.4.4)는 `RemotePolicyConfig` 의 `rename_map` 을 채우지 않아(빈 dict) 서버 측 rename 이 무력화된다. 추론 파이프라인 1단계(`helpers.py:prepare_raw_observation`)가 클라이언트가 보낸 카메라 키로 `policy_image_features[key]` 를 직접 조회하는데, 이 조회는 preprocessor(rename 단계)보다 **먼저** 실행된다. 따라서 클라가 보낸 카메라 키(`--robot.cameras` 의 dict key)와 모델 `input_features` 키가 글자 그대로 일치하지 않으면 `KeyError`. 수집용 `wrist/front/top` 키를 그대로 추론에 넘기면 모델이 기대하는 `camera1` 을 못 찾는다.
 
@@ -1027,13 +1027,13 @@ SmolVLA 는 backbone(SmolVLM)의 canonical 이미지 입력 키가 `camera1/came
 
 ### 해결 방법
 
-1. 추론 클라의 `--robot.cameras` **키를 모델 `input_features` 와 일치**시킨다. SmolVLA fine-tune 이면 `camera1/camera2/camera3`, 물리 매핑은 `rename_map` 대로 `camera1=wrist, camera2=front, camera3=top`:
+1. 추론 클라의 `--robot.cameras` **키를 모델 `input_features` 와 일치**시킨다. SmolVLA fine-tune 이면 `camera1/camera2/camera3`, 물리 매핑은 `rename_map` 대로 `camera1=top, camera2=wrist, camera3=front`:
 
 ```bash
 --robot.cameras="{
-    camera1: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
-    camera2: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
-    camera3: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera1: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera2: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera3: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
 }"
 ```
 

@@ -325,7 +325,7 @@ uv run hf download lerobot/smolvla_base
 
 ### Fine-tune
 
-SO-101 카메라 키 (`wrist` / `front` / `top`) 가 들어간 데이터셋으로 fine-tune 한다. 단 **SmolVLA 는 backbone 의 canonical 입력 키(`camera1/2/3`)로 자동 rename** 하므로 결과 체크포인트의 `input_features` 는 `wrist/front/top` 이 아니라 `camera1/camera2/camera3` 가 된다 (train_config 의 `rename_map`: `wrist→camera1, front→camera2, top→camera3`). 추론(policy-client) 시 카메라 키를 여기에 맞춰야 한다 ([§7](#7-async-policy-server--client)). Windows A4000 은 작은 batch 부터:
+SO-101 카메라 키 (`wrist` / `front` / `top`) 가 들어간 데이터셋으로 fine-tune 한다. **`lerobot/smolvla_base` 의 config 가 입력 키로 `observation.images.camera1/2/3` 를 명시**하고 `--policy.path` 로 fine-tune 하면 이 키가 유지되므로(자동 rename 아님), 데이터셋 키를 camera1/2/3 으로 매핑하는 `--rename_map` 이 **필수**다 (없으면 feature mismatch 로 학습 실패). 슬롯 순서는 SmolVLA 논문 표준(OBS_IMAGE 1=top, 2=wrist, 3=side/front)에 맞춰 `top→camera1, wrist→camera2, front→camera3`. SmolVLA 는 카메라를 이름이 아닌 **입력 순서**로 구분하므로 학습 rename 순서와 추론 클라의 camera1/2/3 물리 매핑을 반드시 동일하게 유지한다([§7](#7-async-policy-server--client)). Windows A4000 은 작은 batch 부터:
 
 ```bash
 export ACCELERATE_MIXED_PRECISION="bf16"
@@ -342,8 +342,11 @@ uv run lerobot-train \
     --batch_size=${BATCH_SIZE} \
     --job_name=${JOB_NAME} \
     --num_workers=${NUM_WORKERS} \
-    --wandb.enable=${WANDB_ENABLE}
+    --wandb.enable=${WANDB_ENABLE} \
+    --rename_map='{"observation.images.top":"observation.images.camera1","observation.images.wrist":"observation.images.camera2","observation.images.front":"observation.images.camera3"}'
 ```
+
+> `--rename_map` 필수: `smolvla_base` 가 `camera1/2/3` 입력 키를 기대하므로 데이터셋 키(top/wrist/front)를 매핑한다(슬롯 순서=논문 표준). 추론 클라의 카메라 키 순서도 이와 동일하게 맞춘다([§7](#7-async-policy-server--client)).
 
 W&B 미사용 시 `--wandb.enable=false`, Hub push 미사용 시 `--policy.push_to_hub=false`. Linux 학습 서버 (RTX PRO 5000 Blackwell 48 GB) 에서 멀티 GPU 가 필요하면 [경로 B](PATH_B_DOCKER.md) 의 docker 학습 또는 별도 Linux native 환경에서 `accelerate launch` 구성.
 
@@ -401,8 +404,8 @@ uv run python -m lerobot.async_inference.policy_server \
 LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 회귀가 있어 본 저장소의 shim 을 먼저 거친다.
 
 > ⚠️ **카메라 키 정합**:
-> - SmolVLA fine-tune 체크포인트는 `camera1/2/3` 키를 기대한다(위 §6 `rename_map`). 추론 클라의 `--robot.cameras` 키를 `camera1/camera2/camera3` 로 맞추고, 물리 매핑(`camera1=wrist, camera2=front, camera3=top`)에 따라 index 를 배치한다. 수집용 `CAMERAS`(wrist/front/top)를 그대로 넘기면 `KeyError: 'observation.images.camera1'` 로 추론이 실패한다.
-> - GR00T N1.5 fine-tune 체크포인트는 `wrist/front/top` 키를 그대로 기대한다. `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 과 함께 `--robot.cameras` 키도 `wrist/front/top` 로 둔다.
+> - SmolVLA fine-tune 체크포인트는 `camera1/2/3` 키를 기대한다(위 §6 `rename_map`). 추론 클라의 `--robot.cameras` 키를 `camera1/camera2/camera3` 로 맞추고, 물리 매핑(`camera1=top, camera2=wrist, camera3=front`)에 따라 index 를 배치한다. 수집용 `CAMERAS`(wrist/front/top)를 그대로 넘기면 `KeyError: 'observation.images.camera1'` 로 추론이 실패한다.
+> - GR00T N1.5 fine-tune 체크포인트는 `wrist/front/top` 키를 그대로 기대한다. `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 과 함께 `--robot.cameras` 키도 `top/wrist/front` 로 둔다.
 >
 > 🖥️ **rerun viewer**: 명령 앞에 `DISPLAY_DATA=true` 를 붙이면 shim 이 control loop 의 관측(카메라·state)·액션을 rerun 에 로깅해 로컬 뷰어를 띄운다. 원격 송출은 `DISPLAY_IP`/`DISPLAY_PORT` 추가.
 
@@ -422,9 +425,9 @@ uv run python ./docker/policy-client-shim.py \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --robot.cameras="{
-        camera1: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
-        camera2: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
-        camera3: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        camera1: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        camera2: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+        camera3: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
     }"
 ```
 
@@ -453,9 +456,9 @@ uv run python ./docker/policy-client-shim.py \
     --robot.port="${ROBOT_PORT}" \
     --robot.id="${ROBOT_ID}" \
     --robot.cameras="{
+        top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
         wrist: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
         front: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
-        top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
     }"
 ```
 
