@@ -12,6 +12,17 @@
 
 ---
 
+## 작업 인계 (2026-06-03 — TA.2 scene spawn/physics 검증 완료)
+
+- **목표**: TA.2 — 펜 4개와 펜컵이 reset 100회 동안 의도 영역(펜=타원, 펜컵=호)에 100% 들어오고, settle 후 관통·바운스 없이 안정적인지 기계 검증한다.
+- **상태**: 완료. 다음 actionable task는 TA.3(카메라 3대 extrinsic/intrinsic 실기 정합, 480×640@30 렌더 shape/FOV 점검).
+- **완료한 일**: `scripts/environments/scene_physics_smoke.py` 추가. 순수 Isaac Lab `RigidObjectCfg(spawn=None)`가 USD authored pose 대신 원점 default를 잡는 문제를 `RigidObjectCfg.InitialStateCfg`로 보정. 펜 4개 USD는 visual collider를 끄고 invisible `CollisionBox` physics proxy만 사용하도록 분리했으며 damping/sleep threshold를 reset 안정성에 맞게 높임. `.usda` 수정 후 `.usd` 바이너리도 재-export.
+- **검증 결과**: 서버 `/DISK1/so101-sim2real/work/ta.2/repo` Isaac venv에서 `scene_physics_smoke.py --resets 100 --settle-steps 30 --num_envs 1 --device cuda:0` 통과(spawn ellipse/arc pass, y min spawn 0.09713 m, y min settled 0.09732 m, max z drop 0.001 m, max xy drift 0.04419 m, max lin vel 0.0098 m/s, max ang vel 1.13728 rad/s). `env_smoke.py --steps 500` 통과(action/policy obs `[1,6]`, resets 0). `drive_response_smoke.py` 재통과(hold tail RMS vel 0.0, step final err max 0.01882).
+- **기록**: `docs/TROUBLESHOOTING.md`에 `RigidObject` reset sampling 원점 밀림과 원형 pen collider rolling 실패/해결 항목 추가.
+- **주의**: Claude worker 호출 allowlist에는 `PowerShell`을 넣지 않는다.
+
+---
+
 ## 작업 인계 (2026-06-03 — TA.1 SO-101 PD drive tuning 완료)
 
 - **목표**: TA.1 — SO-101 articulation의 position PD drive를 Feetech STS3215 근사로 튜닝하고, 정적 hold 및 step 응답 무진동 검증을 통과시킨다.

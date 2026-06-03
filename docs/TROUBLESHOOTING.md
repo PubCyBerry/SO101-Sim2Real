@@ -16,6 +16,8 @@
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [Isaac Lab pip 전환 후 `import sim_to_real` 실패](#isaac-lab-pip-전환-후-import-sim_to_real-실패)
 - [Isaac Lab SO-101 hold smoke에서 관절 속도 잔류](#isaac-lab-so-101-hold-smoke에서-관절-속도-잔류)
+- [Isaac Lab `RigidObject` reset sampling이 원점 기준으로 밀림](#isaac-lab-rigidobject-reset-sampling이-원점-기준으로-밀림)
+- [Isaac Lab reset 후 원형 펜 collider가 굴러 scene physics smoke 실패](#isaac-lab-reset-후-원형-펜-collider가-굴러-scene-physics-smoke-실패)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [SmolVLA fine-tune 추론 시 카메라 키 불일치 (KeyError: observation.images.camera1)](#smolvla-fine-tune-추론-시-카메라-키-불일치-keyerror-observationimagescamera1)
 - [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
@@ -1086,6 +1088,136 @@ UV_CACHE_DIR=/DISK1/so101-sim2real/cache/uv \
   }
 }
 ```
+
+---
+
+## Isaac Lab `RigidObject` reset sampling이 원점 기준으로 밀림
+
+**현상**: TA.2 `scene_physics_smoke.py`에서 펜과 펜컵이 USD authored 위치가 아니라 origin 주변으로 reset 된다. 펜 spawn 타원과 펜컵 호 sampling 로직은 실행되지만 기준점 자체가 `(0, 0)`이라 y 분리와 영역 검증이 실패한다.
+
+**오류 메시지**:
+
+```json
+{
+  "config": {
+    "default_xy_by_object": {
+      "PenWhite": [0.0, 0.0],
+      "PenGray": [0.0, 0.0],
+      "PenBlack": [0.0, 0.0],
+      "PenBlue": [0.0, 0.0],
+      "PenCup": [0.0, 0.0]
+    }
+  },
+  "y_separation": {
+    "min_spawn_observed_m": -0.04,
+    "pass": false
+  }
+}
+```
+
+### 원인
+
+순수 Isaac Lab `RigidObjectCfg(spawn=None)`로 기존 USD prim을 감쌀 때 `init_state`를 명시하지 않으면 `RigidObject.data.default_root_state`가 USD authored transform 대신 원점 pose로 잡힐 수 있다. reset event의 pose randomization은 `default_root_state` 기준으로 offset을 적용하므로 모든 펜과 펜컵 sampling 기준이 origin으로 밀린다.
+
+### 해결 방법
+
+각 펜과 펜컵 `RigidObjectCfg`에 USD authored world-frame pose와 yaw를 `RigidObjectCfg.InitialStateCfg`로 명시한다.
+
+```python
+PenWhite: RigidObjectCfg = RigidObjectCfg(
+    prim_path="{ENV_REGEX_NS}/Scene/PenWhite",
+    spawn=None,
+    init_state=RigidObjectCfg.InitialStateCfg(
+        pos=(2.05, -0.35, 0.9347),
+        rot=_yaw_quat(25.0),
+    ),
+)
+```
+
+이 값은 scene USD의 펜·펜컵 기본 배치를 바꿀 때 함께 갱신한다.
+
+### 확인 방법
+
+서버 Isaac venv에서 TA.2 smoke를 실행한다.
+
+```bash
+cd /DISK1/so101-sim2real/work/ta.2/repo
+UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac \
+UV_CACHE_DIR=/DISK1/so101-sim2real/cache/uv \
+  /home/konan147/.local/bin/uv run python scripts/environments/scene_physics_smoke.py \
+    --task SimToReal-SO101-PickPen-v0 --resets 100 --settle-steps 30 --num_envs 1 --device cuda:0
+```
+
+`default_xy_by_object`가 `PenWhite=[2.05,-0.35]`, `PenCup=[2.2,-0.17]` 같은 scene 좌표로 출력되고 `spawn_ellipse.pass`, `spawn_arc.pass`, `y_separation.pass`가 모두 `true`이면 정상이다.
+
+---
+
+## Isaac Lab reset 후 원형 펜 collider가 굴러 scene physics smoke 실패
+
+**현상**: 펜 spawn 영역은 맞지만 reset 후 settle 단계에서 펜이 굴러가거나 튀어 `scene_physics_smoke.py`가 실패한다. 일부 run에서는 z 하강, y 분리, 속도 조건이 동시에 깨진다.
+
+**오류 메시지**:
+
+```json
+{
+  "status": "failed",
+  "y_separation": {
+    "min_settled_observed_m": -0.7,
+    "pass": false
+  },
+  "physics_stability": {
+    "max_z_drop_m": 1.10865,
+    "max_lin_vel_ms": 3.2,
+    "vel_triggered": true,
+    "pass": false
+  }
+}
+```
+
+### 원인
+
+동적 펜의 collision을 visual과 같은 Capsule/Cylinder/Clip 조합으로 두면 작은 원형 물체가 reset 직후 마우스패드 접촉에서 쉽게 rolling/sliding 에너지를 얻는다. Clip 같은 비대칭 collider는 접촉 impulse를 더 불안정하게 만들 수 있다. 단순히 damping만 높이면 한 run은 통과해도 stochastic reset에서 다시 굴러 실패한다.
+
+### 해결 방법
+
+펜 visual과 physics proxy를 분리한다. `Barrel`, `Grip`, `BackPlug`, `Clip`의 `physics:collisionEnabled`를 끄고, root 중심에 얇은 invisible `CollisionBox` 하나만 collision으로 둔다. 동시에 pen rigid body damping/sleep threshold를 reset 안정성에 맞게 높인다.
+
+```usda
+float physxRigidBody:angularDamping = 100.0
+float physxRigidBody:linearDamping = 5.0
+float physxRigidBody:sleepThreshold = 0.05
+float physxRigidBody:stabilizationThreshold = 0.05
+
+def Cube "CollisionBox" (
+    prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
+)
+{
+    token visibility = "invisible"
+    bool physics:collisionEnabled = 1
+    float3 xformOp:scale = (0.0154, 0.118, 0.0154)
+}
+```
+
+`.usda`를 수정한 뒤 scene이 참조하는 `.usd` 바이너리를 다시 export한다.
+
+### 확인 방법
+
+TA.2 smoke에서 `physics_stability.pass=true`이고 다음 수준의 여유가 있으면 reset 안정성은 통과다.
+
+```json
+{
+  "status": "passed",
+  "physics_stability": {
+    "max_z_drop_m": 0.001,
+    "max_xy_drift_m": 0.04419,
+    "max_lin_vel_ms": 0.0098,
+    "max_ang_vel_rads": 1.13728,
+    "pass": true
+  }
+}
+```
+
+회귀 확인으로 `env_smoke.py --steps 500`와 `drive_response_smoke.py`도 이어서 실행한다.
 
 ---
 

@@ -23,7 +23,7 @@
 ## Phase A — 씬·드라이브·카메라 정합
 
 - [x] **TA.1** SO-101 articulation position PD 드라이브 튜닝 (Feetech STS3215 근사: stiffness/damping/속도·토크 한계) | machine:any | dep:T0.3 | verify:정적 hold 안정 + step 응답 진동 없음 | status:done
-- [ ] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (**고속 사전검증: `scripts/validate_scene_physics.py` via ovphysx — Isaac 부팅 없이 step+pose**, 도구 가용 시) | status:todo
+- [x] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (`scene_physics_smoke.py`: spawn ellipse/arc/y separation/settle stability 모두 pass) | status:done
 - [ ] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:렌더 프레임 shape (480,640,3)×3 + FOV 점검 | status:todo
 
 ## Phase B — RL 전문가 (state-based)
@@ -60,6 +60,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-03] TA.2 done — RigidObject init_state 명시로 reset sampling 기준 원점 밀림 수정, 펜 visual/collision 분리(invisible CollisionBox)로 rolling/sliding 안정화, 서버 100-reset scene physics + env 500-step + drive smoke 통과 / 다음: TA.3
+- [2026-06-03] TA.2 in_progress — 펜/펜컵 reset sampling 영역과 settle 후 관통·바운스 검증 착수
 - [2026-06-03] TA.1 done — fixed root + Feetech STS3215 근사 PD/limit + velocity solver 설정, 서버 drive smoke 통과(hold tail RMS 0.0, step final err max 0.01882) 및 env 500-step 통과 / 다음: TA.2
 - [2026-06-03] T0.3 done — 순수 Isaac Lab ManagerBased env 재작성, sim-critical `leisaac` refs 0, 서버 `env_smoke.py` 500-step 통과(action/policy obs `[1,6]`) / 다음: TA.1
 - [2026-06-03] T0.2 done — 서버 user-local `uv 0.11.18`, `isaacsim[all,extscache]==5.1.0` + `isaaclab[all,isaacsim]==2.3.2`, `/DISK1/so101-sim2real/venvs/isaac` sync(19G), `leisaac` refs 0, 서버 import smoke 통과, Claude allowlist에서 `PowerShell` 제거 / 다음: T0.3

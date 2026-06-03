@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -45,6 +47,20 @@ SO101_JOINT_ORDER: list[str] = [
 _ROBOT_POS = (2.2, -0.61, 0.92)
 # Identity rotation; articulation USD already faces the desk objects.
 _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
+
+
+def _yaw_quat(degrees: float) -> tuple[float, float, float, float]:
+    half = math.radians(degrees) * 0.5
+    return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+_PEN_INIT_STATES = {
+    "PenWhite": ((2.05, -0.35, 0.9347), _yaw_quat(25.0)),
+    "PenGray": ((2.35, -0.35, 0.9347), _yaw_quat(-30.0)),
+    "PenBlack": ((2.25, -0.31, 0.9347), _yaw_quat(60.0)),
+    "PenBlue": ((2.15, -0.31, 0.9347), _yaw_quat(-10.0)),
+}
+_PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.926), _yaw_quat(0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -110,22 +126,42 @@ class PickPenSceneCfg(InteractiveSceneCfg):
     PenWhite: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Scene/PenWhite",
         spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=_PEN_INIT_STATES["PenWhite"][0],
+            rot=_PEN_INIT_STATES["PenWhite"][1],
+        ),
     )
     PenGray: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Scene/PenGray",
         spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=_PEN_INIT_STATES["PenGray"][0],
+            rot=_PEN_INIT_STATES["PenGray"][1],
+        ),
     )
     PenBlack: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Scene/PenBlack",
         spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=_PEN_INIT_STATES["PenBlack"][0],
+            rot=_PEN_INIT_STATES["PenBlack"][1],
+        ),
     )
     PenBlue: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Scene/PenBlue",
         spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=_PEN_INIT_STATES["PenBlue"][0],
+            rot=_PEN_INIT_STATES["PenBlue"][1],
+        ),
     )
     PenCup: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Scene/PenCup",
         spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=_PEN_CUP_INIT_STATE[0],
+            rot=_PEN_CUP_INIT_STATE[1],
+        ),
     )
 
 

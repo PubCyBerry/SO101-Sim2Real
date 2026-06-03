@@ -14,10 +14,10 @@ def Xform "PenBlue" (
     bool physics:rigidBodyEnabled = 1
     bool physxRigidBody:disableGravity = 0
     bool physxRigidBody:enableCCD = 1
-    float physxRigidBody:angularDamping = 5.0
-    float physxRigidBody:linearDamping = 0.5
-    float physxRigidBody:sleepThreshold = 0.0005
-    float physxRigidBody:stabilizationThreshold = 0.0005
+    float physxRigidBody:angularDamping = 100.0
+    float physxRigidBody:linearDamping = 5.0
+    float physxRigidBody:sleepThreshold = 0.05
+    float physxRigidBody:stabilizationThreshold = 0.05
     int physxRigidBody:solverPositionIterationCount = 16
     int physxRigidBody:solverVelocityIterationCount = 4
     def Scope "Looks"
@@ -75,7 +75,7 @@ def Xform "PenBlue" (
     {
         token axis = "Y"
         double height = 0.118
-        bool physics:collisionEnabled = 1
+        bool physics:collisionEnabled = 0
         float physxCollision:contactOffset = 0.0015
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
@@ -84,13 +84,29 @@ def Xform "PenBlue" (
         rel material:binding = </PenBlue/Looks/BluePlastic>
         rel material:binding:physics = </PenBlue/Looks/PenGripPhysics>
     }
+    def Cube "CollisionBox" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
+    )
+    {
+        token visibility = "invisible"
+        bool physics:collisionEnabled = 1
+        float physxCollision:contactOffset = 0.0015
+        float physxCollision:restOffset = 0
+        float physxCollision:torsionalPatchRadius = 0.004
+        float physxCollision:minTorsionalPatchRadius = 0.001
+        double size = 1
+        rel material:binding:physics = </PenBlue/Looks/PenGripPhysics>
+        double3 xformOp:translate = (0, 0, 0)
+        float3 xformOp:scale = (0.0154, 0.118, 0.0154)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
     def Cylinder "Grip" (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
     )
     {
         token axis = "Y"
         double height = 0.025
-        bool physics:collisionEnabled = 1
+        bool physics:collisionEnabled = 0
         float physxCollision:contactOffset = 0.0015
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
@@ -107,7 +123,7 @@ def Xform "PenBlue" (
     {
         token axis = "Y"
         double height = 0.009
-        bool physics:collisionEnabled = 1
+        bool physics:collisionEnabled = 0
         float physxCollision:contactOffset = 0.0015
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
@@ -149,7 +165,7 @@ def Xform "PenBlue" (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
     )
     {
-        bool physics:collisionEnabled = 1
+        bool physics:collisionEnabled = 0
         float physxCollision:contactOffset = 0.0015
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
