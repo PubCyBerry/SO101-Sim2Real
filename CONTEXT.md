@@ -12,6 +12,17 @@
 
 ---
 
+## 작업 인계 (2026-06-03 — TA.1 SO-101 PD drive tuning 완료)
+
+- **목표**: TA.1 — SO-101 articulation의 position PD drive를 Feetech STS3215 근사로 튜닝하고, 정적 hold 및 step 응답 무진동 검증을 통과시킨다.
+- **상태**: 완료. 다음 actionable task는 TA.2(펜 4개·펜컵 spawn 영역·물리 검증).
+- **완료한 일**: SO-101 robot spawn에 `ArticulationRootPropertiesCfg(fix_root_link=True, solver_position_iteration_count=8, solver_velocity_iteration_count=1)` 적용. actuator를 arm/gripper로 분리하고 Isaac Lab 2.3.2의 `effort_limit_sim`/`velocity_limit_sim` 사용. PhysX `enable_external_forces_every_iteration=True`, render interval=decimation 설정. 신규 `scripts/environments/drive_response_smoke.py` 추가.
+- **검증 결과**: 로컬 `py_compile` 통과, deprecated actuator field 잔재 0건. 서버 `/DISK1` Isaac venv에서 `drive_response_smoke.py --num_envs 1 --device cuda:0` 통과(hold tail max pos 0.02102 rad, tail RMS vel 0.0 rad/s, step final err max 0.01882 rad, overshoot max 0.01882 rad). 서버 `env_smoke.py --steps 500 --num_envs 1 --device cuda:0` 통과(action/policy obs `[1,6]`, resets 0).
+- **기록**: `docs/TROUBLESHOOTING.md`에 fixed-root 누락으로 hold velocity가 남는 사례를 추가.
+- **주의**: Claude worker 호출 allowlist에는 `PowerShell`을 넣지 않는다.
+
+---
+
 ## 작업 인계 (2026-06-03 — T0.3 de-leisaac sim-critical 완료)
 
 - **목표**: T0.3 — `src/sim_to_real/tasks/pick_pen`를 순수 Isaac Lab `ManagerBasedRLEnvCfg` 기반으로 재작성하고 sim-critical `leisaac` import를 0건으로 만든다.

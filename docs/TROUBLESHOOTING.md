@@ -15,6 +15,7 @@
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [Isaac Lab pip 전환 후 `import sim_to_real` 실패](#isaac-lab-pip-전환-후-import-sim_to_real-실패)
+- [Isaac Lab SO-101 hold smoke에서 관절 속도 잔류](#isaac-lab-so-101-hold-smoke에서-관절-속도-잔류)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [SmolVLA fine-tune 추론 시 카메라 키 불일치 (KeyError: observation.images.camera1)](#smolvla-fine-tune-추론-시-카메라-키-불일치-keyerror-observationimagescamera1)
 - [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
@@ -985,6 +986,106 @@ ok
 ```
 
 `SimulationApp` 기반 headless import도 exit code 0이면 통과다. 대량의 GLFW/display warning은 headless 서버에서 흔하며, `sim_to_real-ok` 출력과 정상 종료 여부를 기준으로 판단한다.
+
+---
+
+## Isaac Lab SO-101 hold smoke에서 관절 속도 잔류
+
+**현상**: TA.1 drive response smoke에서 zero-action hold 중 관절 위치 편차는 작지만 관절 속도가 계속 남아 `hold.ok=false` 가 된다. stiffness/damping/effort limit을 올려도 수치가 거의 줄지 않는다.
+
+**오류 메시지**:
+
+```json
+{
+  "status": "failed",
+  "hold": {
+    "tail_max_abs_pos_rad": 0.03321,
+    "tail_rms_vel_rads": 0.10544,
+    "final_abs_vel_rads": 0.24793,
+    "ok": false
+  },
+  "step": {
+    "final_err_max_rad": 0.03927,
+    "overshoot_max_rad": 0.0394,
+    "ok": true
+  }
+}
+```
+
+동시에 Isaac Lab이 다음 경고를 낼 수 있다.
+
+```text
+WARNING: The `enable_external_forces_every_iteration` parameter in the PhysxCfg is set to False.
+If you are experiencing noisy velocities, consider enabling this flag.
+```
+
+### 원인
+
+SO-101 follower가 책상 위 고정 매니퓰레이터인데, USD spawn 설정에서 articulation root를 고정하지 않았다. base link가 미세하게 자유롭게 움직이면 zero-action hold에서도 joint velocity가 계속 남아 PD gain만 조정해서는 안정화되지 않는다.
+
+### 해결 방법
+
+로봇 `UsdFileCfg` 에 `ArticulationRootPropertiesCfg(fix_root_link=True)` 를 명시하고, velocity update 정확도를 위해 velocity solver iteration과 `enable_external_forces_every_iteration` 을 함께 설정한다. Deprecated actuator 필드인 `effort_limit` / `velocity_limit` 대신 Isaac Lab 2.3.2의 `effort_limit_sim` / `velocity_limit_sim` 을 사용한다.
+
+```python
+robot = ArticulationCfg(
+    prim_path="{ENV_REGEX_NS}/Robot",
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=ROBOT_USD_PATH,
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            fix_root_link=True,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=1,
+        ),
+    ),
+    actuators={
+        "arm_joints": ImplicitActuatorCfg(
+            joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+            effort_limit_sim=3.0,
+            velocity_limit_sim=5.5,
+            stiffness=400.0,
+            damping=80.0,
+        ),
+    },
+)
+```
+
+환경 cfg의 `__post_init__` 에서는 다음도 설정한다.
+
+```python
+self.sim.physx.enable_external_forces_every_iteration = True
+```
+
+### 확인 방법
+
+서버 Isaac venv에서 TA.1 smoke를 실행한다.
+
+```bash
+cd /DISK1/so101-sim2real/work/ta.1/repo
+UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac \
+UV_CACHE_DIR=/DISK1/so101-sim2real/cache/uv \
+  /home/konan147/.local/bin/uv run python scripts/environments/drive_response_smoke.py \
+    --task SimToReal-SO101-PickPen-v0 --num_envs 1 --device cuda:0
+```
+
+정상 기준 예시:
+
+```json
+{
+  "status": "passed",
+  "hold": {
+    "tail_max_abs_pos_rad": 0.02102,
+    "tail_rms_vel_rads": 0.0,
+    "final_abs_vel_rads": 0.0,
+    "ok": true
+  },
+  "step": {
+    "final_err_max_rad": 0.01882,
+    "overshoot_max_rad": 0.01882,
+    "ok": true
+  }
+}
+```
 
 ---
 

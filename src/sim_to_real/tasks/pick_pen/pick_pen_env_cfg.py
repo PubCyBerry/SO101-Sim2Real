@@ -72,19 +72,36 @@ class PickPenSceneCfg(InteractiveSceneCfg):
     # SO-101 follower articulation
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=sim_utils.UsdFileCfg(usd_path=ROBOT_USD_PATH),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=ROBOT_USD_PATH,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                fix_root_link=True,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=1,
+            ),
+        ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=_ROBOT_POS,
             rot=_ROBOT_ROT,
             joint_pos={j: 0.0 for j in SO101_JOINT_ORDER},
         ),
         actuators={
-            "all_joints": ImplicitActuatorCfg(
-                joint_names_expr=SO101_JOINT_ORDER,
-                effort_limit=50.0,
-                velocity_limit=6.28,  # ~1 rev/s conservative limit
-                stiffness=800.0,
-                damping=40.0,
+            # Feetech STS3215 근사: 7.4V~12V variants 기준 약 1.4~2.9 Nm.
+            # 시뮬 hold 안정성을 위해 3.0 Nm 상한, 속도 한계 5.5 rad/s.
+            "arm_joints": ImplicitActuatorCfg(
+                joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex",
+                                  "wrist_flex", "wrist_roll"],
+                effort_limit_sim=3.0,
+                velocity_limit_sim=5.5,
+                stiffness=400.0,
+                damping=80.0,
+            ),
+            "gripper": ImplicitActuatorCfg(
+                joint_names_expr=["gripper"],
+                effort_limit_sim=1.5,
+                velocity_limit_sim=6.0,
+                stiffness=300.0,
+                damping=60.0,
             ),
         },
     )
@@ -274,8 +291,10 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
         # Physics: 120 Hz simulation, 30 Hz policy (decimation=4)
         self.sim.dt = 1.0 / 120.0
         self.decimation = 4
+        self.sim.render_interval = self.decimation
         self.episode_length_s = 30.0
         # GPU pipeline
+        self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
