@@ -12,6 +12,24 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TC.4 대량 rollout 진행 중)
+
+- **목표**: TC.4 — TC.2에서 검증된 serial 1-env recorder로 최소 목표 2,000 successful episodes를 생성하고 LeRobot v3 validator 통과 후 Hugging Face dataset repo로 push한다.
+- **상태**: 진행 중. 서버 git clean, `/DISK1` 여유 3.4T, GPU는 remote desktop 프로세스 외 heavy workload 없음. `gpu.lock` 파일은 존재하므로 long rollout은 `flock`으로 직렬화해서 실행한다.
+- **대상 산출물**:
+  - Dataset: `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
+  - Log: `/DISK1/so101-sim2real/logs/rollout/tc4_rollout_2000ep_codex_20260604.log`
+  - 목표: `episodes=2000`, `max_attempts=3500`, 3-camera h264 videos 포함.
+- **검증 계획**:
+  - `scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
+  - `meta/info.json.total_episodes == 2000`, data parquet rows와 episode parquet rows 확인.
+  - HF push 후 repo URL/commit 또는 `hf` upload 성공 로그 확인.
+- **주의**:
+  - `scripts/author_pick_pen_scene.py`는 사용자 추가 untracked 참고 파일이므로 TC.4 상태 커밋에 포함하지 않는다.
+  - TC.1 recorder는 top/front world-absolute camera 제약 때문에 `num_envs=1` serial로 실행한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TC.3 overlay preview 완료, 다음 TC.4)
 
 - **목표**: TC.3 — Squint-style segmentation/background overlay를 카메라별 preview로 구현하고, 합성 프레임과 간단 지표로 품질을 점검한다.
