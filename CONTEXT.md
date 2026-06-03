@@ -15,23 +15,25 @@
 ## 작업 인계 (2026-06-03 — T0.0/T0.1 착수 보완 계획 구현)
 
 - **목표**: 보완 계획을 마스터플랜/TASKS에 반영하고, 실제 부트스트랩 일부(T0.0 preflight, T0.1 validator)를 수행.
-- **상태**: T0.1·T0.4 완료. T0.0은 origin 표준화와 tool/GPU 확인은 완료했지만 `/DISK1/so101-sim2real` 권한 미준비로 blocked.
+- **상태**: T0.0·T0.1·T0.4 완료. 다음은 T0.2(서버 user-local `uv` 설치 + leisaac 제거/Isaac direct dependency 전환).
 - **완료한 일**:
   - 로컬 remote `konan` 제거, 로컬/서버 `origin`을 `https://github.com/PubCyBerry/SO101-Sim2Real.git`로 표준화.
   - 서버 repo clean 확인. 서버 tool 확인: `claude`, `docker`, `nvidia-smi`, `gh`, `jq`, `yq` 있음. `uv`는 없음(T0.2 설치 항목).
+  - 사용자가 `/DISK1/so101-sim2real` 권한을 수정했고, Codex가 `test -w /DISK1/so101-sim2real` 성공을 확인해 T0.0을 done 처리.
   - Claude worker로 `scripts/validate_lerobot_schema.py` 작성 후 Codex가 직접 재검증.
   - 마스터플랜에 RELOAD 범위(§0·§1·§7), 복구불가 3회, worker JSON 인터페이스, `/DISK1/so101-sim2real/run/gpu.lock`, T0.5→T0.2 흡수 반영.
-  - `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` 추가. 로컬 dry run은 WSL 없이 Python subprocess가 `claude.exe --effort high`를 직접 호출하고, `dispatch.sh`는 SSH/Unix 래퍼로 유지.
+  - `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` 추가. 로컬 dry run은 WSL 없이 Python subprocess가 `claude.exe --model "sonnet[1m]" --effort high`를 직접 호출하고, `dispatch.sh`는 SSH/Unix 래퍼로 유지.
+  - Claude worker tool allowlist 기본값을 `Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell`로 고정.
 - **검증 결과**:
   - `python scripts/validate_lerobot_schema.py datasets/pick_pen` 통과.
   - `python scripts/validate_lerobot_schema.py --self-test` 통과.
   - `python -m py_compile scripts/validate_lerobot_schema.py` 통과.
   - `python scripts/orchestrator/gate.py validate-lerobot-schema` 통과.
-  - `python scripts/orchestrator/loop.py dry-run-t0.1` 통과(Claude DISPATCH `--effort high` → worker JSON → Codex VERIFY).
-- **블로커**: 서버 `/DISK1`는 root 소유이고 `sudo -n true`가 password 요구. 다음 자율 사이클 전 서버에서 1회 실행 필요:
-  `sudo mkdir -p /DISK1/so101-sim2real/{cache,outputs,datasets,checkpoints,logs,tmp,run} && sudo chown -R konan147:konan147 /DISK1/so101-sim2real`
+  - `ssh konan147 'test -w /DISK1/so101-sim2real'` 통과.
+  - `python scripts/orchestrator/loop.py dry-run-t0.1` 통과(Claude DISPATCH `--model "sonnet[1m]" --effort high` + 지정 tool allowlist → worker JSON → Codex VERIFY). Claude `modelUsage`는 `claude-sonnet-4-6[1m]`, `contextWindow=1000000`으로 확인.
+- **블로커**: 없음. `uv`는 아직 서버 PATH에 없지만 T0.2의 user-local 설치 항목으로 처리.
 - **변경한 파일**: `docs/SIM2REAL_MASTERPLAN.md`, `TASKS.md`, `CONTEXT.md`, `scripts/validate_lerobot_schema.py`, `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}`. 기존 dirty `pyproject.toml`의 `validation = ["ovphysx"]` 변경은 보존(T0.2 소유).
-- **다음**: `/DISK1/so101-sim2real` 권한 해소 후 T0.0 verify 재실행 → T0.2(uv 설치 + leisaac 제거/Isaac direct dependency 전환).
+- **다음**: T0.2(uv 설치 + leisaac 제거/Isaac direct dependency 전환).
 
 ---
 

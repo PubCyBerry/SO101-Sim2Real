@@ -14,7 +14,7 @@
 
 ## Phase 0 — 부트스트랩 + de-leisaac (sim-critical)
 
-- [ ] **T0.0** Codex preflight: origin 단일화 + 서버 clean + `/DISK1/so101-sim2real` writable + tool 가용성 기록 | machine:server | dep:- | verify:양 머신 `git remote -v` origin만 존재·URL 일치 + 서버 `test -w /DISK1/so101-sim2real` 성공 + `claude/docker/nvidia-smi/gh/jq/yq` 확인 (`uv` 부재는 T0.2로 이관) | status:blocked — origin 표준화 완료, `/DISK1/so101-sim2real` not writable
+- [x] **T0.0** Codex preflight: origin 단일화 + 서버 clean + `/DISK1/so101-sim2real` writable + tool 가용성 기록 | machine:server | dep:- | verify:양 머신 `git remote -v` origin만 존재·URL 일치 + 서버 `test -w /DISK1/so101-sim2real` 성공 + `claude/docker/nvidia-smi/gh/jq/yq` 확인 (`uv` 부재는 T0.2로 이관) | status:done
 - [x] **T0.1** `scripts/validate_lerobot_schema.py` (불변 계약 oracle, `--self-test` 포함) | machine:any | dep:- | verify:`python scripts/validate_lerobot_schema.py datasets/pick_pen` + `--self-test` 통과 (`info.json`·`tasks.parquet`·data parquet schema) | status:done
 - [ ] **T0.2** 서버 Isaac 설치 + 의존성 전환: user-local `uv` 설치 → `pyproject.toml`/`uv.lock` leisaac 제거·Isaac direct dependency 전환(`validation = ["ovphysx"]` 보존) → `uv sync --group isaac` → headless smoke. extscache/output→`/DISK1/so101-sim2real` | machine:server | dep:T0.0,T0.4 | verify:`uv run python -c "import isaacsim; print(isaacsim.__version__)"` == 5.1.x + `import sim_to_real` 정상 | status:todo  (§0 사전승인)
 - [ ] **T0.3** de-leisaac sim-critical: pick_pen 순수 Isaac Lab `ManagerBasedRLEnvCfg` 재작성 (scene + SO-101 ArticulationCfg + obs + reward stub + termination + events). leisaac import 0건 | machine:any | dep:T0.2 | verify:`env_smoke.py` gym.make→reset→500 step 무크래시 + obs/action 6-dim | status:todo
@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-03] T0.0 done — `/DISK1/so101-sim2real` writable 확인, origin/tool preflight 완료 (`uv`는 T0.2 설치) / 다음: T0.2
 - [2026-06-03] T0.4 done — `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` 추가, `dry-run-t0.1` e2e 통과 / 다음: T0.0 권한 해소 후 T0.2
 - [2026-06-03] T0.1 done — validator 작성·자기검증 통과 / 다음: T0.0 `/DISK1/so101-sim2real` 권한 해소 후 T0.4
 - [2026-06-03] T0.0 blocked — 양 머신 origin URL 표준화 완료, 서버 tool/GPU 확인 완료, `/DISK1/so101-sim2real` not writable

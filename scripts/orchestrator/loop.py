@@ -17,10 +17,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE = REPO_ROOT / "scripts" / "orchestrator" / "gate.py"
-DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
+DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet[1m]")
 DEFAULT_EFFORT = os.environ.get("CLAUDE_EFFORT", "high")
 DEFAULT_PERMISSION_MODE = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions")
-DEFAULT_TOOLS = os.environ.get("CLAUDE_TOOLS", "Read,Write,Edit,MultiEdit,Bash")
+DEFAULT_TOOLS = os.environ.get(
+    "CLAUDE_TOOLS",
+    "Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, "
+    "TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell",
+)
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -147,6 +151,10 @@ def dry_run_t01() -> dict[str, Any]:
             DEFAULT_MODEL,
             "--effort",
             DEFAULT_EFFORT,
+            "--tools",
+            DEFAULT_TOOLS,
+            "--allowedTools",
+            DEFAULT_TOOLS,
         ],
         "exit_code": dispatch.returncode,
         "stdout": dispatch.stdout.strip(),

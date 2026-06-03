@@ -107,7 +107,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 ### 2.4 디스패치 메커니즘 (구체)
 
 - 워커 호출(검증된 probe 재사용 — CONTEXT.md 2026-06-03 참조):
-  `claude -p "<spec>" --output-format json --permission-mode <검증된 값> --model sonnet --effort high`
+  `claude -p "<spec>" --output-format json --permission-mode <검증된 값> --model "sonnet[1m]" --effort high --tools "Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell" --allowedTools "Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell"`
 - 워커 결과 JSON 인터페이스는 고정: `{task_id,status,changed_files,verification,notes}`. Codex는 이 로그를 참고하되 §7 게이트 명령을 직접 재실행한 뒤 `done` 처리한다.
 - **서버 SSH 주의**: 비대화형 ssh는 PATH에 `claude`/`codex`/`uv`/`docker` 미노출 가능(로그인 셸 아님). 디스패치 스크립트는 절대경로 사용 또는 `bash -lc`로 profile source. 서버 무거운 산출물은 `/`(120GB) 말고 **`/DISK1`(3.4TB)** 로.
 - **git sync 허브**: 양 머신 공통 `origin = github PubCyBerry/SO101-Sim2Real`. 상태 파일·코드는 origin 경유. ⚠️ 로컬 working dir 이름(`SO101-LeRobot-VLA`)≠서버 클론(`~/Workspaces/SO101-Sim2Real`)≠로컬 내부 gitea `konan` 리모트 — **sync는 origin 하나로 표준화**, T0.0에서 명시.
