@@ -256,6 +256,60 @@ def transport_reward(
 
 
 # ---------------------------------------------------------------------------
+# Stage 4.5 — place height: 컵 XY 근처에서 컵 안 높이로 낮추기
+# ---------------------------------------------------------------------------
+
+
+def place_height_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.18),
+    target_height: float = 0.07,
+    xy_range: float = 0.18,
+    z_range: float = 0.16,
+    lift_min: float = 0.02,
+    diff_threshold: float = 0.12,
+    close_threshold: float = 0.50,
+) -> torch.Tensor:
+    """운반 중인 펜을 컵 XY 근처에서 컵 안 높이로 낮추는 dense reward.
+
+    transport_reward 는 XY 접근만 보상하므로, 정책이 컵 위에서 계속 높게 들고
+    있는 collapse가 생길 수 있다. 이 term은 닫힌 그리퍼가 실제로 펜을 들고
+    있을 때만 컵 중심 XY와 목표 z를 동시에 맞추도록 보상한다.
+    """
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    robot_cfg.resolve(env.scene)
+    robot: Articulation = env.scene[robot_cfg.name]
+    gripper_closed = robot.data.joint_pos[:, -1] < close_threshold
+    ee_pos = _get_gripper_pos(env, robot_cfg)
+
+    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
+    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    total = torch.zeros(env.num_envs, device=env.device)
+
+    for cfg in cfgs:
+        pen_pos = _pen_pos_w(env, cfg)
+        local = pen_pos - env.scene.env_origins
+        pen_local_z = local[:, 2]
+        lifted = pen_local_z > (_DESK_TOP_Z + lift_min)
+        dist_ee = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
+        near = dist_ee < diff_threshold
+        xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
+        xy_rew = torch.clamp(1.0 - xy_dist / max(xy_range, 1e-6), 0.0, 1.0)
+
+        target_z = _DESK_TOP_Z + target_height
+        z_rew = torch.clamp(1.0 - torch.abs(pen_local_z - target_z) / max(z_range, 1e-6), 0.0, 1.0)
+
+        carrying = gripper_closed & near & lifted
+        total = total + carrying.float() * xy_rew * z_rew
+
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Stage 5 — insert: 컵 안 삽입 (그리퍼 조건 없음)
 # ---------------------------------------------------------------------------
 

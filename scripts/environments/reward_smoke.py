@@ -46,6 +46,7 @@ _REQUIRED_TERMS = {
     "carry_pen",
     "lift_pen",
     "transport_pen",
+    "place_height_pen",
     "insert_pen",
     "release_pen",
     "task_success",
@@ -80,6 +81,7 @@ def _term_values(env) -> dict[str, torch.Tensor]:
         "carry_pen": task_mdp.carry_pen(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
         "lift_pen": task_mdp.lift_reward(env),
         "transport_pen": task_mdp.transport_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
+        "place_height_pen": task_mdp.place_height_reward(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
         "insert_pen": task_mdp.insert_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
         "release_pen": task_mdp.release_bonus(env, cup_center_xy=PEN_CUP_CENTER_XY),
         "task_success": task_mdp.task_success_bonus(env, cup_center_xy=PEN_CUP_CENTER_XY),
@@ -221,6 +223,31 @@ def main() -> None:
         _sync_scene(env.unwrapped)
         target = _term_values(env.unwrapped)
         _assert_increase(stage_checks, "transport", baseline["transport_pen"], target["transport_pen"], failures)
+
+        # place_height: cup XY 근처에서 목표 z로 낮추는 dense signal.
+        # 실제 그리퍼 이동 없이 reward shape만 확인하도록 diff_threshold를 넓힌다.
+        _write_all_pens_outside(env.unwrapped)
+        _set_gripper_open(env.unwrapped, open_=False)
+        high_over_cup = _local_xyz(env.unwrapped, (PEN_CUP_CENTER_XY[0], PEN_CUP_CENTER_XY[1], _DESK_TOP_Z + 0.23))
+        _write_pen_local_pose(env.unwrapped, "PenWhite", high_over_cup)
+        _sync_scene(env.unwrapped)
+        robot_gripper = SceneEntityCfg("robot", body_names=["gripper"])
+        baseline_place = task_mdp.place_height_reward(
+            env.unwrapped,
+            robot_cfg=robot_gripper,
+            cup_center_xy=PEN_CUP_CENTER_XY,
+            diff_threshold=10.0,
+        )
+        target_height = _local_xyz(env.unwrapped, (PEN_CUP_CENTER_XY[0], PEN_CUP_CENTER_XY[1], _DESK_TOP_Z + 0.07))
+        _write_pen_local_pose(env.unwrapped, "PenWhite", target_height)
+        _sync_scene(env.unwrapped)
+        target_place = task_mdp.place_height_reward(
+            env.unwrapped,
+            robot_cfg=robot_gripper,
+            cup_center_xy=PEN_CUP_CENTER_XY,
+            diff_threshold=10.0,
+        )
+        _assert_increase(stage_checks, "place_height", baseline_place, target_place, failures)
 
         # insert: all pens outside baseline, then all pens inside cup volume with gripper closed.
         _write_all_pens_outside(env.unwrapped)

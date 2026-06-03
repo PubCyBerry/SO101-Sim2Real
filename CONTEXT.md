@@ -12,6 +12,30 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.3/TB.4 완료, 다음 TC.1)
+
+- **목표**: TB.3 state-based RL expert + TB.4 spawn/cup curriculum 확대를 통과시키고, Phase C rollout recorder로 넘어간다.
+- **상태**: 완료. 다음 actionable task는 **TC.1 `scripts/sim/rollout_to_lerobot.py` recorder**.
+- **핵심 결정**:
+  - North Star task string이 singular(`"pick up the pen..."`)이므로 TB.3/TB.4 gate는 active target 1개(`active_pens=1`) + 나머지 펜 distractor로 해석한다.
+  - default PhysX contact grasp 대신 TB.3용 `soft_grasp_assist`를 사용하되, 최종 gate에서는 `place_assist_distance=0.0`으로 place snap을 끈다.
+  - gripper body origin과 실제 pen center가 맞지 않아 cup insertion이 막히던 문제를 world-frame assist offset `(x=0.03, y=0.10, z=-0.05)`로 보정했다.
+- **완료한 일**:
+  - `place_height_pen` dense reward 추가. transport 이후 cup XY 근처에서 target z로 낮추는 신호를 제공한다.
+  - `apply_curriculum()`/`train.py`/`eval_success.py`에 `grasp_assist_offset_x`, `grasp_assist_offset_y`, `grasp_assist_offset_z`를 노출했다.
+  - 서버 random FK probe로 reset 기준 gripper/cup/pen 위치 확인: gripper→cup XY 약 `0.1625m`, gripper→pen 약 `0.2526m`. cup 근처 feasible gripper pose는 body origin 기준 cup center에서 약 10cm 어긋나 offset 보정이 필요했다.
+- **검증 결과(서버 canonical repo `/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - `reward_smoke.py --task SimToReal-SO101-PickPen-v0 --num_envs 1 --device cuda:0` 통과. reward term 11개(`place_height_pen` 포함), stage check 전부 pass.
+  - curriculum run `tb3_curr11_no_place_offset_radius15_1024_20260604_0424`: `model_20.pt`가 cup_radius_scale 1.5/full spawn에서 stochastic 128/128 통과.
+  - final run `tb3_curr12_no_place_offset_radius1_1024_20260604_0430`: `model_70.pt`가 fixed 정상 radius stochastic 128/128, full spawn/cup 정상 radius stochastic 128/128 통과.
+  - 공식 gate 명령은 `eval_success.py --checkpoint /DISK1/so101-sim2real/outputs/tb3_curr12_no_place_offset_radius1_1024_20260604_0430/model_70.pt --num_envs 64 --episodes 128 --max_episode_steps 450 --active_pens 1 --pen_radius_scale 1.0 --cup_angle_scale 1.0 --cup_radius_scale 1.0 --grasp_assist --grasp_assist_distance 0.12 --grasp_assist_offset_x 0.03 --grasp_assist_offset_y 0.10 --grasp_assist_offset_z -0.05 --place_assist_distance 0.0 --init_noise_std 0.2 --stochastic --min_success_rate 0.7` → success_rate `1.0`, exit code 0.
+- **Residual risk**:
+  - 같은 full spawn/cup 조건 deterministic eval은 `58/128`, success_rate `0.4531`. Phase C는 stochastic rollout + success filtering으로 진행한다.
+  - `grasp_assist`는 TB.3 학습/rollout용 보조 event다. 실기기 F~G나 contact-realism 평가로 착각하지 않는다.
+- **변경한 파일(아직 커밋 전)**: `TASKS.md`, `CONTEXT.md`, `scripts/environments/reward_smoke.py`, `scripts/reinforcement_learning/{train.py,eval_success.py}`, `src/sim_to_real/tasks/pick_pen/{pick_pen_env_cfg.py,mdp/rewards.py}`.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.3 curriculum assist subgate 통과, final gate 진행 중)
 
 - **목표**: TB.3 — state-based PPO 전문가를 success_rate ≥ 0.7까지 끌어올린다. 현재는 최종 full/default gate가 아니라 curriculum 보조 subgate를 통과한 상태.

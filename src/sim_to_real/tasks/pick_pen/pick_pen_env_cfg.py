@@ -539,6 +539,16 @@ class PickPenRewardsCfg:
         params={"cup_center_xy": PEN_CUP_CENTER_XY},
     )
 
+    # Stage 4.5: 컵 XY 근처에서 컵 안 높이로 낮추기 (밀집)
+    place_height_pen = RewTerm(
+        func=task_mdp.place_height_reward,
+        weight=6.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
     # Stage 5: 컵 안 삽입 — 그리퍼 조건 없음 (밀집, 펜 수 비례)
     insert_pen = RewTerm(
         func=task_mdp.insert_reward,
@@ -668,6 +678,7 @@ _PEN_REWARD_TERMS = (
     "carry_pen",
     "lift_pen",
     "transport_pen",
+    "place_height_pen",
     "insert_pen",
     "release_pen",
     "task_success",
@@ -676,6 +687,7 @@ _CUP_RADIUS_REWARD_TERMS = (
     "reach_pen",
     "grasp_pen",
     "carry_pen",
+    "place_height_pen",
     "insert_pen",
     "release_pen",
     "task_success",
@@ -691,6 +703,8 @@ def apply_curriculum(
     cup_radius_scale: float = 1.0,
     grasp_assist: bool = False,
     grasp_assist_distance: float = 0.075,
+    grasp_assist_offset_x: float = 0.0,
+    grasp_assist_offset_y: float = 0.0,
     grasp_assist_offset_z: float = 0.0,
     place_assist_distance: float = 0.0,
 ) -> None:
@@ -703,7 +717,7 @@ def apply_curriculum(
         cup_radius_scale: 컵 안 판정 반경 배율. 기본 1.0 = 0.05m.
         grasp_assist: 닫힌 그리퍼 근처 펜을 따라오게 하는 TB.3 학습 보조 event.
         grasp_assist_distance: assist attach 거리.
-        grasp_assist_offset_z: gripper body 기준 pen z offset.
+        grasp_assist_offset_{x,y,z}: gripper body 기준 world-frame pen center offset.
         place_assist_distance: 컵 근방 도달 시 컵 중심으로 스냅하는 거리. 0이면 비활성.
     """
     active_pens = max(1, min(4, active_pens))
@@ -754,7 +768,7 @@ def apply_curriculum(
                 "cup_radius": cup_radius,
                 "attach_distance": grasp_assist_distance,
                 "place_distance": place_assist_distance,
-                "offset": (0.0, 0.0, grasp_assist_offset_z),
+                "offset": (grasp_assist_offset_x, grasp_assist_offset_y, grasp_assist_offset_z),
             },
         )
     elif hasattr(env_cfg.events, "soft_grasp_assist"):

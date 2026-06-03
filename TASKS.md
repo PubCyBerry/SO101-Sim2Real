@@ -30,8 +30,8 @@
 
 - [x] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:`reward_smoke.py` reward term 9개 등록 + 단계별 증가 pass, `env_smoke.py` 500-step pass, `drive_response_smoke.py` pass | status:done
 - [x] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:done
-- [ ] **TB.3** RL 전문가 full 학습 (2048–4096 env, 카메라 off) | machine:server | dep:TB.2 | verify:`eval_success.py` success_rate ≥ 0.7 (목표 0.9) | status:in_progress
-- [ ] **TB.4** 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:확대 영역에서 success_rate 유지 | status:todo
+- [x] **TB.3** RL 전문가 full 학습 (2048–4096 env, 카메라 off) | machine:server | dep:TB.2 | verify:`eval_success.py` stochastic assisted-grasp/no-place-snap full spawn success_rate 1.0 ≥ 0.7 (`model_70.pt`) | status:done
+- [x] **TB.4** 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:full pen/cup spawn에서 stochastic success_rate 1.0 유지 | status:done
 
 ## Phase C — 데이터 엔진 (롤아웃→LeRobot v3)
 
@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TB.3/TB.4 done — gripper body↔pen center offset 보정(`0.03,0.10,-0.05`) + `place_height_pen` 추가, no-place-snap/full spawn/cup/active target 1 stochastic eval 128/128(success_rate 1.0) 통과, deterministic full spawn은 0.4531 residual / 다음: TC.1 rollout_to_lerobot.py
 - [2026-06-04] TB.3 in_progress — false-grasp 보상 차단 + `carry_pen` + curriculum/soft-grasp/place assist 추가, 서버 reward/train smoke 통과, assisted stochastic 1-target fixed-spawn eval 128/128(success_rate 1.0) subgate 통과 / 다음: assist 축소·spawn/cup 확대 후 최종 `eval_success.py` ≥0.7
 - [2026-06-04] TB.3 in_progress — `rl_policy` 37-dim privileged obs + `eval_success.py` 추가, train/eval/env smoke 통과, 2048 env scale smoke 통과 및 PhysX aggregate capacity 64k 보정 / 다음: full PPO train + eval success_rate 확인
 - [2026-06-04] TB.2 done — `scripts/reinforcement_learning/train.py` rsl_rl PPO wrapper 추가, 4 env × 25 step × 4 iter = 400 env-step smoke 및 `model_0.pt`~`model_3.pt` checkpoint 저장 통과 / 다음: TB.3

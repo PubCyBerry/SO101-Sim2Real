@@ -64,8 +64,12 @@ parser.add_argument("--grasp_assist", action="store_true",
                     help="학습과 동일하게 TB.3 soft grasp assist 활성화")
 parser.add_argument("--grasp_assist_distance", type=float, default=0.075,
                     help="grasp assist attach 거리(m)")
+parser.add_argument("--grasp_assist_offset_x", type=float, default=0.0,
+                    help="gripper body 기준 pen world-frame x offset(m)")
+parser.add_argument("--grasp_assist_offset_y", type=float, default=0.0,
+                    help="gripper body 기준 pen world-frame y offset(m)")
 parser.add_argument("--grasp_assist_offset_z", type=float, default=0.0,
-                    help="gripper body 기준 pen z offset(m)")
+                    help="gripper body 기준 pen world-frame z offset(m)")
 parser.add_argument("--place_assist_distance", type=float, default=0.0,
                     help="컵 근방 도달 시 펜을 컵 중심으로 스냅하는 거리(m). 0이면 비활성")
 # --device / --headless 는 AppLauncher 가 등록
@@ -152,6 +156,8 @@ def main() -> None:
             cup_radius_scale=args.cup_radius_scale,
             grasp_assist=args.grasp_assist,
             grasp_assist_distance=args.grasp_assist_distance,
+            grasp_assist_offset_x=args.grasp_assist_offset_x,
+            grasp_assist_offset_y=args.grasp_assist_offset_y,
             grasp_assist_offset_z=args.grasp_assist_offset_z,
             place_assist_distance=args.place_assist_distance,
         )
@@ -225,6 +231,8 @@ def main() -> None:
                 "cup_radius_scale": args.cup_radius_scale,
                 "grasp_assist": args.grasp_assist,
                 "grasp_assist_distance": args.grasp_assist_distance,
+                "grasp_assist_offset_x": args.grasp_assist_offset_x,
+                "grasp_assist_offset_y": args.grasp_assist_offset_y,
                 "grasp_assist_offset_z": args.grasp_assist_offset_z,
                 "place_assist_distance": args.place_assist_distance,
             },
