@@ -3,6 +3,8 @@
 > **단일 진실 공급원.** Codex가 갱신. 매 사이클 SELECT 전 재로드.
 > North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist,front} 480×640@30 · task 문자열).
 > 자율 계약: 마스터플랜 §0 — A~E 무인, F~G만 사용자 게이트.
+> RELOAD: 매 사이클 시작에 마스터플랜 §0·§1·§7 + 본 파일 + `CONTEXT.md` 최근 인계 1~2개.
+> 복구불가 블로커: 동일 task 3회 실패 시 `blocked` 기록 후 의존 없는 task로 우회.
 > 보조 도구(스킬·MCP·ovphysx): [`docs/AGENT_TOOLING.md`](docs/AGENT_TOOLING.md) — 있으면 활용, 없어도 게이트는 그대로 강제.
 >
 > 필드: `id | 설명 | machine | dep | verify(명령/기준) | status`
@@ -12,12 +14,11 @@
 
 ## Phase 0 — 부트스트랩 + de-leisaac (sim-critical)
 
-- [ ] **T0.0** git sync origin 단일화 + `/DISK1` 산출물 규약 문서화 | machine:server | dep:- | verify:양 머신 `git remote -v` origin 일치 + 서버 outputs/extscache가 `/DISK1` 경유 | status:todo
-- [ ] **T0.1** `scripts/validate_lerobot_schema.py` (불변 계약 oracle, `--self-test` 포함) | machine:any | dep:- | verify:`python scripts/validate_lerobot_schema.py datasets/pick_pen` 통과 (6항목 전부) | status:todo
-- [ ] **T0.2** 서버 Isaac 설치: `uv` 설치 → leisaac 제거 후 `uv sync --group isaac` → headless smoke. extscache→`/DISK1` | machine:server | dep:T0.0 | verify:`uv run python -c "import isaacsim; print(isaacsim.__version__)"` == 5.1.x | status:todo  (§0 사전승인)
+- [ ] **T0.0** Codex preflight: origin 단일화 + 서버 clean + `/DISK1/so101-sim2real` writable + tool 가용성 기록 | machine:server | dep:- | verify:양 머신 `git remote -v` origin만 존재·URL 일치 + 서버 `test -w /DISK1/so101-sim2real` 성공 + `claude/docker/nvidia-smi/gh/jq/yq` 확인 (`uv` 부재는 T0.2로 이관) | status:blocked — origin 표준화 완료, `/DISK1/so101-sim2real` not writable
+- [x] **T0.1** `scripts/validate_lerobot_schema.py` (불변 계약 oracle, `--self-test` 포함) | machine:any | dep:- | verify:`python scripts/validate_lerobot_schema.py datasets/pick_pen` + `--self-test` 통과 (`info.json`·`tasks.parquet`·data parquet schema) | status:done
+- [ ] **T0.2** 서버 Isaac 설치 + 의존성 전환: user-local `uv` 설치 → `pyproject.toml`/`uv.lock` leisaac 제거·Isaac direct dependency 전환(`validation = ["ovphysx"]` 보존) → `uv sync --group isaac` → headless smoke. extscache/output→`/DISK1/so101-sim2real` | machine:server | dep:T0.0,T0.4 | verify:`uv run python -c "import isaacsim; print(isaacsim.__version__)"` == 5.1.x + `import sim_to_real` 정상 | status:todo  (§0 사전승인)
 - [ ] **T0.3** de-leisaac sim-critical: pick_pen 순수 Isaac Lab `ManagerBasedRLEnvCfg` 재작성 (scene + SO-101 ArticulationCfg + obs + reward stub + termination + events). leisaac import 0건 | machine:any | dep:T0.2 | verify:`env_smoke.py` gym.make→reset→500 step 무크래시 + obs/action 6-dim | status:todo
-- [ ] **T0.4** 오케스트레이터 스켈레톤 `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` + 1-task 드라이런 | machine:any | dep:T0.1 | verify:T0.1 재검증을 SELECT→DISPATCH→VERIFY→RECORD 1바퀴 무인 완주 | status:todo
-- [ ] **T0.5** `pyproject.toml` leisaac 제거 + `isaaclab` 직접 의존 + `uv lock` | machine:any | dep:T0.3 | verify:`uv sync --group isaac` 성공 + `import sim_to_real` 정상 | status:todo
+- [ ] **T0.4** 오케스트레이터 스켈레톤 `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` + 1-task 드라이런 | machine:any | dep:T0.1 | verify:T0.1 재검증을 SELECT→DISPATCH→worker JSON→VERIFY 재실행→RECORD 1바퀴 무인 완주 + `/DISK1/so101-sim2real/run/gpu.lock` 직렬화 구현 | status:todo
 
 ## Phase A — 씬·드라이브·카메라 정합
 
@@ -59,4 +60,5 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
-- (아직 시작 전)
+- [2026-06-03] T0.1 done — validator 작성·자기검증 통과 / 다음: T0.0 `/DISK1/so101-sim2real` 권한 해소 후 T0.4
+- [2026-06-03] T0.0 blocked — 양 머신 origin URL 표준화 완료, 서버 tool/GPU 확인 완료, `/DISK1/so101-sim2real` not writable

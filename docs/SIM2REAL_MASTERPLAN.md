@@ -30,10 +30,10 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 
 ### 자율 계약 (시작 후 발동, A~E 종료까지 유지)
 1. **사용자에게 묻지 않는다.** A~E(시뮬 전구간)가 끝날 때까지 Codex는 자율 판단으로 진행한다. 승인 대기 금지.
-2. **사전 승인된 행동**(런타임 게이트 아님): 서버 Isaac Sim 설치, `uv sync`, RL/GR00T 학습 run 시작·중단, 롤아웃 대량 생성, `git commit`·`push origin`, 컨테이너 빌드/실행, `/DISK1` 쓰기.
+2. **사전 승인된 행동**(런타임 게이트 아님): 서버 Isaac Sim 설치, `uv sync`, RL/GR00T 학습 run 시작·중단, 롤아웃 대량 생성, `git commit`·`push origin`, 컨테이너 빌드/실행, `/DISK1/so101-sim2real` 쓰기.
 3. **멈추는 경우는 둘뿐**:
    - **실기기 경계(F~G 진입)** — USB·카메라·물리·안전상 사람 필요 → A~E 완료 보고 + F 준비 체크리스트 제시 후 자율 트랙 종료.
-   - **복구 불가 블로커** — 동일 task 재시도(스펙 수정 포함) N회 실패 시 TASKS.md에 `blocked` + 사유 기록하고, 의존 없는 다른 task로 우회. 우회 불가하면 그때만 보고.
+   - **복구 불가 블로커** — 동일 task 재시도(스펙 수정 포함) **3회** 실패 시 TASKS.md에 `blocked` + 사유 기록하고, 의존 없는 다른 task로 우회. 우회 불가하면 그때만 보고.
 4. **자율 ≠ 무분별**: 비용 큰 작업도 멈추지 않되, GPU 직렬화(§4.3)·검증 게이트(§7)·불변 계약(§1)은 **반드시** 기계적으로 지킨다. 게이트 미통과 task는 done 금지.
 5. **진행 상태는 항상 git에 남긴다.** 매 사이클 TASKS.md·CONTEXT.md 갱신 후 push — 그래야 compaction·세션 교체·머신 전환에도 방향이 유지된다.
 
@@ -41,7 +41,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 
 ## 1. 불변 계약 (Invariant / North Star — 매 사이클·매 compaction 후 재확인)
 
-시뮬에서 만드는 **모든 롤아웃 데이터·정책 I/O**는 현재 데이터셋(`datasets/pick_pen/meta/info.json` 으로 확인)과 **정확히 동일**해야 한다. 한 글자라도 어긋나면 GR00T fine-tune/배포에서 깨진다.
+시뮬에서 만드는 **모든 롤아웃 데이터·정책 I/O**는 현재 데이터셋(`datasets/pick_pen/meta/info.json`, `meta/tasks.parquet`, `data/**/file-*.parquet` 으로 확인)과 **정확히 동일**해야 한다. 한 글자라도 어긋나면 GR00T fine-tune/배포에서 깨진다.
 
 | 필드 | 고정값 |
 |---|---|
@@ -90,12 +90,12 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | `TASKS.md` | 구조화 체크리스트(§8). 단일 진실 공급원 | Codex |
 | `CONTEXT.md` | 서사형 작업 인계(기존 관례 유지) + 상단에 **North Star 요약** 고정 | Codex/Claude |
 
-**Compaction 복구 프로토콜**: 어떤 에이전트든 세션 시작/compaction 직후 반드시 순서대로 재로드 — ① 마스터플랜 §1 불변 계약 → ② TASKS.md 현재 phase·in_progress·blocked → ③ CONTEXT.md 최근 1~2개 인계. 이 3개만으로 "지금 무엇을, 왜, 다음 명령은" 복구. 추측 금지 — 상태 파일에 없으면 새 task로 만든다.
+**Compaction 복구 프로토콜**: 어떤 에이전트든 세션 시작/compaction 직후 반드시 순서대로 재로드 — ① 마스터플랜 §0·§1·§7 → ② TASKS.md 현재 phase·in_progress·blocked → ③ CONTEXT.md 최근 1~2개 인계. 이 3개만으로 "지금 무엇을, 왜, 다음 명령은" 복구. 추측 금지 — 상태 파일에 없으면 새 task로 만든다.
 
 ### 2.3 루프 프로토콜 (Codex 1 사이클)
 
 ```
-1. RELOAD   : 마스터플랜 §1·§7 + TASKS.md + CONTEXT.md 최근 인계 읽기
+1. RELOAD   : 마스터플랜 §0·§1·§7 + TASKS.md + CONTEXT.md 최근 인계 1~2개 읽기
 2. SELECT   : depends_on 충족 + status=todo 중 우선순위 1개 선택 (todo 없으면 §0 자율계약 따라 F 경계 보고 후 종료)
 3. SPEC     : 파일경로·변경범위·재사용 심볼·검증명령을 담은 정밀 스펙 작성
 4. DISPATCH : claude -p 워커 실행(로컬 or ssh). GPU 중복 점유 금지(§4.3 직렬화)
@@ -107,7 +107,8 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 ### 2.4 디스패치 메커니즘 (구체)
 
 - 워커 호출(검증된 probe 재사용 — CONTEXT.md 2026-06-03 참조):
-  `claude -p "<spec>" --output-format json --permission-mode acceptEdits --model <m>`
+  `claude -p "<spec>" --output-format json --permission-mode <검증된 값> --model sonnet`
+- 워커 결과 JSON 인터페이스는 고정: `{task_id,status,changed_files,verification,notes}`. Codex는 이 로그를 참고하되 §7 게이트 명령을 직접 재실행한 뒤 `done` 처리한다.
 - **서버 SSH 주의**: 비대화형 ssh는 PATH에 `claude`/`codex`/`uv`/`docker` 미노출 가능(로그인 셸 아님). 디스패치 스크립트는 절대경로 사용 또는 `bash -lc`로 profile source. 서버 무거운 산출물은 `/`(120GB) 말고 **`/DISK1`(3.4TB)** 로.
 - **git sync 허브**: 양 머신 공통 `origin = github PubCyBerry/SO101-Sim2Real`. 상태 파일·코드는 origin 경유. ⚠️ 로컬 working dir 이름(`SO101-LeRobot-VLA`)≠서버 클론(`~/Workspaces/SO101-Sim2Real`)≠로컬 내부 gitea `konan` 리모트 — **sync는 origin 하나로 표준화**, T0.0에서 명시.
 - 오케스트레이션 코드: `scripts/orchestrator/` (loop.py = Codex 사이클, dispatch.sh = claude -p 래퍼 로컬/ssh, gate.py = 게이트 판정). T0.4에서 신설.
@@ -122,7 +123,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | Isaac Sim | 설치 안 함(또는 디버그용 소수 env) | **설치(headless EGL)** — RL 학습·롤아웃 |
 | GR00T fine-tune | 불가(16GB<25GB) | **전담** |
 | 추론 | RobotClient(실기기) | PolicyServer(GR00T, ~6GB) |
-| 데이터 저장 | 작업 캐시만 | `/DISK1` (롤아웃·체크포인트·HDF5) |
+| 데이터 저장 | 작업 캐시만 | `/DISK1/so101-sim2real` (롤아웃·체크포인트·HDF5) |
 
 자율 루프(A~E)는 **사실상 서버 중심**. Windows는 오케스트레이터를 띄우고 ssh로 서버를 운전. (Windows에서 Codex 상시 구동이 부담이면 서버에서 Codex 구동도 가능 — T0.0에서 호스트 확정.)
 
@@ -151,7 +152,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | F: GR00T 추론 | — | — | ~6GB |
 
 ### 4.3 GPU 직렬화 규칙 (오케스트레이터 강제)
-48GB 1장. **RL 학습 ∥ 롤아웃 ∥ GR00T 학습 동시 금지.** Codex는 디스패치 전 `nvidia-smi`로 free VRAM 확인 → 임계 미달이면 큐잉. RAM(서버 125GB)·디스크는 병목 아님.
+48GB 1장. **RL 학습 ∥ 롤아웃 ∥ GR00T 학습 동시 금지.** Codex는 디스패치 전 `nvidia-smi`로 free VRAM 확인하고 `/DISK1/so101-sim2real/run/gpu.lock`으로 중량 작업을 직렬화한다. 임계 미달이면 큐잉. RAM(서버 125GB)·디스크는 병목 아님.
 
 ---
 
@@ -162,7 +163,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 ### Phase 0 — 부트스트랩 + de-leisaac (sim-critical) 🆕🔧
 - 0a. 오케스트레이션 인프라: `scripts/orchestrator/`, `TASKS.md`, CONTEXT.md North Star, git sync 표준화. 🆕
 - 0b. **불변 계약 validator** `scripts/validate_lerobot_schema.py` (§7) — 최우선. 🆕
-- 0c. 서버 Isaac 설치: `uv` 설치 → `uv sync --group isaac`(leisaac 제거 후) → headless smoke. extscache→`/DISK1`. 🆕 (§0에서 사전 승인됨)
+- 0c. 서버 Isaac 설치: user-local `uv` 설치 → `pyproject.toml`/`uv.lock`의 leisaac 제거와 Isaac direct dependency 전환 → `uv sync --group isaac` → headless smoke. extscache→`/DISK1/so101-sim2real`. 🆕 (§0에서 사전 승인됨)
 - 0d. **leisaac 제거(sim-critical만)**: §6. 순수 Isaac Lab `ManagerBasedRLEnvCfg`로 pick_pen 재작성(scene+robot+obs+**reward**+termination+events 명시). 🔧
 - **게이트**: `uv run`로 `SimToReal-SO101-PickPen-v0` gym.make→reset→random step 500회 무크래시 + obs/action shape가 6-dim 계약 일치.
 
@@ -228,7 +229,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 
 | Phase | 검증 명령(개념) | 통과 기준 |
 |---|---|---|
-| 0b | `python scripts/validate_lerobot_schema.py datasets/pick_pen` | 현 데이터셋이 §1 계약 전부 만족(validator 자기검증) |
+| 0b | `python scripts/validate_lerobot_schema.py datasets/pick_pen` + `--self-test` | 현 데이터셋이 §1 계약 전부 만족(`info.json`, `tasks.parquet`, data parquet schema까지 확인) |
 | 0d/A | `uv run scripts/.../env_smoke.py` (gym.make→reset→500 step) | 무크래시 + obs/action 6-dim |
 | B | `uv run scripts/.../eval_success.py --ckpt ...` | success_rate ≥ 임계 |
 | C | `python scripts/validate_lerobot_schema.py <new_dataset>` | 계약 통과(가장 중요) |
@@ -265,14 +266,15 @@ CONTEXT.md: 상단에 **North Star 요약 블록**(불변 계약) 고정 + 기�
 
 ## 10. 부트스트랩 (Codex `/goal` 시작 직후, 무인)
 
-1. **T0.0/T0.1 먼저**(GPU·호스트 변경 없음, 로컬 가능): git sync 표준화 + `validate_lerobot_schema.py` + 현 데이터셋 자기검증.
-2. **오케스트레이터 스켈레톤**(`scripts/orchestrator/`) + claude -p 디스패치 1-task 드라이런(예: T0.1 재검증)으로 루프 e2e 확인.
-3. T0.2 서버 Isaac 설치 → T0.3 de-leisaac → Phase A~E 무인 진행. E 완료 시 §0대로 멈추고 F 체크리스트 보고.
+1. **T0.0 Codex preflight 먼저**: `origin` 단일화, 서버 clean 확인, `/DISK1/so101-sim2real` writable 확인, `claude`/`docker`/`nvidia-smi`/`gh`/`jq`/`yq`/`uv` 가용성 기록. `uv` 부재는 blocker가 아니라 T0.2 설치 항목으로 넘긴다.
+2. **첫 worker 사이클은 T0.1**: Claude worker가 validator를 작성하고, Codex가 `datasets/pick_pen` + `--self-test`를 직접 재실행해 done 처리한다.
+3. **오케스트레이터 스켈레톤**(`scripts/orchestrator/`) + claude -p 디스패치 1-task 드라이런(예: T0.1 재검증)으로 루프 e2e 확인.
+4. T0.2 서버 Isaac 설치/의존성 전환 → T0.3 de-leisaac → Phase A~E 무인 진행. E 완료 시 §0대로 멈추고 F 체크리스트 보고.
 
 ## 11. 오케스트레이션 시스템 자체 검증 (e2e)
 
 자율 개발을 켜기 전, **루프가 동작하는지** 먼저 증명:
-- 드라이런: Codex가 TASKS.md에서 T0.1 SELECT → claude -p DISPATCH → validator 실행 → 결과 JSON 파싱 → TASKS.md done 전이 → CONTEXT.md 인계 → git commit/push. 1바퀴 무인 완주.
+- 드라이런: Codex가 TASKS.md에서 T0.1 SELECT → claude -p DISPATCH → `{task_id,status,changed_files,verification,notes}` JSON 파싱 → validator 게이트 재실행 → TASKS.md done 전이 → CONTEXT.md 인계 → git commit/push. 1바퀴 무인 완주.
 - Compaction 복구 모의: 새 세션에서 마스터플랜+TASKS.md+CONTEXT.md만 주고 "다음 명령"을 정확히 도출하는지 확인.
 - 서버 라우팅: `ssh konan147 'nvidia-smi'`를 디스패치 경로(비대화형 PATH 포함)로 성공.
 
@@ -294,11 +296,11 @@ CONTEXT.md: 상단에 **North Star 요약 블록**(불변 계약) 고정 + 기�
 
 - N `docs/SIM2REAL_MASTERPLAN.md` (이 문서), `TASKS.md`
 - N `scripts/validate_lerobot_schema.py` (불변 계약 oracle)
-- N `scripts/orchestrator/{loop.py, dispatch.sh, gate.py}`
+- N `scripts/orchestrator/{loop.py, dispatch.sh, gate.py}` (`gpu.lock` 직렬화 포함)
 - N `scripts/reinforcement_learning/train.py` (rsl_rl PPO 래퍼), `scripts/.../eval_success.py`, `scripts/.../env_smoke.py`
 - N 롤아웃→LeRobot v3 recorder (`scripts/sim/rollout_to_lerobot.py`)
 - M `src/sim_to_real/tasks/pick_pen/{pick_pen_env_cfg.py, direct/pick_pen_env.py, mdp/__init__.py, mdp/terminations.py}` (de-leisaac + reward)
 - M `src/sim_to_real/assets/scenes/pen_desk.py` (ASSETS_ROOT 제거)
-- M `pyproject.toml` (leisaac 제거, isaaclab 직접 의존), `uv.lock`
+- M `pyproject.toml` (leisaac 제거, isaaclab 직접 의존, validation 그룹 보존), `uv.lock`
 - M `CONTEXT.md` (North Star 블록), `AGENTS.md`·`docs/PATH_C_ISAAC_SIM.md` (leisaac→순수 Isaac Lab 반영)
 - 보존(미참조 격리): `scripts/environments/teleoperation/*`, `so101_joint_state_server.py` (deferred device 트랙)

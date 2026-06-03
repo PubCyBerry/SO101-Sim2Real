@@ -6,9 +6,29 @@
 
 - **마스터플랜**: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) · **현황**: [`TASKS.md`](TASKS.md)
 - **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist,front}` 480×640×3 h264 **fps 30** · task `"pick up the pen and place it in the holder"`.
-- **자율 계약**: Codex `/goal` 시작 후 **A~E 무인 자율**(묻지 않음). 멈추는 경우는 둘뿐 — F~G 실기기 경계 / 복구불가 블로커(N회 재시도 후 우회·기록). 게이트 미통과 task는 done 금지.
-- **복구 프로토콜**: 세션/compaction 직후 ① 마스터플랜 §1·§7 → ② TASKS.md(현재 phase·in_progress·blocked) → ③ 아래 최근 인계 1~2개 순서로 재로드. 추측 금지 — 상태 파일에 없으면 새 task로.
-- **머신**: GPU 중량(Isaac·RL·롤아웃·GR00T) = 서버 konan147(48GB), 산출물 `/DISK1`. 경량·실기기·오케스트레이터 = Windows. sync 허브 = `origin`(github PubCyBerry/SO101-Sim2Real).
+- **자율 계약**: Codex `/goal` 시작 후 **A~E 무인 자율**(묻지 않음). 멈추는 경우는 둘뿐 — F~G 실기기 경계 / 복구불가 블로커(동일 task 3회 재시도 후 우회·기록). 게이트 미통과 task는 done 금지.
+- **복구 프로토콜**: 세션/compaction 직후 ① 마스터플랜 §0·§1·§7 → ② TASKS.md(현재 phase·in_progress·blocked) → ③ 아래 최근 인계 1~2개 순서로 재로드. 추측 금지 — 상태 파일에 없으면 새 task로.
+- **머신**: GPU 중량(Isaac·RL·롤아웃·GR00T) = 서버 konan147(48GB), 산출물 `/DISK1/so101-sim2real`. 경량·실기기·오케스트레이터 = Windows. sync 허브 = `origin`(github PubCyBerry/SO101-Sim2Real).
+
+---
+
+## 작업 인계 (2026-06-03 — T0.0/T0.1 착수 보완 계획 구현)
+
+- **목표**: 보완 계획을 마스터플랜/TASKS에 반영하고, 실제 부트스트랩 일부(T0.0 preflight, T0.1 validator)를 수행.
+- **상태**: T0.1 완료. T0.0은 origin 표준화와 tool/GPU 확인은 완료했지만 `/DISK1/so101-sim2real` 권한 미준비로 blocked.
+- **완료한 일**:
+  - 로컬 remote `konan` 제거, 로컬/서버 `origin`을 `https://github.com/PubCyBerry/SO101-Sim2Real.git`로 표준화.
+  - 서버 repo clean 확인. 서버 tool 확인: `claude`, `docker`, `nvidia-smi`, `gh`, `jq`, `yq` 있음. `uv`는 없음(T0.2 설치 항목).
+  - Claude worker로 `scripts/validate_lerobot_schema.py` 작성 후 Codex가 직접 재검증.
+  - 마스터플랜에 RELOAD 범위(§0·§1·§7), 복구불가 3회, worker JSON 인터페이스, `/DISK1/so101-sim2real/run/gpu.lock`, T0.5→T0.2 흡수 반영.
+- **검증 결과**:
+  - `python scripts/validate_lerobot_schema.py datasets/pick_pen` 통과.
+  - `python scripts/validate_lerobot_schema.py --self-test` 통과.
+  - `python -m py_compile scripts/validate_lerobot_schema.py` 통과.
+- **블로커**: 서버 `/DISK1`는 root 소유이고 `sudo -n true`가 password 요구. 다음 자율 사이클 전 서버에서 1회 실행 필요:
+  `sudo mkdir -p /DISK1/so101-sim2real/{cache,outputs,datasets,checkpoints,logs,tmp,run} && sudo chown -R konan147:konan147 /DISK1/so101-sim2real`
+- **변경한 파일**: `docs/SIM2REAL_MASTERPLAN.md`, `TASKS.md`, `CONTEXT.md`, `scripts/validate_lerobot_schema.py`. 기존 dirty `pyproject.toml`의 `validation = ["ovphysx"]` 변경은 보존(T0.2 소유).
+- **다음**: `/DISK1/so101-sim2real` 권한 해소 후 T0.0 verify 재실행 → T0.4 orchestrator skeleton + dry run.
 
 ---
 
