@@ -20,7 +20,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 
 
-PEN_CUP_DEFAULT_CENTER_XY: tuple[float, float] = (-0.18, 0.43)
+PEN_CUP_DEFAULT_CENTER_XY: tuple[float, float] = (2.2, -0.17)
+DESK_TOP_Z: float = 0.92
 
 
 def pen_grasped(
@@ -90,7 +91,7 @@ def pen_inside_cup(
     else:
         cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
         cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
-        cz = torch.zeros(env.num_envs, device=env.device)
+        cz = torch.full((env.num_envs,), DESK_TOP_Z, device=env.device)
 
     inside_xy = torch.hypot(pen_pos[:, 0] - cx, pen_pos[:, 1] - cy) < radius
     above_floor = pen_pos[:, 2] > (cz + height_range[0])
@@ -128,7 +129,7 @@ def pen_lifted(
     """Pen is at least ``height_threshold`` (m) above the desk surface."""
     pen: RigidObject = env.scene[object_cfg.name]
     pen_z = pen.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
-    return pen_z > height_threshold
+    return pen_z > (DESK_TOP_Z + height_threshold)
 
 
 def ee_near_pen(

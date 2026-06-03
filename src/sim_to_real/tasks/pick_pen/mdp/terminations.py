@@ -12,6 +12,7 @@ from isaaclab.managers import SceneEntityCfg
 
 # Threshold for "at rest pose": all joints within ±15° of zero
 _REST_THRESHOLD_RAD: float = 15.0 * math.pi / 180.0
+_DESK_TOP_Z: float = 0.92
 
 
 def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:
@@ -22,7 +23,7 @@ def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:
 def task_done(
     env: ManagerBasedRLEnv | DirectRLEnv,
     pens_cfg: list[SceneEntityCfg],
-    cup_center_xy: tuple[float, float] = (-0.18, 0.43),
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
     radius: float = 0.05,
     height_range: tuple[float, float] = (0.005, 0.18),
     require_rest_pose: bool = True,
@@ -36,8 +37,8 @@ def task_done(
         pen: RigidObject = env.scene[pen_cfg.name]
         pen_pos = pen.data.root_pos_w - env.scene.env_origins
         inside_xy = torch.hypot(pen_pos[:, 0] - cx, pen_pos[:, 1] - cy) < radius
-        above_floor = pen_pos[:, 2] > height_range[0]
-        below_lip = pen_pos[:, 2] < height_range[1]
+        above_floor = pen_pos[:, 2] > (_DESK_TOP_Z + height_range[0])
+        below_lip = pen_pos[:, 2] < (_DESK_TOP_Z + height_range[1])
         done = torch.logical_and(done, torch.logical_and(inside_xy, torch.logical_and(above_floor, below_lip)))
 
     if require_rest_pose:

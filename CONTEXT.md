@@ -12,6 +12,25 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.1 단계형 reward 완료)
+
+- **목표**: TB.1 — state-based RL 전문가용 단계형 reward(reach→grasp→lift→transport→insert→release + success + action-rate/joint-vel 페널티)를 구현하고 Isaac Lab 2.3.2 GPU smoke로 검증한다.
+- **상태**: 완료. 다음 actionable task는 TB.2(`scripts/reinforcement_learning/train.py` rsl_rl PPO train 래퍼).
+- **완료한 일**:
+  - `src/sim_to_real/tasks/pick_pen/mdp/rewards.py` 추가. contact sensor 없이 `RigidObject.root_pos_w`, robot `gripper` body pose, gripper joint position으로 7개 stage reward를 계산하며 모두 `(num_envs,)` finite tensor를 반환.
+  - `PickPenRewardsCfg`를 reward stub에서 9개 term(`reach_pen`, `grasp_pen`, `lift_pen`, `transport_pen`, `insert_pen`, `release_pen`, `task_success`, `action_rate`, `joint_vel`)으로 교체.
+  - 기존 `pen_in_cup`/`task_done`의 기본 컵 중심이 stale `(-0.18, 0.43)`이고 z 기준이 0 기준이던 문제를 현재 scene 좌표 `(2.2, -0.17)` + desk top `0.92` 기준으로 보정.
+  - `scripts/environments/reward_smoke.py` 추가. Isaac AppLauncher로 headless env를 띄운 뒤 reward term 등록, shape/finite, stage별 독립 baseline→target 증가를 검증.
+- **검증 결과(서버 `/DISK1/so101-sim2real/work/ta.3/repo`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - `reward_smoke.py --task SimToReal-SO101-PickPen-v0 --num_envs 1 --device cuda:0` 통과. 9개 reward term 등록, reach/grasp/lift/transport/insert/release/success 모두 증가, failures `[]`.
+  - `env_smoke.py --steps 500 --num_envs 1 --device cuda:0` 통과(action/policy obs `[1,6]`, resets 0).
+  - `drive_response_smoke.py --num_envs 1 --device cuda:0` 재통과(hold tail RMS vel 0.0, step final err max 0.01882).
+- **참고**:
+  - Claude worker는 `sonnet[1m]`, effort high, `PowerShell` 없는 allowlist로 호출해 초안 구현을 받았고, Codex가 z/컵 기준과 deterministic smoke를 보완했다.
+  - `scripts/author_pick_pen_scene.py`는 사용자가 추가한 untracked 참고 파일로 남겨둠. 이번 TB.1 커밋에 포함하지 않는다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TA.3 camera 정합 완료)
 
 - **목표**: TA.3 — `SimToReal-SO101-PickPen-v0`의 top/front/wrist 카메라가 North Star 계약(`observation.images.{top,wrist,front}`, 480×640×3, 30fps)과 실제 데이터셋 구도에 맞게 렌더되는지 검증한다.

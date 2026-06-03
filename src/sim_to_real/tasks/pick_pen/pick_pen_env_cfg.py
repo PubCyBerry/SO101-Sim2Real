@@ -457,14 +457,75 @@ class PickPenObservationsCfg:
 
 
 # ---------------------------------------------------------------------------
-# Rewards (stub — Phase B implements proper rewards)
+# Rewards — Phase B 단계형 보상
 # ---------------------------------------------------------------------------
 
 
 @configclass
 class PickPenRewardsCfg:
-    """Minimal reward stub so ManagerBasedRLEnv builds. Phase B adds real terms."""
+    """단계형 보상 — reach → grasp → lift → transport → insert → release."""
 
+    # Stage 1: EE → 가장 가까운 미배치 펜 접근 (밀집)
+    reach_pen = RewTerm(
+        func=task_mdp.reach_reward,
+        weight=1.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
+    # Stage 2: 그리퍼 닫힘 + 펜 근접 (sparse bonus, 미배치 펜 한정)
+    grasp_pen = RewTerm(
+        func=task_mdp.grasp_bonus,
+        weight=5.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
+    # Stage 3: 펜을 책상에서 들어올린 높이 (밀집)
+    lift_pen = RewTerm(
+        func=task_mdp.lift_reward,
+        weight=2.0,
+    )
+
+    # Stage 4: 들어올린 펜의 XY → 컵 접근 (밀집)
+    transport_pen = RewTerm(
+        func=task_mdp.transport_reward,
+        weight=2.0,
+        params={"cup_center_xy": PEN_CUP_CENTER_XY},
+    )
+
+    # Stage 5: 컵 안 삽입 — 그리퍼 조건 없음 (밀집, 펜 수 비례)
+    insert_pen = RewTerm(
+        func=task_mdp.insert_reward,
+        weight=10.0,
+        params={"cup_center_xy": PEN_CUP_CENTER_XY},
+    )
+
+    # Stage 6: 컵 안 + 그리퍼 열림 완료 (밀집, 배치된 펜 수)
+    release_pen = RewTerm(
+        func=task_mdp.release_bonus,
+        weight=5.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
+    # 전체 성공 보너스 — 4개 펜 전부 배치 완료
+    task_success = RewTerm(
+        func=task_mdp.task_success_bonus,
+        weight=50.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
+    # 행동률·관절 속도 페널티
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,

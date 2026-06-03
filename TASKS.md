@@ -28,7 +28,7 @@
 
 ## Phase B — RL 전문가 (state-based)
 
-- [ ] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:reward term 단위 점검 (각 단계 통과 시 보너스 발생) | status:todo
+- [x] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:`reward_smoke.py` reward term 9개 등록 + 단계별 증가 pass, `env_smoke.py` 500-step pass, `drive_response_smoke.py` pass | status:done
 - [ ] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:todo
 - [ ] **TB.3** RL 전문가 full 학습 (2048–4096 env, 카메라 off) | machine:server | dep:TB.2 | verify:`eval_success.py` success_rate ≥ 0.7 (목표 0.9) | status:todo
 - [ ] **TB.4** 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:확대 영역에서 success_rate 유지 | status:todo
@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TB.1 done — reach/grasp/lift/transport/insert/release/success 단계형 reward 추가, pen-in-cup/success의 컵 중심·책상 z 기준 보정, 서버 reward smoke + env 500-step + drive smoke 통과 / 다음: TB.2
 - [2026-06-04] TA.3 done — 로봇 z를 USD bbox 기준으로 0.889로 내려 floating 수정, 카메라를 기본 env에서 optional injection으로 분리, top/front/wrist를 데이터셋 프레임+docs/pics 기준으로 재조정, 서버 camera shape/FOV + no-camera env 500-step + drive smoke 통과 / 다음: TB.1
 - [2026-06-03] TA.3 in_progress — 순수 Isaac Lab env에 top/wrist/front camera sensor와 렌더 shape/FOV smoke 추가 착수
 - [2026-06-03] TA.2 done — RigidObject init_state 명시로 reset sampling 기준 원점 밀림 수정, 펜 visual/collision 분리(invisible CollisionBox)로 rolling/sliding 안정화, 서버 100-reset scene physics + env 500-step + drive smoke 통과 / 다음: TA.3
