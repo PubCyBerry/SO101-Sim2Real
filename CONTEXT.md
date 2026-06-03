@@ -12,6 +12,27 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TC.2 200ep pipeline 완료, 다음 TC.3)
+
+- **목표**: TC.2 — DR reset + 3-camera render + success-only filter가 200 successful episodes 규모에서 끝까지 관통되는지 검증한다.
+- **상태**: 완료. 다음 actionable task는 **TC.3 optional segmentation background overlay**.
+- **완료한 일/결과**:
+  - TC.1 recorder를 그대로 사용해 serial `num_envs=1` 200 successful episodes를 생성했다. top/front world-absolute camera 제약 때문에 병렬화는 하지 않았고, DR은 기본 reset events(full pen ellipse + cup arc scale 1.0)로 적용했다.
+  - 산출물: `/DISK1/so101-sim2real/outputs/tc2_rollout_200ep_codex_20260604_0458`
+  - 로그: `/DISK1/so101-sim2real/logs/rollout/tc2_rollout_200ep_codex_20260604_0458.log`
+  - 최종 rollout JSON: `episodes=200`, `attempts=289`, `failures=89`, `total_frames=10473`, `videos=true`, `stochastic=true`.
+  - 파일 크기: 전체 266MB. mp4 크기: front 87,328,497 bytes, top 73,438,175 bytes, wrist 116,282,165 bytes.
+- **검증 결과(서버 canonical repo `/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - `scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc2_rollout_200ep_codex_20260604_0458` PASS.
+  - `meta/info.json`: `total_episodes=200`, `total_frames=10473`, `fps=30`.
+  - `data/chunk-000/file-000.parquet`: 10,473 rows. `meta/episodes/chunk-000/file-000.parquet`: 200 rows.
+- **주의/다음**:
+  - TC.2는 1-env serial로 gate를 통과했다. TC.4 대량 2k-5k 전에는 wall-clock를 줄이려면 camera env-relative 병렬화 또는 chunked multi-process rollout을 검토한다.
+  - success filter는 실제로 89 failed attempts를 버렸다. 대량 run에서는 `max_attempts`를 성공률 기준으로 넉넉히 잡는다.
+  - TC.3는 optional이지만 TASKS.md상 다음 todo다. segmentation overlay를 구현할 경우, 카메라별 실제 dataset 구도와 현재 3cam mp4를 기준으로 합성 품질을 육안/간단 지표로 확인한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TC.1 rollout recorder 완료, 다음 TC.2)
 
 - **목표**: TB.3 stochastic expert checkpoint를 3-camera render와 함께 rollout하고, 성공 episode만 LeRobot v3 데이터셋으로 기록하는 `scripts/sim/rollout_to_lerobot.py` recorder를 만든다.
