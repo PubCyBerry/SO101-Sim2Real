@@ -12,6 +12,24 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.2 rsl_rl PPO train wrapper 완료)
+
+- **목표**: TB.2 — `SimToReal-SO101-PickPen-v0`를 rsl_rl PPO로 학습할 수 있는 `scripts/reinforcement_learning/train.py` 래퍼를 추가하고, 100-step 이상 smoke와 checkpoint 저장을 검증한다.
+- **상태**: 완료. 다음 actionable task는 TB.3(RL 전문가 full 학습, 2048–4096 env, 카메라 off).
+- **완료한 일**:
+  - `scripts/reinforcement_learning/train.py` 추가. Isaac `AppLauncher` headless, `parse_env_cfg` → `gym.make` → `RslRlVecEnvWrapper` → `OnPolicyRunner` 순서로 실행.
+  - CLI: `--task`, `--num_envs`, `--device`, `--rl_device`, `--seed`, `--max_iterations`, `--num_steps_per_env`, `--save_interval`, `--experiment_name`, `--run_name`, `--log_root_path`, `--checkpoint_dir`, `--clip_actions`.
+  - 기본 PPO cfg는 6-dim policy obs/critic obs(`obs_groups={"policy":["policy"],"critic":["policy"]}`), ActorCritic `[128,128]` ELU, PPO 2 epochs/1 minibatch의 smoke-friendly 설정.
+  - `--checkpoint_dir`가 지정되면 해당 디렉터리를 log dir로 사용하고, 이번 실행 시작 이후 생성/갱신된 `model_*.pt`가 없으면 실패 처리.
+- **검증 결과(서버 `/DISK1/so101-sim2real/work/ta.3/repo`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - 로컬 `python -m py_compile scripts/reinforcement_learning/train.py` 통과, `git diff --check` 통과.
+  - `train.py --num_envs 4 --max_iterations 4 --num_steps_per_env 25 --save_interval 1 --checkpoint_dir /DISK1/so101-sim2real/outputs/tb2_train_smoke_codex_final` 통과. 총 400 env-step, latest checkpoint `/DISK1/so101-sim2real/outputs/tb2_train_smoke_codex_final/model_3.pt`.
+- **참고**:
+  - Claude worker는 `sonnet[1m]`, effort high, `PowerShell` 없는 allowlist로 호출했고 초안/서버 smoke를 완료했다. Codex가 checkpoint freshness와 env seed 반영을 보완 후 재검증했다.
+  - smoke reward 로그는 짧은 랜덤 rollout이라 stage reward가 대부분 0이다. TB.3는 학습 스케일/커리큘럼/평가 기준을 별도로 잡아야 한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.1 단계형 reward 완료)
 
 - **목표**: TB.1 — state-based RL 전문가용 단계형 reward(reach→grasp→lift→transport→insert→release + success + action-rate/joint-vel 페널티)를 구현하고 Isaac Lab 2.3.2 GPU smoke로 검증한다.
