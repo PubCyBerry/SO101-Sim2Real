@@ -12,6 +12,27 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TC.1 rollout recorder 완료, 다음 TC.2)
+
+- **목표**: TB.3 stochastic expert checkpoint를 3-camera render와 함께 rollout하고, 성공 episode만 LeRobot v3 데이터셋으로 기록하는 `scripts/sim/rollout_to_lerobot.py` recorder를 만든다.
+- **상태**: 완료. 다음 actionable task는 **TC.2 200ep pipeline with DR + 3 cams + success filter**.
+- **완료한 일**:
+  - `scripts/sim/rollout_to_lerobot.py` 추가. Isaac AppLauncher + `RslRlVecEnvWrapper` + `OnPolicyRunner`로 checkpoint를 로드하고, 성공 episode만 `data/chunk-000/file-000.parquet`, `meta/info.json`, `meta/tasks.parquet`, `meta/episodes/chunk-000/file-000.parquet`, `meta/stats.json`, `videos/observation.images.{top,wrist,front}/chunk-000/file-000.mp4`에 기록한다.
+  - North Star 계약에 맞춰 action/state는 6-dim SO-101 joint position으로 저장한다. sim radian 값은 real LeRobot 데이터셋 단위에 맞춰 arm 5축 rad→deg, gripper `×31.75`로 변환한다.
+  - 기본 rollout 조건은 TB.3/TB.4 gate와 동일: `active_pens=1`, full pen/cup spawn scale 1.0, stochastic policy, `grasp_assist_distance=0.12`, offset `(0.03, 0.10, -0.05)`, `place_assist_distance=0.0`.
+- **검증 결과(서버 canonical repo `/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - 1ep smoke: `/DISK1/so101-sim2real/outputs/tc1_rollout_smoke_1ep_codex`, 1/1 success, 22 frames, 3cam mp4 생성, `validate_lerobot_schema.py` PASS.
+  - TC.1 gate: `/DISK1/so101-sim2real/outputs/tc1_rollout_10ep_codex_20260604_0452`, 10 successes / 15 attempts, failures 5 filtered, total 427 frames, dataset size 약 11MB, `validate_lerobot_schema.py` PASS.
+- **검증 명령**:
+  - Recorder: `UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac /home/konan147/.local/bin/uv run --group isaac --locked python scripts/sim/rollout_to_lerobot.py --checkpoint /DISK1/so101-sim2real/outputs/tb3_curr12_no_place_offset_radius1_1024_20260604_0430/model_70.pt --output_dir /DISK1/so101-sim2real/outputs/tc1_rollout_10ep_codex_20260604_0452 --episodes 10 --max_attempts 30 --max_episode_steps 450 --device cuda:0 --overwrite`
+  - Validator: `UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac /home/konan147/.local/bin/uv run --group isaac --locked python scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc1_rollout_10ep_codex_20260604_0452`
+- **주의/다음**:
+  - TC.1 recorder는 현재 `num_envs=1`만 지원한다. top/front world-absolute camera 때문에 병렬 env 카메라 정합은 TC.2에서 env-relative 전환하거나, 우선 serial 200ep로 관통 후 병렬화한다.
+  - 생성 성공률은 rollout 중 10/15 attempts였다. TC.2는 `max_attempts`를 넉넉히 두고 success filter 정상 동작을 계속 기록한다.
+  - `scripts/author_pick_pen_scene.py`는 사용자 추가 untracked 참고 파일로 남아 있으며 이번 커밋에 포함하지 않는다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.3/TB.4 완료, 다음 TC.1)
 
 - **목표**: TB.3 state-based RL expert + TB.4 spawn/cup curriculum 확대를 통과시키고, Phase C rollout recorder로 넘어간다.
