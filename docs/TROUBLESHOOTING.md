@@ -14,6 +14,7 @@
 - [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
+- [Isaac Lab pip 전환 후 `import sim_to_real` 실패](#isaac-lab-pip-전환-후-import-sim_to_real-실패)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
 - [SmolVLA fine-tune 추론 시 카메라 키 불일치 (KeyError: observation.images.camera1)](#smolvla-fine-tune-추론-시-카메라-키-불일치-keyerror-observationimagescamera1)
 - [카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)](#카메라-sensor-가-raytracing-pipeline-생성-실패-rt-코어-없는-gpu)
@@ -932,6 +933,58 @@ Full App UI 자체가 필요하면 먼저 사용자 설정을 초기화해 재�
 1. `.\.venv\Scripts\isaacsim.exe <isaaclab ... rendering.kit>` 실행 시 로그 폴더가 `Kit\Isaac-Sim\5.1\...` 로 잡히고 GUI 프로세스가 유지되는지 확인.
 2. teleop task 는 `--enable_cameras` 를 둔 기존 명령으로 실행해 PickOrange scene 과 camera observation 이 뜨는지 확인.
 3. bare Full App 재검증이 필요하면 `Get-WinEvent -LogName Application` 에 새 `rtx.scenedb.plugin.dll` / `0xc0000005` APPCRASH 가 추가되지 않았는지 확인.
+
+---
+
+## Isaac Lab pip 전환 후 `import sim_to_real` 실패
+
+**현상**: `leisaac` 의존성을 제거하고 `isaacsim[all,extscache]==5.1.0` + `isaaclab[all,isaacsim]==2.3.2` 직접 의존으로 전환한 뒤, 서버 uv 환경에서 `import sim_to_real` 이 실패한다.
+
+**오류 메시지**:
+
+```text
+ModuleNotFoundError: No module named 'isaaclab.envs'
+```
+
+또는 Isaac Sim runtime 초기화 전 직접 import 시 다음 경고 뒤에 실패한다.
+
+```text
+WARNING: Omniverse/Isaac Sim import statements must take place after the
+`SimulationApp` class has been instantiated.
+...
+ModuleNotFoundError: No module named 'omni.physics'
+# 또는
+ModuleNotFoundError: No module named 'omni.timeline'
+```
+
+### 원인
+
+Isaac Lab 2.3.2 pip 패키지는 top-level `isaaclab` launcher 패키지와 실제 core package(`isaaclab/source/isaaclab/isaaclab`)가 같은 이름을 쓴다. `isaaclab_tasks` 등 일부 extra path 는 `.pth` 로 노출되지만 core package path 는 일반 import에서 바로 잡히지 않아 `isaaclab.envs` 조회가 실패할 수 있다.
+
+또한 Isaac Lab의 환경/asset 모듈은 `omni.physics` 같은 Kit extension이 로드된 뒤에 import해야 한다. 즉 `SimulationApp` 초기화 전의 bare `import sim_to_real` 은 환경 등록까지 끝내는 smoke로 쓰기 어렵다.
+
+### 해결 방법
+
+`src/sim_to_real/__init__.py` 에서 Isaac Lab pip layout을 감지해 `isaaclab.__path__` 에 core package 경로를 보강한다. T0.2처럼 의존성만 먼저 전환한 단계에서는 아직 남아 있는 `leisaac` import와 Isaac runtime 미초기화(`omni.*`)를 deferred import로 처리한다. 실제 gym 환경 등록과 500-step smoke는 T0.3의 de-leisaac 코드 재작성 후 검증한다.
+
+### 확인 방법
+
+서버에서 project env/cache를 `/DISK1`로 지정하고 확인한다.
+
+```bash
+cd /DISK1/so101-sim2real/work/t0.2/repo
+UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac \
+UV_CACHE_DIR=/DISK1/so101-sim2real/cache/uv \
+  /home/konan147/.local/bin/uv run python -c 'import isaacsim; import isaaclab; import sim_to_real; print("ok")'
+```
+
+정상 출력:
+
+```text
+ok
+```
+
+`SimulationApp` 기반 headless import도 exit code 0이면 통과다. 대량의 GLFW/display warning은 headless 서버에서 흔하며, `sim_to_real-ok` 출력과 정상 종료 여부를 기준으로 판단한다.
 
 ---
 

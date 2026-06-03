@@ -12,6 +12,17 @@
 
 ---
 
+## 작업 인계 (2026-06-03 — T0.2 서버 Isaac 설치/의존성 전환 완료)
+
+- **목표**: T0.2 — 서버 `konan147`에 user-local `uv`를 준비하고, `leisaac`를 제거한 순수 Isaac Sim/Isaac Lab 2.3.2 의존성으로 전환한 뒤 headless smoke를 통과시킨다.
+- **상태**: 완료. 다음은 T0.3(de-leisaac sim-critical 코드 재작성).
+- **완료한 일**: `pyproject.toml`/`uv.lock`에서 `leisaac` 의존성과 source 제거, `isaacsim[all,extscache]==5.1.0` + `isaaclab[all,isaacsim]==2.3.2` 직접 의존으로 전환, `validation = ["ovphysx"]` 보존. 서버에 user-local `uv 0.11.18` 설치. `/DISK1/so101-sim2real/venvs/isaac`에 sync 완료(약 19G).
+- **보완한 일**: Isaac Lab pip layout에서 `isaaclab.envs` 경로가 빠지는 문제와 `SimulationApp` 전 `omni.*` import 문제를 `src/sim_to_real/__init__.py`에서 T0.3 전용 deferred import로 처리. Claude worker allowlist에서 `PowerShell` 제거(`loop.py`, `dispatch.sh`, 마스터플랜 반영).
+- **검증 결과**: `uv lock --check` 통과, `rg "leisaac" pyproject.toml uv.lock` 0건, 서버 `uv sync --group isaac --python 3.11 --locked` 통과, 서버 `uv run python -c 'import isaacsim; import isaaclab; import sim_to_real; print(123)'` 통과, 서버 `isaaclab 2.3.2` 확인, `python -m py_compile src/sim_to_real/__init__.py scripts/orchestrator/loop.py` 및 `bash -n scripts/orchestrator/dispatch.sh` 통과.
+- **다음**: T0.3 — `src/sim_to_real/tasks/pick_pen`의 sim-critical leisaac import 제거 및 순수 Isaac Lab env smoke 작성.
+
+---
+
 ## 작업 인계 (2026-06-03 — T0.0/T0.1 착수 보완 계획 구현)
 
 - **목표**: 보완 계획을 마스터플랜/TASKS에 반영하고, 실제 부트스트랩 일부(T0.0 preflight, T0.1 validator)를 수행.
@@ -23,7 +34,7 @@
   - Claude worker로 `scripts/validate_lerobot_schema.py` 작성 후 Codex가 직접 재검증.
   - 마스터플랜에 RELOAD 범위(§0·§1·§7), 복구불가 3회, worker JSON 인터페이스, `/DISK1/so101-sim2real/run/gpu.lock`, T0.5→T0.2 흡수 반영.
   - `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` 추가. 로컬 dry run은 WSL 없이 Python subprocess가 `claude.exe --model "sonnet[1m]" --effort high`를 직접 호출하고, `dispatch.sh`는 SSH/Unix 래퍼로 유지.
-  - Claude worker tool allowlist 기본값을 `Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell`로 고정.
+  - Claude worker tool allowlist 기본값을 `Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow`로 고정.
 - **검증 결과**:
   - `python scripts/validate_lerobot_schema.py datasets/pick_pen` 통과.
   - `python scripts/validate_lerobot_schema.py --self-test` 통과.

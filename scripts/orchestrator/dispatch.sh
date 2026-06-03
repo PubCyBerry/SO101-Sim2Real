@@ -8,7 +8,7 @@ PROMPT_FILE=""
 MODEL="${CLAUDE_MODEL:-sonnet[1m]}"
 EFFORT="${CLAUDE_EFFORT:-high}"
 PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-TOOLS="${CLAUDE_TOOLS:-Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell}"
+TOOLS="${CLAUDE_TOOLS:-Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow}"
 
 usage() {
   cat <<'USAGE'

@@ -23,7 +23,7 @@ DEFAULT_PERMISSION_MODE = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermis
 DEFAULT_TOOLS = os.environ.get(
     "CLAUDE_TOOLS",
     "Skill, Read, Glob, Grep, Write, Edit, Bash, Agent, Monitor, TaskCreate, TaskGet, "
-    "TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow, PowerShell",
+    "TaskList, TaskUpdate, TaskStop, WebFetch, WebSearch, Workflow",
 )
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
