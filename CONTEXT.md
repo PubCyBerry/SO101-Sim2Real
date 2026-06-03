@@ -19,7 +19,7 @@
 - **대상 산출물**:
   - Dataset: `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
   - Log: `/DISK1/so101-sim2real/logs/rollout/tc4_rollout_2000ep_codex_20260604.log`
-  - 목표: `episodes=2000`, `max_attempts=3500`, 3-camera h264 videos 포함.
+  - 목표: `episodes=2000`, `max_attempts=5000`, 3-camera h264 videos 포함. 초기 실행은 `max_attempts=3500`이었으나 성공률 변동 여유를 위해 몇 분 뒤 재시작했다.
 - **검증 계획**:
   - `scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
   - `meta/info.json.total_episodes == 2000`, data parquet rows와 episode parquet rows 확인.
