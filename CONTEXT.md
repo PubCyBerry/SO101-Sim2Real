@@ -12,6 +12,24 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TC.3 overlay preview 완료, 다음 TC.4)
+
+- **목표**: TC.3 — Squint-style segmentation/background overlay를 카메라별 preview로 구현하고, 합성 프레임과 간단 지표로 품질을 점검한다.
+- **상태**: 완료. 다음 actionable task는 **TC.4 대량 롤아웃(2k-5k success ep) → HF push**.
+- **완료한 일**:
+  - `scripts/sim/segmentation_overlay_preview.py` 추가. sim/real PNG 프레임 또는 LeRobot mp4에서 프레임을 읽어 foreground mask, overlay, contact sheet, `overlay_summary.json`을 만든다.
+  - true Isaac `SemanticSegmentation` AOV가 아니라 deterministic preview mask다. top/front는 dominant background color 기반 mask, wrist는 black cup/mat 구분이 어려워 camera-specific ROI fallback을 쓰며 이 선택을 summary에 기록한다.
+  - `semantic-labels`/`camera-outputs-rt2` 스킬은 SemanticsAPI와 AOV 방향성 확인에만 참고했고, 실제 구현은 가벼운 PIL/numpy preview로 제한했다.
+- **검증 결과**:
+  - 로컬: `python -m py_compile scripts/sim/segmentation_overlay_preview.py` 통과.
+  - 로컬 preview: `outputs/tc3_segmentation_overlay_preview_codex_v3` 생성. contact sheet 3종 육안 확인.
+  - 서버 preview: `/DISK1/so101-sim2real/outputs/tc3_segmentation_overlay_preview_codex_20260604_v2` 생성. summary 기준 `top.mask_source=color`, `front.mask_source=color`, `wrist.mask_source=roi_fallback`; metrics foreground ratio top `0.1096`, wrist `0.5937`, front `0.2539`.
+- **주의/다음**:
+  - TC.3는 optional preview로 done 처리한다. 대량 데이터(TC.4)에 overlay를 실제 적용하려면 이 preview script를 recorder 후처리로 연결하거나, 더 정확한 Isaac semantic AOV/label path를 별도 hardening해야 한다.
+  - TC.4는 현재 1-env serial 200ep가 35분대였으므로 2k-5k는 시간이 길다. 먼저 2k target으로 실행하고, 필요 시 chunked serial/multi-process 또는 camera env-relative 병렬화를 검토한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TC.2 200ep pipeline 완료, 다음 TC.3)
 
 - **목표**: TC.2 — DR reset + 3-camera render + success-only filter가 200 successful episodes 규모에서 끝까지 관통되는지 검증한다.

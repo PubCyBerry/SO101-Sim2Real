@@ -37,7 +37,7 @@
 
 - [x] **TC.1** `scripts/sim/rollout_to_lerobot.py` recorder (leisaac LeRobotRecorderManager 대체) | machine:any | dep:TB.3 | verify:10ep 변환 후 `validate_lerobot_schema.py` 통과 | status:done
 - [x] **TC.2** 200ep 파이프라인 관통 (DR + 3캠 렌더 + 성공 ep만 필터) | machine:server | dep:TC.1 | verify:validate 통과 + success filter 동작 확인 | status:done
-- [ ] **TC.3** (선택) segmentation 배경 오버레이 (squint식, 카메라별 정합) | machine:server | dep:TC.2 | verify:카메라별 합성 프레임 육안/지표 점검 | status:todo
+- [x] **TC.3** (선택) segmentation 배경 오버레이 (squint식, 카메라별 정합) | machine:server | dep:TC.2 | verify:카메라별 합성 프레임 육안/지표 점검 | status:done
 - [ ] **TC.4** 대량 롤아웃 (2k–5k 성공 ep) → HF push | machine:server | dep:TC.2 | verify:validate 통과 + ep 수 목표 + `/DISK1` 용량 확인 | status:todo
 
 ## Phase D — GR00T N1.5 증류 (IL)
@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TC.3 done — `segmentation_overlay_preview.py` 추가, TA.3 real/sim 3cam PNG로 Squint-style foreground-mask overlay preview 생성, 서버 산출물 `/DISK1/so101-sim2real/outputs/tc3_segmentation_overlay_preview_codex_20260604_v2`, top/front=color mask·wrist=ROI fallback 기록 / 다음: TC.4 2k-5k success rollout + HF push
 - [2026-06-04] TC.2 done — serial 1-env full DR + 3cam rollout 200 success ep 생성(`/DISK1/so101-sim2real/outputs/tc2_rollout_200ep_codex_20260604_0458`), 200 successes/289 attempts/89 failures filtered/10,473 frames, dataset 266MB, validator PASS / 다음: TC.3 optional segmentation overlay
 - [2026-06-04] TC.1 done — `scripts/sim/rollout_to_lerobot.py` 추가, TB.3 checkpoint stochastic assisted/no-place-snap rollout에서 성공 10ep/15 attempts/427 frames 생성(`/DISK1/so101-sim2real/outputs/tc1_rollout_10ep_codex_20260604_0452`), 3cam h264 mp4 + LeRobot v3 schema validator PASS / 다음: TC.2 200ep DR+3cam success-filter pipeline
 - [2026-06-04] TB.3/TB.4 done — gripper body↔pen center offset 보정(`0.03,0.10,-0.05`) + `place_height_pen` 추가, no-place-snap/full spawn/cup/active target 1 stochastic eval 128/128(success_rate 1.0) 통과, deterministic full spawn은 0.4531 residual / 다음: TC.1 rollout_to_lerobot.py
