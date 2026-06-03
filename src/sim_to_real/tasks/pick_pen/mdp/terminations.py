@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 
-from leisaac.utils.robot_utils import is_so101_at_rest_pose
+
+# Threshold for "at rest pose": all joints within ±15° of zero
+_REST_THRESHOLD_RAD: float = 15.0 * math.pi / 180.0
+
+
+def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:
+    """All joints within _REST_THRESHOLD_RAD of zero (radians)."""
+    return (joint_pos.abs() < _REST_THRESHOLD_RAD).all(dim=-1)
 
 
 def task_done(
@@ -33,7 +42,6 @@ def task_done(
 
     if require_rest_pose:
         robot: Articulation = env.scene["robot"]
-        joint_names = list(robot.data.joint_names)
-        done = torch.logical_and(done, is_so101_at_rest_pose(robot.data.joint_pos, joint_names))
+        done = torch.logical_and(done, _is_at_rest_pose(robot.data.joint_pos))
 
     return done

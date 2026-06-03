@@ -12,6 +12,16 @@
 
 ---
 
+## 작업 인계 (2026-06-03 — T0.3 de-leisaac sim-critical 완료)
+
+- **목표**: T0.3 — `src/sim_to_real/tasks/pick_pen`를 순수 Isaac Lab `ManagerBasedRLEnvCfg` 기반으로 재작성하고 sim-critical `leisaac` import를 0건으로 만든다.
+- **상태**: 완료. 다음은 TA.1(SO-101 articulation position PD drive tuning).
+- **완료한 일**: `pick_pen_env_cfg.py`를 순수 Isaac Lab 2.3.2 `ManagerBasedRLEnvCfg`로 재작성. `InteractiveSceneCfg` + SO-101 `ArticulationCfg` + 펜 4개/펜컵 `RigidObjectCfg` + 6-dim `JointPositionActionCfg` + 6-dim policy obs + minimal reward/event/termination 구성. `pen_desk.py`는 repo-local asset path로 전환. Direct env는 pure DirectRLEnv 재작성 전까지 등록 보류. 신규 `scripts/environments/env_smoke.py` 추가.
+- **검증 결과**: `python -m py_compile ...` 통과, `rg "leisaac" src/sim_to_real/tasks/pick_pen src/sim_to_real/assets/scenes/pen_desk.py` 0건, 서버 `/DISK1` Isaac venv에서 `env_smoke.py --steps 500 --num_envs 1 --device cuda:0` 통과(action_shape `[1,6]`, policy_obs_shape `[1,6]`, resets 0).
+- **주의**: 물리/drive 품질은 smoke 통과 수준이다. 실제 안정성·진동·토크/속도 제한 튜닝은 TA.1에서 수행.
+
+---
+
 ## 작업 인계 (2026-06-03 — T0.2 서버 Isaac 설치/의존성 전환 완료)
 
 - **목표**: T0.2 — 서버 `konan147`에 user-local `uv`를 준비하고, `leisaac`를 제거한 순수 Isaac Sim/Isaac Lab 2.3.2 의존성으로 전환한 뒤 headless smoke를 통과시킨다.

@@ -23,7 +23,8 @@ _extend_isaaclab_pip_namespace()
 try:
     from .tasks import *
 except ModuleNotFoundError as exc:
-    # T0.2는 의존성 전환 단계다. Isaac 런타임/환경 재작성은 T0.3에서 검증한다.
+    # T0.3 이후: 외부 task wrapper 의존성 제거 완료.
+    # isaaclab/isaacsim 없이 import 시(예: schema 검증 스크립트) omni.* 오류는 허용.
     missing = exc.name or ""
-    if missing != "leisaac" and not missing.startswith("omni."):
+    if not missing.startswith("omni.") and not missing.startswith("isaacsim"):
         raise

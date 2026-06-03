@@ -1,79 +1,179 @@
-"""Pen Pick-and-Place task configuration."""
+"""Pen Pick-and-Place task configuration — pure Isaac Lab 2.3.2."""
 
 from __future__ import annotations
 
-from typing import Any
-
-import torch
-from isaaclab.assets import AssetBaseCfg
+import isaaclab.envs.mdp as mdp
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from leisaac.utils.domain_randomization import (
-    domain_randomization,
-    randomize_camera_uniform,
-)
-from leisaac.utils.general_assets import parse_usd_and_create_subassets
 
-from sim_to_real.assets.scenes.pen_desk import PEN_DESK_CFG, PEN_DESK_USD_PATH
-from leisaac.tasks.template import (
-    SingleArmObservationsCfg,
-    SingleArmTaskEnvCfg,
-    SingleArmTaskSceneCfg,
-    SingleArmTerminationsCfg,
-)
+from sim_to_real.assets.scenes.pen_desk import PEN_DESK_CFG, PEN_DESK_USD_PATH, ROBOT_USD_PATH
 from sim_to_real.utils.constant import PEN_CUP_NAME, PEN_NAMES
 from sim_to_real.utils.domain_randomization import (
     randomize_object_in_ellipse,
     randomize_object_on_arc,
 )
 
-from . import mdp
+from . import mdp as task_mdp
 
 
-# World-frame (x, y) of the pen cup at scene authoring time. The cup is a
-# rigid body so this is only the initial pose; pen_in_cup checks against this
-# seed location for now. PEN_CUP_LOCAL=(0, 0.40) + SCENE_OFFSET=(2.2, -0.57)
-# = (2.2, -0.17). Cup is the apex of the forward-facing ±30° arc, sitting
-# ≈ 0.44 m forward of the robot (SO-101 reach perimeter).
+# World-frame (x, y) of the pen cup at scene authoring time.
+# PEN_CUP_LOCAL=(0, 0.40) + SCENE_OFFSET=(2.2, -0.57) = (2.2, -0.17)
 PEN_CUP_CENTER_XY: tuple[float, float] = (2.2, -0.17)
 
+# SO-101 joint order (North Star contract — must not change)
+SO101_JOINT_ORDER: list[str] = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+]
+
+# Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04)
+# z=0.92 = desk surface (DeskTop center 0.90 + half-thickness 0.02)
+_ROBOT_POS = (2.2, -0.61, 0.92)
+# Identity rotation; articulation USD already faces the desk objects.
+_ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
+
+
+# ---------------------------------------------------------------------------
+# Scene
+# ---------------------------------------------------------------------------
 
 
 @configclass
-class PickPenSceneCfg(SingleArmTaskSceneCfg):
-    """Scene configuration for the pick orange task."""
+class PickPenSceneCfg(InteractiveSceneCfg):
+    """Scene: pen desk + SO-101 follower + 4 pens + cup."""
 
+    # shared world assets (not per-env)
+    ground_plane = AssetBaseCfg(
+        prim_path="/World/GroundPlane",
+        spawn=sim_utils.GroundPlaneCfg(),
+    )
+    dome_light = AssetBaseCfg(
+        prim_path="/World/DomeLight",
+        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
+    )
+
+    # pen desk USD (contains desk, mat, and all rigid objects)
     scene: AssetBaseCfg = PEN_DESK_CFG.replace(prim_path="{ENV_REGEX_NS}/Scene")
 
+    # SO-101 follower articulation
+    robot: ArticulationCfg = ArticulationCfg(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        spawn=sim_utils.UsdFileCfg(usd_path=ROBOT_USD_PATH),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=_ROBOT_POS,
+            rot=_ROBOT_ROT,
+            joint_pos={j: 0.0 for j in SO101_JOINT_ORDER},
+        ),
+        actuators={
+            "all_joints": ImplicitActuatorCfg(
+                joint_names_expr=SO101_JOINT_ORDER,
+                effort_limit=50.0,
+                velocity_limit=6.28,  # ~1 rev/s conservative limit
+                stiffness=800.0,
+                damping=40.0,
+            ),
+        },
+    )
+
+    # Rigid objects inside the scene USD (spawn=None → wrap existing prims)
+    PenWhite: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Scene/PenWhite",
+        spawn=None,
+    )
+    PenGray: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Scene/PenGray",
+        spawn=None,
+    )
+    PenBlack: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Scene/PenBlack",
+        spawn=None,
+    )
+    PenBlue: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Scene/PenBlue",
+        spawn=None,
+    )
+    PenCup: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Scene/PenCup",
+        spawn=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Actions  (6-dim joint position, North Star order)
+# ---------------------------------------------------------------------------
 
 
 @configclass
-class PickPenObservationsCfg(SingleArmObservationsCfg):
-    """Adds per-pen grasped / in-cup signals to the shared single-arm obs."""
+class PickPenActionsCfg:
+    """6-dim joint position action matching North Star joint order."""
+
+    arm: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=SO101_JOINT_ORDER,
+        scale=1.0,
+        use_default_offset=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Observations
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class PickPenObservationsCfg:
+    """Observations: policy (6-dim joint pos) + subtask signals."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """6-dim joint position in North Star order."""
+
+        joint_pos = ObsTerm(
+            func=mdp.joint_pos_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=SO101_JOINT_ORDER,
+                )
+            },
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
 
     @configclass
     class SubtaskCfg(ObsGroup):
-        pick_white = ObsTerm(func=mdp.pen_grasped, params={"object_cfg": SceneEntityCfg("PenWhite")})
+        """Per-pen placement signals (pen-in-cup, gripper open check)."""
+
         place_white = ObsTerm(
-            func=mdp.pen_in_cup,
+            func=task_mdp.pen_in_cup,
             params={"object_cfg": SceneEntityCfg("PenWhite"), "cup_center_xy": PEN_CUP_CENTER_XY},
         )
-        pick_gray = ObsTerm(func=mdp.pen_grasped, params={"object_cfg": SceneEntityCfg("PenGray")})
         place_gray = ObsTerm(
-            func=mdp.pen_in_cup,
+            func=task_mdp.pen_in_cup,
             params={"object_cfg": SceneEntityCfg("PenGray"), "cup_center_xy": PEN_CUP_CENTER_XY},
         )
-        pick_black = ObsTerm(func=mdp.pen_grasped, params={"object_cfg": SceneEntityCfg("PenBlack")})
         place_black = ObsTerm(
-            func=mdp.pen_in_cup,
+            func=task_mdp.pen_in_cup,
             params={"object_cfg": SceneEntityCfg("PenBlack"), "cup_center_xy": PEN_CUP_CENTER_XY},
         )
-        pick_blue = ObsTerm(func=mdp.pen_grasped, params={"object_cfg": SceneEntityCfg("PenBlue")})
         place_blue = ObsTerm(
-            func=mdp.pen_in_cup,
+            func=task_mdp.pen_in_cup,
             params={"object_cfg": SceneEntityCfg("PenBlue"), "cup_center_xy": PEN_CUP_CENTER_XY},
         )
 
@@ -81,90 +181,101 @@ class PickPenObservationsCfg(SingleArmObservationsCfg):
             self.enable_corruption = False
             self.concatenate_terms = False
 
+    policy: PolicyCfg = PolicyCfg()
     subtask_terms: SubtaskCfg = SubtaskCfg()
 
 
+# ---------------------------------------------------------------------------
+# Rewards (stub — Phase B implements proper rewards)
+# ---------------------------------------------------------------------------
+
+
 @configclass
-class PickPenTerminationsCfg(SingleArmTerminationsCfg):
+class PickPenRewardsCfg:
+    """Minimal reward stub so ManagerBasedRLEnv builds. Phase B adds real terms."""
+
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
+    joint_vel = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-1e-4,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminations
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class PickPenTerminationsCfg:
+    """Episode ends on timeout or when all pens are in the cup."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
     success = DoneTerm(
-        func=mdp.task_done,
+        func=task_mdp.task_done,
         params={
             "pens_cfg": [SceneEntityCfg(name) for name in PEN_NAMES],
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "require_rest_pose": False,  # rest-pose check is TA.1 territory
         },
     )
 
 
+# ---------------------------------------------------------------------------
+# Events (domain randomisation)
+# ---------------------------------------------------------------------------
+
+
 @configclass
-class PickPenEnvCfg(SingleArmTaskEnvCfg):
-    """Pen Pick-and-Place environment config (manager-based RL)."""
+class PickPenEventCfg:
+    """Reset and randomisation events."""
 
-    scene: PickPenSceneCfg = PickPenSceneCfg(num_envs=1, env_spacing=1.5)
+    reset_scene = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
+
+    reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "position_range": (0.0, 0.0),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    # Pens scatter inside a small ellipse around their authored positions
+    randomize_pen_white = randomize_object_in_ellipse("PenWhite", 0.05, 0.02, (-10.0, 10.0))
+    randomize_pen_gray = randomize_object_in_ellipse("PenGray", 0.05, 0.02, (-10.0, 10.0))
+    randomize_pen_black = randomize_object_in_ellipse("PenBlack", 0.05, 0.02, (-10.0, 10.0))
+    randomize_pen_blue = randomize_object_in_ellipse("PenBlue", 0.05, 0.02, (-10.0, 10.0))
+
+    # Cup swings along a forward-facing ±20° arc
+    randomize_pen_cup = randomize_object_on_arc(PEN_CUP_NAME, radius=0.44, angle_range_deg=(-20.0, 20.0))
+
+
+# ---------------------------------------------------------------------------
+# Environment config
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class PickPenEnvCfg(ManagerBasedRLEnvCfg):
+    """Pen Pick-and-Place environment — pure Isaac Lab 2.3.2 ManagerBased."""
+
+    scene: PickPenSceneCfg = PickPenSceneCfg(num_envs=1, env_spacing=2.5)
     observations: PickPenObservationsCfg = PickPenObservationsCfg()
+    actions: PickPenActionsCfg = PickPenActionsCfg()
+    rewards: PickPenRewardsCfg = PickPenRewardsCfg()
     terminations: PickPenTerminationsCfg = PickPenTerminationsCfg()
-
-    task_description: str = "Pick the scattered pens off the desk and drop them into the pen cup."
+    events: PickPenEventCfg = PickPenEventCfg()
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        parse_usd_and_create_subassets(PEN_DESK_USD_PATH, self, specific_name_list=[*PEN_NAMES, PEN_CUP_NAME])
-
-        domain_randomization(
-            self,
-            random_options=[
-                # 펜은 docs/pics/펜통_펜_배치_3.jpg 의 "초록 타원" 영역 안에서 흩어진다.
-                # 각 펜의 jitter 는 ±5 cm × ±2 cm (가로로 약간 긴) 작은 타원으로 제한해
-                # 4 개 default 가 그린 영역 4 개 구역에 분산된 상태에서 펜끼리 capsule
-                # collider 가 겹치지 않게 한다. yaw 는 ±10° — 4 개 펜의 author yaw 차이
-                # (각각 25°/-30°/60°/-10°) 를 망가뜨리지 않을 정도만 흔든다.
-                *[
-                    randomize_object_in_ellipse(
-                        name,
-                        x_radius=0.05,
-                        y_radius=0.02,
-                        yaw_range_deg=(-10.0, 10.0),
-                    )
-                    for name in PEN_NAMES
-                ],
-                # 펜컵은 docs/pics/펜통_펜_배치_3.jpg 의 "주황 호" 를 따라 sampling.
-                # default 위치 scene-local (0, 0.40) 이 호의 정점, robot scene-local
-                # y=-0.04 에서 0.44 m 떨어진 SO-101 reach 가장자리. ±30° 회전 시
-                # 양 끝 (±0.22, 0.34) — 매트 안 + reach 한계 둘 다 만족. 펜 영역
-                # (y ≤ 0.28) 과 펜컵 영역 (y ≥ 0.34) 이 y 방향으로 분리되어
-                # 펜이 펜컵 안에 spawn 되는 케이스가 원천 차단된다.
-                randomize_object_on_arc(
-                    PEN_CUP_NAME,
-                    radius=0.44,
-                    angle_range_deg=(-20.0, 20.0),
-                ),
-                randomize_camera_uniform(
-                    "front",
-                    pose_range={
-                        "x": (-0.025, 0.025),
-                        "y": (-0.025, 0.025),
-                        "z": (-0.025, 0.025),
-                        "roll": (-2.5 * torch.pi / 180, 2.5 * torch.pi / 180),
-                        "pitch": (-2.5 * torch.pi / 180, 2.5 * torch.pi / 180),
-                        "yaw": (-2.5 * torch.pi / 180, 2.5 * torch.pi / 180),
-                    },
-                    convention="ros",
-                ),
-            ],
-        )
-
-    # ------------------------------------------------------------------
-    # Recorder export helpers — keep the old API used by the converter.
-    # ------------------------------------------------------------------
-
-    def use_teleop_device(self, teleop_device: str) -> None:  # noqa: D401 - inherits docstring
-        super().use_teleop_device(teleop_device)
-
-    def preprocess_device_action(self, action: dict[str, Any], teleop_device) -> torch.Tensor:
-        return super().preprocess_device_action(action, teleop_device)
-
-    def build_lerobot_frame(self, episode_data: EpisodeData, dataset_cfg: LeRobotDatasetCfg) -> dict:
-        return super().build_lerobot_frame(episode_data, dataset_cfg)
-
-
-# Backwards-compatible alias for code paths that still import the old name.
-SO101PickPenTaskEnvCfg = PickPenEnvCfg
+        # Physics: 120 Hz simulation, 30 Hz policy (decimation=4)
+        self.sim.dt = 1.0 / 120.0
+        self.decimation = 4
+        self.episode_length_s = 30.0
+        # GPU pipeline
+        self.sim.physx.bounce_threshold_velocity = 0.2
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
