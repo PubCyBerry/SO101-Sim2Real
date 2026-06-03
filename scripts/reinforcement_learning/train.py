@@ -26,6 +26,7 @@ if multiprocessing.get_start_method() != "spawn":
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -56,6 +57,33 @@ parser.add_argument(
     default=None,
     help="critic 에 사용할 obs 그룹 이름 (기본값: --obs_group 과 동일)",
 )
+# 커리큘럼 파라미터 — gym.make() 이전에 env_cfg 에 적용
+parser.add_argument("--active_pens", type=int, default=4, choices=[1, 2, 3, 4],
+                    help="학습에 사용할 펜 수 (1~4, 기본값: 4)")
+parser.add_argument("--pen_radius_scale", type=float, default=1.0,
+                    help="펜 랜덤화 ellipse 반경 배율 (기본값: 1.0)")
+parser.add_argument("--cup_angle_scale", type=float, default=1.0,
+                    help="컵 랜덤화 각도 범위 배율 (기본값: 1.0)")
+parser.add_argument("--cup_radius_scale", type=float, default=1.0,
+                    help="컵 안 판정 반경 배율 (기본값: 1.0 = 0.05m)")
+parser.add_argument("--episode_length_s", type=float, default=None,
+                    help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
+parser.add_argument("--resume_checkpoint", default=None,
+                    help="이어학습 체크포인트 경로 (.pt). 설정 시 learn() 전 로드.")
+parser.add_argument("--init_noise_std", type=float, default=0.5,
+                    help="ActorCritic 초기 action noise std")
+parser.add_argument("--entropy_coef", type=float, default=0.005,
+                    help="PPO entropy coefficient")
+parser.add_argument("--learning_rate", type=float, default=3e-4,
+                    help="PPO learning rate")
+parser.add_argument("--grasp_assist", action="store_true",
+                    help="닫힌 그리퍼 근처 펜을 따라오게 하는 TB.3 학습 보조 event 활성화")
+parser.add_argument("--grasp_assist_distance", type=float, default=0.075,
+                    help="grasp assist attach 거리(m)")
+parser.add_argument("--grasp_assist_offset_z", type=float, default=0.0,
+                    help="gripper body 기준 pen z offset(m)")
+parser.add_argument("--place_assist_distance", type=float, default=0.0,
+                    help="컵 근방 도달 시 펜을 컵 중심으로 스냅하는 거리(m). 0이면 비활성")
 # --device / --headless 는 AppLauncher 가 등록
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -76,6 +104,19 @@ import sim_to_real  # noqa: E402  # SimToReal-SO101-PickPen-v0 등록
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+
+from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum  # noqa: E402
+
+
+TASK_ID = "TB.3"
+
+
+def _checkpoint_index(path: str) -> int:
+    """model_<step>.pt 체크포인트를 숫자 기준으로 정렬하기 위한 키."""
+    match = re.fullmatch(r"model_(\d+)\.pt", os.path.basename(path))
+    if match is None:
+        return -1
+    return int(match.group(1))
 
 
 def _build_train_cfg(args: argparse.Namespace) -> dict:
@@ -98,7 +139,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
         "policy": {
             "class_name": "ActorCritic",
-            "init_noise_std": 0.5,
+            "init_noise_std": args.init_noise_std,
             "actor_hidden_dims": [128, 128],
             "critic_hidden_dims": [128, 128],
             "activation": "elu",
@@ -109,11 +150,11 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
             "class_name": "PPO",
             "num_learning_epochs": 2,
             "num_mini_batches": 1,
-            "learning_rate": 3e-4,
+            "learning_rate": args.learning_rate,
             "schedule": "fixed",
             "gamma": 0.99,
             "lam": 0.95,
-            "entropy_coef": 0.005,
+            "entropy_coef": args.entropy_coef,
             "desired_kl": 0.01,
             "max_grad_norm": 1.0,
             "value_loss_coef": 1.0,
@@ -147,6 +188,20 @@ def main() -> None:
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         if hasattr(env_cfg, "seed"):
             env_cfg.seed = args.seed
+        # 커리큘럼 파라미터 적용 (기본값은 기존 동작 그대로)
+        apply_curriculum(
+            env_cfg,
+            active_pens=args.active_pens,
+            pen_radius_scale=args.pen_radius_scale,
+            cup_angle_scale=args.cup_angle_scale,
+            cup_radius_scale=args.cup_radius_scale,
+            grasp_assist=args.grasp_assist,
+            grasp_assist_distance=args.grasp_assist_distance,
+            grasp_assist_offset_z=args.grasp_assist_offset_z,
+            place_assist_distance=args.place_assist_distance,
+        )
+        if args.episode_length_s is not None:
+            env_cfg.episode_length_s = args.episode_length_s
         env = gym.make(args.task, cfg=env_cfg)
 
         # rsl_rl VecEnv 래퍼
@@ -164,6 +219,12 @@ def main() -> None:
         # OnPolicyRunner 생성 및 학습
         run_start_time = time.time()
         runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=rl_device)
+        # 이어학습: resume_checkpoint 지정 시 optimizer 포함 로드
+        if args.resume_checkpoint is not None:
+            try:
+                runner.load(args.resume_checkpoint, load_optimizer=True, map_location=rl_device)
+            except TypeError:
+                runner.load(args.resume_checkpoint)
         runner.learn(
             num_learning_iterations=args.max_iterations,
             init_at_random_ep_len=True,
@@ -171,13 +232,16 @@ def main() -> None:
 
         # 체크포인트 목록 수집
         checkpoints = sorted(
-            c for c in glob.glob(os.path.join(log_dir, "model_*.pt"))
-            if os.path.getmtime(c) >= run_start_time - 1.0
+            (
+                c for c in glob.glob(os.path.join(log_dir, "model_*.pt"))
+                if os.path.getmtime(c) >= run_start_time - 1.0
+            ),
+            key=_checkpoint_index,
         )
         if not checkpoints:
             print(
                 json.dumps({
-                    "task_id": "TB.2",
+                    "task_id": TASK_ID,
                     "status": "failed",
                     "error": f"체크포인트 없음: {log_dir}",
                 }),
@@ -188,7 +252,7 @@ def main() -> None:
         total_steps = args.num_envs * args.num_steps_per_env * args.max_iterations
         print(
             json.dumps({
-                "task_id": "TB.2",
+                "task_id": TASK_ID,
                 "status": "passed",
                 "task": args.task,
                 "num_envs": args.num_envs,
@@ -198,6 +262,21 @@ def main() -> None:
                 "log_dir": log_dir,
                 "checkpoints": [os.path.basename(c) for c in checkpoints],
                 "latest_checkpoint": checkpoints[-1],
+                "curriculum": {
+                    "active_pens": args.active_pens,
+                    "pen_radius_scale": args.pen_radius_scale,
+                    "cup_angle_scale": args.cup_angle_scale,
+                    "cup_radius_scale": args.cup_radius_scale,
+                    "episode_length_s": args.episode_length_s,
+                    "resume_checkpoint": args.resume_checkpoint,
+                    "init_noise_std": args.init_noise_std,
+                    "entropy_coef": args.entropy_coef,
+                    "learning_rate": args.learning_rate,
+                    "grasp_assist": args.grasp_assist,
+                    "grasp_assist_distance": args.grasp_assist_distance,
+                    "grasp_assist_offset_z": args.grasp_assist_offset_z,
+                    "place_assist_distance": args.place_assist_distance,
+                },
             }),
             flush=True,
         )
@@ -206,7 +285,7 @@ def main() -> None:
         tb = traceback.format_exc()
         print(
             json.dumps({
-                "task_id": "TB.2",
+                "task_id": TASK_ID,
                 "status": "failed",
                 "error": str(exc),
                 "traceback": tb,

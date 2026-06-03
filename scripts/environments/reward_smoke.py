@@ -43,6 +43,7 @@ _DESK_TOP_Z = 0.92
 _REQUIRED_TERMS = {
     "reach_pen",
     "grasp_pen",
+    "carry_pen",
     "lift_pen",
     "transport_pen",
     "insert_pen",
@@ -76,6 +77,7 @@ def _term_values(env) -> dict[str, torch.Tensor]:
     return {
         "reach_pen": task_mdp.reach_reward(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
         "grasp_pen": task_mdp.grasp_bonus(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
+        "carry_pen": task_mdp.carry_pen(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
         "lift_pen": task_mdp.lift_reward(env),
         "transport_pen": task_mdp.transport_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
         "insert_pen": task_mdp.insert_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
@@ -185,7 +187,9 @@ def main() -> None:
 
         stage_checks: list[dict] = []
 
-        # reach/grasp: independent baseline on desk, then place PenWhite at the gripper.
+        # reach/grasp/carry: baseline은 펜 책상 위, 타겟은 그리퍼 world pos에 펜 배치.
+        # grasp_bonus 는 리프트 조건(lift_min=0.02m)이 있어, 그리퍼 위치에 펜을 두면
+        # 책상 위 정적 상태보다 높아야 increase 함.
         _write_all_pens_outside(env.unwrapped)
         _set_gripper_open(env.unwrapped, open_=False)
         baseline = _term_values(env.unwrapped)
@@ -195,6 +199,7 @@ def main() -> None:
         target = _term_values(env.unwrapped)
         _assert_increase(stage_checks, "reach", baseline["reach_pen"], target["reach_pen"], failures)
         _assert_increase(stage_checks, "grasp", baseline["grasp_pen"], target["grasp_pen"], failures)
+        _assert_increase(stage_checks, "carry", baseline["carry_pen"], target["carry_pen"], failures)
 
         # lift: independent desk baseline, then lift one pen above the desk.
         _write_all_pens_outside(env.unwrapped)

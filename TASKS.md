@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TB.3 in_progress — false-grasp 보상 차단 + `carry_pen` + curriculum/soft-grasp/place assist 추가, 서버 reward/train smoke 통과, assisted stochastic 1-target fixed-spawn eval 128/128(success_rate 1.0) subgate 통과 / 다음: assist 축소·spawn/cup 확대 후 최종 `eval_success.py` ≥0.7
 - [2026-06-04] TB.3 in_progress — `rl_policy` 37-dim privileged obs + `eval_success.py` 추가, train/eval/env smoke 통과, 2048 env scale smoke 통과 및 PhysX aggregate capacity 64k 보정 / 다음: full PPO train + eval success_rate 확인
 - [2026-06-04] TB.2 done — `scripts/reinforcement_learning/train.py` rsl_rl PPO wrapper 추가, 4 env × 25 step × 4 iter = 400 env-step smoke 및 `model_0.pt`~`model_3.pt` checkpoint 저장 통과 / 다음: TB.3
 - [2026-06-04] TB.1 done — reach/grasp/lift/transport/insert/release/success 단계형 reward 추가, pen-in-cup/success의 컵 중심·책상 z 기준 보정, 서버 reward smoke + env 500-step + drive smoke 통과 / 다음: TB.2

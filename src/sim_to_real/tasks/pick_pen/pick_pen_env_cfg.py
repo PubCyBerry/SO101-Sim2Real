@@ -32,6 +32,7 @@ from . import mdp as task_mdp
 # World-frame (x, y) of the pen cup at scene authoring time.
 # PEN_CUP_LOCAL=(0, 0.40) + SCENE_OFFSET=(2.2, -0.57) = (2.2, -0.17)
 PEN_CUP_CENTER_XY: tuple[float, float] = (2.2, -0.17)
+PEN_CUP_SUCCESS_RADIUS: float = 0.05
 
 # SO-101 joint order (North Star contract — must not change)
 SO101_JOINT_ORDER: list[str] = [
@@ -508,7 +509,17 @@ class PickPenRewardsCfg:
     # Stage 2: 그리퍼 닫힘 + 펜 근접 (sparse bonus, 미배치 펜 한정)
     grasp_pen = RewTerm(
         func=task_mdp.grasp_bonus,
-        weight=5.0,
+        weight=1.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+        },
+    )
+
+    # Stage 2.5: 닫힌 그리퍼 + 들린 펜 + 컵 방향 운반 (밀집 도우미)
+    carry_pen = RewTerm(
+        func=task_mdp.carry_pen,
+        weight=4.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "cup_center_xy": PEN_CUP_CENTER_XY,
@@ -524,21 +535,21 @@ class PickPenRewardsCfg:
     # Stage 4: 들어올린 펜의 XY → 컵 접근 (밀집)
     transport_pen = RewTerm(
         func=task_mdp.transport_reward,
-        weight=2.0,
+        weight=8.0,
         params={"cup_center_xy": PEN_CUP_CENTER_XY},
     )
 
     # Stage 5: 컵 안 삽입 — 그리퍼 조건 없음 (밀집, 펜 수 비례)
     insert_pen = RewTerm(
         func=task_mdp.insert_reward,
-        weight=10.0,
+        weight=25.0,
         params={"cup_center_xy": PEN_CUP_CENTER_XY},
     )
 
     # Stage 6: 컵 안 + 그리퍼 열림 완료 (밀집, 배치된 펜 수)
     release_pen = RewTerm(
         func=task_mdp.release_bonus,
-        weight=5.0,
+        weight=10.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "cup_center_xy": PEN_CUP_CENTER_XY,
@@ -548,7 +559,7 @@ class PickPenRewardsCfg:
     # 전체 성공 보너스 — 4개 펜 전부 배치 완료
     task_success = RewTerm(
         func=task_mdp.task_success_bonus,
-        weight=50.0,
+        weight=100.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "cup_center_xy": PEN_CUP_CENTER_XY,
@@ -644,3 +655,107 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         # 2048+ env PPO에서 aggregate pair가 18k를 넘는다. 64k로 여유 확보.
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
+
+
+# ---------------------------------------------------------------------------
+# 커리큘럼 적용 헬퍼 — gym.make() 이전에 env_cfg 에 in-place 적용
+# ---------------------------------------------------------------------------
+
+# 보상 항에서 펜 목록을 오버라이드할 term 이름 목록
+_PEN_REWARD_TERMS = (
+    "reach_pen",
+    "grasp_pen",
+    "carry_pen",
+    "lift_pen",
+    "transport_pen",
+    "insert_pen",
+    "release_pen",
+    "task_success",
+)
+_CUP_RADIUS_REWARD_TERMS = (
+    "reach_pen",
+    "grasp_pen",
+    "carry_pen",
+    "insert_pen",
+    "release_pen",
+    "task_success",
+)
+
+
+def apply_curriculum(
+    env_cfg: PickPenEnvCfg,
+    *,
+    active_pens: int = 4,
+    pen_radius_scale: float = 1.0,
+    cup_angle_scale: float = 1.0,
+    cup_radius_scale: float = 1.0,
+    grasp_assist: bool = False,
+    grasp_assist_distance: float = 0.075,
+    grasp_assist_offset_z: float = 0.0,
+    place_assist_distance: float = 0.0,
+) -> None:
+    """커리큘럼 파라미터를 env_cfg 에 in-place 적용.
+
+    Args:
+        active_pens: 학습에 사용할 펜 수 (1~4). PEN_NAMES 앞에서부터 선택.
+        pen_radius_scale: randomize_pen_* 의 x/y_radius 곱셈 배율.
+        cup_angle_scale: randomize_pen_cup 의 angle_range_deg 곱셈 배율 (0 기준).
+        cup_radius_scale: 컵 안 판정 반경 배율. 기본 1.0 = 0.05m.
+        grasp_assist: 닫힌 그리퍼 근처 펜을 따라오게 하는 TB.3 학습 보조 event.
+        grasp_assist_distance: assist attach 거리.
+        grasp_assist_offset_z: gripper body 기준 pen z offset.
+        place_assist_distance: 컵 근방 도달 시 컵 중심으로 스냅하는 거리. 0이면 비활성.
+    """
+    active_pens = max(1, min(4, active_pens))
+    active_names = PEN_NAMES[:active_pens]
+    active_cfgs = [SceneEntityCfg(n) for n in active_names]
+    cup_radius = PEN_CUP_SUCCESS_RADIUS * max(0.1, cup_radius_scale)
+
+    # 보상 term 에 활성 펜 목록 주입
+    for term_name in _PEN_REWARD_TERMS:
+        term = getattr(env_cfg.rewards, term_name, None)
+        if term is not None:
+            term.params["pen_cfgs"] = active_cfgs
+    for term_name in _CUP_RADIUS_REWARD_TERMS:
+        term = getattr(env_cfg.rewards, term_name, None)
+        if term is not None:
+            term.params["cup_radius"] = cup_radius
+
+    # 종료 조건에 활성 펜 목록 주입
+    env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
+    env_cfg.terminations.success.params["radius"] = cup_radius
+
+    # ellipse 반경 스케일링 — randomize_pen_{white,gray,black,blue}
+    if pen_radius_scale != 1.0:
+        for pen_name in PEN_NAMES:
+            attr_name = "randomize_pen_" + pen_name[3:].lower()  # PenWhite → white
+            term = getattr(env_cfg.events, attr_name, None)
+            if term is not None:
+                p = term.params
+                p["x_radius"] = p["x_radius"] * pen_radius_scale
+                p["y_radius"] = p["y_radius"] * pen_radius_scale
+
+    # 컵 각도 범위 스케일링 (0° 대칭 기준)
+    if cup_angle_scale != 1.0:
+        cup_term = env_cfg.events.randomize_pen_cup
+        if cup_term is not None:
+            lo, hi = cup_term.params["angle_range_deg"]
+            cup_term.params["angle_range_deg"] = (lo * cup_angle_scale, hi * cup_angle_scale)
+
+    if grasp_assist:
+        env_cfg.events.soft_grasp_assist = EventTerm(
+            func=task_mdp.soft_grasp_assist,
+            mode="interval",
+            interval_range_s=(0.0, 0.0),
+            params={
+                "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+                "pen_cfgs": active_cfgs,
+                "cup_center_xy": PEN_CUP_CENTER_XY,
+                "cup_radius": cup_radius,
+                "attach_distance": grasp_assist_distance,
+                "place_distance": place_assist_distance,
+                "offset": (0.0, 0.0, grasp_assist_offset_z),
+            },
+        )
+    elif hasattr(env_cfg.events, "soft_grasp_assist"):
+        env_cfg.events.soft_grasp_assist = None

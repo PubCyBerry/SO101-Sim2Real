@@ -47,6 +47,27 @@ parser.add_argument("--critic_obs_group", default=None,
 parser.add_argument("--clip_actions", type=float, default=1.0)
 parser.add_argument("--min_success_rate", type=float, default=None,
                     help="설정하면 success_rate 가 이 값 미만일 때 exit code 1 로 종료")
+parser.add_argument("--stochastic", action="store_true",
+                    help="deterministic act_inference 대신 stochastic policy.act()로 평가")
+parser.add_argument("--init_noise_std", type=float, default=0.5,
+                    help="학습 시 ActorCritic init_noise_std (checkpoint load shape 재현용)")
+# 커리큘럼 파라미터 — 학습 시와 동일한 설정을 사용해야 분포가 일치
+parser.add_argument("--active_pens", type=int, default=4, choices=[1, 2, 3, 4],
+                    help="평가에 사용할 펜 수 (학습 시와 동일하게 설정)")
+parser.add_argument("--pen_radius_scale", type=float, default=1.0,
+                    help="펜 랜덤화 ellipse 반경 배율")
+parser.add_argument("--cup_angle_scale", type=float, default=1.0,
+                    help="컵 랜덤화 각도 범위 배율")
+parser.add_argument("--cup_radius_scale", type=float, default=1.0,
+                    help="컵 안 판정 반경 배율 (기본값: 1.0 = 0.05m)")
+parser.add_argument("--grasp_assist", action="store_true",
+                    help="학습과 동일하게 TB.3 soft grasp assist 활성화")
+parser.add_argument("--grasp_assist_distance", type=float, default=0.075,
+                    help="grasp assist attach 거리(m)")
+parser.add_argument("--grasp_assist_offset_z", type=float, default=0.0,
+                    help="gripper body 기준 pen z offset(m)")
+parser.add_argument("--place_assist_distance", type=float, default=0.0,
+                    help="컵 근방 도달 시 펜을 컵 중심으로 스냅하는 거리(m). 0이면 비활성")
 # --device / --headless 는 AppLauncher 가 등록
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -64,6 +85,8 @@ import sim_to_real  # noqa: E402  # SimToReal-SO101-PickPen-v0 등록
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+
+from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum  # noqa: E402
 
 
 def _build_train_cfg(args: argparse.Namespace) -> dict:
@@ -86,7 +109,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
         "policy": {
             "class_name": "ActorCritic",
-            "init_noise_std": 0.5,
+            "init_noise_std": args.init_noise_std,
             "actor_hidden_dims": [128, 128],
             "critic_hidden_dims": [128, 128],
             "activation": "elu",
@@ -120,6 +143,18 @@ def main() -> None:
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         if hasattr(env_cfg, "seed"):
             env_cfg.seed = args.seed
+        # 커리큘럼 파라미터 적용 (학습 시와 동일하게 설정할 것)
+        apply_curriculum(
+            env_cfg,
+            active_pens=args.active_pens,
+            pen_radius_scale=args.pen_radius_scale,
+            cup_angle_scale=args.cup_angle_scale,
+            cup_radius_scale=args.cup_radius_scale,
+            grasp_assist=args.grasp_assist,
+            grasp_assist_distance=args.grasp_assist_distance,
+            grasp_assist_offset_z=args.grasp_assist_offset_z,
+            place_assist_distance=args.place_assist_distance,
+        )
         # episode_length_s 를 max_episode_steps 기준으로 override
         policy_dt = env_cfg.sim.dt * env_cfg.decimation  # 초 단위 policy step
         env_cfg.episode_length_s = args.max_episode_steps * policy_dt
@@ -138,7 +173,12 @@ def main() -> None:
             # rsl_rl 버전에 따라 load() 인자 지원 범위가 다를 수 있음
             runner.load(args.checkpoint)
 
-        policy = runner.get_inference_policy(device=rl_device)
+        if args.stochastic:
+            runner.eval_mode()
+            runner.alg.policy.to(rl_device)
+            policy = runner.alg.policy.act
+        else:
+            policy = runner.get_inference_policy(device=rl_device)
 
         # 평가 루프
         # get_observations() → TensorDict (obs group 이름을 키로 가짐)
@@ -177,6 +217,17 @@ def main() -> None:
             "success_rate": round(success_rate, 4),
             "num_envs": args.num_envs,
             "max_episode_steps": args.max_episode_steps,
+            "stochastic": args.stochastic,
+            "curriculum": {
+                "active_pens": args.active_pens,
+                "pen_radius_scale": args.pen_radius_scale,
+                "cup_angle_scale": args.cup_angle_scale,
+                "cup_radius_scale": args.cup_radius_scale,
+                "grasp_assist": args.grasp_assist,
+                "grasp_assist_distance": args.grasp_assist_distance,
+                "grasp_assist_offset_z": args.grasp_assist_offset_z,
+                "place_assist_distance": args.place_assist_distance,
+            },
         }
         print(json.dumps(result), flush=True)
 

@@ -120,10 +120,12 @@ def grasp_bonus(
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     diff_threshold: float = 0.07,
     close_threshold: float = 0.50,
+    lift_min: float = 0.02,
 ) -> torch.Tensor:
-    """그리퍼 닫힘 AND EE 근접 조건 달성 펜 수 (미배치만).
+    """그리퍼 닫힘 AND EE 근접 AND 펜 살짝 들린 상태 (미배치만).
 
-    각 펜에 대해 독립적으로 판단하고 합산 — [0, 4].
+    책상 위 정적 파지는 보상하지 않음 — 실제 픽업(lift_min 이상 상승)이어야 함.
+    합산 — [0, 4].
     """
     cfgs = _make_pen_cfgs(pen_cfgs)
     robot_cfg.resolve(env.scene)
@@ -134,10 +136,64 @@ def grasp_bonus(
     total = torch.zeros(env.num_envs, device=env.device)
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
+        # 환경 원점 기준 local z 로 리프트 확인
+        pen_local_z = pen_pos[:, 2] - env.scene.env_origins[:, 2]
+        lifted = pen_local_z > (_DESK_TOP_Z + lift_min)
         dist = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
         placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
         near = dist < diff_threshold
-        total = total + (near & gripper_closed & ~placed).float()
+        total = total + (near & gripper_closed & lifted & ~placed).float()
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Stage 2.5 — carry: 닫힌 그리퍼 + 들린 펜 + 컵 방향 진행 (밀집 도우미)
+# ---------------------------------------------------------------------------
+
+
+def carry_pen(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.18),
+    lift_min: float = 0.02,
+    carry_range: float = 0.40,
+    diff_threshold: float = 0.10,
+    close_threshold: float = 0.50,
+) -> torch.Tensor:
+    """닫힌 그리퍼 + 들린 펜 + 컵 방향 XY 진행 밀집 보상.
+
+    grasp_bonus 와 달리 연속값(XY 진행도)을 반환 — [0, num_pens].
+    책상 위에서는 lifted=False 라 0이 되어 false-grasp 촉진을 차단한다.
+    """
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    robot_cfg.resolve(env.scene)
+    robot: Articulation = env.scene[robot_cfg.name]
+    gripper_closed = robot.data.joint_pos[:, -1] < close_threshold
+    ee_pos = _get_gripper_pos(env, robot_cfg)
+
+    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
+    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    total = torch.zeros(env.num_envs, device=env.device)
+
+    for cfg in cfgs:
+        pen_pos = _pen_pos_w(env, cfg)
+        local = pen_pos - env.scene.env_origins
+        pen_local_z = local[:, 2]
+
+        lifted = pen_local_z > (_DESK_TOP_Z + lift_min)
+        dist_ee = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
+        near = dist_ee < diff_threshold
+        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+
+        xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
+        xy_rew = torch.clamp(1.0 - xy_dist / max(carry_range, 1e-6), 0.0, 1.0)
+
+        carrying = gripper_closed & near & lifted & ~placed
+        total = total + carrying.float() * xy_rew
+
     return total
 
 

@@ -12,6 +12,31 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.3 curriculum assist subgate 통과, final gate 진행 중)
+
+- **목표**: TB.3 — state-based PPO 전문가를 success_rate ≥ 0.7까지 끌어올린다. 현재는 최종 full/default gate가 아니라 curriculum 보조 subgate를 통과한 상태.
+- **상태**: 진행 중. 2048-env default full 학습은 false grasp/zero lift로 실패했고, TB.4 성격의 curriculum/assist를 앞당겨 성공 rollout이 나오는 최소 조건을 확보했다.
+- **완료한 일**:
+  - `grasp_bonus`가 tabletop 근처 false grasp를 주지 않도록 lift 조건을 추가했다.
+  - `carry_pen` dense reward를 추가하고 reward weight를 grasp 1 / carry 4 / transport 8 / insert 25 / release 10 / success 100으로 재조정했다.
+  - `apply_curriculum()` 추가: `active_pens`, pen ellipse radius, cup arc angle, cup success radius, episode length, grasp/place assist를 train/eval에서 공통 적용.
+  - `soft_grasp_assist` event 추가: 닫힌 gripper 근처 target pen을 따라오게 하고, 선택적으로 cup 근방에서 place snap을 수행한다. 기본 env에서는 비활성이다.
+  - `train.py`/`eval_success.py`에 curriculum, resume, stochastic eval, noise/lr/entropy CLI를 추가했다. `train.py`의 latest checkpoint 정렬은 `model_<n>.pt` 숫자 기준으로 보정.
+- **검증 결과(서버 temp repo `/DISK1/so101-sim2real/work/tb3_grasp_assist_20260604_030539/repo`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - 로컬/서버 `python -m py_compile ...` 통과, `git diff --check` 통과.
+  - `reward_smoke.py --task SimToReal-SO101-PickPen-v0 --num_envs 1 --device cuda:0` 통과. reward term 10개(`carry_pen` 포함), stage check 전부 pass.
+  - `train.py --num_envs 64 --max_iterations 3 --num_steps_per_env 12 --save_interval 1 --active_pens 1 --pen_radius_scale 0 --cup_angle_scale 0 --grasp_assist --place_assist_distance 0.18 ...` 통과. `soft_grasp_assist` interval event 등록, 최신 checkpoint `model_2.pt` 정상 산출.
+  - subgate eval: `model_8.pt` from `/DISK1/so101-sim2real/outputs/tb3_curr7_1pen_placeassist_denseckpt_1024_20260604_0334/model_8.pt`, stochastic, active target 1개, fixed spawn/cup, `place_assist_distance=0.22`, normal cup radius에서 `128/128`, success_rate `1.0`, `--min_success_rate 0.7` 통과.
+- **남은 일**:
+  - TB.3는 아직 `done` 금지. 위 결과는 assisted/stochastic/fixed curriculum subgate일 뿐이다.
+  - 다음 루프는 `place_assist_distance 0.22 → 0.18 → 0.12 → 0.0`, `pen_radius_scale/cup_angle_scale 0 → 0.25 → 0.5 → 1.0`, active target 일반화 순서로 확장한다.
+  - 최종 gate는 `eval_success.py --min_success_rate 0.7`을 기본 성공 판정에 가깝게 통과해야 한다.
+- **주의**:
+  - `scripts/author_pick_pen_scene.py`는 사용자가 추가한 untracked 참고 파일이다. 이번 TB.3 커밋에는 포함하지 않는다.
+  - 카메라 정합을 다시 Claude worker에게 맡길 때는 `claude-opus-4-8[1m]`, effort high, `PowerShell` 없는 allowlist를 사용한다. 지시에는 `docs/pics` 사무실 사진 참고, top camera는 사무실 사진보다 높게 조정된 점, 각 카메라 pose/angle/FOV는 실제 dataset 영상 `observation.images.top`, `observation.images.wrist`, `observation.images.front`를 기준으로 맞출 것을 반드시 포함한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.3 RL state/eval 준비 완료, full 학습 진행 중)
 
 - **목표**: TB.3 — 2048–4096 env state-based PPO 전문가를 full 학습하고 `eval_success.py` success_rate ≥ 0.7(목표 0.9)를 달성한다.
