@@ -24,7 +24,7 @@
 
 - [x] **TA.1** SO-101 articulation position PD 드라이브 튜닝 (Feetech STS3215 근사: stiffness/damping/속도·토크 한계) | machine:any | dep:T0.3 | verify:정적 hold 안정 + step 응답 진동 없음 | status:done
 - [x] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (`scene_physics_smoke.py`: spawn ellipse/arc/y separation/settle stability 모두 pass) | status:done
-- [ ] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:렌더 프레임 shape (480,640,3)×3 + FOV 점검 | status:todo
+- [x] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:`camera_shape_smoke.py` 3캠 RGB shape/FOV/pose pass + 기본 `env_smoke.py` no-camera pass | status:done
 
 ## Phase B — RL 전문가 (state-based)
 
@@ -60,6 +60,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TA.3 done — 로봇 z를 USD bbox 기준으로 0.889로 내려 floating 수정, 카메라를 기본 env에서 optional injection으로 분리, top/front/wrist를 데이터셋 프레임+docs/pics 기준으로 재조정, 서버 camera shape/FOV + no-camera env 500-step + drive smoke 통과 / 다음: TB.1
+- [2026-06-03] TA.3 in_progress — 순수 Isaac Lab env에 top/wrist/front camera sensor와 렌더 shape/FOV smoke 추가 착수
 - [2026-06-03] TA.2 done — RigidObject init_state 명시로 reset sampling 기준 원점 밀림 수정, 펜 visual/collision 분리(invisible CollisionBox)로 rolling/sliding 안정화, 서버 100-reset scene physics + env 500-step + drive smoke 통과 / 다음: TA.3
 - [2026-06-03] TA.2 in_progress — 펜/펜컵 reset sampling 영역과 settle 후 관통·바운스 검증 착수
 - [2026-06-03] TA.1 done — fixed root + Feetech STS3215 근사 PD/limit + velocity solver 설정, 서버 drive smoke 통과(hold tail RMS 0.0, step final err max 0.01882) 및 env 500-step 통과 / 다음: TA.2

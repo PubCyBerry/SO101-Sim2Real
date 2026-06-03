@@ -16,6 +16,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils import configclass
 
 from sim_to_real.assets.scenes.pen_desk import PEN_DESK_CFG, PEN_DESK_USD_PATH, ROBOT_USD_PATH
@@ -42,9 +43,15 @@ SO101_JOINT_ORDER: list[str] = [
     "gripper",
 ]
 
-# Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04)
-# z=0.92 = desk surface (DeskTop center 0.90 + half-thickness 0.02)
-_ROBOT_POS = (2.2, -0.61, 0.92)
+# Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
+#
+# z 정합: 책상 상판(DeskTop) 윗면은 world z=0.92 (SCENE_OFFSET.z 0.92 + center
+# -0.02 + half-thickness 0.02). 그러나 so101_follower.usd 의 articulation root
+# 원점(z=0)은 베이스 바닥이 아니다 — 베이스 최하단 지오메트리가 local z=+0.0301
+# 에 있다(USD bbox 측정). 따라서 원점을 0.92 에 두면 팔 전체가 ~3 cm 떠버린다
+# (사용자가 보고한 "로봇이 책상 위에 떠 있는" 현상). 베이스 판이 상판에 닿도록
+# 원점을 내린다:  robot_z = desk_top(0.92) - base_min_z(0.0301) ≈ 0.889.
+_ROBOT_POS = (2.2, -0.61, 0.889)
 # Identity rotation; articulation USD already faces the desk objects.
 _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
@@ -54,6 +61,92 @@ def _yaw_quat(degrees: float) -> tuple[float, float, float, float]:
     return (math.cos(half), 0.0, 0.0, math.sin(half))
 
 
+def _dot3(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross3(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _normalize3(v: tuple[float, float, float]) -> tuple[float, float, float]:
+    norm = math.sqrt(_dot3(v, v))
+    if norm < 1e-9:
+        raise ValueError(f"Cannot normalize near-zero vector: {v!r}")
+    return (v[0] / norm, v[1] / norm, v[2] / norm)
+
+
+def _quat_from_matrix(
+    m: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ],
+) -> tuple[float, float, float, float]:
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        return (
+            0.25 * s,
+            (m[2][1] - m[1][2]) / s,
+            (m[0][2] - m[2][0]) / s,
+            (m[1][0] - m[0][1]) / s,
+        )
+    if m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        s = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
+        return (
+            (m[2][1] - m[1][2]) / s,
+            0.25 * s,
+            (m[0][1] + m[1][0]) / s,
+            (m[0][2] + m[2][0]) / s,
+        )
+    if m[1][1] > m[2][2]:
+        s = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
+        return (
+            (m[0][2] - m[2][0]) / s,
+            (m[0][1] + m[1][0]) / s,
+            0.25 * s,
+            (m[1][2] + m[2][1]) / s,
+        )
+    s = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
+    return (
+        (m[1][0] - m[0][1]) / s,
+        (m[0][2] + m[2][0]) / s,
+        (m[1][2] + m[2][1]) / s,
+        0.25 * s,
+    )
+
+
+def _look_at_quat_world(
+    eye: tuple[float, float, float],
+    target: tuple[float, float, float],
+    up: tuple[float, float, float] = (0.0, 0.0, 1.0),
+) -> tuple[float, float, float, float]:
+    """Quaternion for Isaac Lab camera world convention: forward +X, up +Z."""
+
+    forward = _normalize3((target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]))
+    up_hint = _normalize3(up)
+    up_axis_raw = (
+        up_hint[0] - _dot3(up_hint, forward) * forward[0],
+        up_hint[1] - _dot3(up_hint, forward) * forward[1],
+        up_hint[2] - _dot3(up_hint, forward) * forward[2],
+    )
+    if _dot3(up_axis_raw, up_axis_raw) < 1e-9:
+        up_axis_raw = (0.0, 1.0, 0.0)
+    up_axis = _normalize3(up_axis_raw)
+    right_axis = _cross3(up_axis, forward)
+    matrix = (
+        (forward[0], right_axis[0], up_axis[0]),
+        (forward[1], right_axis[1], up_axis[1]),
+        (forward[2], right_axis[2], up_axis[2]),
+    )
+    return _quat_from_matrix(matrix)
+
+
 _PEN_INIT_STATES = {
     "PenWhite": ((2.05, -0.35, 0.9347), _yaw_quat(25.0)),
     "PenGray": ((2.35, -0.35, 0.9347), _yaw_quat(-30.0)),
@@ -61,6 +154,42 @@ _PEN_INIT_STATES = {
     "PenBlue": ((2.15, -0.31, 0.9347), _yaw_quat(-10.0)),
 }
 _PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.926), _yaw_quat(0.0))
+
+# ---------------------------------------------------------------------------
+# 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
+#   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
+#   · 포즈/FOV 는 실제 데이터셋 프레임(outputs/ta3_camera_refs/{top,front,wrist}
+#     _t*.png)을 기준으로 튜닝. docs/pics 사무실 사진은 물리 배치 맥락일 뿐 —
+#     특히 top 카메라는 사무실 사진보다 더 높게 물리 조정되었으므로 사진 포즈가
+#     아니라 top 비디오 구도(로봇 베이스가 프레임 하단, 매트/컵이 위로 넓게)에
+#     맞춘다.
+#   · world frame 절대 좌표(convention="world", forward +X / up +Z). num_envs=1
+#     smoke 기준. 멀티-env(TC.2)에서는 env-relative 좌표로 전환 필요.
+# ---------------------------------------------------------------------------
+
+# top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique. 로봇 베이스가 하단,
+# 펜/컵/매트가 위로 펼쳐진다. 사무실 사진보다 높게 올린 실제 top 비디오에 맞춤.
+_TOP_CAMERA_POS = (2.2, -1.12, 1.88)
+_TOP_CAMERA_TARGET = (2.14, -0.15, 0.92)
+_TOP_CAMERA_FOCAL = 16.0
+
+# front: 로봇 전면(+y 를 바라봄)에 근접 장착. 베이스 바로 앞, 책상에서 ~8 cm
+# 높이의 낮은 시점에서 작업 영역을 가로질러 본다. 펜이 전경, 컵이 중앙 —
+# observation.images.front 와 정합. (기존 (1.46,0.16,0.99) 는 컵 너머 측면에서
+# 거꾸로 보던 분리형 카메라라 잘못됨 → 로봇 전면 장착으로 교정.)
+_FRONT_CAMERA_POS = (2.48, -0.56, 0.965)
+_FRONT_CAMERA_TARGET = (2.16, -0.03, 0.955)
+_FRONT_CAMERA_FOCAL = 14.0
+
+# wrist: gripper 링크에 강결합되어 팔을 따라 움직인다. gripper 접근축(jaw/그립
+# 지점 방향)을 따라 매트를 근접·광각으로 내려본다 — observation.images.wrist.
+# gripper-local 축은 rest 자세에서 world 로 localX->+Z, localY->+X, localZ->+Y.
+# gripper->jaw(접근/손가락 축) 방향을 gripper-local 좌표로 표현:
+_WRIST_CAM_LOCAL_POS = (-0.040, 0.030, -0.120)
+# gripper parent 회전을 역산해, rest 자세에서 camera world pos≈(2.149,-0.213,1.116)
+# 기준 mat/cup 방향 world target≈(2.10,-0.13,0.93)을 바라보도록 한 local rot.
+_WRIST_CAM_LOCAL_ROT = (0.2280, 0.0630, 0.9365, 0.2588)
+_WRIST_CAMERA_FOCAL = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +292,95 @@ class PickPenSceneCfg(InteractiveSceneCfg):
             rot=_PEN_CUP_INIT_STATE[1],
         ),
     )
+
+    # ------------------------------------------------------------------
+    # 카메라는 기본 씬에 두지 않는다 — env_smoke 가 --enable_cameras 없이 돌도록.
+    # 카메라 smoke/롤아웃은 gym.make() 전에 add_pick_pen_cameras(scene) 로 주입.
+    # (InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 동적 주입이 센서로
+    #  등록됨 — Isaac Lab 2.3.2 interactive_scene._add_entities_from_cfg 확인.)
+    # ------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 카메라 리그 (선택 주입) — observation.images.{top,front,wrist}
+# ---------------------------------------------------------------------------
+
+
+def _pinhole_camera_cfg(
+    prim_path: str,
+    pos: tuple[float, float, float],
+    rot: tuple[float, float, float, float],
+    focal_length: float,
+    *,
+    focus_distance: float,
+    clipping_range: tuple[float, float],
+) -> TiledCameraCfg:
+    """640×480 RGB TiledCamera. offset 은 prim_path 부모 프레임 기준."""
+
+    return TiledCameraCfg(
+        prim_path=prim_path,
+        offset=TiledCameraCfg.OffsetCfg(pos=pos, rot=rot, convention="world"),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=focal_length,
+            focus_distance=focus_distance,
+            horizontal_aperture=20.955,
+            clipping_range=clipping_range,
+        ),
+        width=640,
+        height=480,
+        update_period=0.0,
+    )
+
+
+def make_pick_pen_camera_cfgs() -> dict[str, TiledCameraCfg]:
+    """top/front/wrist 카메라 cfg 3개를 반환.
+
+    기본 PickPenSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
+    gym.make() 전에 add_pick_pen_cameras() 로 scene cfg 에 주입해서 쓴다.
+    각 카메라는 480×640 RGB.
+    """
+
+    top = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/TopCamera",
+        _TOP_CAMERA_POS,
+        _look_at_quat_world(_TOP_CAMERA_POS, _TOP_CAMERA_TARGET),
+        _TOP_CAMERA_FOCAL,
+        focus_distance=1.3,
+        clipping_range=(0.1, 6.0),
+    )
+    front = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/FrontCamera",
+        _FRONT_CAMERA_POS,
+        _look_at_quat_world(_FRONT_CAMERA_POS, _FRONT_CAMERA_TARGET),
+        _FRONT_CAMERA_FOCAL,
+        focus_distance=0.6,
+        clipping_range=(0.05, 6.0),
+    )
+    # wrist: gripper 링크의 자식 prim → 팔을 따라 이동. pos/rot 은 gripper-local
+    # 프레임 기준. 정확한 화각은 GPU 렌더로 최종 검증 필요(Codex).
+    wrist = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
+        _WRIST_CAM_LOCAL_POS,
+        _WRIST_CAM_LOCAL_ROT,
+        _WRIST_CAMERA_FOCAL,
+        focus_distance=0.2,
+        clipping_range=(0.02, 3.0),
+    )
+    return {"top_camera": top, "front_camera": front, "wrist_camera": wrist}
+
+
+def add_pick_pen_cameras(scene_cfg: PickPenSceneCfg) -> PickPenSceneCfg:
+    """카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
+
+    InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
+    gym.make() 시 센서로 등록된다. 멀티-env 시 world 좌표 → env-relative 전환
+    필요(TC.2).
+    """
+
+    for name, cam_cfg in make_pick_pen_camera_cfgs().items():
+        setattr(scene_cfg, name, cam_cfg)
+    return scene_cfg
 
 
 # ---------------------------------------------------------------------------

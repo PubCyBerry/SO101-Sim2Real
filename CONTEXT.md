@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TA.3 camera 정합 완료)
+
+- **목표**: TA.3 — `SimToReal-SO101-PickPen-v0`의 top/front/wrist 카메라가 North Star 계약(`observation.images.{top,wrist,front}`, 480×640×3, 30fps)과 실제 데이터셋 구도에 맞게 렌더되는지 검증한다.
+- **상태**: 완료. 다음 actionable task는 TB.1(단계형 reward 구현).
+- **완료한 일**:
+  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`: 로봇 floating 수정. `so101_follower.usd` base bbox 최하단(local z≈0.0301)을 반영해 `_ROBOT_POS.z`를 `0.92` → `0.889`로 낮춤.
+  - 카메라를 `PickPenSceneCfg` 기본 필드에서 제거하고 `make_pick_pen_camera_cfgs()` / `add_pick_pen_cameras(scene_cfg)` optional injection으로 분리. 따라서 기본 `env_smoke.py`는 `--enable_cameras` 없이 계속 동작.
+  - top/front/wrist 포즈/FOV를 `datasets/pick_pen/videos/observation.images.{top,front,wrist}` 프레임과 `docs/pics/사무실_사진_*`, `펜통_*` 사진을 참고해 조정. 단 top camera는 사용자 지시대로 사무실 사진보다 더 높은 실제 dataset top view를 우선.
+  - `front_camera`: 기존 detached side view를 폐기하고 로봇 전면 근처 낮은 장착 위치로 재배치.
+  - `wrist_camera`: `{ENV_REGEX_NS}/Robot/gripper/WristCamera`로 gripper 링크 자식 prim에 부착. rest 자세 기준 컵/매트 근접 광각뷰로 조정.
+  - `scripts/environments/camera_shape_smoke.py`: camera injection 후 5-step warmup, 3캠 RGB shape/intrinsics/FOV/pose JSON 출력, optional PNG preview 저장.
+- **검증 결과(서버 `/DISK1/so101-sim2real/work/ta.3/repo`, GPU `cuda:0`)**:
+  - `camera_shape_smoke.py --save-dir /DISK1/so101-sim2real/outputs/ta3_camera/opus_fix5` 통과. top/front/wrist 모두 `[1,480,640,3]`, dtype `torch.uint8`; FOV: top 66.44°, front 73.62°, wrist 92.67°.
+  - `env_smoke.py --steps 500 --num_envs 1 --device cuda:0` 통과(action/policy obs `[1,6]`, resets 0). 카메라 없는 기본 env 경로 복구 확인.
+  - `drive_response_smoke.py --num_envs 1 --device cuda:0` 재통과(hold tail RMS vel 0.0, step final err max 0.01882).
+- **참고**:
+  - Claude worker는 사용자 지시대로 `claude-opus-4-8[1m]`, effort high, `PowerShell` 없는 allowlist로 호출했으나 30분 타임아웃. 부분 구현을 Codex가 직접 검토·수정·검증함.
+  - `scripts/author_pick_pen_scene.py`는 사용자가 추가한 과거 author script로 읽고 좌표 문맥 참고만 했다. 이번 TA.3 커밋 범위에는 포함하지 않음.
+  - 멀티-env 카메라(TC.2)는 top/front world absolute pose를 env-relative로 전환해야 한다.
+
+---
+
 ## 작업 인계 (2026-06-03 — TA.2 scene spawn/physics 검증 완료)
 
 - **목표**: TA.2 — 펜 4개와 펜컵이 reset 100회 동안 의도 영역(펜=타원, 펜컵=호)에 100% 들어오고, settle 후 관통·바운스 없이 안정적인지 기계 검증한다.
