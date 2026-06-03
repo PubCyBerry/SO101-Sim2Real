@@ -1,0 +1,62 @@
+# TASKS — SO-101 Sim2Real 자율 개발
+
+> **단일 진실 공급원.** Codex가 갱신. 매 사이클 SELECT 전 재로드.
+> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist,front} 480×640@30 · task 문자열).
+> 자율 계약: 마스터플랜 §0 — A~E 무인, F~G만 사용자 게이트.
+> 보조 도구(스킬·MCP·ovphysx): [`docs/AGENT_TOOLING.md`](docs/AGENT_TOOLING.md) — 있으면 활용, 없어도 게이트는 그대로 강제.
+>
+> 필드: `id | 설명 | machine | dep | verify(명령/기준) | status`
+> 상태: `todo | in_progress | blocked | done | gated`. verify 통과 전 done 금지. blocked는 사유 1줄.
+
+---
+
+## Phase 0 — 부트스트랩 + de-leisaac (sim-critical)
+
+- [ ] **T0.0** git sync origin 단일화 + `/DISK1` 산출물 규약 문서화 | machine:server | dep:- | verify:양 머신 `git remote -v` origin 일치 + 서버 outputs/extscache가 `/DISK1` 경유 | status:todo
+- [ ] **T0.1** `scripts/validate_lerobot_schema.py` (불변 계약 oracle, `--self-test` 포함) | machine:any | dep:- | verify:`python scripts/validate_lerobot_schema.py datasets/pick_pen` 통과 (6항목 전부) | status:todo
+- [ ] **T0.2** 서버 Isaac 설치: `uv` 설치 → leisaac 제거 후 `uv sync --group isaac` → headless smoke. extscache→`/DISK1` | machine:server | dep:T0.0 | verify:`uv run python -c "import isaacsim; print(isaacsim.__version__)"` == 5.1.x | status:todo  (§0 사전승인)
+- [ ] **T0.3** de-leisaac sim-critical: pick_pen 순수 Isaac Lab `ManagerBasedRLEnvCfg` 재작성 (scene + SO-101 ArticulationCfg + obs + reward stub + termination + events). leisaac import 0건 | machine:any | dep:T0.2 | verify:`env_smoke.py` gym.make→reset→500 step 무크래시 + obs/action 6-dim | status:todo
+- [ ] **T0.4** 오케스트레이터 스켈레톤 `scripts/orchestrator/{loop.py,dispatch.sh,gate.py}` + 1-task 드라이런 | machine:any | dep:T0.1 | verify:T0.1 재검증을 SELECT→DISPATCH→VERIFY→RECORD 1바퀴 무인 완주 | status:todo
+- [ ] **T0.5** `pyproject.toml` leisaac 제거 + `isaaclab` 직접 의존 + `uv lock` | machine:any | dep:T0.3 | verify:`uv sync --group isaac` 성공 + `import sim_to_real` 정상 | status:todo
+
+## Phase A — 씬·드라이브·카메라 정합
+
+- [ ] **TA.1** SO-101 articulation position PD 드라이브 튜닝 (Feetech STS3215 근사: stiffness/damping/속도·토크 한계) | machine:any | dep:T0.3 | verify:정적 hold 안정 + step 응답 진동 없음 | status:todo
+- [ ] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (**고속 사전검증: `scripts/validate_scene_physics.py` via ovphysx — Isaac 부팅 없이 step+pose**, 도구 가용 시) | status:todo
+- [ ] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:렌더 프레임 shape (480,640,3)×3 + FOV 점검 | status:todo
+
+## Phase B — RL 전문가 (state-based)
+
+- [ ] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:reward term 단위 점검 (각 단계 통과 시 보너스 발생) | status:todo
+- [ ] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:todo
+- [ ] **TB.3** RL 전문가 full 학습 (2048–4096 env, 카메라 off) | machine:server | dep:TB.2 | verify:`eval_success.py` success_rate ≥ 0.7 (목표 0.9) | status:todo
+- [ ] **TB.4** 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:확대 영역에서 success_rate 유지 | status:todo
+
+## Phase C — 데이터 엔진 (롤아웃→LeRobot v3)
+
+- [ ] **TC.1** `scripts/sim/rollout_to_lerobot.py` recorder (leisaac LeRobotRecorderManager 대체) | machine:any | dep:TB.3 | verify:10ep 변환 후 `validate_lerobot_schema.py` 통과 | status:todo
+- [ ] **TC.2** 200ep 파이프라인 관통 (DR + 3캠 렌더 + 성공 ep만 필터) | machine:server | dep:TC.1 | verify:validate 통과 + success filter 동작 확인 | status:todo
+- [ ] **TC.3** (선택) segmentation 배경 오버레이 (squint식, 카메라별 정합) | machine:server | dep:TC.2 | verify:카메라별 합성 프레임 육안/지표 점검 | status:todo
+- [ ] **TC.4** 대량 롤아웃 (2k–5k 성공 ep) → HF push | machine:server | dep:TC.2 | verify:validate 통과 + ep 수 목표 + `/DISK1` 용량 확인 | status:todo
+
+## Phase D — GR00T N1.5 증류 (IL)
+
+- [ ] **TD.1** GR00T fine-tune (sim 대량, 전략 i 순차) | machine:server | dep:TC.4 | verify:train 완료 + checkpoint config.type=groot | status:todo
+- [ ] **TD.2** GR00T co-training (sim + 50 real, 전략 ii) | machine:server | dep:TC.4 | verify:train 완료 | status:todo
+- [ ] **TD.3** held-out action MSE 평가 스크립트 | machine:any | dep:TD.1 | verify:MSE 산출 + 시각화 | status:todo
+
+## Phase E — 평가
+
+- [ ] **TE.1** closed-loop sim eval (success rate, 일반화 영역 포함) | machine:server | dep:TD.1,TD.2 | verify:success_rate 표 산출 | status:todo
+- [ ] **TE.2** 3원 비교표 (①인간50 only ②sim+GR00T ③순수RL) + 사용자 보고 | machine:any | dep:TE.1 | verify:비교표 생성 → **자율 트랙 종료 보고** | status:todo
+
+## Phase F~G — 실기기 배포·Sim2Real 루프 (GATED — 자율 트랙 밖)
+
+- [ ] **TF.0** [GATED] 실기기 준비 체크리스트 제시 (USB 포워딩·카메라 인덱스·캘리브레이션·안전 정지) | machine:local | dep:TE.2 | 사용자 개입 필요 | status:gated
+
+---
+
+## 작업 로그 (Codex 갱신 — 최근이 위)
+
+<!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- (아직 시작 전)
