@@ -407,7 +407,15 @@ class PickPenActionsCfg:
 
 @configclass
 class PickPenObservationsCfg:
-    """Observations: policy (6-dim joint pos) + subtask signals."""
+    """Observations: policy (6-dim joint pos) + subtask signals + rl_policy (privileged RL state).
+
+    Groups:
+      policy      — 6-dim joint pos (North Star contract, immutable).
+      subtask_terms — per-pen placement signals.
+      rl_policy   — TB.3 privileged state (37-dim) for RL actor/critic.
+                    Does NOT contain the policy group; use obs_groups in train.py
+                    to map both policy and critic to rl_policy.
+    """
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -452,8 +460,30 @@ class PickPenObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = False
 
+    @configclass
+    class RlPolicyCfg(ObsGroup):
+        """TB.3 privileged state for RL training (37-dim, concatenated).
+
+        Includes joint pos, gripper body pos, all pen/cup positions relative to env
+        origin, gripper→pen relative vectors, and gripper open fraction.
+        No FrameTransformer dependency — resolves gripper body by name.
+        """
+
+        rl_state_obs = ObsTerm(
+            func=task_mdp.rl_state,
+            params={
+                "pen_names": PEN_NAMES,
+                "cup_name": PEN_CUP_NAME,
+            },
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
     policy: PolicyCfg = PolicyCfg()
     subtask_terms: SubtaskCfg = SubtaskCfg()
+    rl_policy: RlPolicyCfg = RlPolicyCfg()
 
 
 # ---------------------------------------------------------------------------
@@ -612,4 +642,5 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
+        # 2048+ env PPO에서 aggregate pair가 18k를 넘는다. 64k로 여유 확보.
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024

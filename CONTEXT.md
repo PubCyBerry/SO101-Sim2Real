@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.3 RL state/eval 준비 완료, full 학습 진행 중)
+
+- **목표**: TB.3 — 2048–4096 env state-based PPO 전문가를 full 학습하고 `eval_success.py` success_rate ≥ 0.7(목표 0.9)를 달성한다.
+- **상태**: 진행 중. `rl_policy`/eval/스케일 smoke는 완료했고, 다음은 full PPO train 실행 및 주기적 eval.
+- **완료한 일**:
+  - `policy` observation group은 North Star 계약대로 6-dim joint state를 유지.
+  - `rl_policy` observation group 추가. `task_mdp.rl_state`가 37-dim privileged state(6 joint + gripper pos + pen/cup pos + gripper→pen vectors + gripper open fraction)를 제공한다.
+  - `scripts/reinforcement_learning/train.py` 기본 obs group을 `rl_policy`로 전환하고 `--obs_group`, `--critic_obs_group` CLI를 추가했다.
+  - `scripts/reinforcement_learning/eval_success.py` 추가. rsl_rl checkpoint를 로드해 closed-loop episode를 돌고 timeout을 success로 세지 않는다.
+  - 2048 env scale smoke에서 PhysX `totalAggregatePairsCapacity` 부족 오류를 확인하고 `gpu_total_aggregate_pairs_capacity = 64 * 1024`로 보정. `docs/TROUBLESHOOTING.md`에 기록.
+- **검증 결과(서버 `/DISK1/so101-sim2real/work/ta.3/repo`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
+  - `train.py --num_envs 4 --max_iterations 4 --num_steps_per_env 25` 통과. actor/critic input `37`, checkpoint `model_3.pt` 생성.
+  - `eval_success.py --checkpoint .../tb3_train_state_smoke_codex/model_3.pt --episodes 4 --max_episode_steps 120` 통과(success_rate 0.0, smoke checkpoint라 정상).
+  - `env_smoke.py --steps 500 --num_envs 1` 통과(`policy_obs_shape [1,6]`, `rl_policy shape (37,)` 등록 확인).
+  - `train.py --num_envs 2048 --max_iterations 2 --num_steps_per_env 24` 통과(total_steps 98,304, checkpoint `model_1.pt`). capacity 64k 적용 후 `totalAggregatePairsCapacity` 오류 없음.
+- **다음 실행 후보**:
+  - full PPO train: `train.py --num_envs 2048 --max_iterations 1500 --num_steps_per_env 24 --save_interval 50 --run_name tb3_full_2048 --checkpoint_dir /DISK1/so101-sim2real/outputs/tb3_full_2048`
+  - eval: `eval_success.py --checkpoint /DISK1/so101-sim2real/outputs/tb3_full_2048/model_1499.pt --num_envs 64 --episodes 200 --max_episode_steps 900 --min_success_rate 0.7`
+- **주의**: 짧은 랜덤/초기 학습은 reach 보상만 조금 뜨고 grasp/lift 이후는 0이다. full 학습 실패 시 TB.4 커리큘럼을 앞당기거나 reward/episode horizon을 조정해야 한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.2 rsl_rl PPO train wrapper 완료)
 
 - **목표**: TB.2 — `SimToReal-SO101-PickPen-v0`를 rsl_rl PPO로 학습할 수 있는 `scripts/reinforcement_learning/train.py` 래퍼를 추가하고, 100-step 이상 smoke와 checkpoint 저장을 검증한다.

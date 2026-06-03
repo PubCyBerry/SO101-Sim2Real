@@ -16,6 +16,7 @@
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [Isaac Lab pip 전환 후 `import sim_to_real` 실패](#isaac-lab-pip-전환-후-import-sim_to_real-실패)
 - [Isaac Lab SO-101 hold smoke에서 관절 속도 잔류](#isaac-lab-so-101-hold-smoke에서-관절-속도-잔류)
+- [Isaac Lab 대규모 PPO에서 `totalAggregatePairsCapacity` 부족](#isaac-lab-대규모-ppo에서-totalaggregatepairscapacity-부족)
 - [Isaac Lab `RigidObject` reset sampling이 원점 기준으로 밀림](#isaac-lab-rigidobject-reset-sampling이-원점-기준으로-밀림)
 - [Isaac Lab reset 후 원형 펜 collider가 굴러 scene physics smoke 실패](#isaac-lab-reset-후-원형-펜-collider가-굴러-scene-physics-smoke-실패)
 - [`lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)](#lerobot-record-키보드-컨트롤이-동작하지-않음-wslg--windows-terminal)
@@ -1088,6 +1089,51 @@ UV_CACHE_DIR=/DISK1/so101-sim2real/cache/uv \
   }
 }
 ```
+
+---
+
+## Isaac Lab 대규모 PPO에서 `totalAggregatePairsCapacity` 부족
+
+**현상**: TB.3 rsl_rl PPO를 2048개 env 이상으로 실행하면 학습은 진행되지만 PhysX가 aggregate pair buffer 부족을 보고한다. 이 상태에서는 일부 contact interaction이 누락될 수 있어 full training 결과를 신뢰하기 어렵다.
+
+**오류 메시지**:
+
+```text
+[Error] [omni.physx.plugin] PhysX error: The application needs to increase PxGpuDynamicsMemoryConfig::totalAggregatePairsCapacity to 18432 , otherwise, the simulation will miss interactions
+, FILE /builds/omniverse/physics/physx/source/gpubroadphase/src/PxgAABBManager.cpp, LINE 1291
+```
+
+### 원인
+
+`PickPenEnvCfg.__post_init__`에서 Isaac Lab manipulation 예제 값을 따라 `gpu_total_aggregate_pairs_capacity = 16 * 1024`로 낮춰 두었다. 2048 env의 SO-101 + 펜 4개 + 펜컵 접촉 조합에서는 aggregate pair 요구량이 약 18k를 넘으므로 16k buffer가 부족하다.
+
+### 해결 방법
+
+대규모 PPO 여유를 위해 `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`에서 total aggregate pair capacity를 64k로 올린다.
+
+```python
+self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
+self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
+```
+
+4096 env로 확장해 같은 오류가 재발하면 같은 항목을 더 크게 잡는다. Isaac Lab 2.3.2 기본값은 더 크지만, task cfg에서 직접 override하면 그 값이 적용된다.
+
+### 확인 방법
+
+서버 Isaac venv에서 2048 env scale smoke를 실행한다.
+
+```bash
+cd /DISK1/so101-sim2real/work/ta.3/repo
+UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac \
+  /home/konan147/.local/bin/uv run --group isaac --locked \
+  python scripts/reinforcement_learning/train.py \
+    --task SimToReal-SO101-PickPen-v0 \
+    --num_envs 2048 --device cuda:0 \
+    --max_iterations 2 --num_steps_per_env 24 --save_interval 1 \
+    --checkpoint_dir /DISK1/so101-sim2real/outputs/tb3_train_scale_2048x2_cap64k
+```
+
+정상 기준: 학습 JSON이 `status=passed`, `total_steps=98304`, checkpoint `model_1.pt`를 출력하고 위 `totalAggregatePairsCapacity` 오류가 더 이상 나오지 않는다.
 
 ---
 

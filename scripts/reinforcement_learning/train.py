@@ -1,8 +1,20 @@
-"""TB.2 PPO 학습 스크립트 — SimToReal-SO101-PickPen-v0.
+"""TB.2/TB.3 PPO 학습 스크립트 — SimToReal-SO101-PickPen-v0.
 
 사용법:
+    # TB.3 상태 기반 (기본값 — rl_policy 그룹 사용)
     uv run python scripts/reinforcement_learning/train.py \
         --task SimToReal-SO101-PickPen-v0 \
+        --num_envs 64 --device cuda:0 --max_iterations 100
+
+    # North Star 6-dim 정책만 사용
+    uv run python scripts/reinforcement_learning/train.py \
+        --task SimToReal-SO101-PickPen-v0 --obs_group policy \
+        --num_envs 64 --device cuda:0 --max_iterations 100
+
+    # 비대칭 AC: actor=rl_policy, critic=rl_policy
+    uv run python scripts/reinforcement_learning/train.py \
+        --task SimToReal-SO101-PickPen-v0 \
+        --obs_group rl_policy --critic_obs_group rl_policy \
         --num_envs 64 --device cuda:0 --max_iterations 100
 """
 
@@ -34,6 +46,16 @@ parser.add_argument("--run_name", default="")
 parser.add_argument("--log_root_path", default="outputs/rl/rsl_rl")
 parser.add_argument("--checkpoint_dir", default=None, help="체크포인트 저장 경로 (스모크 테스트용)")
 parser.add_argument("--clip_actions", type=float, default=1.0)
+parser.add_argument(
+    "--obs_group",
+    default="rl_policy",
+    help="actor 에 사용할 obs 그룹 이름 (기본값: rl_policy)",
+)
+parser.add_argument(
+    "--critic_obs_group",
+    default=None,
+    help="critic 에 사용할 obs 그룹 이름 (기본값: --obs_group 과 동일)",
+)
 # --device / --headless 는 AppLauncher 가 등록
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -59,6 +81,8 @@ from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 def _build_train_cfg(args: argparse.Namespace) -> dict:
     """OnPolicyRunner 에 전달할 학습 설정 딕셔너리 반환."""
     rl_device = args.rl_device if args.rl_device is not None else args.device
+    obs_group = args.obs_group
+    critic_group = args.critic_obs_group if args.critic_obs_group is not None else obs_group
     return {
         "seed": args.seed,
         "device": rl_device,
@@ -71,7 +95,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "load_run": ".*",
         "load_checkpoint": "model_.*.pt",
         "logger": "tensorboard",
-        "obs_groups": {"policy": ["policy"], "critic": ["policy"]},
+        "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
         "policy": {
             "class_name": "ActorCritic",
             "init_noise_std": 0.5,
