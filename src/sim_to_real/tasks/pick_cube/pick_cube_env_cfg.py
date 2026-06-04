@@ -22,6 +22,7 @@ from isaaclab.utils import configclass
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH, ROBOT_USD_PATH
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (
     SO101_JOINT_ORDER,
+    SO101_JOINT_TARGET_MAX_VELOCITY,
     _look_at_quat_world,
     _pinhole_camera_cfg,
     _yaw_quat,
@@ -324,11 +325,12 @@ def add_pick_cube_cameras(
 class PickCubeActionsCfg:
     """6-dim joint position action matching North Star joint order."""
 
-    arm: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
+    arm: task_mdp.SlewLimitedJointPositionActionCfg = task_mdp.SlewLimitedJointPositionActionCfg(
         asset_name="robot",
         joint_names=SO101_JOINT_ORDER,
         scale=1.0,
         use_default_offset=True,
+        max_velocity=SO101_JOINT_TARGET_MAX_VELOCITY,
     )
 
 

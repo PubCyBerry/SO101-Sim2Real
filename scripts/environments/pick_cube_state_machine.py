@@ -55,8 +55,8 @@ parser.add_argument("--max_joint_delta", type=float, default=0.075)
 parser.add_argument(
     "--max_arm_step_delta",
     type=float,
-    default=0.01,
-    help="Max per-step arm joint command change in radians (0.01 ~= 0.3 rad/s at 30 Hz)",
+    default=0.006,
+    help="Max per-step arm joint command change in radians (0.006 ~= 0.18 rad/s at 30 Hz)",
 )
 parser.add_argument(
     "--max_gripper_step_delta",

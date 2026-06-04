@@ -92,7 +92,7 @@ parser.add_argument("--right_arm_port", type=str, default="/dev/ttyACM1")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed for the environment.")
 parser.add_argument("--sensitivity", type=float, default=1.0, help="Keyboard sensitivity factor.")
-parser.add_argument("--step_hz", type=int, default=60, help="Environment stepping rate in Hz.")
+parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
 parser.add_argument("--record", action="store_true", help="Enable lightweight HDF5 action/state recording")
 parser.add_argument("--dataset_file", type=str, default="./datasets/dataset.hdf5", help="HDF5 recording path")
 parser.add_argument("--resume", action="store_true", help="Append to an existing dataset file")
@@ -121,6 +121,18 @@ parser.add_argument(
 parser.add_argument("--leader_joint_signs", type=_vec6, default=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
 parser.add_argument("--leader_joint_offsets", type=_vec6, default=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
 parser.add_argument("--leader_smoothing", type=float, default=0.0)
+parser.add_argument(
+    "--max_arm_speed",
+    type=float,
+    default=0.20,
+    help="Max commanded arm target speed in rad/s of sim time. <=0 disables controller-side limiting.",
+)
+parser.add_argument(
+    "--max_gripper_speed",
+    type=float,
+    default=0.20,
+    help="Max commanded gripper target speed in rad/s of sim time. <=0 disables controller-side limiting.",
+)
 parser.add_argument("--joint_step", type=float, default=0.035, help="Keyboard arm joint step in radians")
 parser.add_argument("--gripper_step", type=float, default=0.05, help="Keyboard gripper joint step")
 
@@ -265,12 +277,36 @@ def _joint_limits(device: str) -> torch.Tensor:
     return torch.tensor(limits, dtype=torch.float32, device=device)
 
 
+def _policy_dt(env) -> float:
+    return float(env.cfg.sim.dt * env.cfg.decimation)
+
+
+def _slew_limited_targets(
+    current: torch.Tensor,
+    desired: torch.Tensor,
+    limits: torch.Tensor,
+    *,
+    policy_dt: float,
+) -> torch.Tensor:
+    delta = desired - current
+    if args_cli.max_arm_speed > 0.0:
+        arm_step = float(args_cli.max_arm_speed) * policy_dt
+        delta[:5] = torch.clamp(delta[:5], -arm_step, arm_step)
+    if args_cli.max_gripper_speed > 0.0:
+        gripper_step = float(args_cli.max_gripper_speed) * policy_dt
+        delta[5] = torch.clamp(delta[5], -gripper_step, gripper_step)
+    next_targets = current + delta
+    return torch.maximum(torch.minimum(next_targets, limits[:, 1]), limits[:, 0])
+
+
 class KeyboardJointController:
     def __init__(self, env, keyboard: GuiKeyboard, limits: torch.Tensor) -> None:
         self.env = env
         self.keyboard = keyboard
         self.limits = limits
-        self.targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
+        self.policy_dt = _policy_dt(env)
+        self.desired_targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
+        self.targets = self.desired_targets.clone()
         keyboard.add_key_listener(self._on_key)
 
     def _on_key(self, key: str) -> None:
@@ -278,12 +314,13 @@ class KeyboardJointController:
             return
         joint_id, direction, label = KEY_BINDINGS[key]
         delta = args_cli.gripper_step if joint_id == 5 else args_cli.joint_step
-        self.targets[joint_id] += direction * delta * args_cli.sensitivity
-        self.targets = torch.maximum(torch.minimum(self.targets, self.limits[:, 1]), self.limits[:, 0])
-        print(f"[key] {label}: {self.targets[joint_id].item():+.4f}")
+        self.desired_targets[joint_id] += direction * delta * args_cli.sensitivity
+        self.desired_targets = torch.maximum(torch.minimum(self.desired_targets, self.limits[:, 1]), self.limits[:, 0])
+        print(f"[key] {label}: {self.desired_targets[joint_id].item():+.4f}")
 
     def reset(self) -> None:
-        self.targets = self.env.scene["robot"].data.joint_pos[0, :6].clone().to(self.env.device)
+        self.desired_targets = self.env.scene["robot"].data.joint_pos[0, :6].clone().to(self.env.device)
+        self.targets = self.desired_targets.clone()
 
     def close(self) -> None:
         pass
@@ -291,6 +328,12 @@ class KeyboardJointController:
     def advance(self) -> torch.Tensor | None:
         if not self.keyboard.started:
             return None
+        self.targets = _slew_limited_targets(
+            self.targets,
+            self.desired_targets,
+            self.limits,
+            policy_dt=self.policy_dt,
+        )
         return self.targets.unsqueeze(0)
 
 
@@ -304,6 +347,8 @@ class SO101LeaderJointController:
         self.signs = torch.tensor(args_cli.leader_joint_signs, dtype=torch.float32, device=env.device)
         self.offsets = torch.tensor(args_cli.leader_joint_offsets, dtype=torch.float32, device=env.device)
         self.targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
+        self.filtered_targets = self.targets.clone()
+        self.policy_dt = _policy_dt(env)
         cfg = SO101LeaderConfig(port=args_cli.port, id=args_cli.leader_id, use_degrees=True)
         self.teleop = SO101Leader(cfg)
         print(f"[leader] connecting SO-101 leader on {args_cli.port} (id={args_cli.leader_id})")
@@ -317,6 +362,7 @@ class SO101LeaderJointController:
 
     def reset(self) -> None:
         self.targets = self.env.scene["robot"].data.joint_pos[0, :6].clone().to(self.env.device)
+        self.filtered_targets = self.targets.clone()
 
     def close(self) -> None:
         if self.teleop.is_connected:
@@ -349,9 +395,15 @@ class SO101LeaderJointController:
         leader_targets = self._read_leader_targets()
         smoothing = min(max(float(args_cli.leader_smoothing), 0.0), 0.99)
         if smoothing > 0.0:
-            self.targets = smoothing * self.targets + (1.0 - smoothing) * leader_targets
+            self.filtered_targets = smoothing * self.filtered_targets + (1.0 - smoothing) * leader_targets
         else:
-            self.targets = leader_targets
+            self.filtered_targets = leader_targets
+        self.targets = _slew_limited_targets(
+            self.targets,
+            self.filtered_targets,
+            self.limits,
+            policy_dt=self.policy_dt,
+        )
         return self.targets.unsqueeze(0)
 
 
@@ -893,6 +945,12 @@ def main() -> None:  # noqa: C901
         keyboard.add_callback("N", lambda: request_reset(True))
         keyboard.add_callback("C", request_capture)
         keyboard.display_controls(args_cli.teleop_device)
+        print(
+            "[teleop] command speed limit: "
+            f"arm<={args_cli.max_arm_speed:.3f} rad/s, "
+            f"gripper<={args_cli.max_gripper_speed:.3f} rad/s, "
+            f"loop={args_cli.step_hz} Hz"
+        )
 
         if args_cli.teleop_device == "keyboard":
             controller = KeyboardJointController(env, keyboard, limits)

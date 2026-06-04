@@ -43,6 +43,8 @@ SO101_JOINT_ORDER: list[str] = [
     "wrist_roll",
     "gripper",
 ]
+SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 0.20 for joint in SO101_JOINT_ORDER}
+"""Processed joint-position target speed cap in rad/s (sim time)."""
 
 # Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
 #
@@ -440,11 +442,12 @@ def add_pick_pen_cameras(
 class PickPenActionsCfg:
     """6-dim joint position action matching North Star joint order."""
 
-    arm: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
+    arm: task_mdp.SlewLimitedJointPositionActionCfg = task_mdp.SlewLimitedJointPositionActionCfg(
         asset_name="robot",
         joint_names=SO101_JOINT_ORDER,
         scale=1.0,
         use_default_offset=True,
+        max_velocity=SO101_JOINT_TARGET_MAX_VELOCITY,
     )
 
 

@@ -62,6 +62,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TB.4 in_progress — 로봇팔 target 속도 제한 추가(`SlewLimitedJointPositionActionCfg`, PickPen/PickCube 0.20rad/s, teleop 기본 30Hz + controller speed cap, state-machine arm 0.006rad/step), 로컬 py_compile + PickCube env_smoke 5-step 통과; 기존 TB.4 checkpoint 평가는 speed-cap 전 참고치로 격하 / 다음: 서버 sync 후 model715 speed-cap 재평가
+- [2026-06-05] TB.4 in_progress — speed-cap 전 object0.30+Bowl0.25는 model714 deterministic 93/128 통과, object0.30+Bowl0.2625는 model715 deterministic 95/128 통과, Bowl0.275/0.30은 아직 실패 / 다음: 제한 적용 환경에서 0.2625 재확인 후 0.275 진행
 - [2026-06-05] TB.4 in_progress — staged PPO curriculum으로 Bowl0.05/0.10/0.25 및 object0.10+Bowl0.25 통과, 현재 best object0.25+Bowl0.25 `/DISK1/so101-sim2real/outputs/tb4_pickcube_obj025_bowl025_std001_from698_short_4096_20260605/model_706.pt` deterministic 103/128(0.8047); object/Bowl 0.35+는 실패 / 다음: 0.30 축 분리 curriculum
 - [2026-06-05] TB.4 in_progress — clean model550은 Bowl scale0.05 deterministic 91/128로 0.7 통과하지만 stochastic은 23/128, std override 0.01도 70/128로 노이즈 민감; `train/eval_success.py --override_policy_std` 추가 / 다음: 낮은 std·낮은 entropy로 scale0.05 PPO resume
 - [2026-06-05] TB.4 in_progress — state-machine expert `.pt` 6 success/2 fail 생성 후 BC warm-start 2종(raw target·clipped target) 시도, 둘 다 dynamic Bowl deterministic eval 0/128로 폐기; BC target clipping(`--target_clip_actions 1.0`)은 보정으로 유지 / 다음: clean `model_550.pt`에서 Bowl scale 0.05~0.10 소 curriculum PPO 재시도
