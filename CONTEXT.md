@@ -18,21 +18,22 @@
 - **상태**: 코드 적용 및 로컬 smoke 완료. 서버 학습/평가 프로세스는 없음. 속도 제한 때문에 기존 TB.4 checkpoint 성공률은 참고치로만 보고, 다음 서버 사이클은 speed-cap 적용 후 재평가부터 시작한다.
 - **적용 변경**:
   - `src/sim_to_real/tasks/pick_pen/mdp/actions.py`: `SlewLimitedJointPositionActionCfg` 추가. `JointPositionAction`의 processed target이 sim-time 기준 `max_velocity` 이상으로 변하지 않게 제한한다.
-  - `pick_pen_env_cfg.py`/`pick_cube_env_cfg.py`: 6-dim action을 위 action term으로 교체, `SO101_JOINT_TARGET_MAX_VELOCITY={joint:0.20 rad/s}` 적용. 정책·eval·rollout·teleop 모두 같은 action cap을 지난다.
+  - `pick_pen_env_cfg.py`/`pick_cube_env_cfg.py`: 6-dim action을 위 action term으로 교체, `SO101_JOINT_TARGET_MAX_VELOCITY={joint:1.00 rad/s}` 적용. 정책·eval·rollout은 빠른 target jump를 막는 완화된 action cap을 지난다.
   - `teleop_se3_agent.py`: 기본 `--step_hz=30`으로 변경(환경 policy step/camera 30Hz와 정합), controller-side `--max_arm_speed=0.20`, `--max_gripper_speed=0.20` 추가. Leader/keyboard 입력도 기록 전에 slew-limit한다.
   - `pick_cube_state_machine.py`: 기본 arm command slew limit `0.01 → 0.006 rad/step`(약 0.18 rad/s @30Hz). gripper는 `0.005 rad/step` 유지.
 - **검증 결과**:
   - `uv run python -m py_compile ...` 통과.
   - 로컬 Windows RTX A4000에서 `uv run --group isaac --locked python scripts\environments\env_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda --steps 5` 정상 종료.
-  - GUI teleop 체감 확인 및 speed-cap 적용 후 서버 장기 eval/train은 아직 미실시.
+  - 서버 py_compile + PickCube 5-step env smoke 통과.
+  - 첫 시도 action cap `0.20 rad/s`, `0.50 rad/s`, `1.00 rad/s` 모두 model715 재평가가 0/128로 붕괴했다. 즉 기존 PPO checkpoint는 제한 없는 target jump 동역학에 강하게 의존한다. GUI teleop 체감 확인 및 cap-aware 재학습은 아직 미실시.
 - **TB.4 속도 제한 전 참고 결과**:
   - object `0.30` + Bowl `0.25`: `/DISK1/so101-sim2real/outputs/tb4_pickcube_obj030_bowl025_std001_from706_short_4096_20260605/model_714.pt`, deterministic 93/128(0.7266) 통과.
   - object `0.30` + Bowl `0.30`: model714 deterministic 59/128(0.4609) 실패.
   - object `0.30` + Bowl `0.275`: model714 baseline 79/128, fine-tune best model716 86/128(0.6719) 실패.
   - object `0.30` + Bowl `0.2625`: `/DISK1/so101-sim2real/outputs/tb4_pickcube_obj030_bowl02625_std001_from714_short_4096_20260605/model_715.pt`, deterministic 95/128(0.7422) 통과.
 - **다음**:
-  - 코드 push 후 서버에 sync하고, speed-cap 적용 환경에서 `model_715.pt`를 object `0.30` + Bowl `0.2625` 재평가한다.
-  - 재평가가 0.7 이상이면 Bowl `0.275` 평가/짧은 보정으로 진행한다. 실패하면 `model_714/model_715` 대신 speed-cap 환경에서 해당 stage를 재학습한다.
+  - `model_714/model_715` continuation 대신 speed-cap 환경에서 해당 stage를 재학습한다. 시작 후보는 object `0.30` + Bowl `0.25` 또는 한 단계 낮은 object `0.25` + Bowl `0.25` 재학습/재평가.
+  - GUI teleop은 이미 controller-side `0.20 rad/s` cap이 적용됐으므로, 사용자가 체감이 여전히 빠르다고 하면 `--max_arm_speed`/`--max_gripper_speed`를 더 낮춘다.
 
 ---
 

@@ -43,7 +43,7 @@ SO101_JOINT_ORDER: list[str] = [
     "wrist_roll",
     "gripper",
 ]
-SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 0.20 for joint in SO101_JOINT_ORDER}
+SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 1.00 for joint in SO101_JOINT_ORDER}
 """Processed joint-position target speed cap in rad/s (sim time)."""
 
 # Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
