@@ -62,6 +62,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TB.4 in_progress — 43-dim target-observed scratch PPO는 fixed model160 deterministic 5/128, low-std continuation은 1/128 이하로 악화; reach→close 탐색 장벽 완화를 위해 PickCube `pregrasp_cube` reward(weight 2.0) 추가, 서버 smoke에서 12 reward terms 확인 / 다음: pregrasp reward 기준 fixed-spawn scratch PPO 재시작
 - [2026-06-05] TB.4 in_progress — speed-cap PPO 부분관측 보정으로 `rl_policy`를 37→43-dim 확장(현재 processed joint target 6개 추가), 서버 env_smoke에서 `rl_policy (43,)`와 train smoke Actor/Critic input 43 확인; cap2.0 회복 실험은 model550/model706/model715 모두 0/128이라 폐기, cap은 1.0rad/s 유지 / 다음: 43-dim fixed-spawn PickCube를 scratch PPO로 재학습
 - [2026-06-05] TB.4 in_progress — 로봇팔 target 속도 제한 추가(`SlewLimitedJointPositionActionCfg`, PickPen/PickCube 정책 cap 1.00rad/s, teleop 기본 30Hz + controller 0.20rad/s cap, state-machine arm 0.006rad/step), 로컬/서버 py_compile + PickCube env_smoke 5-step 통과; model715은 0.20/0.50/1.00rad/s cap 모두 eval 0/128로 붕괴 / 다음: speed-cap 환경에서 해당 stage 재학습
 - [2026-06-05] TB.4 in_progress — speed-cap 전 object0.30+Bowl0.25는 model714 deterministic 93/128 통과, object0.30+Bowl0.2625는 model715 deterministic 95/128 통과, Bowl0.275/0.30은 아직 실패 / 다음: 제한 적용 환경에서 0.2625 재확인 후 0.275 진행

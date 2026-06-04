@@ -464,6 +464,19 @@ class PickCubeRewardsCfg:
     )
 
     # Stage 2: 그리퍼 닫힘 + 큐브 근접 (sparse bonus, 미배치 큐브 한정)
+    pregrasp_cube = RewTerm(
+        func=task_mdp.pregrasp_bonus,
+        weight=2.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "cup_radius": BOWL_SUCCESS_RADIUS,
+            "cup_height_range": BOWL_HEIGHT_RANGE,
+        },
+    )
+
     grasp_cube = RewTerm(
         func=task_mdp.grasp_bonus,
         weight=1.0,
@@ -670,6 +683,7 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
 
 _CUBE_REWARD_TERMS = (
     "reach_cube",
+    "pregrasp_cube",
     "grasp_cube",
     "carry_cube",
     "lift_cube",
@@ -681,6 +695,7 @@ _CUBE_REWARD_TERMS = (
 )
 _BOWL_RADIUS_REWARD_TERMS = (
     "reach_cube",
+    "pregrasp_cube",
     "grasp_cube",
     "carry_cube",
     "place_height_cube",

@@ -12,6 +12,24 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — PickCube pregrasp reward 추가)
+
+- **목표**: speed-cap PPO가 reach 이후 "그리퍼 닫기→lift" 탐색 장벽에서 정체되는 문제를 줄인다.
+- **상태**: 코드 적용 및 서버 smoke 통과. 장기 학습은 새 reward 기준으로 재시작 전이다.
+- **적용 변경**:
+  - `task_mdp.pregrasp_bonus`: EE가 큐브 근처이고 gripper가 닫힌 상태를 lift 전에도 보상한다.
+  - `PickCubeRewardsCfg.pregrasp_cube`: weight `2.0`, `reach_cube`와 `grasp_cube` 사이에 추가. PickPen cfg에는 term을 추가하지 않아 PickCube 재학습 범위로 제한했다.
+- **검증 결과**:
+  - 로컬/서버 `py_compile` 통과.
+  - 서버 `env_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda:0 --steps 5` 통과, Reward Manager `pregrasp_cube` 포함 12 terms 및 `rl_policy (43,)` 확인.
+- **직전 학습 결과**:
+  - 43-dim target-observed scratch PPO `/DISK1/so101-sim2real/outputs/tb4_speedcap_targetobs_fixed_scratch_clip2_4096_20260605`는 model160 deterministic 5/128(0.0391)까지만 도달.
+  - low-std continuation `/DISK1/so101-sim2real/outputs/tb4_speedcap_targetobs_fixed_from160_lowstd_4096_20260605`는 model170 1/128, model180 0/128, model200 0/128, model220 1/128로 악화.
+- **다음**:
+  - 새 `pregrasp_cube` reward 기준으로 fixed-spawn PickCube scratch PPO를 다시 시작하고, grasp/lift reward가 올라가는지 확인한다.
+
+---
+
 ## 작업 인계 (2026-06-05 — speed-cap target 관측 추가 + cap2 실험 폐기)
 
 - **목표**: 로봇팔 target 속도 제한(`1.00 rad/s`) 아래에서 PickCube PPO가 다시 학습 가능하도록 부분관측을 줄인다.
@@ -31,8 +49,6 @@
 - **다음**:
   - 43-dim target-observed 환경에서 fixed-spawn PickCube를 새로 학습한다. 기존 checkpoint resume은 shape 불일치라 사용하지 않는다.
   - 시작 후보: `4096 env`, `clip_actions=2.0`, `active_objects=1`, object/Bowl fixed, `max_iterations 200~300`, `num_learning_epochs>=20`, `init_noise_std 0.5`, `entropy_coef 0.005`.
-
----
 
 ## 작업 인계 (2026-06-05 — 로봇팔 속도 제한 + TB.4 재평가 필요)
 
