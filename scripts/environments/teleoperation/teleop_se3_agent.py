@@ -112,7 +112,12 @@ parser.add_argument("--lerobot_dataset_fps", type=int, default=30, help="Recordi
 parser.add_argument("--capture_dir", type=Path, default=Path("outputs/captured_images"))
 parser.add_argument("--capture_on_start", action="store_true", help="Capture camera images immediately after reset.")
 parser.add_argument("--leader_id", default="so101_teleop", help="LeRobot calibration id for SO-101 leader")
-parser.add_argument("--leader_gripper_divisor", type=float, default=100.0)
+parser.add_argument(
+    "--leader_gripper_divisor",
+    type=float,
+    default=100.0,
+    help="(legacy, 미사용) 그리퍼는 이제 follower joint-limit affine 매핑(-10°~100°)을 쓴다.",
+)
 parser.add_argument("--leader_joint_signs", type=_vec6, default=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
 parser.add_argument("--leader_joint_offsets", type=_vec6, default=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
 parser.add_argument("--leader_smoothing", type=float, default=0.0)
@@ -237,6 +242,17 @@ class GuiKeyboard:
             print("  SO-101 Leader: move the physical leader arm on the configured serial port")
 
 
+# LeRobot SO101 leader 의 그리퍼는 use_degrees 와 무관하게 항상 RANGE_0_100
+# (0=열림 .. 100=닫힘) 로 읽힌다(lerobot SOLeader 소스 확인). 팔 관절은
+# use_degrees=True 라 degree 로 읽혀 radians() 로 바로 변환한다.
+_LEADER_GRIPPER_RANGE: tuple[float, float] = (0.0, 100.0)
+# Follower USD(assets/robots/so101_follower.usd) gripper revolute joint limit(deg).
+# leisaac SO101_FOLLOWER_USD_JOINT_LIMITS["gripper"] 와 동일. leader 0..100 을 이
+# 범위로 affine 매핑해야 leader 를 끝까지 닫았을 때 follower 도 100°(=1.745 rad)
+# 까지 닫힌다.
+_FOLLOWER_GRIPPER_JOINT_DEG: tuple[float, float] = (-10.0, 100.0)
+
+
 def _joint_limits(device: str) -> torch.Tensor:
     limits = [
         (-math.pi, math.pi),
@@ -244,7 +260,7 @@ def _joint_limits(device: str) -> torch.Tensor:
         (-math.pi, math.pi),
         (-math.pi, math.pi),
         (-math.pi, math.pi),
-        (0.0, 1.0),
+        (math.radians(_FOLLOWER_GRIPPER_JOINT_DEG[0]), math.radians(_FOLLOWER_GRIPPER_JOINT_DEG[1])),
     ]
     return torch.tensor(limits, dtype=torch.float32, device=device)
 
@@ -282,8 +298,6 @@ class SO101LeaderJointController:
     def __init__(self, env, keyboard: GuiKeyboard, limits: torch.Tensor) -> None:
         from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
-        if args_cli.leader_gripper_divisor <= 1e-6:
-            raise ValueError("--leader_gripper_divisor must be > 0")
         self.env = env
         self.keyboard = keyboard
         self.limits = limits
@@ -316,7 +330,14 @@ class SO101LeaderJointController:
             if joint_id < 5:
                 value = math.radians(value)
             else:
-                value = value / args_cli.leader_gripper_divisor
+                # leader gripper(0..100) → follower USD gripper joint(-10°..100°) → rad.
+                # leisaac convert_action_from_so101_leader 와 동일한 affine 매핑.
+                # (이전 value/leader_gripper_divisor 는 [0,1] rad(≈57°)에 캡돼
+                #  leader 를 끝까지 닫아도 그리퍼가 57°까지만 닫혔다.)
+                lo_m, hi_m = _LEADER_GRIPPER_RANGE
+                lo_j, hi_j = _FOLLOWER_GRIPPER_JOINT_DEG
+                frac = (value - lo_m) / (hi_m - lo_m)
+                value = math.radians(frac * (hi_j - lo_j) + lo_j)
             values.append(value)
         targets = torch.tensor(values, dtype=torch.float32, device=self.env.device)
         targets = targets * self.signs + self.offsets
