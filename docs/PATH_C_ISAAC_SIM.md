@@ -2,7 +2,7 @@
 
 > [← README](../README.md) · 관련: [경로 A (Windows native)](PATH_A_NATIVE.md) · [경로 B (Docker)](PATH_B_DOCKER.md) · [OpenUSD 가이드](OpenUSD_Guide.md) · [트러블슈팅](TROUBLESHOOTING.md)
 
-Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0` Gym 환경에서 시뮬 teleop · 오라클 정책 · 데이터 수집을 수행한다. Docker 미연결 — RT 코어 GPU 가 있는 Windows 워크스테이션 또는 Linux 서버의 호스트 uv 환경에서 직접 실행한다.
+Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0`(펜→펜컵) · `SimToReal-SO101-PickCube-v0`(큐브→그릇) Gym 환경에서 시뮬 teleop · 오라클 정책 · 데이터 수집을 수행한다. 두 task 는 4객체+1컨테이너 구조가 동일해 씬·env cfg·MDP·카메라 리그를 공유 패턴으로 재사용한다(`pick_cube` 는 `pick_pen.mdp` 를 그대로 import). Docker 미연결 — RT 코어 GPU 가 있는 Windows 워크스테이션 또는 Linux 서버의 호스트 uv 환경에서 직접 실행한다.
 
 > 사전 준비(인증)는 [README §공통 준비](../README.md#공통-준비) 참고.
 
@@ -26,7 +26,7 @@ flowchart LR
     classDef cloud fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
 
     LEAD["🦾 SO-101 리더 암<br/>(선택, COM5)"]:::hw
-    KB["⌨️ 키보드 / 게임패드<br/>(선택)"]:::hw
+    KB["⌨️ 키보드<br/>(선택 디버그)"]:::hw
 
     subgraph WIN["🖥️ Windows 11 + uv venv (--group isaac)"]
         direction TB
@@ -39,8 +39,8 @@ flowchart LR
     OUT["./outputs/<br/>HDF5 + LeRobot v3 + 씬 캡처"]:::host
     HF[("🤗 HuggingFace Hub")]:::cloud
 
-    LEAD -->|leisaac device layer<br/>so101leader| SCR
-    KB -->|leisaac device layer<br/>keyboard / gamepad| SCR
+    LEAD -->|teleop_se3_agent.py<br/>SO101Leader direct| SCR
+    KB -->|teleop_se3_agent.py<br/>joint-position debug| SCR
     SCR --> PKG
     PKG --> SIM
     USD --> SIM
@@ -75,26 +75,29 @@ SO101-LeRobot-VLA/
 ├── assets/
 │   ├── robots/                          # SO-101 follower USD + 편집용 URDF
 │   ├── sample_calibrations/             # 샘플 .json 캘리브레이션
-│   └── scenes/pen_desk/                 # 펜 Pick-and-Place 씬
-│       ├── scene.usd / scene.usda       # 책상/매트/조명 + objects 참조 + 좌표
-│       └── objects/
-│           ├── PenWhite/PenWhite.usd
-│           ├── PenGray/PenGray.usd
-│           ├── PenBlack/PenBlack.usd
-│           ├── PenBlue/PenBlue.usd
-│           └── PenCup/PenCup.usd
+│   └── scenes/
+│       ├── pen_desk/                     # 펜 Pick-and-Place 씬
+│       │   ├── scene.usd / scene.usda    # 책상/매트/조명 + objects 참조 + 좌표
+│       │   └── objects/PenWhite·PenGray·PenBlack·PenBlue·PenCup/<Name>.usd
+│       └── cube_desk/                    # 큐브 Pick-and-Place 씬 (펜 씬과 동일 패턴)
+│           ├── scene.usd / scene.usda
+│           └── objects/Cube1·Cube2·Cube3·Cube4·Bowl/<Name>.usd
 ├── scripts/                             # Isaac Lab 진입점 스크립트
+│   ├── environments/author_pick_pen_scene.py   # 펜 씬 USD 일괄 author
+│   ├── environments/author_pick_cube_scene.py  # 큐브 씬 USD 일괄 author
 │   └── environments/teleoperation/      # teleop_se3_agent / replay / so101_joint_state_server
 └── src/sim_to_real/                     # 로컬 Python 패키지 (leisaac 미러 구조)
-    ├── assets/scenes/pen_desk.py        # PEN_DESK_CFG (UsdFileCfg 래퍼)
-    ├── tasks/                           # SimToReal-SO101-PickPen-v0 등록
-    │   └── pick_pen/{pick_pen_env_cfg.py, mdp/{observations,terminations}.py}
+    ├── assets/scenes/{pen_desk.py, cube_desk.py}  # PEN_DESK_CFG / CUBE_DESK_CFG (UsdFileCfg 래퍼)
+    ├── tasks/                           # SimToReal-SO101-PickPen/PickCube-v0 등록
+    │   ├── pick_pen/{pick_pen_env_cfg.py, mdp/{observations,terminations,rewards,events}.py}
+    │   └── pick_cube/{pick_cube_env_cfg.py}      # mdp 는 pick_pen.mdp 재사용
     └── utils/                           # constant + domain_randomization (ellipse / arc)
 ```
 
 | Gym ID | 정의 위치 | 진입점 |
 |----|----------|--------|
 | `SimToReal-SO101-PickPen-v0` | `sim_to_real.tasks.pick_pen.pick_pen_env_cfg:PickPenEnvCfg` | `isaaclab.envs.ManagerBasedRLEnv` |
+| `SimToReal-SO101-PickCube-v0` | `sim_to_real.tasks.pick_cube.pick_cube_env_cfg:PickCubeEnvCfg` | `isaaclab.envs.ManagerBasedRLEnv` |
 
 ---
 
@@ -135,198 +138,127 @@ uv run scripts\author_pick_pen_scene.py
 - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py::PEN_CUP_CENTER_XY` — `mdp.pen_in_cup` 의 컵 기준점 (world frame)
 - 오라클 state machine 의 동일 상수 (`src/sim_to_real/datagen/state_machine/pick_pen.py`, 존재 시)
 
+### 큐브 씬 (Cube Scene)
+
+`SimToReal-SO101-PickCube-v0` 가 쓰는 `assets/scenes/cube_desk/`. 펜 씬과 동일한 책상/매트/조명 + `SCENE_OFFSET` 을 쓰고 조작 대상만 큐브 4개 + 그릇으로 바꾼다.
+
+- **큐브 4개** (`Cube1`~`Cube4`): 한 변 2.5 cm, 무광 회색 폼(`GrayFoam`). Box 자체가 analytic collider. grasp 안정 물리 — `mass=0.035 kg`(너무 가벼우면 빠른 가속 시 contact 끊겨 떨어짐), `contactOffset=0.004`(그리퍼 빠른 접근 시 관통 방지), `maxDepenetrationVelocity=1.0`(파고든 뒤 튐 방지), `solverPositionIterationCount=32`, `CubeFriction static=1.8/dynamic=1.5`(미끄러짐 방지).
+- **그릇** (`Bowl`): 동적 rigid body(`mass=0.15 kg`), 하늘색(`BowlBlue`). 바닥 disk + 반구 곡면 벽(8밴드×24 panel = 192개, 위로 갈수록 바깥 경사)으로 사진의 곡면 그릇을 근사 — 큐브가 굴러들어와 담긴다.
+- **좌표·랜덤화:** 큐브는 매트 중앙 타원(`randomize_object_in_ellipse`), 그릇은 정면 호(`randomize_object_on_arc`) — 펜/펜컵과 동일. world 기준 `BOWL_CENTER_XY=(2.2,-0.17)`, `BOWL_SUCCESS_RADIUS=0.06`.
+
+```powershell
+uv run scripts\environments\author_pick_cube_scene.py
+```
+
+큐브 크기/물성·그릇 형상 변경 시 이 스크립트를 다시 실행해 USD 6쌍(scene + Cube1~4 + Bowl)을 재생성한다. world-frame 상수(`BOWL_CENTER_XY` 등)는 `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py` 와 함께 갱신.
+
 ---
 
 ## 5. 텔레오퍼레이션 및 레코드
 
-### 순수 Isaac Lab joint teleop + 카메라 튜닝
+`scripts/environments/teleoperation/teleop_se3_agent.py` 는 로컬 GUI teleop의 표준
+진입점이며 **두 task 공용**이다(`--task` 만 바꾼다). 예전 leisaac device layer
+import를 제거했고, Isaac Lab 환경에 직접 6-dim SO-101 joint-position action을 보낸다.
 
-`scripts/environments/teleoperation/pick_pen_joint_teleop.py` 는 현재
-`SimToReal-SO101-PickPen-v0`에 직접 6-dim joint-position action을 보내는
-디버그용 GUI teleop이다. LeIsaac device layer를 쓰지 않으므로 카메라/씬/드라이브
-튜닝에는 이 스크립트를 우선 사용한다.
+Windows 워크스테이션에서 `--enable_cameras`를 켜면 스크립트가 자동으로
+`isaaclab.python.rendering.kit` experience를 선택해 사용자가 볼 수 있는 Isaac GUI
+창으로 열린다. reset 직후 메인 Perspective viewport 는 책상 부감 구도로 자동
+정렬된다(마우스로 자유 조정 가능).
 
-Windows 워크스테이션에서는 Isaac Sim 5.1 렌더링 crash를 피하려고 experience를
-명시한다.
-
-```bash
-uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
-    --task SimToReal-SO101-PickPen-v0 \
-    --device cuda:0 \
-    --experience isaaclab.python.rendering.kit \
-    --snapshot_on_start \
-    --snapshot_dir outputs/camera_tuning
-```
-
-키보드 입력은 터미널 창에 포커스가 있을 때 동작한다. Isaac GUI는 장면 확인용이고,
-조작 키는 실행 터미널에서 받는다.
-
-SO-101 Leader Arm으로 조작할 때는 같은 스크립트에 `--control_mode leader`를 붙인다.
-현재 Windows 워크스테이션의 leader 포트는 `COM5`다.
+- **기본(실시간 제어 모드):** 보조 viewport docking 을 끄고 메인 viewport 1개만
+  렌더해 실시간 teleop 성능을 확보한다. 카메라 sensor 는 데이터 계약대로 **30 fps**
+  (`render_interval`)로 유지된다(`observation.images.* fps 30`).
+- **`--tune_cameras`(카메라 보정 모드):** top/front/wrist sensor 를 메인과 함께
+  2×2 사분면 viewport 로 docking 하고, 실시간 카메라 튜너 위젯을 띄운다(아래
+  [카메라 튜닝](#카메라-튜닝) 참고). 렌더 부하가 커지므로 보정할 때만 켠다.
 
 ```bash
-uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
-    --task SimToReal-SO101-PickPen-v0 \
-    --device cuda:0 \
-    --experience isaaclab.python.rendering.kit \
-    --control_mode leader \
-    --leader_port COM5 \
-    --leader_id so101_teleop \
-    --snapshot_on_start \
-    --snapshot_dir outputs/camera_tuning
-```
-
-Leader Arm 모드는 LeRobot `SO101Leader` calibration을 그대로 사용한다. arm 5축은
-LeRobot degree 값을 radian으로 변환하고, gripper는 기본적으로 `0..100` 값을
-`--leader_gripper_divisor 100`으로 나눠 Isaac `0..1` joint target으로 보낸다.
-리더 calibration이 없거나 모터 calibration과 다르면 `--leader_calibrate`를 추가해
-터미널 prompt를 따라 보정한다.
-
-실기와 sim 방향이 반대로 보이는 축은 CLI에서 먼저 보정한다.
-
-```bash
-# 예: shoulder_lift만 반전하고, shoulder_pan에 +0.10 rad offset
-uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
-    --task SimToReal-SO101-PickPen-v0 \
-    --device cuda:0 \
-    --experience isaaclab.python.rendering.kit \
-    --control_mode leader \
-    --leader_port COM5 \
-    --leader_joint_signs "1,-1,1,1,1,1" \
-    --leader_joint_offsets "0.10,0,0,0,0,0" \
-    --leader_smoothing 0.2
-```
-
-Leader Arm 모드에서도 터미널 키 `u`(scene reset), `c`(snapshot), `p`(metadata 출력),
-`Esc`(종료)는 계속 동작한다.
-
-| 키 | 동작 | 키 | 동작 |
-|---|---|---|---|
-| `q` / `a` | shoulder_pan ± | `w` / `s` | shoulder_lift ± |
-| `e` / `d` | elbow_flex ± | `r` / `f` | wrist_flex ± |
-| `t` / `g` | wrist_roll ± | `y` / `h` | gripper open / close |
-| `[` / `]` | step 크기 축소 / 확대 | `z` | joint target 0 |
-| `u` | scene reset | `c` | 3개 카메라 PNG snapshot 저장 |
-| `p` | joint/camera metadata 출력 | `Esc` | 종료 |
-
-카메라 임시 튜닝은 CLI override로 먼저 실험한다. 낮은 focal length는 넓은 FOV,
-높은 focal length는 zoom-in이다.
-
-```bash
-uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
-    --task SimToReal-SO101-PickPen-v0 \
-    --device cuda:0 \
-    --experience isaaclab.python.rendering.kit \
-    --top_pos "2.20,-1.25,2.10" \
-    --top_target "2.20,-0.17,0.92" \
-    --top_focal 12.0 \
-    --front_pos "2.45,-0.62,1.02" \
-    --front_target "2.12,-0.12,0.95" \
-    --front_focal 12.0 \
-    --wrist_pos "-0.04,0.03,-0.12" \
-    --wrist_focal 10.0 \
-    --snapshot_on_start \
-    --snapshot_dir outputs/camera_tuning_trial
-```
-
-마음에 드는 값은 `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`의 아래 상수에
-반영한다.
-
-| 카메라 | 위치 | 각도 | FOV |
-|---|---|---|---|
-| top | `_TOP_CAMERA_POS` | `_TOP_CAMERA_TARGET`를 바라보도록 자동 계산 | `_TOP_CAMERA_FOCAL` |
-| front | `_FRONT_CAMERA_POS` | `_FRONT_CAMERA_TARGET`를 바라보도록 자동 계산 | `_FRONT_CAMERA_FOCAL` |
-| wrist | `_WRIST_CAM_LOCAL_POS` (gripper-local) | `_WRIST_CAM_LOCAL_ROT` (wxyz quaternion) | `_WRIST_CAMERA_FOCAL` |
-
-top/front는 world-frame `pos + target` 방식이라 조정이 쉽다. wrist는 gripper 링크
-자식 prim이라 위치/회전이 gripper-local이다. wrist 각도는 Isaac GUI에서
-`/World/envs/env_0/Robot/gripper/WristCamera`를 직접 돌려 보고 local transform을
-복사하거나, `--wrist_rot "w,x,y,z"`로 임시 quaternion을 넣어 비교한다.
-
-실제 데이터셋 기준으로 맞출 때는 `observation.images.top`,
-`observation.images.front`, `observation.images.wrist` 프레임을 1차 기준으로 삼는다.
-`docs/pics` 사무실 사진은 물리 배치 참고용이다. top 카메라는 실제 사무실 사진보다
-높게 조정된 상태이므로 사진의 물리 위치보다 데이터셋 top 영상 구도를 우선한다.
-
-### Legacy LeIsaac teleop
-
-`scripts/environments/teleoperation/teleop_se3_agent.py` 는 `gym.make("SimToReal-SO101-PickPen-v0")` + leisaac 디바이스 레이어.
-현재 A~E 순수 Isaac Lab 트랙에서는 leisaac import를 제거했으므로, 아래 경로는 F 단계
-실기기 device layer를 다시 붙일 때 참고용이다.
-
-### 디바이스 종류
-
-| `--teleop_device` | 클래스 | 동작 방식 |
-|---|---|---|
-| `keyboard` | `SO101Keyboard` | 키보드 → 8D delta (SE3 + shoulder-pan + gripper), differential IK |
-| `gamepad` | `SO101Gamepad` | Xbox 게임패드 → 동일한 8D delta |
-| `so101leader` | `SO101Leader` | USB 시리얼로 실제 SO-101 리더 암 연결. Feetech 모터 6개 위치 → follower joint 직접 매핑 |
-| `so101leader` (remote) | `SO101LeaderRemote` | ZMQ SUB 으로 원격 SO-101 리더 상태 수신. `--remote_endpoint` 필요 |
-| `bi-so101leader` | `BiSO101Leader` | 좌/우 두 대의 SO-101 리더 (양팔 태스크용) |
-| `lekiwi-*` | `LeKiwi*` | 키보드 / 게임패드 / 리더 암으로 LeKiwi 모바일 매니퓰레이터 제어 |
-
-#### 액션 구조 차이
-
-| 디바이스 | 제어 방식 | 액션 차원 |
-|---|---|---|
-| `keyboard` / `gamepad` | Differential IK — gripper 프레임 기준 delta pose | 8D: `[dx, dy, dz, droll, dpitch, dyaw, Δshoulder_pan, Δgripper]` |
-| `so101leader` / `so101leader`(remote) | 직접 관절 위치 제어 — 모터 값 → 관절 한계 범위 변환 | 6D: 관절 위치 (rad) |
-
-### 실행
-
-```bash
-# 키보드
+# 큐브 task 실시간 제어 + 녹화 (펜 task 는 --task 만 PickPen 으로)
 uv run scripts/environments/teleoperation/teleop_se3_agent.py \
-    --task SimToReal-SO101-PickPen-v0 --teleop_device keyboard
-
-# SO-101 leader (Windows COM)
-uv run scripts/environments/teleoperation/teleop_se3_agent.py \
-    --task SimToReal-SO101-PickPen-v0 --teleop_device so101leader --port COM5
-
-# SO-101 leader (원격 ZMQ)
-uv run scripts/environments/teleoperation/teleop_se3_agent.py \
-    --task SimToReal-SO101-PickPen-v0 --teleop_device so101leader \
-    --remote_endpoint tcp://192.168.1.10:5556
-
-# 양팔
-uv run scripts/environments/teleoperation/teleop_se3_agent.py \
-    --task SimToReal-SO101-BiArm-v0 --teleop_device bi-so101leader \
-    --left_arm_port COM5 --right_arm_port COM6
+    --task=SimToReal-SO101-PickCube-v0 \
+    --teleop_device=so101leader \
+    --port=COM5 \
+    --num_envs=1 \
+    --device=cuda \
+    --enable_cameras \
+    --record \
+    --dataset_file=./datasets/dataset.hdf5
 ```
 
-### 주요 인자
-
-| 인자 | 기본값 | 설명 |
-|---|---|---|
-| `--task` | (필수) | Gym 환경 ID |
-| `--teleop_device` | `keyboard` | 디바이스 종류 |
-| `--port` | `/dev/ttyACM0` | `so101leader` 시리얼 포트 |
-| `--remote_endpoint` | `None` | ZMQ 원격 (e.g. `tcp://host:5556`) |
-| `--left_arm_port` / `--right_arm_port` | `/dev/ttyACM0` / `/dev/ttyACM1` | bi-arm 포트 |
-| `--sensitivity` | `1.0` | keyboard/gamepad 민감도 |
-| `--recalibrate` | `False` | 강제 캘리브레이션 |
-| `--quality` | `False` | FXAA + quality 렌더링 |
-| `--step_hz` | `60` | 환경 step 비율 |
-
-### 키 바인딩 (`SO101Keyboard`)
-
-**세션 제어** (모든 디바이스 공통):
+### 조작
 
 | 키 | 동작 |
 |---|---|
-| `B` | 제어 시작 |
-| `R` | 현재 시도를 실패로 리셋 |
-| `N` | 현재 시도를 성공으로 표시 후 리셋 |
+| `B` | Leader Arm/keyboard 제어 시작 |
+| `R` | 현재 episode를 실패로 저장하고 reset |
+| `N` | 현재 episode를 성공으로 저장하고 reset |
+| `C` | top/front/wrist PNG와 카메라 metadata JSON 저장 |
+| `Ctrl+C` 또는 GUI 창 닫기 | 종료 |
 
-**암 제어** (keyboard 전용):
+`--teleop_device=so101leader` 는 LeRobot `SO101Leader`를 직접 사용한다. arm 5축은
+degree 값을 radian으로 변환하고, gripper는 기본적으로 `0..100` 값을
+`--leader_gripper_divisor 100`으로 나눠 Isaac `0..1` joint target으로 보낸다.
+calibration mismatch가 뜨면 `--recalibrate`를 추가해 LeRobot prompt를 따라 보정한다.
+
+키보드 디버그 모드는 같은 스크립트에서 `--teleop_device=keyboard`로 실행한다.
 
 | 키 | 동작 | 키 | 동작 |
 |---|---|---|---|
-| `W` / `S` | 앞 / 뒤 | `A` / `D` | 왼 / 오른 |
-| `Q` / `E` | 위 / 아래 | `J` / `L` | 롤 좌 / 우 |
-| `I` / `K` | 피치 위 / 아래 | `U` / `O` | 그리퍼 열기 / 닫기 |
+| `Q` / `A` | shoulder_pan ± | `W` / `S` | shoulder_lift ± |
+| `E` / `D` | elbow_flex ± | `U` / `J` | wrist_flex ± |
+| `T` / `G` | wrist_roll ± | `Y` / `H` | gripper open / close |
 
-모든 이동·회전은 **gripper 프레임 기준 delta**, 내부에서 robot base 프레임으로 변환.
+### 카메라 캡처
+
+GUI 창에서 `C`를 누르면 `outputs/captured_images`에 다음 파일이 생긴다.
+
+| 파일 | 내용 |
+|---|---|
+| `<timestamp>_top_camera.png` | `observation.images.top` 대응 렌더 |
+| `<timestamp>_front_camera.png` | `observation.images.front` 대응 렌더 |
+| `<timestamp>_wrist_camera.png` | `observation.images.wrist` 대응 렌더 |
+| `<timestamp>_camera_metadata.json` | 저장 파일 경로, 각 카메라 prim path, local/world position/quaternion/euler/FOV/focal length |
+| `latest_camera_metadata.json` | 가장 최근 metadata 복사본 |
+
+검증용으로 시작 직후 한 번만 캡처하려면 `--capture_on_start`를 붙인다.
+
+### 카메라 튜닝
+
+GUI 카메라 튜너 위젯으로 보면서 직접 맞추는 것이 가장 정확하다. `--tune_cameras`
+를 붙여 실행하면:
+
+1. top/front/wrist viewport 가 메인 Perspective 와 함께 2×2 사분면으로 docking 된다.
+2. `SO101 Camera Tuner` 패널에서 각 카메라의 **Pos X/Y/Z**, **Rot X/Y/Z(deg)**,
+   **Focal(mm)** 슬라이더를 움직이면 카메라 prim 의 transform/focal 이 **실시간** 갱신된다.
+3. 만족스러우면 **Print cfg values** 버튼을 눌러 콘솔에 값을 출력한다. 카메라마다
+   `pos` + `rot_xyz_deg`(슬라이더값, prim frame) + `rot_quat`(wxyz, world-convention,
+   cfg용) + `focal` 이 함께 찍힌다.
+
+```bash
+uv run scripts/environments/teleoperation/teleop_se3_agent.py \
+    --task=SimToReal-SO101-PickCube-v0 \
+    --teleop_device=so101leader --port=COM5 \
+    --num_envs=1 --device=cuda --enable_cameras --tune_cameras
+```
+
+출력한 값을 task env cfg 상수에 반영한다 — 펜은
+`src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`, 큐브는
+`src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`.
+
+| 카메라 | 위치 | 각도 | FOV |
+|---|---|---|---|
+| top | `_TOP_CAMERA_POS` (world) | `_TOP_CAMERA_ROT` (wxyz quat 직접 지정. None 이면 `_TOP_CAMERA_TARGET` look_at) | `_TOP_CAMERA_FOCAL` |
+| front | `_FRONT_CAM_LOCAL_POS` (shoulder-local) | `_FRONT_CAM_LOCAL_ROT` (wxyz quat) | `_FRONT_CAMERA_FOCAL` |
+| wrist | `_WRIST_CAM_LOCAL_POS` (gripper-local) | `_WRIST_CAM_LOCAL_ROT` (wxyz quat) | `_WRIST_CAMERA_FOCAL` |
+
+front 는 `/World/envs/env_0/Robot/shoulder/FrontCamera` 로 shoulder_pan 회전을 따라가고
+(위치/회전 shoulder-local), wrist 는 `.../Robot/gripper/WristCamera` 로 gripper 를
+따라간다(gripper-local). top 은 world 절대 좌표다.
+
+CLI override(`--top_pos/--top_target/--top_focal/--front_pos/--front_rot/--wrist_pos/
+--wrist_rot/--wrist_focal`)로도 임시 실험할 수 있으나, 위젯 실시간 조정이 더 빠르다.
+실제 데이터셋 기준으로 맞출 때는 `observation.images.{top,front,wrist}` 프레임을 1차
+기준으로 삼고, `docs/pics` 사진은 물리 배치 참고용이다.
 
 ### Rerun 뷰어 시각화
 

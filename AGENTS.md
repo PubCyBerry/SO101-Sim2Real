@@ -98,31 +98,34 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 | 경로 | 내용 |
 |---|---|
-| `assets/scenes/pen_desk.py` | `PEN_DESK_CFG` (UsdFileCfg 래퍼) |
+| `assets/scenes/{pen_desk,cube_desk}.py` | `PEN_DESK_CFG` / `CUBE_DESK_CFG` (UsdFileCfg 래퍼) |
 | `tasks/__init__.py` | `isaaclab_tasks.utils.import_packages` 로 하위 task config 자동 등록 (블랙리스트: `utils`, `.mdp`) |
-| `tasks/pick_pen/` | `SimToReal-SO101-PickPen-v0` (entry point `pick_pen_env_cfg:PickPenEnvCfg`, env class `ManagerBasedRLEnv`), `mdp/{observations,terminations}.py` |
-| `utils/{constant,domain_randomization}.py` | `randomize_object_in_ellipse` / `randomize_object_on_arc` 두 `EventTermCfg` wrapper — leisaac 사각형 분포로 불가능한 타원 면적 균등 / 호 1D sampling |
+| `tasks/pick_pen/` | `SimToReal-SO101-PickPen-v0` (entry point `pick_pen_env_cfg:PickPenEnvCfg`, env class `ManagerBasedRLEnv`), `mdp/{observations,terminations,rewards,events}.py` |
+| `tasks/pick_cube/` | `SimToReal-SO101-PickCube-v0` (entry point `pick_cube_env_cfg:PickCubeEnvCfg`). 펜과 4객체+1컨테이너 구조가 같아 **MDP 를 fork 하지 않고 `pick_pen.mdp` 를 import** 해 cube/bowl 이름만 명시 주입(reward/`rl_state` 기본값이 `PEN_NAMES` 라 기본값 의존 금지) |
+| `utils/{constant,domain_randomization}.py` | `PEN_NAMES`·`PEN_CUP_NAME`·`CUBE_NAMES`·`BOWL_NAME` 상수 + `randomize_object_in_ellipse` / `randomize_object_on_arc` 두 `EventTermCfg` wrapper (타원 면적 균등 / 호 1D sampling) |
 
 ### USD 에셋 (`assets/`)
 
 - `scenes/pen_desk/scene.usd` + `objects/<Pen*,PenCup>/<Name>.usd` — kitchen_with_orange 패턴 (객체별 self-contained USD + `prepend payload` 참조)
+- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = 2.5cm 회색 폼(grasp 안정 물리: mass 0.035kg, contactOffset 0.004, maxDepenetrationVelocity 1.0, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
 - `robots/` — SO-101 follower USD + 편집용 URDF
-- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 펜 4개 + 펜컵 collider 는 `PhysicsCollisionAPI` 직접 부여 (Cube proxy 미사용)
-- **영역 분리**: 펜 = 그린 타원 (`y ∈ [0.22, 0.26]`), 펜컵 = 주황 호 (`y ∈ [0.34, 0.40]`). y 마진 ≥ 0.08 m 라 펜이 펜컵 안에 spawn 불가.
+- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 펜·큐브 collider 는 `PhysicsCollisionAPI` 직접 부여 (별도 proxy 미사용)
+- **영역 분리**: 조작 대상(펜/큐브) = 그린 타원 (`y ∈ [0.22, 0.26]`), 컨테이너(펜컵/그릇) = 주황 호 (`y ∈ [0.34, 0.40]`). y 마진 ≥ 0.08 m 라 조작 대상이 컨테이너 안에 spawn 불가.
 
 ### 진입 스크립트 (`scripts/`)
 
 | 스크립트 | 내용 |
 |---|---|
 | `environments/list_envs.py` | leisaac 등록 환경 일람 |
-| `environments/teleoperation/teleop_se3_agent.py` | `gym.make("SimToReal-SO101-PickPen-v0")` + leisaac 디바이스 레이어 (`keyboard` / `gamepad` / `so101leader` / `so101leader` remote ZMQ / `bi-so101leader` / `lekiwi-*`) |
+| `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author (pxr.Sdf, isaac 불필요) |
+| `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(2×2 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
 
 ### 씬 재생성
 
-USD 6개 (`scene.usd` + 펜 4개 + PenCup) 는 author 스크립트로 일괄 재생성. 좌표 변경 시 import 경로는 무관(`pyproject.toml` 의 `[tool.setuptools]` 가 `src/` 기준 패키지 탐색)하나, `pen_cup_center_xy` 같은 world-frame 상수는 `tasks/pick_pen/pick_pen_env_cfg.py` 와 오라클 state machine 양쪽을 같이 갱신해야 한다.
+USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성 (펜=`author_pick_pen_scene.py`, 큐브=`author_pick_cube_scene.py`). 좌표 변경 시 import 경로는 무관(`pyproject.toml` 의 `[tool.setuptools]` 가 `src/` 기준 패키지 탐색)하나, `PEN_CUP_CENTER_XY`·`BOWL_CENTER_XY` 같은 world-frame 상수는 각 task 의 `*_env_cfg.py` (및 오라클 state machine, 존재 시) 와 같이 갱신해야 한다.
 
 ## Python 패키지 / 의존성
 

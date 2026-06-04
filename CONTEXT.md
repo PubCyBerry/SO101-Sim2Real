@@ -12,35 +12,104 @@
 
 ---
 
-## 작업 인계 (2026-06-04 — TC.4 visual 품질 문제 → 로컬 teleop/camera tuning)
+## 작업 인계 (2026-06-04 — cube_desk 씬 + PickCube task 신설)
 
-- **목표**: TC.4 midcheck 영상 품질 문제를 받아, 대량 rollout 재개 전에 사용자가 로컬 Windows에서 직접 scene을 보고 joint teleop 및 3-camera pose/FOV를 조정할 수 있게 한다.
-- **상태**: 완료. TC.4 본 목표(2k-5k + HF push)는 아직 미완료이며, 카메라/assist/학습 길이 재설계 후 재시작해야 한다. 사용자가 볼 수 있는 local GUI는 SO-101 Leader Arm(COM5) 모드로 실행 중이다.
-- **발견/결정**:
-  - 10ep midcheck 영상에서 카메라 위치/FOV 불일치, `grasp_assist`로 pen이 순간이동하듯 붙는 현상, episode horizon/학습 전략 의심이 확인됐다.
-  - 기존 `teleop_se3_agent.py`는 leisaac device layer 의존이라 순수 Isaac Lab env에 맞지 않는다. 디버그용으로 직접 6-dim joint-position action을 보내는 새 스크립트를 추가했다.
-  - Leader Arm은 LeRobot `SO101Leader`를 직접 사용한다. arm 5축은 degree→radian, gripper는 0..100→0..1로 변환해 Isaac joint-position action에 넣는다.
-  - GUI render crash 원인은 Gymnasium wrapper(`OrderEnforcing`)에 `sim`이 없는데 `env.sim.render()`를 호출한 것. `env.unwrapped.sim.render()`로 수정했다.
-- **변경한 파일**:
-  - `scripts/environments/teleoperation/pick_pen_joint_teleop.py` 추가/보강. GUI/terminal joint teleop, SO-101 Leader Arm(COM5) 입력, top/front/wrist camera injection, CLI camera override, PNG snapshot/metadata 저장 지원.
-  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`의 `make_pick_pen_camera_cfgs()`/`add_pick_pen_cameras()`에 optional camera override 인자 추가. 기본 동작은 기존 상수 그대로 유지.
-  - `docs/PATH_C_ISAAC_SIM.md`에 순수 Isaac Lab joint teleop 실행법, Leader Arm 실행법, 키 바인딩, camera pose/FOV 튜닝 방법, Windows `--experience isaaclab.python.rendering.kit` 주의 기록.
-- **검증 결과(로컬 Windows, RTX A4000, Isaac Lab 2.3.2)**:
-  - `python -m py_compile scripts/environments/teleoperation/pick_pen_joint_teleop.py src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py scripts/environments/camera_shape_smoke.py scripts/sim/rollout_to_lerobot.py` 통과.
-  - `uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py --task SimToReal-SO101-PickPen-v0 --device cuda:0 --headless --no_cameras --max_steps 5` 통과.
-  - 카메라 포함 실행은 기본 experience에서 Windows `rtx.scenedb.plugin.dll` access violation이 재현됐고, `--experience isaaclab.python.rendering.kit` 명시 시 통과.
-  - `--snapshot_on_start --snapshot_dir outputs/local_joint_teleop_camera_smoke_codex`로 top/front/wrist PNG와 `camera_metadata_latest.json` 생성 확인.
-  - Leader 보강 후 `python -m py_compile scripts/environments/teleoperation/pick_pen_joint_teleop.py` 통과.
-  - `uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py --task SimToReal-SO101-PickPen-v0 --device cuda:0 --headless --no_cameras --max_steps 5` 통과.
-  - `uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py --task SimToReal-SO101-PickPen-v0 --device cuda:0 --headless --max_steps 2 --experience isaaclab.python.rendering.kit --snapshot_on_start --snapshot_dir outputs/local_joint_teleop_camera_smoke_leader_codex` 통과.
-- **현재 실행 중(local visible GUI)**:
-  - Terminal PID: `37300`
-  - Isaac Python child PID: `28820`
-  - Command: `uv run --group isaac --locked python scripts\environments\teleoperation\pick_pen_joint_teleop.py --task SimToReal-SO101-PickPen-v0 --device cuda:0 --experience isaaclab.python.rendering.kit --control_mode leader --leader_port COM5 --leader_id so101_teleop --snapshot_on_start --snapshot_dir outputs\camera_tuning_gui`
-  - 터미널 보조키: `u` reset, `c` snapshot, `p` metadata, `Esc` 종료. calibration mismatch가 뜨면 `--leader_calibrate`로 재실행.
+- **목표**: `docs/pics/cube_desk/` 사진(회색 큐브 4개 + 하늘색 그릇, Front/Wrist/Top 카메라 3대, SO-101 클램프) 기반 새 OpenUSD 씬 + 큐브를 그릇에 담는 `SimToReal-SO101-PickCube-v0` task 신설. 사용자 teleop 명령(`--task`만 PickCube로 교체)이 동작하고 SO-101이 책상 위 올바른 위치에 놓이며 카메라 3대가 사진 구도를 따르게 한다.
+- **상태**: 구현 완료 + GUI 후속 보정 완료. headless 등록/cfg-parse/카메라 주입 EXIT=0. **후속(GUI 확인 반영)**: ①Bowl 곡면화(8밴드×24 경사 panel 반구 근사), ②카메라 viewport 3개를 메인과 2×2 사분면으로 docking, ③GUI 카메라 튜너 위젯 추가, ④사용자가 위젯으로 보정한 top/front/wrist pos·rot·focal 을 cfg 상수에 확정 반영.
+- **설계 원칙**: `pen_desk`/`PickPen`(펜 4 + 펜컵 1)과 1:1 대응이라 검증된 author 패턴·env cfg·MDP·도메인 랜덤화·카메라 리그를 복제·일반화. **MDP는 fork하지 않고 `sim_to_real.tasks.pick_pen.mdp` 재사용** — reward/`rl_state` 기본값이 `PEN_NAMES`라 cube cfg는 모든 항에 `CUBE_NAMES`/`BOWL_NAME` 명시 주입(기본값 의존 금지). `pick_pen` 파일·씬·MDP는 무변경(회귀 없음).
+- **생성 파일**:
+  - `scripts/environments/author_pick_cube_scene.py` (author_pick_pen_scene 복제·개조)
+  - `assets/scenes/cube_desk/scene.{usd,usda}` + `objects/{Cube1..4,Bowl}/*.{usd,usda}` (스크립트 생성물 6쌍)
+  - `src/sim_to_real/assets/scenes/cube_desk.py` (CUBE_DESK_CFG wrapper)
+  - `src/sim_to_real/tasks/pick_cube/{__init__.py, pick_cube_env_cfg.py}` (gym 등록 + env cfg, 카메라 함수 `make_pick_cube_camera_cfgs`/`add_pick_cube_cameras`)
+- **수정 파일**:
+  - `src/sim_to_real/utils/constant.py`: `CUBE_NAMES=["Cube1".."Cube4"]`, `BOWL_NAME="Bowl"` 추가(PEN_* 보존)
+  - `scripts/environments/teleoperation/teleop_se3_agent.py`: `--task`에 "Cube" 포함 시 `add_pick_cube_cameras` 사용(미존재 시 pen으로 fallback). 녹화·키보드·leader·캡처 로직 불변.
+- **SPEC(좌표·물성)**:
+  - SCENE_OFFSET (2.2,-0.57,0.76)·로봇 (2.2,-0.61,0.7299) = pen_desk와 동일.
+  - 큐브 4개: 한 변 0.025m, GrayFoam(0.45,0.46,0.47/rough0.92), Box 자체 collider. scene-local z=0.0195 → world init z=0.7795. xy는 펜 클러스터 좌표 그대로(yaw 25/-30/60/-10). **grasp 물리 보정**: mass 0.035kg(6g→35g, 너무 가벼우면 빠른 가속 시 contact 끊겨 떨어짐), contactOffset 0.004(관통 방지, 0.0015는 빠른 접근 시 파고듦), maxDepenetrationVelocity 1.0(파고든 뒤 안 튀게), solverPos/Vel 32/8, angularDamping 1.5/linearDamping 0.2, CubeFriction static1.8/dyn1.5(미끄러짐 방지).
+  - 그릇 Bowl: 동적 RigidBody mass 0.15kg, BowlBlue(0.72,0.82,0.90/rough0.45), 바닥 Cylinder(r0.037) + **반구 곡면 벽(8밴드×24 panel=192개, r 0.035→0.065, 깊이 0.045, 위로 갈수록 바깥 경사, visible+collision 겸용)**. scene-local (0,0.40,0.006) → world (2.2,-0.17,0.766). author 스크립트에 `_bowl_panel`(중첩 Xform: 바깥 rotateZ 접선 + 안쪽 Cube rotateX 경사) 추가, `_cube`에 `rotate_x` 인자 추가.
+  - `BOWL_CENTER_XY=(2.2,-0.17)`, `BOWL_SUCCESS_RADIUS=0.06`, `BOWL_HEIGHT_RANGE=(0.005,0.12)`.
+  - **카메라 확정값(GUI 튜너 보정, wxyz world-conv)**: top pos(2.2,-0.93,1.70)/rot(0.6124,-0.3536,0.3536,0.6124)/focal 19 — top 은 look_at→quat 직접지정으로 전환(`_TOP_CAMERA_ROT`, `make_pick_cube_camera_cfgs(top_rot=...)`). front pos(-0.03,-0.01,0.03)/rot(0.0,0.0872,0.9962,0.0)/focal 19. wrist pos(0.0,0.05,-0.08)/rot(-0.183,0.683,-0.683,-0.183)/focal 19.
+- **카메라 튜너 위젯(`teleop_se3_agent.py::create_camera_tuner`)**: GUI 패널에서 top/front/wrist 의 Pos XYZ·Rot XYZ(deg)·Focal 슬라이더 → USD prim transform/focal 실시간 갱신. `Print cfg values` 버튼이 pos + rot_xyz_deg(prim frame, 슬라이더값) + rot_quat(world-conv, cfg용) + focal 출력. prim(opengl)→world 변환은 `isaaclab.utils.math.convert_camera_frame_orientation_convention`. 카메라 viewport 3개는 메인과 2×2 사분면 docking(`omni.ui` `dock_in`).
+- **teleop 성능/모드 분기(`teleop_se3_agent.py`)**:
+  - `--tune_cameras` 플래그: **있을 때만** 2×2 docking viewport + 튜너 위젯을 띄운다. **없으면(기본=실시간 제어)** 보조 viewport docking 을 끄고 메인 viewport 만 렌더해 속도 확보. **카메라 sensor 는 30fps(render_interval=4@120Hz) 유지** — North Star `observation.images.* fps 30` 계약(sensor update_period 는 0.0 그대로, 5Hz 로 낮추지 않음). `c` capture 시 `cam.update(force_recompute=True)`로 정지 중에도 최신 프레임 보장.
+  - 녹화 FPS 미변경: `--lerobot_dataset_fps=30`(HDF5 메타), `--step_hz=60`(제어 루프).
+  - `_set_initial_view()`: reset 직후 메인 Perspective viewport 를 책상 부감 구도(eye[1.60,-1.20,1.20]/target[2.18,-0.30,0.79])로 설정(`isaacsim.core.utils.viewports.set_camera_view`). viewport 인터랙티브라 이후 마우스로 자유 조정.
+- **검증 결과(로컬 Windows, RTX A4000)**:
+  - `uv run scripts/environments/author_pick_cube_scene.py` → USD 6쌍 생성, usd-core 파싱 OK(Bowl=Bottom+Wall000~191+Looks).
+  - `uv run python -m py_compile` 통과. headless `parse_env_cfg` + 카메라 주입 EXIT=0(PickPen 회귀 없음).
+  - 카메라/위젯/2x2 docking/곡면은 GUI 실행으로 사용자 확인 완료.
 - **다음**:
-  - 사용자가 로컬 GUI teleop로 카메라 상수/CLI override를 튜닝한다.
-  - 다음 rollout 전에는 `grasp_assist_distance`를 크게 낮추거나 끄고(`--disable_grasp_assist`), episode horizon/training iterations를 늘리는 방향으로 TB.3/TC.4를 재설계한다.
+  - 추가 카메라 미세조정이 필요하면 GUI 튜너로 조정 후 `Print cfg values` → cfg 상수 갱신(top 은 `_TOP_CAMERA_ROT`).
+  - 새 종류 에러 해결 시 `docs/TROUBLESHOOTING.md` 기록. 커밋은 사용자 요청 시.
+
+---
+
+## 작업 인계 (2026-06-04 — TC.4 attached camera viewport follow-up)
+
+- **목표**: wrist camera는 gripper 위/옆 실제 장착 위치처럼 gripper를 따라 움직이게 하고, front camera는 shoulder_pan 전면부 장착처럼 shoulder_pan 회전을 따라가게 한다. GUI에는 top/front/wrist camera viewport 3개를 추가로 띄운다.
+- **상태**: 완료. visible GUI는 사용자가 요청한 `teleop_se3_agent.py` 명령으로 재실행 중이며, COM5 Leader Arm 연결과 3개 camera viewport 생성이 로그에서 확인됐다.
+- **핵심 수정**:
+  - `front_camera` prim path를 `/World/envs/env_0/Robot/shoulder/FrontCamera`로 변경하고 shoulder-local pos/rot override(`--front_pos`, `--front_rot`)를 추가했다. `--front_target`은 예전 world-fixed 방식이라 경고 후 무시한다.
+  - `wrist_camera`는 `/World/envs/env_0/Robot/gripper/WristCamera` 유지, local 위치를 `(0.035, 0.035, -0.075)`로 올려 gripper 위/옆 장착에 가깝게 조정했다.
+  - `TiledCameraCfg.update_latest_camera_pose=True`를 켜서 `C` 캡처 metadata의 `pos_w/rot_w`가 최신 body pose를 반영하게 했다.
+  - GUI에서 `--enable_cameras` + non-headless 실행 시 `SO101 Top/Front/Wrist Camera` floating viewport 3개를 자동 생성한다.
+- **변경한 파일**:
+  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`
+  - `scripts/environments/teleoperation/teleop_se3_agent.py`
+  - `scripts/environments/camera_shape_smoke.py`
+  - `docs/PATH_C_ISAAC_SIM.md`
+  - `CONTEXT.md`, `TASKS.md`
+- **검증 결과(로컬 Windows, RTX A4000)**:
+  - `python -m py_compile scripts\environments\teleoperation\teleop_se3_agent.py src\sim_to_real\tasks\pick_pen\pick_pen_env_cfg.py scripts\environments\camera_shape_smoke.py` 통과.
+  - `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard --num_envs=1 --device=cuda --headless --enable_cameras --capture_on_start --capture_dir outputs/captured_images_smoke_attached_cams_final --max_steps=2` 통과. PNG 3개 + metadata 생성.
+  - `outputs/camera_follow_motion_smoke.json`: shoulder_pan 0.6rad action 후 front camera `0.1785m`, wrist camera `0.1965m` world-position delta 확인.
+  - `git diff --check` 통과(CRLF 안내만 출력).
+- **현재 실행 중(local visible GUI)**:
+  - PowerShell PID: `14296`
+  - uv PID: `36428`
+  - Isaac Python PIDs: `41332`, `23560`
+  - Command: `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task=SimToReal-SO101-PickPen-v0 --teleop_device=so101leader --port=COM5 --num_envs=1 --device=cuda --enable_cameras --record --dataset_file=./datasets/dataset.hdf5`
+  - Log: `outputs/teleop_gui_launch_latest.log`
+  - Log 확인: `[viewport] opened Top/Front/Wrist Camera`, `[leader] connected`.
+- **다음**: 사용자가 GUI의 3 camera viewport와 `C` metadata를 보며 `_TOP_*`, `_FRONT_CAM_LOCAL_*`, `_WRIST_CAM_LOCAL_*` / focal 값을 튜닝한다.
+
+---
+
+## 작업 인계 (2026-06-04 — TC.4 local GUI teleop + desk/camera tuning)
+
+- **목표**: 사용자가 로컬 Windows에서 Isaac GUI를 직접 보며 SO-101 Leader Arm(COM5)으로 teleop하고, `C` 키로 3-camera 렌더/metadata를 저장해 pose/FOV를 튜닝할 수 있게 한다.
+- **상태**: 완료. TC.4 본 목표(2k-5k + HF push)는 아직 미완료이며, 카메라/assist/episode horizon 재설계 후 재시작한다. visible GUI는 사용자가 요청한 `teleop_se3_agent.py` 명령으로 실행 중이다.
+- **발견/결정**:
+  - 책상 floating 원인은 scene author 기준 `SCENE_OFFSET.z=0.92`에서 다리 하단이 ground z=0보다 16cm 높아지는 구조였다. `SCENE_OFFSET.z=0.76`으로 내리고 desk-top/robot/pen/cup/reward z 기준을 모두 동기화했다.
+  - `teleop_se3_agent.py`의 leisaac device layer 의존을 제거하고, Isaac Lab env에 직접 6-dim joint-position action을 보내도록 교체했다.
+  - old 임시 파일 `scripts/environments/teleoperation/pick_pen_joint_teleop.py`는 삭제했다.
+  - Leader Arm은 LeRobot `SO101Leader`를 직접 사용한다. arm 5축은 degree→radian, gripper는 0..100→0..1로 변환해 Isaac joint-position action에 넣는다.
+  - `--enable_cameras`일 때 Windows 렌더 안정성을 위해 `isaaclab.python.rendering.kit` experience를 자동 선택한다.
+- **변경한 파일**:
+  - `scripts/environments/teleoperation/teleop_se3_agent.py`: pure Isaac Lab GUI teleop, SO-101 Leader(COM5), lightweight HDF5 record, `C` key PNG/JSON capture, camera CLI overrides.
+  - `scripts/environments/teleoperation/pick_pen_joint_teleop.py`: 삭제.
+  - `scripts/author_pick_pen_scene.py` + `assets/scenes/pen_desk/**`: 책상/펜/컵 USD 재생성. 다리 center z=0.36, scale z=0.72 → 하단 z=0.
+  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py` 및 `mdp/{events,observations,rewards,terminations}.py`, `scripts/environments/reward_smoke.py`: desk-top z=0.76 동기화.
+  - `docs/PATH_C_ISAAC_SIM.md`: 현재 teleop 실행법, `C` 캡처, camera pose/FOV 튜닝 방법 갱신.
+- **검증 결과(로컬 Windows, RTX A4000, Isaac Lab 2.3.2)**:
+  - `uv run scripts/author_pick_pen_scene.py` 성공. `scene.usda`에서 `DeskLeg*` 하단 z=0, `DeskTop` top face z=0.76 확인.
+  - `python -m py_compile ...` 변경 Python 파일 전체 통과.
+  - `uv run scripts/environments/teleoperation/teleop_se3_agent.py --help` 통과. leisaac import 없음.
+  - `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task=SimToReal-SO101-PickPen-v0 --teleop_device=keyboard --num_envs=1 --device=cuda --headless --enable_cameras --capture_on_start --capture_dir outputs/captured_images_smoke_codex_final --max_steps=2` 통과.
+  - `outputs/captured_images_smoke_codex_final`에 top/front/wrist PNG 3개와 metadata JSON 생성. 세 이미지 모두 640×480, nonblank.
+  - `uv run scripts/environments/reward_smoke.py --task=SimToReal-SO101-PickPen-v0 --num_envs=1 --device=cuda --headless` 통과.
+- **현재 실행 중(local visible GUI)**:
+  - PowerShell PID: `9064`
+  - uv PID: `43348`
+  - Isaac Python PID: `41052`
+  - Command: `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task=SimToReal-SO101-PickPen-v0 --teleop_device=so101leader --port=COM5 --num_envs=1 --device=cuda --enable_cameras --record --dataset_file=./datasets/dataset.hdf5`
+  - Log: `outputs/teleop_gui_launch_latest.log`
+  - GUI 키: `B` start, `R` fail/reset, `N` success/reset, `C` capture. calibration mismatch가 뜨면 `--recalibrate`로 재실행.
+- **다음**:
+  - 사용자가 local GUI에서 camera CLI override 또는 `pick_pen_env_cfg.py` 상수를 조정한다.
+  - 다음 rollout 전에는 `grasp_assist_distance`를 크게 낮추거나 끄고, episode horizon/training iterations를 늘리는 방향으로 TB.3/TC.4를 재설계한다.
 
 ---
 
