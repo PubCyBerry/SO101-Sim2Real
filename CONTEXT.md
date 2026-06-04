@@ -15,7 +15,7 @@
 ## 작업 인계 (2026-06-05 — PickCube guided lift reward 추가)
 
 - **목표**: `pregrasp_cube` 추가 후 정책이 "근접+닫기" 보상은 크게 받지만 lift가 0 근처에 머무는 문제를 줄인다.
-- **상태**: 코드 적용 및 서버 smoke 통과. 장기 학습은 새 reward 기준으로 재시작 전이다.
+- **상태**: 코드 적용 및 서버 smoke 통과. 장기 학습/평가까지 완료했지만 deterministic 성공률이 1/128에 그쳐 reward-only 경로는 실패로 본다.
 - **적용 변경**:
   - `task_mdp.guided_lift_reward`: gripper closed + object near 상태에서 큐브 center가 desk 위 `0.015→0.060m` 구간으로 올라가는 정도를 연속 보상한다.
   - `PickCubeRewardsCfg.guided_lift_cube`: weight `8.0`, `pregrasp_cube`와 `grasp_cube` 사이에 추가. PickPen cfg에는 term을 추가하지 않았다.
@@ -24,8 +24,9 @@
   - 서버 `env_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda:0 --steps 5` 통과, Reward Manager `pregrasp_cube`, `guided_lift_cube` 포함 13 terms 및 `rl_policy (43,)` 확인.
 - **직전 학습 결과**:
   - pregrasp-only scratch PPO `/DISK1/so101-sim2real/outputs/tb4_speedcap_pregrasp_fixed_scratch_clip2_4096_20260605`는 iter100 근처에서 `pregrasp_cube≈1.6`까지 올라갔지만 `lift_cube≈0.000x`, success termination≈0.3~0.4%로 정체되어 중단(model100까지 저장).
+  - guided-lift scratch PPO `/DISK1/so101-sim2real/outputs/tb4_speedcap_guidedlift_fixed_scratch_clip2_4096_20260605`는 완료(model219). on-policy success termination은 최종 ≈0.58%, deterministic eval은 model100 0/128, model160 0/128, model219 1/128.
 - **다음**:
-  - `guided_lift_cube` 포함 reward 기준으로 fixed-spawn scratch PPO를 재시작한다. lift reward가 올라가지 않으면 보상만으로는 부족하므로 state-machine phase imitation/DAgger 쪽으로 전환한다.
+  - 보상만으로는 부족하다. state-machine expert를 phase-aware imitation/DAgger로 쓰거나, oracle phase/progress를 privileged obs/reward에 주입하는 방향으로 전환한다.
 
 ---
 

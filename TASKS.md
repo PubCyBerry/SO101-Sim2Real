@@ -62,6 +62,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TB.4 in_progress — guided-lift scratch PPO 완료(model219)했지만 deterministic eval model100 0/128, model160 0/128, model219 1/128로 실패; reward-only 보정은 중단 / 다음: state-machine expert 기반 phase-aware imitation/DAgger 또는 oracle phase/progress privileged obs로 전환
 - [2026-06-05] TB.4 in_progress — pregrasp-only PPO는 `pregrasp_cube≈1.6`까지 오르지만 lift/success가 정체되어 중단(model100); closed+near 상태의 초기 lift 연속 보상 `guided_lift_cube`(weight 8.0) 추가, 서버 smoke에서 13 reward terms 확인 / 다음: guided-lift reward 기준 fixed-spawn scratch PPO 재시작
 - [2026-06-05] TB.4 in_progress — 43-dim target-observed scratch PPO는 fixed model160 deterministic 5/128, low-std continuation은 1/128 이하로 악화; reach→close 탐색 장벽 완화를 위해 PickCube `pregrasp_cube` reward(weight 2.0) 추가, 서버 smoke에서 12 reward terms 확인 / 다음: pregrasp reward 기준 fixed-spawn scratch PPO 재시작
 - [2026-06-05] TB.4 in_progress — speed-cap PPO 부분관측 보정으로 `rl_policy`를 37→43-dim 확장(현재 processed joint target 6개 추가), 서버 env_smoke에서 `rl_policy (43,)`와 train smoke Actor/Critic input 43 확인; cap2.0 회복 실험은 model550/model706/model715 모두 0/128이라 폐기, cap은 1.0rad/s 유지 / 다음: 43-dim fixed-spawn PickCube를 scratch PPO로 재학습
