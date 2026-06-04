@@ -169,8 +169,9 @@ def main() -> None:
             "saved_images": saved_images,
             "notes": [
                 "카메라는 add_pick_pen_cameras() 로 주입 — 기본 씬은 카메라 없이 --enable_cameras 불필요",
-                "wrist_camera는 gripper 링크 자식 prim 으로 부착되어 팔을 따라 이동(prim_path=.../Robot/gripper/WristCamera)",
-                "top/front 는 world 절대 포즈 — 멀티-env(TC.2)는 env-relative 좌표 전환 필요",
+                "front_camera는 shoulder 링크 자식 prim 으로 부착되어 shoulder_pan 회전을 따라감(prim_path=.../Robot/shoulder/FrontCamera)",
+                "wrist_camera는 gripper 링크 자식 prim 으로 부착되어 gripper 움직임을 따라감(prim_path=.../Robot/gripper/WristCamera)",
+                "top_camera만 world 절대 포즈로 고정",
                 "포즈/FOV는 observation.images.{top,wrist,front} 데이터셋 프레임과 docs/pics 물리 배치 사진을 기준으로 1차 정합",
             ],
         }

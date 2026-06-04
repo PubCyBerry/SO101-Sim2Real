@@ -39,7 +39,7 @@ from sim_to_real.tasks.pick_pen import mdp as task_mdp  # noqa: E402
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import PEN_CUP_CENTER_XY  # noqa: E402
 from sim_to_real.utils.constant import PEN_NAMES  # noqa: E402
 
-_DESK_TOP_Z = 0.92
+_DESK_TOP_Z = 0.76
 _REQUIRED_TERMS = {
     "reach_pen",
     "grasp_pen",

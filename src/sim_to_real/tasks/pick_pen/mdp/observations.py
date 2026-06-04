@@ -26,7 +26,7 @@ from isaaclab.sensors import FrameTransformer
 
 
 PEN_CUP_DEFAULT_CENTER_XY: tuple[float, float] = (2.2, -0.17)
-DESK_TOP_Z: float = 0.92
+DESK_TOP_Z: float = 0.76
 
 
 def pen_grasped(

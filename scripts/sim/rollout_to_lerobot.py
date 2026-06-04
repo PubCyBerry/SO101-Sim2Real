@@ -1,12 +1,12 @@
 """TC.1 RSL-RL expert rollout -> LeRobot v3 dataset recorder.
 
-This script records successful SimToReal-SO101-PickPen-v0 episodes only.
-It writes the same North Star data contract as datasets/pick_pen:
+This script records successful SimToReal-SO101 PickCube/PickPen episodes only.
+It writes the LeRobot v3 data contract used by the real SO-101 datasets:
 6-dim joint action/state, 30 FPS timestamps, and three h264 camera videos.
 
 Example:
     uv run --group isaac --locked python scripts/sim/rollout_to_lerobot.py \
-        --checkpoint /DISK1/so101-sim2real/outputs/tb3_curr12_no_place_offset_radius1_1024_20260604_0430/model_70.pt \
+        --checkpoint /DISK1/so101-sim2real/outputs/pick_cube_rl/model_200.pt \
         --output_dir /DISK1/so101-sim2real/outputs/tc1_rollout_10ep \
         --episodes 10 --overwrite
 """
@@ -32,7 +32,8 @@ from isaaclab.app import AppLauncher
 
 
 TASK_ID = "TC.1"
-TASK_NAME = "pick up the pen and place it in the holder"
+PEN_TASK_NAME = "pick up the pen and place it in the holder"
+CUBE_TASK_NAME = "pick up the cube and place it in the bowl"
 FPS = 30
 IMAGE_HEIGHT = 480
 IMAGE_WIDTH = 640
@@ -51,20 +52,16 @@ JOINT_FEATURE_NAMES = [
     "wrist_roll.pos",
     "gripper.pos",
 ]
-DEFAULT_CHECKPOINT = (
-    "/DISK1/so101-sim2real/outputs/"
-    "tb3_curr12_no_place_offset_radius1_1024_20260604_0430/model_70.pt"
-)
 GRIPPER_LEROBOT_SCALE = 31.75
 
 
 parser = argparse.ArgumentParser(description="TC.1 rollout-to-LeRobot-v3 recorder")
-parser.add_argument("--task", default="SimToReal-SO101-PickPen-v0")
-parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="RSL-RL OnPolicyRunner checkpoint")
+parser.add_argument("--task", default="SimToReal-SO101-PickCube-v0")
+parser.add_argument("--checkpoint", required=True, help="RSL-RL OnPolicyRunner checkpoint")
 parser.add_argument("--output_dir", required=True, help="LeRobot dataset output directory")
 parser.add_argument("--episodes", type=int, default=10, help="Number of successful episodes to keep")
 parser.add_argument("--max_attempts", type=int, default=None, help="Stop after this many attempted episodes")
-parser.add_argument("--max_episode_steps", type=int, default=450)
+parser.add_argument("--max_episode_steps", type=int, default=900)
 parser.add_argument("--num_envs", type=int, default=1, help="TC.1 recorder currently supports only 1 env")
 parser.add_argument("--rl_device", default=None, help="RL device; defaults to --device")
 parser.add_argument("--seed", type=int, default=0)
@@ -72,22 +69,22 @@ parser.add_argument("--obs_group", default="rl_policy")
 parser.add_argument("--critic_obs_group", default=None)
 parser.add_argument("--clip_actions", type=float, default=1.0)
 parser.add_argument("--init_noise_std", type=float, default=0.2)
+parser.add_argument("--num_learning_epochs", type=int, default=20)
+parser.add_argument("--num_mini_batches", type=int, default=4)
 parser.add_argument("--overwrite", action="store_true", help="Replace output_dir if it already exists")
 parser.add_argument("--no_videos", action="store_true", help="Skip mp4 writing, but keep video metadata contract")
 parser.add_argument("--deterministic", action="store_true", help="Use deterministic act_inference instead of stochastic act")
 parser.add_argument("--warmup_steps", type=int, default=5, help="Camera/render warm-up steps before recording")
 
-# Curriculum defaults match the TB.3/TB.4 validated stochastic expert gate.
-parser.add_argument("--active_pens", type=int, default=1, choices=[1, 2, 3, 4])
-parser.add_argument("--pen_radius_scale", type=float, default=1.0)
-parser.add_argument("--cup_angle_scale", type=float, default=1.0)
-parser.add_argument("--cup_radius_scale", type=float, default=1.0)
-parser.add_argument("--grasp_assist_distance", type=float, default=0.12)
-parser.add_argument("--grasp_assist_offset_x", type=float, default=0.03)
-parser.add_argument("--grasp_assist_offset_y", type=float, default=0.10)
-parser.add_argument("--grasp_assist_offset_z", type=float, default=-0.05)
-parser.add_argument("--place_assist_distance", type=float, default=0.0)
-parser.add_argument("--disable_grasp_assist", action="store_true")
+# Curriculum defaults.
+parser.add_argument("--active_objects", "--active_pens", dest="active_objects",
+                    type=int, default=4, choices=[1, 2, 3, 4])
+parser.add_argument("--object_radius_scale", "--pen_radius_scale", dest="object_radius_scale",
+                    type=float, default=1.0)
+parser.add_argument("--container_angle_scale", "--cup_angle_scale", dest="container_angle_scale",
+                    type=float, default=1.0)
+parser.add_argument("--container_radius_scale", "--cup_radius_scale", dest="container_radius_scale",
+                    type=float, default=1.0)
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -107,15 +104,19 @@ import torch  # noqa: E402
 if not args.no_videos:
     import imageio.v2 as imageio  # noqa: E402
 
-import sim_to_real  # noqa: E402  # registers SimToReal-SO101-PickPen-v0
+import sim_to_real  # noqa: E402  # registers SimToReal-SO101-PickCube/PickPen-v0
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
+from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
+    add_pick_cube_cameras,
+    apply_curriculum as apply_cube_curriculum,
+)
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (  # noqa: E402
     add_pick_pen_cameras,
-    apply_curriculum,
+    apply_curriculum as apply_pen_curriculum,
 )
 
 
@@ -215,8 +216,8 @@ def _build_train_cfg(cli_args: argparse.Namespace) -> dict[str, Any]:
         },
         "algorithm": {
             "class_name": "PPO",
-            "num_learning_epochs": 2,
-            "num_mini_batches": 1,
+            "num_learning_epochs": cli_args.num_learning_epochs,
+            "num_mini_batches": cli_args.num_mini_batches,
             "learning_rate": 3e-4,
             "schedule": "fixed",
             "gamma": 0.99,
@@ -229,6 +230,38 @@ def _build_train_cfg(cli_args: argparse.Namespace) -> dict[str, Any]:
             "clip_param": 0.2,
         },
     }
+
+
+def _task_name(task: str) -> str:
+    return CUBE_TASK_NAME if "PickCube" in task else PEN_TASK_NAME
+
+
+def _apply_task_curriculum(env_cfg, cli_args: argparse.Namespace) -> None:
+    """task 이름에 맞는 curriculum을 적용한다."""
+
+    params = {
+        "active_objects": cli_args.active_objects,
+        "object_radius_scale": cli_args.object_radius_scale,
+        "container_angle_scale": cli_args.container_angle_scale,
+        "container_radius_scale": cli_args.container_radius_scale,
+    }
+    if cli_args.task and "PickCube" in cli_args.task:
+        apply_cube_curriculum(env_cfg, **params)
+    else:
+        apply_pen_curriculum(
+            env_cfg,
+            active_pens=params["active_objects"],
+            pen_radius_scale=params["object_radius_scale"],
+            cup_angle_scale=params["container_angle_scale"],
+            cup_radius_scale=params["container_radius_scale"],
+        )
+
+
+def _add_task_cameras(env_cfg, task: str) -> None:
+    if "PickCube" in task:
+        add_pick_cube_cameras(env_cfg.scene)
+    else:
+        add_pick_pen_cameras(env_cfg.scene)
 
 
 def _prepare_output_dir(path: Path, overwrite: bool) -> None:
@@ -345,8 +378,8 @@ def _write_data_parquet(root: Path, rows: list[dict[str, Any]]) -> None:
     pq.write_table(table, root / "data" / "chunk-000" / "file-000.parquet")
 
 
-def _write_tasks(root: Path) -> None:
-    table = pa.table({"task_index": [0], "__index_level_0__": [TASK_NAME]})
+def _write_tasks(root: Path, task_name: str) -> None:
+    table = pa.table({"task_index": [0], "__index_level_0__": [task_name]})
     pq.write_table(table, root / "meta" / "tasks.parquet")
 
 
@@ -453,6 +486,7 @@ def _reset_wrapper_env(env) -> Any:
 def _append_success_episode(
     episode: EpisodeRecord,
     episode_index: int,
+    task_name: str,
     rows: list[dict[str, Any]],
     episodes_meta: list[dict[str, Any]],
     writers: dict[str, Any],
@@ -477,7 +511,7 @@ def _append_success_episode(
     video_to = (start_index + length) / FPS
     meta: dict[str, Any] = {
         "episode_index": episode_index,
-        "tasks": [TASK_NAME],
+        "tasks": [task_name],
         "length": length,
         "dataset_from_index": start_index,
         "dataset_to_index": start_index + length,
@@ -514,26 +548,15 @@ def main() -> None:
 
         device: str = args.device
         rl_device: str = args.rl_device if args.rl_device is not None else device
+        task_name = _task_name(args.task)
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         if hasattr(env_cfg, "seed"):
             env_cfg.seed = args.seed
-        apply_curriculum(
-            env_cfg,
-            active_pens=args.active_pens,
-            pen_radius_scale=args.pen_radius_scale,
-            cup_angle_scale=args.cup_angle_scale,
-            cup_radius_scale=args.cup_radius_scale,
-            grasp_assist=not args.disable_grasp_assist,
-            grasp_assist_distance=args.grasp_assist_distance,
-            grasp_assist_offset_x=args.grasp_assist_offset_x,
-            grasp_assist_offset_y=args.grasp_assist_offset_y,
-            grasp_assist_offset_z=args.grasp_assist_offset_z,
-            place_assist_distance=args.place_assist_distance,
-        )
+        _apply_task_curriculum(env_cfg, args)
         policy_dt = env_cfg.sim.dt * env_cfg.decimation
         env_cfg.episode_length_s = args.max_episode_steps * policy_dt
         if not args.no_videos:
-            add_pick_pen_cameras(env_cfg.scene)
+            _add_task_cameras(env_cfg, args.task)
 
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=args.clip_actions)
@@ -590,6 +613,7 @@ def main() -> None:
                     _append_success_episode(
                         current,
                         successes,
+                        task_name,
                         rows,
                         episodes_meta,
                         writers,
@@ -622,7 +646,7 @@ def main() -> None:
         _close_video_writers(writers)
         writers = {}
         _write_data_parquet(root, rows)
-        _write_tasks(root)
+        _write_tasks(root, task_name)
         _write_episodes(root, episodes_meta)
         _write_info(root, total_episodes=successes, total_frames=len(rows))
         _write_stats(root, rows, image_stats)
@@ -641,16 +665,10 @@ def main() -> None:
             "videos": not args.no_videos,
             "stochastic": not args.deterministic,
             "curriculum": {
-                "active_pens": args.active_pens,
-                "pen_radius_scale": args.pen_radius_scale,
-                "cup_angle_scale": args.cup_angle_scale,
-                "cup_radius_scale": args.cup_radius_scale,
-                "grasp_assist": not args.disable_grasp_assist,
-                "grasp_assist_distance": args.grasp_assist_distance,
-                "grasp_assist_offset_x": args.grasp_assist_offset_x,
-                "grasp_assist_offset_y": args.grasp_assist_offset_y,
-                "grasp_assist_offset_z": args.grasp_assist_offset_z,
-                "place_assist_distance": args.place_assist_distance,
+                "active_objects": args.active_objects,
+                "object_radius_scale": args.object_radius_scale,
+                "container_angle_scale": args.container_angle_scale,
+                "container_radius_scale": args.container_radius_scale,
             },
         }
         print(json.dumps(result), flush=True)

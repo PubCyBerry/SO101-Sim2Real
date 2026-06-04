@@ -14,7 +14,7 @@ from isaaclab.managers import SceneEntityCfg
 from sim_to_real.utils.constant import PEN_NAMES
 
 # world frame 책상 상판 z — PickPenSceneCfg 와 동기화 유지
-_DESK_TOP_Z: float = 0.92
+_DESK_TOP_Z: float = 0.76
 
 
 # ---------------------------------------------------------------------------

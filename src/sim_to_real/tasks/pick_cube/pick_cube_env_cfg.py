@@ -65,7 +65,7 @@ _BOWL_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
 #   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
-#   · 포즈/FOV 는 실제 데이터셋 프레임 또는 pen_desk 기준으로 시작점 설정.
+#   · 포즈/FOV 는 cube_task GUI 튜너와 실제 데이터셋 프레임 기준으로 보정.
 #   · top 은 world frame 절대 좌표, front/wrist 는 각각 shoulder/gripper 링크
 #     자식 prim 의 local offset. num_envs=1 smoke 기준.
 # ---------------------------------------------------------------------------
@@ -120,8 +120,10 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
             usd_path=ROBOT_USD_PATH,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 fix_root_link=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
+                # leisaac SO101_FOLLOWER_CFG 검증값(enabled_self_collisions + solver 4/4).
+                enabled_self_collisions=True,
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=4,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -130,24 +132,28 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
             joint_pos={j: 0.0 for j in SO101_JOINT_ORDER},
         ),
         actuators={
-            # Feetech STS3215 근사: 7.4V~12V variants 기준 약 1.4~2.9 Nm.
-            # 시뮬 hold 안정성을 위해 3.0 Nm 상한, 속도 한계 5.5 rad/s.
+            # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
+            # assets/robots/lerobot.py). Feetech STS3215 를 낮은 stiffness(soft PD)
+            # + 높은 effort 상한으로 모델링한다. 그리퍼가 큐브에 막혀도 클램프
+            # 토크가 최대 10 Nm 까지 올라가 grasp 가 유지된다(이전 1.5 Nm 상한은
+            # stiffness 300 에서 ~0.3° 만에 포화돼 들어올릴 때 미끄러짐).
             "arm_joints": ImplicitActuatorCfg(
                 joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex",
                                   "wrist_flex", "wrist_roll"],
-                effort_limit_sim=3.0,
-                velocity_limit_sim=5.5,
-                stiffness=400.0,
-                damping=80.0,
+                effort_limit_sim=10.0,
+                velocity_limit_sim=10.0,
+                stiffness=17.8,
+                damping=0.6,
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["gripper"],
-                effort_limit_sim=1.5,
-                velocity_limit_sim=6.0,
-                stiffness=300.0,
-                damping=60.0,
+                effort_limit_sim=10.0,
+                velocity_limit_sim=10.0,
+                stiffness=17.8,
+                damping=0.6,
             ),
         },
+        soft_joint_pos_limit_factor=1.0,
     )
 
     # Rigid objects inside the scene USD (spawn=None → wrap existing prims)
@@ -641,3 +647,78 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         # 2048+ env PPO에서 aggregate pair가 18k를 넘는다. 64k로 여유 확보.
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
+
+
+# ---------------------------------------------------------------------------
+# 커리큘럼 적용 헬퍼 — gym.make() 이전에 env_cfg 에 in-place 적용
+# ---------------------------------------------------------------------------
+
+_CUBE_REWARD_TERMS = (
+    "reach_cube",
+    "grasp_cube",
+    "carry_cube",
+    "lift_cube",
+    "transport_cube",
+    "place_height_cube",
+    "insert_cube",
+    "release_cube",
+    "task_success",
+)
+_BOWL_RADIUS_REWARD_TERMS = (
+    "reach_cube",
+    "grasp_cube",
+    "carry_cube",
+    "place_height_cube",
+    "insert_cube",
+    "release_cube",
+    "task_success",
+)
+
+
+def apply_curriculum(
+    env_cfg: PickCubeEnvCfg,
+    *,
+    active_objects: int = 4,
+    object_radius_scale: float = 1.0,
+    container_angle_scale: float = 1.0,
+    container_radius_scale: float = 1.0,
+) -> None:
+    """PickCube curriculum을 env_cfg에 in-place 적용.
+
+    활성 큐브 수, reset 랜덤화 범위, bowl 성공 반경만 조정한다.
+    """
+
+    active_objects = max(1, min(4, active_objects))
+    active_names = CUBE_NAMES[:active_objects]
+    active_cfgs = [SceneEntityCfg(n) for n in active_names]
+    bowl_radius = BOWL_SUCCESS_RADIUS * max(0.1, container_radius_scale)
+
+    for term_name in _CUBE_REWARD_TERMS:
+        term = getattr(env_cfg.rewards, term_name, None)
+        if term is not None:
+            term.params["pen_cfgs"] = active_cfgs
+    for term_name in _BOWL_RADIUS_REWARD_TERMS:
+        term = getattr(env_cfg.rewards, term_name, None)
+        if term is not None:
+            term.params["cup_radius"] = bowl_radius
+
+    env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
+    env_cfg.terminations.success.params["radius"] = bowl_radius
+
+    for cube_name in CUBE_NAMES:
+        term = getattr(env_cfg.events, "randomize_" + cube_name.lower(), None)
+        if term is not None and object_radius_scale != 1.0:
+            p = term.params
+            p["x_radius"] = p["x_radius"] * object_radius_scale
+            p["y_radius"] = p["y_radius"] * object_radius_scale
+
+    bowl_term = getattr(env_cfg.events, "randomize_bowl", None)
+    if bowl_term is not None and container_angle_scale != 1.0:
+        lo, hi = bowl_term.params["angle_range_deg"]
+        bowl_term.params["angle_range_deg"] = (lo * container_angle_scale, hi * container_angle_scale)
+
+    for cube_name in CUBE_NAMES:
+        obs_name = "place_" + cube_name.lower()
+        term = getattr(env_cfg.observations.subtask_terms, obs_name, None)
+        if term is not None:
+            term.params["radius"] = bowl_radius

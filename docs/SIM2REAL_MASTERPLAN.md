@@ -41,7 +41,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 
 ## 1. 불변 계약 (Invariant / North Star — 매 사이클·매 compaction 후 재확인)
 
-시뮬에서 만드는 **모든 롤아웃 데이터·정책 I/O**는 현재 데이터셋(`datasets/pick_pen/meta/info.json`, `meta/tasks.parquet`, `data/**/file-*.parquet` 으로 확인)과 **정확히 동일**해야 한다. 한 글자라도 어긋나면 GR00T fine-tune/배포에서 깨진다.
+시뮬에서 만드는 **모든 롤아웃 데이터·정책 I/O**는 현재 실기기 데이터셋 스키마(`datasets/pick_pen/meta/info.json`, `meta/tasks.parquet`, `data/**/file-*.parquet` 으로 확인)와 **정확히 동일**해야 한다. PickCube 전환 후에도 action/state/camera feature 계약은 그대로 유지하고, task 문자열만 cube task로 바꾼다. 한 글자라도 어긋나면 GR00T fine-tune/배포에서 깨진다.
 
 | 필드 | 고정값 |
 |---|---|
@@ -49,7 +49,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | robot_type | `so_follower` |
 | action / observation.state | 각 **6-dim joint position** (순서: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) |
 | 카메라 | `observation.images.{top, wrist, front}` · 480×640×3 · h264 · **fps 30** |
-| task 문자열 | `"pick up the pen and place it in the holder"` |
+| task 문자열 | `"pick up the cube and place it in the bowl"` |
 
 이 계약을 **기계가 강제**하도록 `scripts/validate_lerobot_schema.py`(§7)를 가장 먼저 만든다. 모든 데이터 생성 단계는 이 validator를 통과해야 done 처리된다.
 

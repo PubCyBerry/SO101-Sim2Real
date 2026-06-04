@@ -1,21 +1,21 @@
-"""TB.2/TB.3 PPO 학습 스크립트 — SimToReal-SO101-PickPen-v0.
+"""TB.2/TB.3 PPO 학습 스크립트 — SO-101 PickCube/PickPen.
 
 사용법:
-    # TB.3 상태 기반 (기본값 — rl_policy 그룹 사용)
+    # PickCube 상태 기반 (기본값 — rl_policy 그룹 사용)
     uv run python scripts/reinforcement_learning/train.py \
-        --task SimToReal-SO101-PickPen-v0 \
-        --num_envs 64 --device cuda:0 --max_iterations 100
+        --task SimToReal-SO101-PickCube-v0 \
+        --num_envs 64 --device cuda:0 --max_iterations 200
 
     # North Star 6-dim 정책만 사용
     uv run python scripts/reinforcement_learning/train.py \
-        --task SimToReal-SO101-PickPen-v0 --obs_group policy \
-        --num_envs 64 --device cuda:0 --max_iterations 100
+        --task SimToReal-SO101-PickCube-v0 --obs_group policy \
+        --num_envs 64 --device cuda:0 --max_iterations 200
 
     # 비대칭 AC: actor=rl_policy, critic=rl_policy
     uv run python scripts/reinforcement_learning/train.py \
-        --task SimToReal-SO101-PickPen-v0 \
+        --task SimToReal-SO101-PickCube-v0 \
         --obs_group rl_policy --critic_obs_group rl_policy \
-        --num_envs 64 --device cuda:0 --max_iterations 100
+        --num_envs 64 --device cuda:0 --max_iterations 200
 """
 
 import multiprocessing
@@ -35,14 +35,18 @@ from datetime import datetime
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="TB.2 PPO training")
-parser.add_argument("--task", default="SimToReal-SO101-PickPen-v0")
+parser.add_argument("--task", default="SimToReal-SO101-PickCube-v0")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--rl_device", default=None, help="RL 연산 디바이스 (기본값: --device와 동일)")
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--max_iterations", type=int, default=100)
+parser.add_argument("--max_iterations", type=int, default=200)
 parser.add_argument("--num_steps_per_env", type=int, default=24)
+parser.add_argument("--num_learning_epochs", type=int, default=20,
+                    help="PPO update당 learning epoch 수. contact-rich grasp 학습을 위해 기본 20.")
+parser.add_argument("--num_mini_batches", type=int, default=4,
+                    help="PPO minibatch 수")
 parser.add_argument("--save_interval", type=int, default=50)
-parser.add_argument("--experiment_name", default="so101_pick_pen_ppo")
+parser.add_argument("--experiment_name", default="so101_pick_cube_ppo")
 parser.add_argument("--run_name", default="")
 parser.add_argument("--log_root_path", default="outputs/rl/rsl_rl")
 parser.add_argument("--checkpoint_dir", default=None, help="체크포인트 저장 경로 (스모크 테스트용)")
@@ -58,14 +62,18 @@ parser.add_argument(
     help="critic 에 사용할 obs 그룹 이름 (기본값: --obs_group 과 동일)",
 )
 # 커리큘럼 파라미터 — gym.make() 이전에 env_cfg 에 적용
-parser.add_argument("--active_pens", type=int, default=4, choices=[1, 2, 3, 4],
-                    help="학습에 사용할 펜 수 (1~4, 기본값: 4)")
-parser.add_argument("--pen_radius_scale", type=float, default=1.0,
-                    help="펜 랜덤화 ellipse 반경 배율 (기본값: 1.0)")
-parser.add_argument("--cup_angle_scale", type=float, default=1.0,
-                    help="컵 랜덤화 각도 범위 배율 (기본값: 1.0)")
-parser.add_argument("--cup_radius_scale", type=float, default=1.0,
-                    help="컵 안 판정 반경 배율 (기본값: 1.0 = 0.05m)")
+parser.add_argument("--active_objects", "--active_pens", dest="active_objects",
+                    type=int, default=4, choices=[1, 2, 3, 4],
+                    help="학습에 사용할 대상 수 (1~4, 기본값: 4). --active_pens는 호환 alias.")
+parser.add_argument("--object_radius_scale", "--pen_radius_scale", dest="object_radius_scale",
+                    type=float, default=1.0,
+                    help="대상 reset ellipse 반경 배율. --pen_radius_scale은 호환 alias.")
+parser.add_argument("--container_angle_scale", "--cup_angle_scale", dest="container_angle_scale",
+                    type=float, default=1.0,
+                    help="그릇/컵 reset 각도 범위 배율. --cup_angle_scale은 호환 alias.")
+parser.add_argument("--container_radius_scale", "--cup_radius_scale", dest="container_radius_scale",
+                    type=float, default=1.0,
+                    help="그릇/컵 안 판정 반경 배율. --cup_radius_scale은 호환 alias.")
 parser.add_argument("--episode_length_s", type=float, default=None,
                     help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
 parser.add_argument("--resume_checkpoint", default=None,
@@ -76,18 +84,6 @@ parser.add_argument("--entropy_coef", type=float, default=0.005,
                     help="PPO entropy coefficient")
 parser.add_argument("--learning_rate", type=float, default=3e-4,
                     help="PPO learning rate")
-parser.add_argument("--grasp_assist", action="store_true",
-                    help="닫힌 그리퍼 근처 펜을 따라오게 하는 TB.3 학습 보조 event 활성화")
-parser.add_argument("--grasp_assist_distance", type=float, default=0.075,
-                    help="grasp assist attach 거리(m)")
-parser.add_argument("--grasp_assist_offset_x", type=float, default=0.0,
-                    help="gripper body 기준 pen world-frame x offset(m)")
-parser.add_argument("--grasp_assist_offset_y", type=float, default=0.0,
-                    help="gripper body 기준 pen world-frame y offset(m)")
-parser.add_argument("--grasp_assist_offset_z", type=float, default=0.0,
-                    help="gripper body 기준 pen world-frame z offset(m)")
-parser.add_argument("--place_assist_distance", type=float, default=0.0,
-                    help="컵 근방 도달 시 펜을 컵 중심으로 스냅하는 거리(m). 0이면 비활성")
 # --device / --headless 는 AppLauncher 가 등록
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -103,13 +99,14 @@ import glob  # noqa: E402
 import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
 
-import sim_to_real  # noqa: E402  # SimToReal-SO101-PickPen-v0 등록
+import sim_to_real  # noqa: E402  # SimToReal-SO101-PickCube/PickPen-v0 등록
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
-from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum  # noqa: E402
+from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import apply_curriculum as apply_cube_curriculum  # noqa: E402
+from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum as apply_pen_curriculum  # noqa: E402
 
 
 TASK_ID = "TB.3"
@@ -152,8 +149,8 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         },
         "algorithm": {
             "class_name": "PPO",
-            "num_learning_epochs": 2,
-            "num_mini_batches": 1,
+            "num_learning_epochs": args.num_learning_epochs,
+            "num_mini_batches": args.num_mini_batches,
             "learning_rate": args.learning_rate,
             "schedule": "fixed",
             "gamma": 0.99,
@@ -166,6 +163,27 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
             "clip_param": 0.2,
         },
     }
+
+
+def _apply_task_curriculum(env_cfg, args: argparse.Namespace) -> None:
+    """task 이름에 맞는 curriculum을 적용한다."""
+
+    params = {
+        "active_objects": args.active_objects,
+        "object_radius_scale": args.object_radius_scale,
+        "container_angle_scale": args.container_angle_scale,
+        "container_radius_scale": args.container_radius_scale,
+    }
+    if args.task and "PickCube" in args.task:
+        apply_cube_curriculum(env_cfg, **params)
+    else:
+        apply_pen_curriculum(
+            env_cfg,
+            active_pens=params["active_objects"],
+            pen_radius_scale=params["object_radius_scale"],
+            cup_angle_scale=params["container_angle_scale"],
+            cup_radius_scale=params["container_radius_scale"],
+        )
 
 
 def _resolve_log_dir(args: argparse.Namespace) -> str:
@@ -192,20 +210,8 @@ def main() -> None:
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         if hasattr(env_cfg, "seed"):
             env_cfg.seed = args.seed
-        # 커리큘럼 파라미터 적용 (기본값은 기존 동작 그대로)
-        apply_curriculum(
-            env_cfg,
-            active_pens=args.active_pens,
-            pen_radius_scale=args.pen_radius_scale,
-            cup_angle_scale=args.cup_angle_scale,
-            cup_radius_scale=args.cup_radius_scale,
-            grasp_assist=args.grasp_assist,
-            grasp_assist_distance=args.grasp_assist_distance,
-            grasp_assist_offset_x=args.grasp_assist_offset_x,
-            grasp_assist_offset_y=args.grasp_assist_offset_y,
-            grasp_assist_offset_z=args.grasp_assist_offset_z,
-            place_assist_distance=args.place_assist_distance,
-        )
+        # 커리큘럼 파라미터 적용
+        _apply_task_curriculum(env_cfg, args)
         if args.episode_length_s is not None:
             env_cfg.episode_length_s = args.episode_length_s
         env = gym.make(args.task, cfg=env_cfg)
@@ -264,26 +270,22 @@ def main() -> None:
                 "num_envs": args.num_envs,
                 "num_steps_per_env": args.num_steps_per_env,
                 "max_iterations": args.max_iterations,
+                "num_learning_epochs": args.num_learning_epochs,
+                "num_mini_batches": args.num_mini_batches,
                 "total_steps": total_steps,
                 "log_dir": log_dir,
                 "checkpoints": [os.path.basename(c) for c in checkpoints],
                 "latest_checkpoint": checkpoints[-1],
                 "curriculum": {
-                    "active_pens": args.active_pens,
-                    "pen_radius_scale": args.pen_radius_scale,
-                    "cup_angle_scale": args.cup_angle_scale,
-                    "cup_radius_scale": args.cup_radius_scale,
+                    "active_objects": args.active_objects,
+                    "object_radius_scale": args.object_radius_scale,
+                    "container_angle_scale": args.container_angle_scale,
+                    "container_radius_scale": args.container_radius_scale,
                     "episode_length_s": args.episode_length_s,
                     "resume_checkpoint": args.resume_checkpoint,
                     "init_noise_std": args.init_noise_std,
                     "entropy_coef": args.entropy_coef,
                     "learning_rate": args.learning_rate,
-                    "grasp_assist": args.grasp_assist,
-                    "grasp_assist_distance": args.grasp_assist_distance,
-                    "grasp_assist_offset_x": args.grasp_assist_offset_x,
-                    "grasp_assist_offset_y": args.grasp_assist_offset_y,
-                    "grasp_assist_offset_z": args.grasp_assist_offset_z,
-                    "place_assist_distance": args.place_assist_distance,
                 },
             }),
             flush=True,

@@ -66,7 +66,7 @@ from leisaac.utils.env_utils import (
     get_task_type,
 )
 
-import leisaac  # noqa: F401
+import sim_to_real # noqa: F401
 
 
 class RateLimiter:

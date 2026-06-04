@@ -12,7 +12,7 @@ from isaaclab.managers import SceneEntityCfg
 
 # Threshold for "at rest pose": all joints within ±15° of zero
 _REST_THRESHOLD_RAD: float = 15.0 * math.pi / 180.0
-_DESK_TOP_Z: float = 0.92
+_DESK_TOP_Z: float = 0.76
 
 
 def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:

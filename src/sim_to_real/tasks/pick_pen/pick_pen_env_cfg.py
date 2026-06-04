@@ -46,13 +46,13 @@ SO101_JOINT_ORDER: list[str] = [
 
 # Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
 #
-# z 정합: 책상 상판(DeskTop) 윗면은 world z=0.92 (SCENE_OFFSET.z 0.92 + center
+# z 정합: 책상 상판(DeskTop) 윗면은 world z=0.76 (SCENE_OFFSET.z 0.76 + center
 # -0.02 + half-thickness 0.02). 그러나 so101_follower.usd 의 articulation root
 # 원점(z=0)은 베이스 바닥이 아니다 — 베이스 최하단 지오메트리가 local z=+0.0301
-# 에 있다(USD bbox 측정). 따라서 원점을 0.92 에 두면 팔 전체가 ~3 cm 떠버린다
+# 에 있다(USD bbox 측정). 따라서 원점을 0.76 에 두면 팔 전체가 ~3 cm 떠버린다
 # (사용자가 보고한 "로봇이 책상 위에 떠 있는" 현상). 베이스 판이 상판에 닿도록
-# 원점을 내린다:  robot_z = desk_top(0.92) - base_min_z(0.0301) ≈ 0.889.
-_ROBOT_POS = (2.2, -0.61, 0.889)
+# 원점을 내린다:  robot_z = desk_top(0.76) - base_min_z(0.0301) ≈ 0.7299.
+_ROBOT_POS = (2.2, -0.61, 0.7299)
 # Identity rotation; articulation USD already faces the desk objects.
 _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
@@ -149,12 +149,12 @@ def _look_at_quat_world(
 
 
 _PEN_INIT_STATES = {
-    "PenWhite": ((2.05, -0.35, 0.9347), _yaw_quat(25.0)),
-    "PenGray": ((2.35, -0.35, 0.9347), _yaw_quat(-30.0)),
-    "PenBlack": ((2.25, -0.31, 0.9347), _yaw_quat(60.0)),
-    "PenBlue": ((2.15, -0.31, 0.9347), _yaw_quat(-10.0)),
+    "PenWhite": ((2.05, -0.35, 0.7747), _yaw_quat(25.0)),
+    "PenGray": ((2.35, -0.35, 0.7747), _yaw_quat(-30.0)),
+    "PenBlack": ((2.25, -0.31, 0.7747), _yaw_quat(60.0)),
+    "PenBlue": ((2.15, -0.31, 0.7747), _yaw_quat(-10.0)),
 }
-_PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.926), _yaw_quat(0.0))
+_PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
@@ -164,31 +164,29 @@ _PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.926), _yaw_quat(0.0))
 #     특히 top 카메라는 사무실 사진보다 더 높게 물리 조정되었으므로 사진 포즈가
 #     아니라 top 비디오 구도(로봇 베이스가 프레임 하단, 매트/컵이 위로 넓게)에
 #     맞춘다.
-#   · world frame 절대 좌표(convention="world", forward +X / up +Z). num_envs=1
-#     smoke 기준. 멀티-env(TC.2)에서는 env-relative 좌표로 전환 필요.
+#   · top 은 world frame 절대 좌표, front/wrist 는 각각 shoulder/gripper 링크
+#     자식 prim 의 local offset. num_envs=1 smoke 기준.
 # ---------------------------------------------------------------------------
 
 # top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique. 로봇 베이스가 하단,
 # 펜/컵/매트가 위로 펼쳐진다. 사무실 사진보다 높게 올린 실제 top 비디오에 맞춤.
-_TOP_CAMERA_POS = (2.2, -1.12, 1.88)
-_TOP_CAMERA_TARGET = (2.14, -0.15, 0.92)
+_TOP_CAMERA_POS = (2.2, -1.12, 1.72)
+_TOP_CAMERA_TARGET = (2.14, -0.15, 0.76)
 _TOP_CAMERA_FOCAL = 16.0
 
-# front: 로봇 전면(+y 를 바라봄)에 근접 장착. 베이스 바로 앞, 책상에서 ~8 cm
-# 높이의 낮은 시점에서 작업 영역을 가로질러 본다. 펜이 전경, 컵이 중앙 —
-# observation.images.front 와 정합. (기존 (1.46,0.16,0.99) 는 컵 너머 측면에서
-# 거꾸로 보던 분리형 카메라라 잘못됨 → 로봇 전면 장착으로 교정.)
-_FRONT_CAMERA_POS = (2.48, -0.56, 0.965)
-_FRONT_CAMERA_TARGET = (2.16, -0.03, 0.955)
+# front: shoulder_pan 전면부에 붙은 카메라. shoulder 링크의 자식 prim 이라
+# shoulder_pan 이 좌우 회전하면 함께 회전한다. 아래 local transform 은 기존 잘못된
+# world-fixed front 카메라의 초기 구도를 shoulder frame 으로 역산한 1차값이다.
+_FRONT_CAM_LOCAL_POS = (-0.0269, -0.3008, 0.0198)
+_FRONT_CAM_LOCAL_ROT = (-0.0078, 0.2683, 0.9633, 0.0022)
 _FRONT_CAMERA_FOCAL = 14.0
 
-# wrist: gripper 링크에 강결합되어 팔을 따라 움직인다. gripper 접근축(jaw/그립
-# 지점 방향)을 따라 매트를 근접·광각으로 내려본다 — observation.images.wrist.
-# gripper-local 축은 rest 자세에서 world 로 localX->+Z, localY->+X, localZ->+Y.
-# gripper->jaw(접근/손가락 축) 방향을 gripper-local 좌표로 표현:
-_WRIST_CAM_LOCAL_POS = (-0.040, 0.030, -0.120)
-# gripper parent 회전을 역산해, rest 자세에서 camera world pos≈(2.149,-0.213,1.116)
-# 기준 mat/cup 방향 world target≈(2.10,-0.13,0.93)을 바라보도록 한 local rot.
+# wrist: gripper 위/옆에 강결합된 카메라. 사용자가 표시한 실제 장착 위치처럼
+# gripper 하단보다 위쪽에 두고, gripper 움직임을 그대로 따라간다.
+# gripper-local 축은 rest 자세에서 대략 localX->+Z, localY->-X, localZ->-Y.
+_WRIST_CAM_LOCAL_POS = (0.035, 0.035, -0.075)
+# gripper parent 회전을 역산해, rest 자세에서 camera world pos≈(2.149,-0.213,0.956)
+# 기준 mat/cup 방향 world target≈(2.10,-0.13,0.77)을 바라보도록 한 local rot.
 _WRIST_CAM_LOCAL_ROT = (0.2280, 0.0630, 0.9365, 0.2588)
 _WRIST_CAMERA_FOCAL = 10.0
 
@@ -222,8 +220,10 @@ class PickPenSceneCfg(InteractiveSceneCfg):
             usd_path=ROBOT_USD_PATH,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 fix_root_link=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
+                # leisaac SO101_FOLLOWER_CFG 검증값(enabled_self_collisions + solver 4/4).
+                enabled_self_collisions=True,
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=4,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -232,24 +232,28 @@ class PickPenSceneCfg(InteractiveSceneCfg):
             joint_pos={j: 0.0 for j in SO101_JOINT_ORDER},
         ),
         actuators={
-            # Feetech STS3215 근사: 7.4V~12V variants 기준 약 1.4~2.9 Nm.
-            # 시뮬 hold 안정성을 위해 3.0 Nm 상한, 속도 한계 5.5 rad/s.
+            # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
+            # assets/robots/lerobot.py). Feetech STS3215 를 낮은 stiffness(soft PD)
+            # + 높은 effort 상한으로 모델링한다. 그리퍼가 큐브/펜에 막혀도 클램프
+            # 토크가 최대 10 Nm 까지 올라가 grasp 가 유지된다(이전 1.5 Nm 상한은
+            # stiffness 300 에서 ~0.3° 만에 포화돼 들어올릴 때 미끄러짐).
             "arm_joints": ImplicitActuatorCfg(
                 joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex",
                                   "wrist_flex", "wrist_roll"],
-                effort_limit_sim=3.0,
-                velocity_limit_sim=5.5,
-                stiffness=400.0,
-                damping=80.0,
+                effort_limit_sim=10.0,
+                velocity_limit_sim=10.0,
+                stiffness=17.8,
+                damping=0.6,
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["gripper"],
-                effort_limit_sim=1.5,
-                velocity_limit_sim=6.0,
-                stiffness=300.0,
-                damping=60.0,
+                effort_limit_sim=10.0,
+                velocity_limit_sim=10.0,
+                stiffness=17.8,
+                damping=0.6,
             ),
         },
+        soft_joint_pos_limit_factor=1.0,
     )
 
     # Rigid objects inside the scene USD (spawn=None → wrap existing prims)
@@ -331,6 +335,7 @@ def _pinhole_camera_cfg(
         width=640,
         height=480,
         update_period=0.0,
+        update_latest_camera_pose=True,
     )
 
 
@@ -339,8 +344,8 @@ def make_pick_pen_camera_cfgs(
     top_pos: tuple[float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_pos: tuple[float, float, float] | None = None,
-    front_target: tuple[float, float, float] | None = None,
+    front_local_pos: tuple[float, float, float] | None = None,
+    front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
@@ -356,8 +361,8 @@ def make_pick_pen_camera_cfgs(
     top_pos = _TOP_CAMERA_POS if top_pos is None else top_pos
     top_target = _TOP_CAMERA_TARGET if top_target is None else top_target
     top_focal = _TOP_CAMERA_FOCAL if top_focal is None else top_focal
-    front_pos = _FRONT_CAMERA_POS if front_pos is None else front_pos
-    front_target = _FRONT_CAMERA_TARGET if front_target is None else front_target
+    front_local_pos = _FRONT_CAM_LOCAL_POS if front_local_pos is None else front_local_pos
+    front_local_rot = _FRONT_CAM_LOCAL_ROT if front_local_rot is None else front_local_rot
     front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
     wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
     wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
@@ -372,15 +377,15 @@ def make_pick_pen_camera_cfgs(
         clipping_range=(0.1, 6.0),
     )
     front = _pinhole_camera_cfg(
-        "{ENV_REGEX_NS}/FrontCamera",
-        front_pos,
-        _look_at_quat_world(front_pos, front_target),
+        "{ENV_REGEX_NS}/Robot/shoulder/FrontCamera",
+        front_local_pos,
+        front_local_rot,
         front_focal,
         focus_distance=0.6,
         clipping_range=(0.05, 6.0),
     )
-    # wrist: gripper 링크의 자식 prim → 팔을 따라 이동. pos/rot 은 gripper-local
-    # 프레임 기준. 정확한 화각은 GPU 렌더로 최종 검증 필요(Codex).
+    # front/wrist: robot 링크의 자식 prim → 각 링크 회전을 따라 이동/회전한다.
+    # pos/rot 은 해당 부모 링크 local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
     wrist = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
         wrist_local_pos,
@@ -398,8 +403,8 @@ def add_pick_pen_cameras(
     top_pos: tuple[float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_pos: tuple[float, float, float] | None = None,
-    front_target: tuple[float, float, float] | None = None,
+    front_local_pos: tuple[float, float, float] | None = None,
+    front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
@@ -408,16 +413,15 @@ def add_pick_pen_cameras(
     """카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
 
     InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
-    gym.make() 시 센서로 등록된다. 멀티-env 시 world 좌표 → env-relative 전환
-    필요(TC.2).
+    gym.make() 시 센서로 등록된다.
     """
 
     for name, cam_cfg in make_pick_pen_camera_cfgs(
         top_pos=top_pos,
         top_target=top_target,
         top_focal=top_focal,
-        front_pos=front_pos,
-        front_target=front_target,
+        front_local_pos=front_local_pos,
+        front_local_rot=front_local_rot,
         front_focal=front_focal,
         wrist_local_pos=wrist_local_pos,
         wrist_local_rot=wrist_local_rot,
@@ -744,12 +748,6 @@ def apply_curriculum(
     pen_radius_scale: float = 1.0,
     cup_angle_scale: float = 1.0,
     cup_radius_scale: float = 1.0,
-    grasp_assist: bool = False,
-    grasp_assist_distance: float = 0.075,
-    grasp_assist_offset_x: float = 0.0,
-    grasp_assist_offset_y: float = 0.0,
-    grasp_assist_offset_z: float = 0.0,
-    place_assist_distance: float = 0.0,
 ) -> None:
     """커리큘럼 파라미터를 env_cfg 에 in-place 적용.
 
@@ -758,10 +756,6 @@ def apply_curriculum(
         pen_radius_scale: randomize_pen_* 의 x/y_radius 곱셈 배율.
         cup_angle_scale: randomize_pen_cup 의 angle_range_deg 곱셈 배율 (0 기준).
         cup_radius_scale: 컵 안 판정 반경 배율. 기본 1.0 = 0.05m.
-        grasp_assist: 닫힌 그리퍼 근처 펜을 따라오게 하는 TB.3 학습 보조 event.
-        grasp_assist_distance: assist attach 거리.
-        grasp_assist_offset_{x,y,z}: gripper body 기준 world-frame pen center offset.
-        place_assist_distance: 컵 근방 도달 시 컵 중심으로 스냅하는 거리. 0이면 비활성.
     """
     active_pens = max(1, min(4, active_pens))
     active_names = PEN_NAMES[:active_pens]
@@ -798,21 +792,3 @@ def apply_curriculum(
         if cup_term is not None:
             lo, hi = cup_term.params["angle_range_deg"]
             cup_term.params["angle_range_deg"] = (lo * cup_angle_scale, hi * cup_angle_scale)
-
-    if grasp_assist:
-        env_cfg.events.soft_grasp_assist = EventTerm(
-            func=task_mdp.soft_grasp_assist,
-            mode="interval",
-            interval_range_s=(0.0, 0.0),
-            params={
-                "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-                "pen_cfgs": active_cfgs,
-                "cup_center_xy": PEN_CUP_CENTER_XY,
-                "cup_radius": cup_radius,
-                "attach_distance": grasp_assist_distance,
-                "place_distance": place_assist_distance,
-                "offset": (grasp_assist_offset_x, grasp_assist_offset_y, grasp_assist_offset_z),
-            },
-        )
-    elif hasattr(env_cfg.events, "soft_grasp_assist"):
-        env_cfg.events.soft_grasp_assist = None

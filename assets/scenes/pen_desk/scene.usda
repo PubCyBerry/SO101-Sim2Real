@@ -51,11 +51,11 @@ def Xform "Scene"
     {
         double size = 1
         rel material:binding = </Scene/Looks/Ceiling>
-        double3 xformOp:translate = (2.2, -0.26, 2.12)
+        double3 xformOp:translate = (2.2, -0.26, 1.96)
         float3 xformOp:scale = (5, 4, 0.05)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
-    # The desk top is shifted so its top face sits at the robot base height (z=0.89).
+    # The desk top is shifted so its top face sits at z=0.76 and the legs touch z=0.
     def Cube "DeskTop" (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
     )
@@ -67,7 +67,7 @@ def Xform "Scene"
         float physxCollision:minTorsionalPatchRadius = 0.001
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
-        double3 xformOp:translate = (2.2, -0.26, 0.9)
+        double3 xformOp:translate = (2.2, -0.26, 0.74)
         float3 xformOp:scale = (1.2, 0.78, 0.04)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -75,7 +75,7 @@ def Xform "Scene"
     {
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
-        double3 xformOp:translate = (1.68, 0.07, 0.52)
+        double3 xformOp:translate = (1.68, 0.07, 0.36)
         float3 xformOp:scale = (0.06, 0.06, 0.72)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -83,7 +83,7 @@ def Xform "Scene"
     {
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
-        double3 xformOp:translate = (2.72, 0.07, 0.52)
+        double3 xformOp:translate = (2.72, 0.07, 0.36)
         float3 xformOp:scale = (0.06, 0.06, 0.72)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -91,7 +91,7 @@ def Xform "Scene"
     {
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
-        double3 xformOp:translate = (1.68, -0.59, 0.52)
+        double3 xformOp:translate = (1.68, -0.59, 0.36)
         float3 xformOp:scale = (0.06, 0.06, 0.72)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -99,7 +99,7 @@ def Xform "Scene"
     {
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
-        double3 xformOp:translate = (2.72, -0.59, 0.52)
+        double3 xformOp:translate = (2.72, -0.59, 0.36)
         float3 xformOp:scale = (0.06, 0.06, 0.72)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -114,7 +114,7 @@ def Xform "Scene"
         float physxCollision:minTorsionalPatchRadius = 0.001
         double size = 1
         rel material:binding = </Scene/Looks/DeskMat>
-        double3 xformOp:translate = (2.18, -0.22, 0.923)
+        double3 xformOp:translate = (2.18, -0.22, 0.763)
         float3 xformOp:scale = (1.04, 0.57, 0.006)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
@@ -122,7 +122,7 @@ def Xform "Scene"
         prepend payload = @./objects/PenCup/PenCup.usd@
     )
     {
-        double3 xformOp:translate = (2.2, -0.17, 0.926)
+        double3 xformOp:translate = (2.2, -0.17, 0.766)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
     # Pens are seeded scattered on the mat for Pick-and-Place. Each pen is a
@@ -131,7 +131,7 @@ def Xform "Scene"
         prepend payload = @./objects/PenWhite/PenWhite.usd@
     )
     {
-        double3 xformOp:translate = (2.05, -0.35, 0.9347)
+        double3 xformOp:translate = (2.05, -0.35, 0.7747)
         float xformOp:rotateZ = 25
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
@@ -139,7 +139,7 @@ def Xform "Scene"
         prepend payload = @./objects/PenGray/PenGray.usd@
     )
     {
-        double3 xformOp:translate = (2.35, -0.35, 0.9347)
+        double3 xformOp:translate = (2.35, -0.35, 0.7747)
         float xformOp:rotateZ = -30
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
@@ -147,7 +147,7 @@ def Xform "Scene"
         prepend payload = @./objects/PenBlack/PenBlack.usd@
     )
     {
-        double3 xformOp:translate = (2.25, -0.31, 0.9347)
+        double3 xformOp:translate = (2.25, -0.31, 0.7747)
         float xformOp:rotateZ = 60
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
@@ -155,7 +155,7 @@ def Xform "Scene"
         prepend payload = @./objects/PenBlue/PenBlue.usd@
     )
     {
-        double3 xformOp:translate = (2.15, -0.31, 0.9347)
+        double3 xformOp:translate = (2.15, -0.31, 0.7747)
         float xformOp:rotateZ = -10
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
