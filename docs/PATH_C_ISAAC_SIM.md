@@ -139,7 +139,81 @@ uv run scripts\author_pick_pen_scene.py
 
 ## 5. 텔레오퍼레이션 및 레코드
 
+### 순수 Isaac Lab joint teleop + 카메라 튜닝
+
+`scripts/environments/teleoperation/pick_pen_joint_teleop.py` 는 현재
+`SimToReal-SO101-PickPen-v0`에 직접 6-dim joint-position action을 보내는
+디버그용 GUI teleop이다. LeIsaac device layer를 쓰지 않으므로 카메라/씬/드라이브
+튜닝에는 이 스크립트를 우선 사용한다.
+
+Windows 워크스테이션에서는 Isaac Sim 5.1 렌더링 crash를 피하려고 experience를
+명시한다.
+
+```bash
+uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
+    --task SimToReal-SO101-PickPen-v0 \
+    --device cuda:0 \
+    --experience isaaclab.python.rendering.kit \
+    --snapshot_on_start \
+    --snapshot_dir outputs/camera_tuning
+```
+
+키보드 입력은 터미널 창에 포커스가 있을 때 동작한다. Isaac GUI는 장면 확인용이고,
+조작 키는 실행 터미널에서 받는다.
+
+| 키 | 동작 | 키 | 동작 |
+|---|---|---|---|
+| `q` / `a` | shoulder_pan ± | `w` / `s` | shoulder_lift ± |
+| `e` / `d` | elbow_flex ± | `r` / `f` | wrist_flex ± |
+| `t` / `g` | wrist_roll ± | `y` / `h` | gripper open / close |
+| `[` / `]` | step 크기 축소 / 확대 | `z` | joint target 0 |
+| `u` | scene reset | `c` | 3개 카메라 PNG snapshot 저장 |
+| `p` | joint/camera metadata 출력 | `Esc` | 종료 |
+
+카메라 임시 튜닝은 CLI override로 먼저 실험한다. 낮은 focal length는 넓은 FOV,
+높은 focal length는 zoom-in이다.
+
+```bash
+uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
+    --task SimToReal-SO101-PickPen-v0 \
+    --device cuda:0 \
+    --experience isaaclab.python.rendering.kit \
+    --top_pos "2.20,-1.25,2.10" \
+    --top_target "2.20,-0.17,0.92" \
+    --top_focal 12.0 \
+    --front_pos "2.45,-0.62,1.02" \
+    --front_target "2.12,-0.12,0.95" \
+    --front_focal 12.0 \
+    --wrist_pos "-0.04,0.03,-0.12" \
+    --wrist_focal 10.0 \
+    --snapshot_on_start \
+    --snapshot_dir outputs/camera_tuning_trial
+```
+
+마음에 드는 값은 `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`의 아래 상수에
+반영한다.
+
+| 카메라 | 위치 | 각도 | FOV |
+|---|---|---|---|
+| top | `_TOP_CAMERA_POS` | `_TOP_CAMERA_TARGET`를 바라보도록 자동 계산 | `_TOP_CAMERA_FOCAL` |
+| front | `_FRONT_CAMERA_POS` | `_FRONT_CAMERA_TARGET`를 바라보도록 자동 계산 | `_FRONT_CAMERA_FOCAL` |
+| wrist | `_WRIST_CAM_LOCAL_POS` (gripper-local) | `_WRIST_CAM_LOCAL_ROT` (wxyz quaternion) | `_WRIST_CAMERA_FOCAL` |
+
+top/front는 world-frame `pos + target` 방식이라 조정이 쉽다. wrist는 gripper 링크
+자식 prim이라 위치/회전이 gripper-local이다. wrist 각도는 Isaac GUI에서
+`/World/envs/env_0/Robot/gripper/WristCamera`를 직접 돌려 보고 local transform을
+복사하거나, `--wrist_rot "w,x,y,z"`로 임시 quaternion을 넣어 비교한다.
+
+실제 데이터셋 기준으로 맞출 때는 `observation.images.top`,
+`observation.images.front`, `observation.images.wrist` 프레임을 1차 기준으로 삼는다.
+`docs/pics` 사무실 사진은 물리 배치 참고용이다. top 카메라는 실제 사무실 사진보다
+높게 조정된 상태이므로 사진의 물리 위치보다 데이터셋 top 영상 구도를 우선한다.
+
+### Legacy LeIsaac teleop
+
 `scripts/environments/teleoperation/teleop_se3_agent.py` 는 `gym.make("SimToReal-SO101-PickPen-v0")` + leisaac 디바이스 레이어.
+현재 A~E 순수 Isaac Lab 트랙에서는 leisaac import를 제거했으므로, 아래 경로는 F 단계
+실기기 device layer를 다시 붙일 때 참고용이다.
 
 ### 디바이스 종류
 

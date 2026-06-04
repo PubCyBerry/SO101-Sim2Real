@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TC.4 visual 품질 문제 → 로컬 teleop/camera tuning)
+
+- **목표**: TC.4 midcheck 영상 품질 문제를 받아, 대량 rollout 재개 전에 사용자가 로컬 Windows에서 직접 scene을 보고 joint teleop 및 3-camera pose/FOV를 조정할 수 있게 한다.
+- **상태**: 완료. TC.4 본 목표(2k-5k + HF push)는 아직 미완료이며, 카메라/assist/학습 길이 재설계 후 재시작해야 한다.
+- **발견/결정**:
+  - 10ep midcheck 영상에서 카메라 위치/FOV 불일치, `grasp_assist`로 pen이 순간이동하듯 붙는 현상, episode horizon/학습 전략 의심이 확인됐다.
+  - 기존 `teleop_se3_agent.py`는 leisaac device layer 의존이라 순수 Isaac Lab env에 맞지 않는다. 디버그용으로 직접 6-dim joint-position action을 보내는 새 스크립트를 추가했다.
+- **변경한 파일**:
+  - `scripts/environments/teleoperation/pick_pen_joint_teleop.py` 추가. GUI/terminal joint teleop, top/front/wrist camera injection, CLI camera override, PNG snapshot/metadata 저장 지원.
+  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`의 `make_pick_pen_camera_cfgs()`/`add_pick_pen_cameras()`에 optional camera override 인자 추가. 기본 동작은 기존 상수 그대로 유지.
+  - `docs/PATH_C_ISAAC_SIM.md`에 순수 Isaac Lab joint teleop 실행법, 키 바인딩, camera pose/FOV 튜닝 방법, Windows `--experience isaaclab.python.rendering.kit` 주의 기록.
+- **검증 결과(로컬 Windows, RTX A4000, Isaac Lab 2.3.2)**:
+  - `python -m py_compile scripts/environments/teleoperation/pick_pen_joint_teleop.py src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py scripts/environments/camera_shape_smoke.py scripts/sim/rollout_to_lerobot.py` 통과.
+  - `uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py --task SimToReal-SO101-PickPen-v0 --device cuda:0 --headless --no_cameras --max_steps 5` 통과.
+  - 카메라 포함 실행은 기본 experience에서 Windows `rtx.scenedb.plugin.dll` access violation이 재현됐고, `--experience isaaclab.python.rendering.kit` 명시 시 통과.
+  - `--snapshot_on_start --snapshot_dir outputs/local_joint_teleop_camera_smoke_codex`로 top/front/wrist PNG와 `camera_metadata_latest.json` 생성 확인.
+- **다음**:
+  - 사용자가 로컬 GUI teleop로 카메라 상수/CLI override를 튜닝한다.
+  - 다음 rollout 전에는 `grasp_assist_distance`를 크게 낮추거나 끄고(`--disable_grasp_assist`), episode horizon/training iterations를 늘리는 방향으로 TB.3/TC.4를 재설계한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TC.4 대량 rollout 중간 점검)
 
 - **목표**: TC.4 — TC.2에서 검증된 serial 1-env recorder로 최소 목표 2,000 successful episodes를 생성하고 LeRobot v3 validator 통과 후 Hugging Face dataset repo로 push한다.

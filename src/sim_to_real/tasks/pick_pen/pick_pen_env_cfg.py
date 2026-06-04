@@ -334,7 +334,18 @@ def _pinhole_camera_cfg(
     )
 
 
-def make_pick_pen_camera_cfgs() -> dict[str, TiledCameraCfg]:
+def make_pick_pen_camera_cfgs(
+    *,
+    top_pos: tuple[float, float, float] | None = None,
+    top_target: tuple[float, float, float] | None = None,
+    top_focal: float | None = None,
+    front_pos: tuple[float, float, float] | None = None,
+    front_target: tuple[float, float, float] | None = None,
+    front_focal: float | None = None,
+    wrist_local_pos: tuple[float, float, float] | None = None,
+    wrist_local_rot: tuple[float, float, float, float] | None = None,
+    wrist_focal: float | None = None,
+) -> dict[str, TiledCameraCfg]:
     """top/front/wrist 카메라 cfg 3개를 반환.
 
     기본 PickPenSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
@@ -342,19 +353,29 @@ def make_pick_pen_camera_cfgs() -> dict[str, TiledCameraCfg]:
     각 카메라는 480×640 RGB.
     """
 
+    top_pos = _TOP_CAMERA_POS if top_pos is None else top_pos
+    top_target = _TOP_CAMERA_TARGET if top_target is None else top_target
+    top_focal = _TOP_CAMERA_FOCAL if top_focal is None else top_focal
+    front_pos = _FRONT_CAMERA_POS if front_pos is None else front_pos
+    front_target = _FRONT_CAMERA_TARGET if front_target is None else front_target
+    front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
+    wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
+    wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
+    wrist_focal = _WRIST_CAMERA_FOCAL if wrist_focal is None else wrist_focal
+
     top = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/TopCamera",
-        _TOP_CAMERA_POS,
-        _look_at_quat_world(_TOP_CAMERA_POS, _TOP_CAMERA_TARGET),
-        _TOP_CAMERA_FOCAL,
+        top_pos,
+        _look_at_quat_world(top_pos, top_target),
+        top_focal,
         focus_distance=1.3,
         clipping_range=(0.1, 6.0),
     )
     front = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/FrontCamera",
-        _FRONT_CAMERA_POS,
-        _look_at_quat_world(_FRONT_CAMERA_POS, _FRONT_CAMERA_TARGET),
-        _FRONT_CAMERA_FOCAL,
+        front_pos,
+        _look_at_quat_world(front_pos, front_target),
+        front_focal,
         focus_distance=0.6,
         clipping_range=(0.05, 6.0),
     )
@@ -362,16 +383,28 @@ def make_pick_pen_camera_cfgs() -> dict[str, TiledCameraCfg]:
     # 프레임 기준. 정확한 화각은 GPU 렌더로 최종 검증 필요(Codex).
     wrist = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
-        _WRIST_CAM_LOCAL_POS,
-        _WRIST_CAM_LOCAL_ROT,
-        _WRIST_CAMERA_FOCAL,
+        wrist_local_pos,
+        wrist_local_rot,
+        wrist_focal,
         focus_distance=0.2,
         clipping_range=(0.02, 3.0),
     )
     return {"top_camera": top, "front_camera": front, "wrist_camera": wrist}
 
 
-def add_pick_pen_cameras(scene_cfg: PickPenSceneCfg) -> PickPenSceneCfg:
+def add_pick_pen_cameras(
+    scene_cfg: PickPenSceneCfg,
+    *,
+    top_pos: tuple[float, float, float] | None = None,
+    top_target: tuple[float, float, float] | None = None,
+    top_focal: float | None = None,
+    front_pos: tuple[float, float, float] | None = None,
+    front_target: tuple[float, float, float] | None = None,
+    front_focal: float | None = None,
+    wrist_local_pos: tuple[float, float, float] | None = None,
+    wrist_local_rot: tuple[float, float, float, float] | None = None,
+    wrist_focal: float | None = None,
+) -> PickPenSceneCfg:
     """카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
 
     InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
@@ -379,7 +412,17 @@ def add_pick_pen_cameras(scene_cfg: PickPenSceneCfg) -> PickPenSceneCfg:
     필요(TC.2).
     """
 
-    for name, cam_cfg in make_pick_pen_camera_cfgs().items():
+    for name, cam_cfg in make_pick_pen_camera_cfgs(
+        top_pos=top_pos,
+        top_target=top_target,
+        top_focal=top_focal,
+        front_pos=front_pos,
+        front_target=front_target,
+        front_focal=front_focal,
+        wrist_local_pos=wrist_local_pos,
+        wrist_local_rot=wrist_local_rot,
+        wrist_focal=wrist_focal,
+    ).items():
         setattr(scene_cfg, name, cam_cfg)
     return scene_cfg
 
