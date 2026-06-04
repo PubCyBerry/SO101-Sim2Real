@@ -161,6 +161,45 @@ uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen
 키보드 입력은 터미널 창에 포커스가 있을 때 동작한다. Isaac GUI는 장면 확인용이고,
 조작 키는 실행 터미널에서 받는다.
 
+SO-101 Leader Arm으로 조작할 때는 같은 스크립트에 `--control_mode leader`를 붙인다.
+현재 Windows 워크스테이션의 leader 포트는 `COM5`다.
+
+```bash
+uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
+    --task SimToReal-SO101-PickPen-v0 \
+    --device cuda:0 \
+    --experience isaaclab.python.rendering.kit \
+    --control_mode leader \
+    --leader_port COM5 \
+    --leader_id so101_teleop \
+    --snapshot_on_start \
+    --snapshot_dir outputs/camera_tuning
+```
+
+Leader Arm 모드는 LeRobot `SO101Leader` calibration을 그대로 사용한다. arm 5축은
+LeRobot degree 값을 radian으로 변환하고, gripper는 기본적으로 `0..100` 값을
+`--leader_gripper_divisor 100`으로 나눠 Isaac `0..1` joint target으로 보낸다.
+리더 calibration이 없거나 모터 calibration과 다르면 `--leader_calibrate`를 추가해
+터미널 prompt를 따라 보정한다.
+
+실기와 sim 방향이 반대로 보이는 축은 CLI에서 먼저 보정한다.
+
+```bash
+# 예: shoulder_lift만 반전하고, shoulder_pan에 +0.10 rad offset
+uv run --group isaac --locked python scripts/environments/teleoperation/pick_pen_joint_teleop.py \
+    --task SimToReal-SO101-PickPen-v0 \
+    --device cuda:0 \
+    --experience isaaclab.python.rendering.kit \
+    --control_mode leader \
+    --leader_port COM5 \
+    --leader_joint_signs "1,-1,1,1,1,1" \
+    --leader_joint_offsets "0.10,0,0,0,0,0" \
+    --leader_smoothing 0.2
+```
+
+Leader Arm 모드에서도 터미널 키 `u`(scene reset), `c`(snapshot), `p`(metadata 출력),
+`Esc`(종료)는 계속 동작한다.
+
 | 키 | 동작 | 키 | 동작 |
 |---|---|---|---|
 | `q` / `a` | shoulder_pan ± | `w` / `s` | shoulder_lift ± |

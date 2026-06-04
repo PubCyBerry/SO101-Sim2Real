@@ -60,10 +60,15 @@ def _quat(text: str) -> tuple[float, float, float, float]:
     return _parse_floats(text, 4, "quat")  # type: ignore[return-value]
 
 
+def _vec6(text: str) -> tuple[float, float, float, float, float, float]:
+    return _parse_floats(text, 6, "vec6")  # type: ignore[return-value]
+
+
 parser = argparse.ArgumentParser(description="GUI joint teleop and camera tuning for pick-pen scene")
 parser.add_argument("--task", default="SimToReal-SO101-PickPen-v0")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--step_hz", type=float, default=30.0)
+parser.add_argument("--control_mode", choices=("keyboard", "leader"), default="keyboard")
 parser.add_argument("--joint_step", type=float, default=0.035, help="Arm joint increment in radians per key press")
 parser.add_argument("--gripper_step", type=float, default=0.05, help="Gripper increment per key press")
 parser.add_argument("--max_steps", type=int, default=0, help="0 = run until Isaac window closes or Esc is pressed")
@@ -72,6 +77,38 @@ parser.add_argument("--snapshot_on_start", action="store_true", help="Save camer
 parser.add_argument("--snapshot_interval", type=int, default=0, help="Save snapshots every N steps; 0 disables")
 parser.add_argument("--no_cameras", action="store_true", help="Do not inject top/front/wrist TiledCamera sensors")
 parser.add_argument("--randomize_scene", action="store_true", help="Keep reset-time pen/cup randomization enabled")
+parser.add_argument("--leader_port", default="COM5", help="SO-101 leader serial port for --control_mode leader")
+parser.add_argument("--leader_id", default="so101_teleop", help="LeRobot calibration id for the SO-101 leader")
+parser.add_argument("--leader_calibration_dir", type=Path, default=None, help="Optional LeRobot calibration directory")
+parser.add_argument(
+    "--leader_calibrate",
+    action="store_true",
+    help="Allow LeRobot's interactive leader calibration flow if calibration is missing or mismatched",
+)
+parser.add_argument(
+    "--leader_gripper_divisor",
+    type=float,
+    default=100.0,
+    help="Convert LeRobot leader gripper 0..100 value into Isaac 0..1 joint target",
+)
+parser.add_argument(
+    "--leader_joint_signs",
+    type=_vec6,
+    default=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    help="Six signs applied after unit conversion, e.g. '1,-1,1,1,1,1'",
+)
+parser.add_argument(
+    "--leader_joint_offsets",
+    type=_vec6,
+    default=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    help="Six offsets after sign conversion; arm in radians, gripper in 0..1",
+)
+parser.add_argument(
+    "--leader_smoothing",
+    type=float,
+    default=0.0,
+    help="Exponential smoothing factor for leader targets; 0.0 follows directly, 0.9 is very smooth",
+)
 
 # Camera overrides. Defaults come from pick_pen_env_cfg.py.
 parser.add_argument("--top_pos", type=_vec3, default=None, help="x,y,z world position")
@@ -162,6 +199,74 @@ class RateLimiter:
         self.next_time = max(self.next_time + self.period, time.perf_counter())
 
 
+class LeaderArmSource:
+    """LeRobot SO-101 leader reader converted into Isaac joint-position targets."""
+
+    def __init__(
+        self,
+        port: str,
+        leader_id: str,
+        calibration_dir: Path | None,
+        calibrate: bool,
+        gripper_divisor: float,
+        joint_signs: tuple[float, float, float, float, float, float],
+        joint_offsets: tuple[float, float, float, float, float, float],
+        device: str,
+    ) -> None:
+        if gripper_divisor <= 1e-6:
+            raise ValueError("--leader_gripper_divisor must be > 0")
+        self.port = port
+        self.leader_id = leader_id
+        self.calibration_dir = calibration_dir
+        self.calibrate = calibrate
+        self.gripper_divisor = gripper_divisor
+        self.joint_signs = torch.tensor(joint_signs, dtype=torch.float32, device=device)
+        self.joint_offsets = torch.tensor(joint_offsets, dtype=torch.float32, device=device)
+        self.device = device
+        self.teleop = None
+
+    def connect(self) -> None:
+        from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+        cfg = SO101LeaderConfig(
+            port=self.port,
+            id=self.leader_id,
+            calibration_dir=self.calibration_dir,
+            use_degrees=True,
+        )
+        self.teleop = SO101Leader(cfg)
+        print(f"[leader] connecting SO-101 leader on {self.port} (id={self.leader_id})")
+        self.teleop.connect(calibrate=self.calibrate)
+        if not self.teleop.is_calibrated:
+            raise RuntimeError(
+                "SO-101 leader calibration is missing or mismatched. Run again with "
+                "--leader_calibrate, or calibrate the leader with LeRobot first."
+            )
+        print("[leader] connected; arm joints use LeRobot degrees, gripper uses 0..100")
+
+    def disconnect(self) -> None:
+        if self.teleop is not None and self.teleop.is_connected:
+            self.teleop.disconnect()
+
+    def read_targets(self, limits: torch.Tensor) -> torch.Tensor:
+        if self.teleop is None:
+            raise RuntimeError("LeaderArmSource is not connected")
+
+        raw_action = self.teleop.get_action()
+        values: list[float] = []
+        for joint_id, joint_name in enumerate(SO101_JOINT_ORDER):
+            value = float(raw_action[f"{joint_name}.pos"])
+            if joint_id < 5:
+                value = math.radians(value)
+            else:
+                value = value / self.gripper_divisor
+            values.append(value)
+
+        targets = torch.tensor(values, dtype=torch.float32, device=self.device)
+        targets = targets * self.joint_signs + self.joint_offsets
+        return torch.maximum(torch.minimum(targets, limits[:, 1]), limits[:, 0])
+
+
 def _disable_randomization(env_cfg) -> None:
     for name in (
         "randomize_pen_white",
@@ -192,6 +297,10 @@ def _joint_limits(device: str) -> torch.Tensor:
         (0.0, 1.0),
     ]
     return torch.tensor(limits, dtype=torch.float32, device=device)
+
+
+def _render_env(env) -> None:
+    env.unwrapped.sim.render()
 
 
 def _rgb_to_u8(rgb: torch.Tensor) -> np.ndarray:
@@ -277,7 +386,19 @@ def _save_snapshots(env, snapshot_dir: Path, step: int) -> None:
     print(f"[snapshot] {snapshot_dir.resolve()} ({', '.join(saved) or 'no cameras'})")
 
 
-def _print_controls() -> None:
+def _print_controls(control_mode: str) -> None:
+    if control_mode == "leader":
+        print(
+            f"""
+Controls:
+  Move SO-101 Leader Arm on {args.leader_port}; its calibrated joint positions drive the sim arm.
+  u reset scene               c save 3-camera snapshots
+  p print joints + camera metadata
+  Esc or Ctrl+C quit
+""".strip()
+        )
+        return
+
     print(
         """
 Controls (terminal window must have focus):
@@ -335,12 +456,27 @@ def main() -> None:
         arm_step = float(args.joint_step)
         gripper_step = float(args.gripper_step)
         rate = RateLimiter(args.step_hz)
-        _print_controls()
+        leader = None
+        if args.control_mode == "leader":
+            leader = LeaderArmSource(
+                port=args.leader_port,
+                leader_id=args.leader_id,
+                calibration_dir=args.leader_calibration_dir,
+                calibrate=args.leader_calibrate,
+                gripper_divisor=args.leader_gripper_divisor,
+                joint_signs=args.leader_joint_signs,
+                joint_offsets=args.leader_joint_offsets,
+                device=device,
+            )
+            leader.connect()
+            targets = leader.read_targets(limits)
+
+        _print_controls(args.control_mode)
         if args.snapshot_on_start and not args.no_cameras:
             for _ in range(5):
                 env.step(targets.unsqueeze(0))
                 if not args.headless:
-                    env.sim.render()
+                    _render_env(env)
             _save_snapshots(env, args.snapshot_dir, 0)
 
         with NonBlockingKeyboard() as keyboard:
@@ -350,7 +486,7 @@ def main() -> None:
                     break
                 if key:
                     lower = key.lower()
-                    if lower in KEY_BINDINGS:
+                    if args.control_mode == "keyboard" and lower in KEY_BINDINGS:
                         joint_id, direction, label = KEY_BINDINGS[lower]
                         delta = gripper_step if joint_id == 5 else arm_step
                         targets[joint_id] += direction * delta
@@ -377,10 +513,18 @@ def main() -> None:
                     elif lower == "p":
                         _print_state(targets, env)
 
+                if leader is not None:
+                    leader_targets = leader.read_targets(limits)
+                    smoothing = min(max(float(args.leader_smoothing), 0.0), 0.99)
+                    if smoothing > 0.0:
+                        targets = smoothing * targets + (1.0 - smoothing) * leader_targets
+                    else:
+                        targets = leader_targets
+
                 action = targets.unsqueeze(0)
                 env.step(action)
                 if not args.headless:
-                    env.sim.render()
+                    _render_env(env)
                 step_count += 1
                 if args.snapshot_interval > 0 and step_count % args.snapshot_interval == 0 and not args.no_cameras:
                     _save_snapshots(env, args.snapshot_dir, step_count)
@@ -394,6 +538,8 @@ def main() -> None:
         print(traceback.format_exc())
         raise
     finally:
+        if "leader" in locals() and leader is not None:
+            leader.disconnect()
         if env is not None:
             env.close()
         simulation_app.close()

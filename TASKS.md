@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TC.4 local GUI teleop — `pick_pen_joint_teleop.py`에 SO-101 Leader Arm(COM5) 직접 입력 지원 추가, Gym wrapper GUI render crash 수정(`env.unwrapped.sim.render()`), visible Isaac GUI를 `--control_mode leader --leader_port COM5`로 실행(PID 37300 → python child 28820) / 다음: 사용자가 GUI에서 카메라 pose/FOV·축 방향 점검
 - [2026-06-04] TC.4 quality reset — midcheck 영상 품질 문제(카메라 mismatch, 과강한 grasp assist, 짧은 horizon 의심)로 대량 rollout 재개 전 로컬 joint teleop/camera tuning 스크립트 추가, Windows `--experience isaaclab.python.rendering.kit` smoke + snapshot 생성 통과 / 다음: 사용자가 카메라 pose/FOV 튜닝 후 assist·학습 길이 재설계
 - [2026-06-04] TC.4 midcheck — 사용자 요청으로 2k rollout을 `1024 successes/1514 attempts`에서 kill하고 별도 10 success ep dataset 생성(`/DISK1/so101-sim2real/outputs/tc4_rollout_10ep_midcheck_codex_20260604`), 10 successes/15 attempts/427 frames, schema PASS, 3cam mp4 valid / 다음: visual 점검 후 2k-5k 재생성+HF push
 - [2026-06-04] TC.4 in_progress — 서버 `/DISK1` 여유 3.4T와 GPU 상태 확인 후 최소 목표 2,000 successful episodes로 대량 rollout/HF push 착수, target `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604` / 다음: rollout 완료 후 schema validate + HF dataset push
