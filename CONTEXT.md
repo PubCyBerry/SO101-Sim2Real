@@ -12,6 +12,36 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.3 PickCube no-assist PPO checkpoint 선별)
+
+- **목표**: rule-based state machine으로 cube_desk pick-and-place 가능성을 확인했으므로, grab/teleport assist 없이 PickCube state-based PPO 전문가를 다시 학습하고 TB.4 커리큘럼 시작 checkpoint를 고른다.
+- **상태**: TB.3 완료, TB.4 진행 중. TB.3 verify(`rg` 보조 코드 0건 + PickCube/no-assist/20epoch + checkpoint 산출) 통과. `eval_success.py` success_rate 0.7 이상은 TB.4 gate로 유지한다.
+- **속도 제한 반영**:
+  - 사용자 요청에 따라 state machine command target에 slew limit을 적용했다. 기본 arm `0.01 rad/step`, gripper `0.005 rad/step`.
+  - 성공 3cam dataset `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_90s_slowlimit_20260604`는 이 제한값으로 생성됐다.
+- **핵심 코드 변경**:
+  - `pick_pen/mdp/{observations,rewards}.py`: RL obs/reward의 gripper 기준점을 state machine과 같은 jaw-offset grasp point `jaw + quat(jaw)*(-0.021,-0.070,0.020)`로 정합.
+  - `pick_cube_env_cfg.py`: PickCube `task_success` reward를 termination과 맞춰 `require_open=False`, `place_height_cube`/`insert_cube`/`task_success` shaping 강화.
+  - `train.py`: checkpoint에서 policy/value만 로드하고 optimizer는 새 LR로 시작하는 `--resume_without_optimizer` 추가.
+- **서버 학습/평가 요약** (`/home/konan147/Workspaces/SO101-Sim2Real`, RTX PRO 5000, Isaac Lab 2.3.2):
+  - full default 4 active objects no-assist: `tb3_pickcube_noassist_2048_slowlimit_20260604`, model199 eval 0/128.
+  - 1-cube fixed no-assist baseline: model199 deterministic 0/128, stochastic 3/128.
+  - jaw-offset 적용: `tb3_pickcube_noassist_1cube_fixed_jawoffset_2048_20260604`, model199 stochastic 12/128.
+  - low-entropy resume: `tb3_pickcube_noassist_1cube_fixed_jawoffset_lowentropy_resume_2048_20260604`, model300 stochastic 43/128.
+  - success reward 정합 resume: 최고 model350 stochastic 26/128, model400 deterministic 6/128.
+  - place/insert shaping 강화: `tb3_pickcube_noassist_1cube_fixed_placeboost_resume_2048_20260604`, model449 stochastic 72/128.
+  - placeboost continuation: `tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604`, **best model550 deterministic 87/128(success_rate 0.6797), stochastic 81/128(0.6328)**.
+  - model550 추가 fine-tune(`tb3_pickcube_noassist_1cube_fixed_placeboost_550finetune_2048_20260604`)는 model600 deterministic 64/128·stochastic 79/128, model624 deterministic 64/128·stochastic 75/128로 하락.
+- **현재 best checkpoint**:
+  - `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`
+- **다음(TB.4)**:
+  - model550에서 1-cube spawn/cup curriculum을 점진 확대한다. 시작 후보: `active_objects=1`, `object_radius_scale=0.25`, `container_angle_scale=0.25`, `container_radius_scale=1.0`, 낮은 LR(`5e-5`) + `--resume_without_optimizer`.
+  - 각 curriculum stage는 `eval_success.py --max_episode_steps 900 --episodes 128`로 deterministic/stochastic 비교, 최종 full cube/bowl spawn success_rate ≥0.7까지 진행한다.
+- **주의**:
+  - 서버 worktree에는 사용자가 수정한 `env/groot.env`와 이번 검증을 위해 복사한 파일들이 남아 있다. 커밋/정리 시 `env/*.env`와 `ref_repos/`는 제외한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — PickCube rule-based state machine 성공 + 3cam dataset 저장)
 
 - **목표**: 강화학습(TB.3) 전에 cube_desk/PickCube 씬이 물리적으로 pick-and-place 가능한지 rule-based state machine으로 입증하고, 사용자가 볼 수 있는 LeRobot v3 3-camera dataset을 저장한다.

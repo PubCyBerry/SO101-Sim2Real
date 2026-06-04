@@ -78,6 +78,8 @@ parser.add_argument("--episode_length_s", type=float, default=None,
                     help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
 parser.add_argument("--resume_checkpoint", default=None,
                     help="이어학습 체크포인트 경로 (.pt). 설정 시 learn() 전 로드.")
+parser.add_argument("--resume_without_optimizer", action="store_true",
+                    help="체크포인트에서 policy/value만 로드하고 optimizer state는 새 설정으로 시작")
 parser.add_argument("--init_noise_std", type=float, default=0.5,
                     help="ActorCritic 초기 action noise std")
 parser.add_argument("--entropy_coef", type=float, default=0.005,
@@ -233,8 +235,9 @@ def main() -> None:
         runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=rl_device)
         # 이어학습: resume_checkpoint 지정 시 optimizer 포함 로드
         if args.resume_checkpoint is not None:
+            load_optimizer = not args.resume_without_optimizer
             try:
-                runner.load(args.resume_checkpoint, load_optimizer=True, map_location=rl_device)
+                runner.load(args.resume_checkpoint, load_optimizer=load_optimizer, map_location=rl_device)
             except TypeError:
                 runner.load(args.resume_checkpoint)
         runner.learn(
@@ -283,6 +286,7 @@ def main() -> None:
                     "container_radius_scale": args.container_radius_scale,
                     "episode_length_s": args.episode_length_s,
                     "resume_checkpoint": args.resume_checkpoint,
+                    "resume_without_optimizer": args.resume_without_optimizer,
                     "init_noise_std": args.init_noise_std,
                     "entropy_coef": args.entropy_coef,
                     "learning_rate": args.learning_rate,

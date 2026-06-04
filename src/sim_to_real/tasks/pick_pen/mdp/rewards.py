@@ -15,6 +15,7 @@ from sim_to_real.utils.constant import PEN_NAMES
 
 # world frame 책상 상판 z — PickPenSceneCfg 와 동기화 유지
 _DESK_TOP_Z: float = 0.76
+_JAW_GRASP_OFFSET: tuple[float, float, float] = (-0.021, -0.070, 0.020)
 
 
 # ---------------------------------------------------------------------------
@@ -22,14 +23,30 @@ _DESK_TOP_Z: float = 0.76
 # ---------------------------------------------------------------------------
 
 
+def _quat_apply_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """wxyz quaternion으로 vec를 회전한다."""
+    qw = quat[:, 0:1]
+    qv = quat[:, 1:4]
+    uv = torch.cross(qv, vec, dim=-1)
+    uuv = torch.cross(qv, uv, dim=-1)
+    return vec + 2.0 * (qw * uv + uuv)
+
+
 def _get_gripper_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
-    """gripper body world pos, shape (num_envs, 3).
+    """state machine과 같은 jaw-offset grasp point world pos, shape (num_envs, 3).
 
     body_names=["gripper"] 로 SceneEntityCfg 를 전달해야 한다.
     resolve() 는 멱등 호출 — 첫 스텝에 body_ids 를 캐시한다.
     """
     robot_cfg.resolve(env.scene)
     robot: Articulation = env.scene[robot_cfg.name]
+    body_names: list[str] = robot.data.body_names
+    if "jaw" in body_names:
+        jaw_idx = body_names.index("jaw")
+        offset = torch.tensor(_JAW_GRASP_OFFSET, device=env.device, dtype=robot.data.body_pos_w.dtype)
+        offset = offset.unsqueeze(0).expand(env.num_envs, -1)
+        return robot.data.body_pos_w[:, jaw_idx, :] + _quat_apply_wxyz(robot.data.body_quat_w[:, jaw_idx, :], offset)
+
     ids = robot_cfg.body_ids
     if isinstance(ids, int):
         return robot.data.body_pos_w[:, ids, :]
@@ -273,6 +290,7 @@ def place_height_reward(
     lift_min: float = 0.02,
     diff_threshold: float = 0.12,
     close_threshold: float = 0.50,
+    require_carry: bool = True,
 ) -> torch.Tensor:
     """운반 중인 펜을 컵 XY 근처에서 컵 안 높이로 낮추는 dense reward.
 
@@ -304,7 +322,8 @@ def place_height_reward(
         z_rew = torch.clamp(1.0 - torch.abs(pen_local_z - target_z) / max(z_range, 1e-6), 0.0, 1.0)
 
         carrying = gripper_closed & near & lifted
-        total = total + carrying.float() * xy_rew * z_rew
+        active = carrying if require_carry else lifted
+        total = total + active.float() * xy_rew * z_rew
 
     return total
 
@@ -372,8 +391,9 @@ def task_success_bonus(
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     open_threshold: float = 0.60,
+    require_open: bool = True,
 ) -> torch.Tensor:
-    """4개 펜 전부 배치 완료 시 1.0, 미완료 시 0.0."""
+    """모든 대상이 배치 완료되면 1.0, 미완료 시 0.0."""
     cfgs = _make_pen_cfgs(pen_cfgs)
     robot: Articulation = env.scene[robot_cfg.name]
     gripper_open = robot.data.joint_pos[:, -1] > open_threshold
@@ -382,6 +402,9 @@ def task_success_bonus(
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
         inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
-        all_placed = all_placed & inside & gripper_open
+        all_placed = all_placed & inside
+
+    if require_open:
+        all_placed = all_placed & gripper_open
 
     return all_placed.float()

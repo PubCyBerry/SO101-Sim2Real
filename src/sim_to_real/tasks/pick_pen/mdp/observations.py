@@ -10,7 +10,7 @@ Three families live here:
   sub-phase has an independent pass/fail signal even when the gripper
   command is wrong.
 - *RL state* (``rl_state``) — privileged full state for RL training: joint pos,
-  gripper body position, all pen/cup positions, relative vectors. Does NOT
+  jaw-offset grasp point position, all pen/cup positions, relative vectors. Does NOT
   depend on FrameTransformer or ee_frame.
 """
 
@@ -27,6 +27,16 @@ from isaaclab.sensors import FrameTransformer
 
 PEN_CUP_DEFAULT_CENTER_XY: tuple[float, float] = (2.2, -0.17)
 DESK_TOP_Z: float = 0.76
+JAW_GRASP_OFFSET: tuple[float, float, float] = (-0.021, -0.070, 0.020)
+
+
+def _quat_apply_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """wxyz quaternion으로 vec를 회전한다."""
+    qw = quat[:, 0:1]
+    qv = quat[:, 1:4]
+    uv = torch.cross(qv, vec, dim=-1)
+    uuv = torch.cross(qv, uv, dim=-1)
+    return vec + 2.0 * (qw * uv + uuv)
 
 
 def pen_grasped(
@@ -169,10 +179,10 @@ def rl_state(
 
     Breakdown (all positions are env-origin-relative):
       [0:6]   robot joint positions in SO-101 order (rad)
-      [6:9]   gripper body position (m)
+      [6:9]   jaw-offset grasp point position (m)
       [9:21]  pen positions, 4×3 in pen_names order (m)
       [21:24] cup position (m)
-      [24:36] gripper→pen relative vectors, 4×3 (m)
+      [24:36] grasp point→pen relative vectors, 4×3 (m)
       [36]    gripper joint pos normalised to [0,1] (open fraction)
     """
     robot: Articulation = env.scene[robot_cfg.name]
@@ -181,16 +191,23 @@ def rl_state(
     # --- joint positions (6) ---
     joint_pos = robot.data.joint_pos  # (N, num_joints)
 
-    # --- gripper body position relative to env origin (3) ---
+    # --- grasp point position relative to env origin (3) ---
     body_names: list[str] = robot.data.body_names
-    try:
-        gripper_idx = body_names.index(gripper_body_name)
-    except ValueError:
-        # 폴백: "gripper" 포함 첫 번째 바디
-        gripper_idx = next(
-            (i for i, n in enumerate(body_names) if gripper_body_name in n), 0
-        )
-    gripper_pos = robot.data.body_pos_w[:, gripper_idx, :] - origins  # (N, 3)
+    if "jaw" in body_names:
+        jaw_idx = body_names.index("jaw")
+        offset = torch.tensor(JAW_GRASP_OFFSET, device=env.device, dtype=robot.data.body_pos_w.dtype)
+        offset = offset.unsqueeze(0).expand(env.num_envs, -1)
+        grasp_pos = robot.data.body_pos_w[:, jaw_idx, :] + _quat_apply_wxyz(robot.data.body_quat_w[:, jaw_idx, :], offset)
+        gripper_pos = grasp_pos - origins
+    else:
+        try:
+            gripper_idx = body_names.index(gripper_body_name)
+        except ValueError:
+            # 폴백: "gripper" 포함 첫 번째 바디
+            gripper_idx = next(
+                (i for i, n in enumerate(body_names) if gripper_body_name in n), 0
+            )
+        gripper_pos = robot.data.body_pos_w[:, gripper_idx, :] - origins  # (N, 3)
 
     # --- pen positions relative to env origin (4×3) ---
     pen_parts: list[torch.Tensor] = []
@@ -203,7 +220,7 @@ def rl_state(
     cup: RigidObject = env.scene[cup_name]
     cup_pos = cup.data.root_pos_w - origins  # (N, 3)
 
-    # --- gripper → pen relative vectors (4×3) ---
+    # --- grasp point → pen relative vectors (4×3) ---
     rel_parts: list[torch.Tensor] = []
     for i in range(len(pen_names)):
         pen_p = pen_parts[i]  # (N, 3)

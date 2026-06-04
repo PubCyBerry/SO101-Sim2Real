@@ -32,8 +32,8 @@
 
 - [x] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:`reward_smoke.py` reward term 9개 등록 + 단계별 증가 pass, `env_smoke.py` 500-step pass, `drive_response_smoke.py` pass | status:done
 - [x] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:done
-- [ ] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:todo
-- [ ] **TB.4** PickCube 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:`eval_success.py` PickCube full cube/bowl spawn success_rate ≥0.7, `max_episode_steps>=900` | status:todo
+- [x] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:done
+- [ ] **TB.4** PickCube 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:`eval_success.py` PickCube full cube/bowl spawn success_rate ≥0.7, `max_episode_steps>=900` | status:in_progress
 
 ## Phase C — 데이터 엔진 (롤아웃→LeRobot v3)
 
@@ -62,6 +62,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TB.4 in_progress — TB.3 best no-assist checkpoint는 `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`, 1-cube fixed eval deterministic 87/128(success_rate 0.6797)·stochastic 81/128(0.6328); fine-tune model600/624는 하락 / 다음: model550에서 spawn/cup curriculum 확대
+- [2026-06-04] TB.3 done — jaw-offset grasp point로 RL obs/reward 정합, PickCube success reward와 termination 조건 일치(`require_open=False`), place/insert shaping 강화, `resume_without_optimizer` 추가; no-assist PPO 20epoch+ checkpoint 산출 및 eval 완료 / 다음: TB.4 커리큘럼
 - [2026-06-04] TA.CUBE.STATE_MACHINE done — `pick_cube_state_machine.py` 추가, joint command slew limit(`0.01rad/step`) + 느린 gripper close(`0.005rad/step`) + grasp retry(max 3)로 1-cube fixed-spawn pick-and-place 입증; 서버 3cam LeRobot v3 dataset `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_90s_slowlimit_20260604` 생성(2700 frames/90.0s/schema PASS, placed_and_released true) / 다음: no-assist PickCube PPO 재학습(TB.3)
 - [2026-06-04] TA.CUBE.PHYSICS done — `pick_cube_physics_smoke.py` static_usd/settle/grasp_hold pass(`outputs/pick_cube_physics_smoke_after_actuator.json`), leisaac actuator 이식+cube/desk 물성 보정 후 fixture contact hold 검증 / 다음: rule-based state machine gate
 - [2026-06-04] PickCube pivot in_progress — 목표를 PickPen에서 PickCube/cube_task로 전환, 사용자 GUI 카메라 튜닝값은 PickCube cfg에 반영된 상태, 기존 PickPen assisted RL/rollout 결과는 새 목표에서 사용하지 않음 / 다음: `pick_cube_physics_smoke.py`로 물리 gate 후 no-assist 20epoch+ PPO 재학습

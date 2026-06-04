@@ -508,20 +508,21 @@ class PickCubeRewardsCfg:
     # Stage 4.5: 그릇 XY 근처에서 그릇 안 높이로 낮추기 (밀집)
     place_height_cube = RewTerm(
         func=task_mdp.place_height_reward,
-        weight=6.0,
+        weight=30.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
+            "require_carry": False,
         },
     )
 
     # Stage 5: 그릇 안 삽입 — 그리퍼 조건 없음 (밀집, 큐브 수 비례)
     insert_cube = RewTerm(
         func=task_mdp.insert_reward,
-        weight=25.0,
+        weight=80.0,
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -546,13 +547,16 @@ class PickCubeRewardsCfg:
     # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
     task_success = RewTerm(
         func=task_mdp.task_success_bonus,
-        weight=100.0,
+        weight=200.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
+            # PickCube termination은 "큐브가 그릇 안에 있음"과 일치한다.
+            # release_cube가 gripper open을 별도로 보상한다.
+            "require_open": False,
         },
     )
 
