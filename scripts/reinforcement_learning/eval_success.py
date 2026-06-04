@@ -51,6 +51,8 @@ parser.add_argument("--stochastic", action="store_true",
                     help="deterministic act_inference 대신 stochastic policy.act()로 평가")
 parser.add_argument("--init_noise_std", type=float, default=0.5,
                     help="학습 시 ActorCritic init_noise_std (checkpoint load shape 재현용)")
+parser.add_argument("--override_policy_std", type=float, default=None,
+                    help="checkpoint 로드 후 policy action std를 이 값으로 덮어씀")
 parser.add_argument("--num_learning_epochs", type=int, default=20,
                     help="학습 시 PPO learning epoch 수")
 parser.add_argument("--num_mini_batches", type=int, default=4,
@@ -156,6 +158,15 @@ def _apply_task_curriculum(env_cfg, args: argparse.Namespace) -> None:
         )
 
 
+def _override_policy_std(policy, value: float | None) -> None:
+    if value is None:
+        return
+    if not hasattr(policy, "std"):
+        raise AttributeError("ActorCritic policy does not expose a 'std' parameter")
+    with torch.no_grad():
+        policy.std.fill_(float(value))
+
+
 def main() -> None:
     device: str = args.device
     rl_device: str = args.rl_device if args.rl_device is not None else device
@@ -184,6 +195,7 @@ def main() -> None:
         except TypeError:
             # rsl_rl 버전에 따라 load() 인자 지원 범위가 다를 수 있음
             runner.load(args.checkpoint)
+        _override_policy_std(runner.alg.policy, args.override_policy_std)
 
         if args.stochastic:
             runner.eval_mode()
@@ -230,6 +242,7 @@ def main() -> None:
             "num_envs": args.num_envs,
             "max_episode_steps": args.max_episode_steps,
             "stochastic": args.stochastic,
+            "override_policy_std": args.override_policy_std,
             "curriculum": {
                 "active_objects": args.active_objects,
                 "object_radius_scale": args.object_radius_scale,

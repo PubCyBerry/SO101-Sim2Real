@@ -31,6 +31,10 @@
 - **다음**:
   - BC checkpoint 대신 clean fixed-spawn best `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`에서 시작한다.
   - Bowl curriculum을 `container_angle_scale=0.05` 또는 `0.10`처럼 더 작게 시작하고, `--resume_without_optimizer`, 낮은 LR(`1e-5`~`3e-5`), 4096 env, `num_learning_epochs>=20`로 재시도한다.
+- **추가 baseline/std 점검**:
+  - `model_550.pt`, object fixed + Bowl scale `0.05`: deterministic 91/128(0.7109), stochastic 23/128(0.1797).
+  - checkpoint std는 `[0.0325, 0.1617, 0.0681, 0.2278, 0.2518, 0.3373]`로 wrist/gripper 축이 큼.
+  - `eval_success.py --override_policy_std 0.05 --stochastic`: 57/128(0.4453), `0.01`: 70/128(0.5469). 노이즈 민감도가 크므로 PPO resume은 낮은 std + 낮은 entropy로 시작한다.
 
 ---
 

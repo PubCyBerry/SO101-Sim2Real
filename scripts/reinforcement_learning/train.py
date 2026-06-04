@@ -82,6 +82,8 @@ parser.add_argument("--resume_without_optimizer", action="store_true",
                     help="체크포인트에서 policy/value만 로드하고 optimizer state는 새 설정으로 시작")
 parser.add_argument("--init_noise_std", type=float, default=0.5,
                     help="ActorCritic 초기 action noise std")
+parser.add_argument("--override_policy_std", type=float, default=None,
+                    help="resume checkpoint 로드 후 policy action std를 이 값으로 덮어씀")
 parser.add_argument("--entropy_coef", type=float, default=0.005,
                     help="PPO entropy coefficient")
 parser.add_argument("--learning_rate", type=float, default=3e-4,
@@ -203,6 +205,15 @@ def _resolve_log_dir(args: argparse.Namespace) -> str:
     return log_dir
 
 
+def _override_policy_std(policy, value: float | None) -> None:
+    if value is None:
+        return
+    if not hasattr(policy, "std"):
+        raise AttributeError("ActorCritic policy does not expose a 'std' parameter")
+    with torch.no_grad():
+        policy.std.fill_(float(value))
+
+
 def main() -> None:
     device: str = args.device
     rl_device: str = args.rl_device if args.rl_device is not None else device
@@ -240,6 +251,7 @@ def main() -> None:
                 runner.load(args.resume_checkpoint, load_optimizer=load_optimizer, map_location=rl_device)
             except TypeError:
                 runner.load(args.resume_checkpoint)
+            _override_policy_std(runner.alg.policy, args.override_policy_std)
         runner.learn(
             num_learning_iterations=args.max_iterations,
             init_at_random_ep_len=True,
@@ -288,6 +300,7 @@ def main() -> None:
                     "resume_checkpoint": args.resume_checkpoint,
                     "resume_without_optimizer": args.resume_without_optimizer,
                     "init_noise_std": args.init_noise_std,
+                    "override_policy_std": args.override_policy_std,
                     "entropy_coef": args.entropy_coef,
                     "learning_rate": args.learning_rate,
                 },
