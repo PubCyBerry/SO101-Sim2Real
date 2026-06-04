@@ -175,6 +175,39 @@ def pregrasp_bonus(
     return total
 
 
+def guided_lift_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.18),
+    diff_threshold: float = 0.10,
+    close_threshold: float = 0.50,
+    lift_start: float = 0.015,
+    lift_height: float = 0.060,
+) -> torch.Tensor:
+    """pregrasp 상태에서 물체가 책상에서 떨어지는 초기 lift를 연속 보상한다."""
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    robot_cfg.resolve(env.scene)
+    robot: Articulation = env.scene[robot_cfg.name]
+    gripper_closed = robot.data.joint_pos[:, -1] < close_threshold
+    ee_pos = _get_gripper_pos(env, robot_cfg)
+    span = max(lift_height - lift_start, 1e-6)
+
+    total = torch.zeros(env.num_envs, device=env.device)
+    for cfg in cfgs:
+        pen_pos = _pen_pos_w(env, cfg)
+        local_z = pen_pos[:, 2] - env.scene.env_origins[:, 2]
+        height_rew = torch.clamp((local_z - _DESK_TOP_Z - lift_start) / span, 0.0, 1.0)
+        dist = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
+        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
+        active = (dist < diff_threshold) & gripper_closed & ~placed
+        total = total + active.float() * height_rew
+    return total
+
+
 def grasp_bonus(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),

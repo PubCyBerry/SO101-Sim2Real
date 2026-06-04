@@ -12,6 +12,23 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — PickCube guided lift reward 추가)
+
+- **목표**: `pregrasp_cube` 추가 후 정책이 "근접+닫기" 보상은 크게 받지만 lift가 0 근처에 머무는 문제를 줄인다.
+- **상태**: 코드 적용 및 서버 smoke 통과. 장기 학습은 새 reward 기준으로 재시작 전이다.
+- **적용 변경**:
+  - `task_mdp.guided_lift_reward`: gripper closed + object near 상태에서 큐브 center가 desk 위 `0.015→0.060m` 구간으로 올라가는 정도를 연속 보상한다.
+  - `PickCubeRewardsCfg.guided_lift_cube`: weight `8.0`, `pregrasp_cube`와 `grasp_cube` 사이에 추가. PickPen cfg에는 term을 추가하지 않았다.
+- **검증 결과**:
+  - 로컬/서버 `py_compile` 통과.
+  - 서버 `env_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda:0 --steps 5` 통과, Reward Manager `pregrasp_cube`, `guided_lift_cube` 포함 13 terms 및 `rl_policy (43,)` 확인.
+- **직전 학습 결과**:
+  - pregrasp-only scratch PPO `/DISK1/so101-sim2real/outputs/tb4_speedcap_pregrasp_fixed_scratch_clip2_4096_20260605`는 iter100 근처에서 `pregrasp_cube≈1.6`까지 올라갔지만 `lift_cube≈0.000x`, success termination≈0.3~0.4%로 정체되어 중단(model100까지 저장).
+- **다음**:
+  - `guided_lift_cube` 포함 reward 기준으로 fixed-spawn scratch PPO를 재시작한다. lift reward가 올라가지 않으면 보상만으로는 부족하므로 state-machine phase imitation/DAgger 쪽으로 전환한다.
+
+---
+
 ## 작업 인계 (2026-06-05 — PickCube pregrasp reward 추가)
 
 - **목표**: speed-cap PPO가 reach 이후 "그리퍼 닫기→lift" 탐색 장벽에서 정체되는 문제를 줄인다.
