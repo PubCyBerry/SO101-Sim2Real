@@ -25,13 +25,14 @@
 - [x] **TA.1** SO-101 articulation position PD 드라이브 튜닝 (Feetech STS3215 근사: stiffness/damping/속도·토크 한계) | machine:any | dep:T0.3 | verify:정적 hold 안정 + step 응답 진동 없음 | status:done
 - [x] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (`scene_physics_smoke.py`: spawn ellipse/arc/y separation/settle stability 모두 pass) | status:done
 - [x] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:`camera_shape_smoke.py` 3캠 RGB shape/FOV/pose pass + 기본 `env_smoke.py` no-camera pass | status:done
-- [ ] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:in_progress
+- [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
+- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 3cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
 
 ## Phase B — RL 전문가 (state-based)
 
 - [x] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:`reward_smoke.py` reward term 9개 등록 + 단계별 증가 pass, `env_smoke.py` 500-step pass, `drive_response_smoke.py` pass | status:done
 - [x] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:done
-- [ ] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:todo
+- [ ] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:todo
 - [ ] **TB.4** PickCube 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:`eval_success.py` PickCube full cube/bowl spawn success_rate ≥0.7, `max_episode_steps>=900` | status:todo
 
 ## Phase C — 데이터 엔진 (롤아웃→LeRobot v3)
@@ -61,6 +62,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TA.CUBE.STATE_MACHINE done — `pick_cube_state_machine.py` 추가, joint command slew limit(`0.01rad/step`) + 느린 gripper close(`0.005rad/step`) + grasp retry(max 3)로 1-cube fixed-spawn pick-and-place 입증; 서버 3cam LeRobot v3 dataset `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_90s_slowlimit_20260604` 생성(2700 frames/90.0s/schema PASS, placed_and_released true) / 다음: no-assist PickCube PPO 재학습(TB.3)
+- [2026-06-04] TA.CUBE.PHYSICS done — `pick_cube_physics_smoke.py` static_usd/settle/grasp_hold pass(`outputs/pick_cube_physics_smoke_after_actuator.json`), leisaac actuator 이식+cube/desk 물성 보정 후 fixture contact hold 검증 / 다음: rule-based state machine gate
 - [2026-06-04] PickCube pivot in_progress — 목표를 PickPen에서 PickCube/cube_task로 전환, 사용자 GUI 카메라 튜닝값은 PickCube cfg에 반영된 상태, 기존 PickPen assisted RL/rollout 결과는 새 목표에서 사용하지 않음 / 다음: `pick_cube_physics_smoke.py`로 물리 gate 후 no-assist 20epoch+ PPO 재학습
 - [2026-06-04] TC.4 local GUI teleop camera attach — front camera를 shoulder 링크 자식, wrist camera를 gripper 링크 자식으로 정리하고 `update_latest_camera_pose=True` 적용, shoulder_pan motion smoke에서 front/wrist camera delta 확인, GUI 실행 시 top/front/wrist camera viewport 3개 자동 생성 및 COM5 Leader 연결 확인(PID 14296 → uv 36428 → python 41332/23560) / 다음: 사용자가 viewport와 `C` metadata로 pose/FOV 튜닝
 - [2026-06-04] TC.4 local GUI teleop follow-up — floating desk 원인(`SCENE_OFFSET.z=0.92`) 수정 후 USD 재생성, `pick_pen_joint_teleop.py` 삭제, `teleop_se3_agent.py`를 leisaac-free SO-101 Leader(COM5) GUI teleop/camera capture 진입점으로 교체, `C` 키 PNG+metadata 저장 및 visible GUI 실행(PID 9064 → uv 43348 → python 41052) / 다음: 사용자가 카메라 pose/FOV를 튜닝

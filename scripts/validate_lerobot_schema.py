@@ -34,7 +34,7 @@ EXPECTED_JOINT_NAMES = [
     "gripper.pos",
 ]
 EXPECTED_CAMERAS = ["top", "wrist", "front"]
-EXPECTED_TASK = "pick up the pen and place it in the holder"
+EXPECTED_TASK = "pick up the cube and place it in the bowl"
 
 EXPECTED_CAMERA_INFO = {
     "video.codec": "h264",
@@ -115,7 +115,7 @@ def validate_info(dataset_root: str, errors: list[str]) -> None:
                 )
 
 
-def validate_tasks(dataset_root: str, errors: list[str]) -> None:
+def validate_tasks(dataset_root: str, errors: list[str], expected_task: str = EXPECTED_TASK) -> None:
     """meta/tasks.parquet 검증 (pyarrow 전용)."""
     try:
         import pyarrow.parquet as pq
@@ -153,8 +153,8 @@ def validate_tasks(dataset_root: str, errors: list[str]) -> None:
         errors.append(f"tasks.parquet 행 수 = {len(task_indices)}, 기대: 1")
     if task_indices and task_indices[0] != 0:
         errors.append(f"tasks.parquet task_index = {task_indices[0]}, 기대: 0")
-    if task_texts and task_texts[0] != EXPECTED_TASK:
-        errors.append(f"tasks.parquet 태스크 문자열 = {task_texts[0]!r}, 기대: {EXPECTED_TASK!r}")
+    if task_texts and task_texts[0] != expected_task:
+        errors.append(f"tasks.parquet 태스크 문자열 = {task_texts[0]!r}, 기대: {expected_task!r}")
 
 
 def validate_data_parquet(dataset_root: str, errors: list[str]) -> None:
@@ -366,6 +366,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LeRobot v3 데이터셋 스키마 검증기")
     parser.add_argument("dataset_root", nargs="?", help="데이터셋 루트 경로")
     parser.add_argument("--self-test", action="store_true", help="내부 픽스처로 검증기 동작 확인")
+    parser.add_argument("--expected-task", default=EXPECTED_TASK, help="tasks.parquet에 기대하는 task 문자열")
     args = parser.parse_args()
 
     if args.self_test:
@@ -383,7 +384,7 @@ def main() -> None:
 
     errors: list[str] = []
     validate_info(root, errors)
-    validate_tasks(root, errors)
+    validate_tasks(root, errors, expected_task=args.expected_task)
     validate_data_parquet(root, errors)
 
     if errors:

@@ -12,6 +12,34 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — PickCube rule-based state machine 성공 + 3cam dataset 저장)
+
+- **목표**: 강화학습(TB.3) 전에 cube_desk/PickCube 씬이 물리적으로 pick-and-place 가능한지 rule-based state machine으로 입증하고, 사용자가 볼 수 있는 LeRobot v3 3-camera dataset을 저장한다.
+- **상태**: 완료. `TA.CUBE.PHYSICS`와 `TA.CUBE.STATE_MACHINE` gate 통과. 다음은 no-assist PickCube PPO 재학습(TB.3).
+- **핵심 구현**:
+  - 신규 `scripts/environments/pick_cube_state_machine.py`.
+  - random-FK waypoint joint-position state machine. 목표 EE는 leisaac jaw detection frame과 같은 `jaw + quat(jaw) * (-0.021, -0.070, 0.020)`.
+  - 로봇팔이 너무 빠르게 움직이지 않도록 command target slew limit 추가: arm `0.01 rad/step`, gripper `0.005 rad/step`.
+  - Feetech/Isaac low-stiffness PD가 target을 늦게 따라오는 점을 반영해 `command_settle_steps=200`.
+  - 물리 smoke의 성공 조건과 맞춰 gripper close target은 `0.0`으로 확정(`0.4`는 JointPositionAction 경로에서 너무 덜 닫힘).
+  - 접촉이 비결정적으로 밀리는 경우가 있어 `max_grasp_attempts=3` retry loop 추가. lift 후 cube z가 `DESK_TOP_Z+0.08`를 넘지 않으면 open/settle 후 현재 cube pose 기준 재시도.
+  - 같은 스크립트가 LeRobot v3 writer를 내장해 `action`, `observation.state`, `observation.images.{top,wrist,front}` h264 mp4, parquet/meta/stats를 저장한다.
+- **서버 검증 결과** (`/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`):
+  - WIP 30초 dataset(실패 동작, 사용자 중간점검용): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_wip_30s_slow_20260604`, 900 frames/30s, 3cam video, schema PASS, state_machine_status failed.
+  - 성공 proof JSON(이전 제한값): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_retry_probe_20260604.json`, placed_and_released true. Attempt1 grasp false → Attempt2 grasp true.
+  - 성공 proof JSON(느린 제한값): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_slowlimit_probe_20260604.json`, placed_and_released true, controller arm `0.01`, gripper `0.005`, trace step 합계 1993.
+  - 성공 3cam dataset(느린 제한값): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_90s_slowlimit_20260604`, 2700 frames/90.0s, 3cam mp4(top/wrist/front) 생성, `scripts/validate_lerobot_schema.py` PASS, state_machine_status passed, placed_and_released true.
+  - 성공 run 요약(느린 dataset): final `Cube1` inside bowl true, final cube world `[2.21848, -0.19331, 0.798]`, final bowl world `[2.20002, -0.1699, 0.76656]`.
+- **검증기 변경**: `scripts/validate_lerobot_schema.py` 기본 task 문자열을 North Star PickCube `"pick up the cube and place it in the bowl"`로 변경하고, 옛 PickPen 검증이 필요하면 `--expected-task`로 override 가능하게 했다. `--self-test` 통과.
+- **주의**:
+  - 로컬 Windows headless+camera는 `Hydra/RTX viewport` access violation이 재현되어 dataset 생성은 서버에서 수행했다. GUI 경로는 별도.
+  - 서버와 로컬 worktree에 사용자가 수정한 `env/groot.env`/`env/smolvla.env` 변경이 있어 이번 커밋에서 제외해야 한다.
+- **다음 명령**:
+  - TB.3 재학습 전 확인: `rg -n "grasp_assist|soft_grasp|place_assist|disable_grasp" src scripts -g"*.py"` 가 state machine 외 보조 코드 0건인지 확인.
+  - TB.3 train: `UV_PROJECT_ENVIRONMENT=/DISK1/so101-sim2real/venvs/isaac /home/konan147/.local/bin/uv run --group isaac --locked python scripts/reinforcement_learning/train.py --task SimToReal-SO101-PickCube-v0 --num_envs 2048 --max_iterations 200 --num_learning_epochs 20 --device cuda:0 --checkpoint_dir /DISK1/so101-sim2real/outputs/<run_name>`.
+
+---
+
 ## 작업 인계 (2026-06-04 — grasp 물리 재점검 + leisaac actuator 이식)
 
 - **계기**: GUI teleop 녹화에서 ①큐브가 그리퍼 몸체에 박힘 ②잡혀야 할 때 미끄러짐 ③들어올릴 때 떨어짐. 큐브/매트/책상/로봇팔 물리·충돌 전면 재점검 요청.
