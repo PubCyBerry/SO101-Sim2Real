@@ -12,6 +12,31 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — TB.4 staged curriculum 진행)
+
+- **목표**: corrected dynamic Bowl 기준 PickCube TB.4 curriculum을 작은 단계로 확장한다.
+- **상태**: 진행 중. 현재 best는 `active_objects=1`, `object_radius_scale=0.25`, `container_angle_scale=0.25` gate 통과. `0.35+`는 아직 실패.
+- **전략**:
+  - BC warm-start는 폐기하고, clean TB.3 best에서 낮은 policy std(`--override_policy_std 0.01`)와 낮은 entropy(`0.0002~0.0005`)로 PPO resume.
+  - 큰 jump 대신 `Bowl 0.05 → 0.10 → 0.25`, 이후 object scale을 별도 확대.
+- **성공한 단계/checkpoint**:
+  - Bowl `0.05`, object fixed: `/DISK1/so101-sim2real/outputs/tb4_pickcube_bowl005_std001_from550_4096_20260605/model_575.pt`, deterministic 107/128(0.8359).
+  - Bowl `0.10`, object fixed: `/DISK1/so101-sim2real/outputs/tb4_pickcube_bowl010_std001_from575_4096_20260605/model_649.pt`, deterministic 99/128(0.7734).
+  - Bowl `0.25`, object fixed: `/DISK1/so101-sim2real/outputs/tb4_pickcube_bowl025_std001_from649_4096_20260605/model_698.pt`, deterministic 103/128(0.8047).
+  - object `0.10` + Bowl `0.25`: `/DISK1/so101-sim2real/outputs/tb4_pickcube_obj010_bowl025_std001_from698_4096_20260605/model_747.pt`, deterministic 128/128(1.0).
+  - object `0.25` + Bowl `0.25`: `/DISK1/so101-sim2real/outputs/tb4_pickcube_obj025_bowl025_std001_from698_short_4096_20260605/model_706.pt`, deterministic 103/128(0.8047). **현재 best / 다음 출발점**.
+- **실패/주의**:
+  - object `0.35` + Bowl `0.35`: best 77/128(0.6016).
+  - object `0.35` + Bowl `0.25`: baseline 87/128(0.6797), short fine-tune best 84/128(0.6562).
+  - object `0.25` + Bowl `0.35`: 81/128(0.6328).
+  - object+Bowl `0.50`: 54/128(0.4219).
+  - 결론: 다음 병목은 object/Bowl scale 0.35 이상이며, 특히 Bowl 0.35가 더 어렵다. 단순 PPO 50-iter fine-tune은 drift가 잦으니 0.30 또는 축 분리 + 짧은 저장 주기 유지.
+- **다음**:
+  - `model_706.pt`에서 `object_radius_scale=0.30`, `container_angle_scale=0.25` 또는 `object=0.25`, `Bowl=0.30`을 먼저 평가/짧은 fine-tune.
+  - 0.35를 다시 시도할 때는 50-iter 장기 run보다 1~5 iter 단위 저장/평가 또는 LR `2e-6~5e-6`을 우선한다.
+
+---
+
 ## 작업 인계 (2026-06-05 — TB.4 BC warm-start 시도와 폐기)
 
 - **목표**: dynamic Bowl target 정정 뒤 PPO-only continuation이 하락하므로, state-machine expert trajectory로 ActorCritic actor를 BC warm-start해 TB.4 재개 후보를 만든다.
