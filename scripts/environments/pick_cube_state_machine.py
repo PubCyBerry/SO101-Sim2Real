@@ -443,7 +443,7 @@ class ExpertTrajectoryRecorder:
             obs = torch.stack(self.obs, dim=0)
             actions = torch.stack(self.actions, dim=0)
         else:
-            obs = torch.empty((0, 37), dtype=torch.float32)
+            obs = torch.empty((0, 43), dtype=torch.float32)
             actions = torch.empty((0, 6), dtype=torch.float32)
 
         meta = {

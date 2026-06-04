@@ -346,7 +346,7 @@ class PickCubeObservationsCfg:
     Groups:
       policy      — 6-dim joint pos (North Star contract, immutable).
       subtask_terms — per-cube placement signals.
-      rl_policy   — TB.3 privileged state (37-dim) for RL actor/critic.
+      rl_policy   — TB.3 privileged state (43-dim) for RL actor/critic.
                     Does NOT contain the policy group; use obs_groups in train.py
                     to map both policy and critic to rl_policy.
     """
@@ -416,7 +416,7 @@ class PickCubeObservationsCfg:
 
     @configclass
     class RlPolicyCfg(ObsGroup):
-        """TB.3 privileged state for RL training (37-dim, concatenated).
+        """TB.3 privileged state for RL training (43-dim, concatenated).
 
         Includes joint pos, gripper body pos, all cube/bowl positions relative to env
         origin, gripper→cube relative vectors, and gripper open fraction.

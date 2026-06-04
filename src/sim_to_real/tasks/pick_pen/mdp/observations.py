@@ -10,8 +10,8 @@ Three families live here:
   sub-phase has an independent pass/fail signal even when the gripper
   command is wrong.
 - *RL state* (``rl_state``) — privileged full state for RL training: joint pos,
-  jaw-offset grasp point position, all pen/cup positions, relative vectors. Does NOT
-  depend on FrameTransformer or ee_frame.
+  slew-limited action target, jaw-offset grasp point position, all pen/cup positions,
+  relative vectors. Does NOT depend on FrameTransformer or ee_frame.
 """
 
 from __future__ import annotations
@@ -161,6 +161,45 @@ def ee_near_pen(
     return torch.linalg.vector_norm(pen_pos - jaw_pos, dim=1) < distance_threshold
 
 
+def _get_action_term(env: ManagerBasedRLEnv | DirectRLEnv, term_name: str):
+    """ActionManager에서 term을 방어적으로 찾는다."""
+    action_manager = getattr(env, "action_manager", None)
+    if action_manager is None:
+        return None
+
+    get_term = getattr(action_manager, "get_term", None)
+    if callable(get_term):
+        try:
+            return get_term(term_name)
+        except Exception:
+            pass
+
+    for attr_name in ("_terms", "_action_terms"):
+        terms = getattr(action_manager, attr_name, None)
+        if isinstance(terms, dict) and term_name in terms:
+            return terms[term_name]
+
+    return None
+
+
+def _current_action_target(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    joint_pos: torch.Tensor,
+    term_name: str,
+) -> torch.Tensor:
+    """현재 action term target을 반환하고, 접근 실패 시 joint_pos로 대체한다."""
+    term = _get_action_term(env, term_name)
+    if term is None:
+        return joint_pos
+
+    for attr_name in ("processed_actions", "_processed_actions", "_limited_actions"):
+        value = getattr(term, attr_name, None)
+        if isinstance(value, torch.Tensor) and value.shape == joint_pos.shape:
+            return value
+
+    return joint_pos
+
+
 # ---------------------------------------------------------------------------
 # RL privileged state (TB.3) — no FrameTransformer dependency
 # ---------------------------------------------------------------------------
@@ -172,24 +211,29 @@ def rl_state(
     pen_names: Sequence[str] = ("PenWhite", "PenGray", "PenBlack", "PenBlue"),
     cup_name: str = "PenCup",
     gripper_body_name: str = "gripper",
+    action_term_name: str = "arm",
 ) -> torch.Tensor:
     """Privileged state vector for RL training.
 
-    Shape: (num_envs, D) where D = 6 + 3 + 4*3 + 3 + 4*3 + 1 = 37.
+    Shape: (num_envs, D) where D = 6 + 6 + 3 + 4*3 + 3 + 4*3 + 1 = 43.
 
     Breakdown (all positions are env-origin-relative):
       [0:6]   robot joint positions in SO-101 order (rad)
-      [6:9]   jaw-offset grasp point position (m)
-      [9:21]  pen positions, 4×3 in pen_names order (m)
-      [21:24] cup position (m)
-      [24:36] grasp point→pen relative vectors, 4×3 (m)
-      [36]    gripper joint pos normalised to [0,1] (open fraction)
+      [6:12]  current processed joint target in SO-101 order (rad)
+      [12:15] jaw-offset grasp point position (m)
+      [15:27] pen positions, 4×3 in pen_names order (m)
+      [27:30] cup position (m)
+      [30:42] grasp point→pen relative vectors, 4×3 (m)
+      [42]    gripper joint pos normalised to [0,1] (open fraction)
     """
     robot: Articulation = env.scene[robot_cfg.name]
     origins = env.scene.env_origins  # (N, 3)
 
     # --- joint positions (6) ---
     joint_pos = robot.data.joint_pos  # (N, num_joints)
+
+    # --- current slew-limited action target (6) ---
+    joint_target = _current_action_target(env, joint_pos, action_term_name)
 
     # --- grasp point position relative to env origin (3) ---
     body_names: list[str] = robot.data.body_names
@@ -232,5 +276,5 @@ def rl_state(
     # full-open ≈ 1.0 rad, full-closed ≈ 0.0 rad (Feetech STS3215 limits)
     gripper_open = joint_pos[:, -1:].clamp(0.0, 1.0)  # (N, 1)
 
-    state = torch.cat([joint_pos, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open], dim=-1)
+    state = torch.cat([joint_pos, joint_target, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open], dim=-1)
     return state.float()

@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — speed-cap target 관측 추가 + cap2 실험 폐기)
+
+- **목표**: 로봇팔 target 속도 제한(`1.00 rad/s`) 아래에서 PickCube PPO가 다시 학습 가능하도록 부분관측을 줄인다.
+- **상태**: 코드 적용 및 smoke 통과. 장기 학습은 아직 재시작 전이다. 기존 37-dim checkpoint/BC expert는 새 43-dim `rl_policy`와 호환되지 않으므로 새로 학습해야 한다.
+- **적용 변경**:
+  - `task_mdp.rl_state`: 37-dim → 43-dim. 기존 joint/cube/bowl/relative state 앞쪽에 현재 `arm` action term의 processed joint target 6개를 추가했다.
+  - 목적: `SlewLimitedJointPositionAction`의 내부 target state를 PPO actor/critic이 볼 수 있게 해서, 같은 joint_pos라도 이전 target이 다른 부분관측 문제를 줄인다.
+  - `pick_pen_env_cfg.py`/`pick_cube_env_cfg.py`의 `rl_policy` 설명을 43-dim으로 갱신, `pick_cube_state_machine.py` expert empty fallback도 `(0,43)`으로 갱신.
+- **검증 결과**:
+  - 로컬/서버 `py_compile` 통과.
+  - 서버 `env_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda:0 --steps 5` 통과, Observation Manager에서 `rl_policy shape: (43,)` 확인.
+  - 서버 train smoke `/DISK1/so101-sim2real/outputs/tb4_speedcap_targetobs_train_smoke_20260605`: 4 env × 2 iter 통과, Actor/Critic `Linear(in_features=43, ...)` 확인.
+- **speed-cap 평가 메모**:
+  - cap-aware PPO continuation best deterministic은 `/DISK1/so101-sim2real/outputs/tb4_speedcap_fixed_clip2_from550_4096_20260605/model_645.pt`의 5/128. continuation final `model_804.pt` deterministic 3/128.
+  - stochastic eval `/DISK1/so101-sim2real/outputs/tb4_speedcap_fixed_clip2_stoch_eval_20260605`: model645 std0.05/0.10 = 4/128, model804 std0.05 = 17/128, std0.10 = 12/128.
+  - RL target cap `2.00 rad/s` 실험은 폐기. `/DISK1/so101-sim2real/outputs/tb4_cap2_recovery_eval_20260605`에서 model550 fixed 0/128, model706 obj0.25+Bowl0.25 0/128, model715 obj0.30+Bowl0.2625 0/128, model804 fixed clip2 1/128. 로컬/서버 cap은 다시 `1.00 rad/s`.
+- **다음**:
+  - 43-dim target-observed 환경에서 fixed-spawn PickCube를 새로 학습한다. 기존 checkpoint resume은 shape 불일치라 사용하지 않는다.
+  - 시작 후보: `4096 env`, `clip_actions=2.0`, `active_objects=1`, object/Bowl fixed, `max_iterations 200~300`, `num_learning_epochs>=20`, `init_noise_std 0.5`, `entropy_coef 0.005`.
+
+---
+
 ## 작업 인계 (2026-06-05 — 로봇팔 속도 제한 + TB.4 재평가 필요)
 
 - **목표**: 사용자가 지적한 "로봇팔 움직임이 너무 빠름"을 반영해 PickCube/PickPen 공통 joint-position target 속도를 제한한다.
