@@ -62,6 +62,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TB.4 in_progress — 동적 Bowl 기준 PPO continuation 3종(old model749, clean model550 scale0.25, clean model550 Bowl-only scale0.25)이 모두 baseline 대비 하락; PPO-only continuation 중단 / 다음: state machine expert trajectory 기반 BC/warm-start 설계 및 구현
 - [2026-06-04] TB.4 in_progress — Bowl/PenCup reset 랜덤화 후 reward/termination이 고정 cup xy를 쓰던 버그 수정(`cup_cfg`로 실제 pose 사용), 4096 env PhysX aggregate capacity 256k로 상향; 이전 TB.4 eval은 고정 좌표 기준이라 폐기, 동적 Bowl 기준 baseline model749 scale0.25 stochastic 29/128·scale1.0 11/128 / 다음: `/DISK1/so101-sim2real/outputs/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604` 학습 완료 후 재평가
 - [2026-06-04] TB.4 in_progress — TB.3 best no-assist checkpoint는 `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`, 1-cube fixed eval deterministic 87/128(success_rate 0.6797)·stochastic 81/128(0.6328); fine-tune model600/624는 하락 / 다음: model550에서 spawn/cup curriculum 확대
 - [2026-06-04] TB.3 done — jaw-offset grasp point로 RL obs/reward 정합, PickCube success reward와 termination 조건 일치(`require_open=False`), place/insert shaping 강화, `resume_without_optimizer` 추가; no-assist PPO 20epoch+ checkpoint 산출 및 eval 완료 / 다음: TB.4 커리큘럼

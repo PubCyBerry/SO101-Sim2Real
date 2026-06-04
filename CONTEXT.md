@@ -30,15 +30,16 @@
   - 서버 동일 py_compile 통과.
   - 서버 smoke: `/DISK1/so101-sim2real/outputs/tb4_dynamic_bowl_train_smoke`, 512 env × 2 iter, `status=passed`.
   - 동적 Bowl 기준 기존 model749 baseline: scale0.25 deterministic 20/128·stochastic 29/128, scale1.0 deterministic 9/128·stochastic 11/128. 즉 이전 고정 좌표 TB.4 eval은 gate 근거로 사용 금지.
-- **현재 실행 중(서버)**:
-  - Run: `/DISK1/so101-sim2real/outputs/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604`
-  - Log: `/DISK1/so101-sim2real/logs/rl/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604.log`
-  - PID: `3053264` → Python `3053283`
-  - Command: 4096 env, 200 iterations, active_objects=1, object/container scale=0.25, resume from old `model_749.pt`, LR `1e-4`, entropy `1e-4`, `--resume_without_optimizer`.
-  - 초기 확인: aggregate warning 0건, iteration 757/949 부근 success termination 약 0.12.
+- **PPO continuation 재시도 결과(동적 Bowl 기준)**:
+  - old wrong-target `model_749.pt` → scale0.25, 4096 env, LR `1e-4`: 중단. saved model750/model800 eval stochastic 25/128, 27/128.
+  - clean fixed-spawn `model_550.pt` → object/container scale0.25, 4096 env, LR `5e-5`: 중단. saved model600 eval deterministic 35/128, stochastic 40/128. baseline model550 deterministic 60/128보다 하락.
+  - clean fixed-spawn `model_550.pt` → object fixed + Bowl angle scale0.25, 4096 env, LR `1e-5`: 중단. saved model600 eval deterministic 12/128, stochastic 35/128. baseline model550 deterministic 57/128보다 하락.
+  - 결론: corrected dynamic Bowl target에 대해 PPO continuation만으로는 고정 좌표 local optimum을 벗어나지 못하고 정책을 망가뜨린다.
+- **현재 병렬 조사**:
+  - Explorer `019e9344-c4c0-7db1-9537-f046179eae34`가 state-machine expert trajectory 기반 BC/warm-start 최소 구현 경로를 조사 중.
 - **다음**:
-  - run 완료 후 checkpoints(`model_800`, `model_850`, `model_900`, final)를 동적 Bowl scale0.25에서 deterministic/stochastic 평가.
-  - scale0.25가 안정적으로 ≥0.7이면 scale0.5→0.75→1.0 순서로 재개. full default(4 objects)는 그 다음.
+  - state machine에서 `rl_state` + env action을 저장하는 expert dataset을 만들고, rsl_rl ActorCritic actor를 MSE로 warm-start한 뒤 PPO를 재시작한다.
+  - PPO-only 재시도는 같은 조건에서 더 반복하지 않는다.
 
 ---
 

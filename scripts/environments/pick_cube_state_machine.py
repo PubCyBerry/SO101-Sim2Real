@@ -71,6 +71,7 @@ parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
 parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_state_machine.json"))
 parser.add_argument("--dataset_dir", type=Path, default=None, help="Optional LeRobot v3 episode output directory")
+parser.add_argument("--expert_dataset_pt", type=Path, default=None, help="Optional raw rl_state/action expert dataset (.pt)")
 parser.add_argument("--record_seconds", type=float, default=30.0, help="Seconds to record when --dataset_dir is set")
 parser.add_argument("--overwrite_dataset", action="store_true", help="Replace --dataset_dir if it already exists")
 parser.add_argument("--no_videos", action="store_true", help="Skip camera videos in the LeRobot dataset")
@@ -413,6 +414,71 @@ class LeRobotV3EpisodeRecorder:
         (self.root / "meta" / "stats.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+class ExpertTrajectoryRecorder:
+    """Step-pre expert pairs for BC warm-start.
+
+    LeRobot dataset rows intentionally store post-step observations. BC needs
+    state_t -> action_t, so this recorder is called immediately before
+    env.step(action).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.resolve()
+        self.obs: list[torch.Tensor] = []
+        self.actions: list[torch.Tensor] = []
+        self.phases: list[str] = []
+
+    def record(self, env, action: torch.Tensor, phase: str) -> None:
+        obs = task_mdp.rl_state(
+            env.unwrapped,
+            pen_names=CUBE_NAMES,
+            cup_name=BOWL_NAME,
+        )
+        self.obs.append(obs[0].detach().cpu().to(torch.float32))
+        self.actions.append(action[0, :6].detach().cpu().to(torch.float32))
+        self.phases.append(phase)
+
+    def finalize(self, *, run_result: dict[str, Any]) -> dict[str, Any]:
+        if self.obs:
+            obs = torch.stack(self.obs, dim=0)
+            actions = torch.stack(self.actions, dim=0)
+        else:
+            obs = torch.empty((0, 37), dtype=torch.float32)
+            actions = torch.empty((0, 6), dtype=torch.float32)
+
+        meta = {
+            "task_id": "TA.CUBE.STATE_MACHINE.EXPERT",
+            "status": "passed" if run_result.get("placed_and_released") else "failed",
+            "task": run_result.get("task"),
+            "frames": int(obs.shape[0]),
+            "active_objects": run_result.get("active_objects"),
+            "object_radius_scale": run_result.get("object_radius_scale"),
+            "container_angle_scale": run_result.get("container_angle_scale"),
+            "container_radius_scale": run_result.get("container_radius_scale"),
+            "placed_and_released": run_result.get("placed_and_released"),
+            "final_inside": run_result.get("final_inside"),
+            "controller": run_result.get("controller"),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "obs": obs,
+                "actions": actions,
+                "phases": self.phases,
+                "meta": meta,
+            },
+            self.path,
+        )
+        return {
+            "task_id": "TA.CUBE.STATE_MACHINE.EXPERT",
+            "status": meta["status"],
+            "path": str(self.path),
+            "frames": int(obs.shape[0]),
+            "obs_shape": list(obs.shape),
+            "action_shape": list(actions.shape),
+        }
+
+
 def _round_list(values: torch.Tensor, digits: int = 5) -> list[float]:
     return [round(float(v), digits) for v in values.detach().cpu().flatten().tolist()]
 
@@ -738,6 +804,7 @@ def _phase(
     trace: list[dict[str, Any]],
     command: torch.Tensor,
     recorder: LeRobotV3EpisodeRecorder | None,
+    expert_recorder: ExpertTrajectoryRecorder | None = None,
     *,
     tolerance: float,
 ) -> dict[str, Any]:
@@ -762,6 +829,8 @@ def _phase(
     for step in range(actual_steps):
         action = _joint_position_action(robot, command, q_goal, gripper_target, device)
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
+        if expert_recorder is not None:
+            expert_recorder.record(env, action, name)
         step_out = env.step(action)
         if len(step_out) == 5:
             _obs, _rew, terminated, truncated, _infos = step_out
@@ -802,11 +871,15 @@ def _hold_joint_target(
     steps: int,
     command: torch.Tensor,
     recorder: LeRobotV3EpisodeRecorder | None,
+    expert_recorder: ExpertTrajectoryRecorder | None = None,
+    phase: str = "hold",
 ) -> None:
     robot = env.unwrapped.scene["robot"]
     device = str(target.device)
     for _ in range(max(1, steps)):
         action = _joint_position_action(robot, command, target[:ARM_DOF], gripper_target, device)
+        if expert_recorder is not None:
+            expert_recorder.record(env, action, phase)
         env.step(action)
         if recorder is not None:
             recorder.record(env, action)
@@ -837,6 +910,7 @@ def _run_state_machine(
     device: str,
     active_names: list[str],
     recorder: LeRobotV3EpisodeRecorder | None = None,
+    expert_recorder: ExpertTrajectoryRecorder | None = None,
 ) -> dict[str, Any]:
     scene = env.unwrapped.scene
     robot = scene["robot"]
@@ -846,6 +920,8 @@ def _run_state_machine(
 
     for _ in range(args.settle_steps):
         zero_action = _joint_position_action(robot, command, torch.zeros(ARM_DOF, device=device), args.gripper_open, device)
+        if expert_recorder is not None:
+            expert_recorder.record(env, zero_action, "settle")
         env.step(zero_action)
         if recorder is not None:
             recorder.record(env, zero_action)
@@ -866,6 +942,7 @@ def _run_state_machine(
                 trace,
                 command,
                 recorder,
+                expert_recorder,
                 tolerance=args.target_tolerance,
             )
             _phase(
@@ -878,6 +955,7 @@ def _run_state_machine(
                 trace,
                 command,
                 recorder,
+                expert_recorder,
                 tolerance=args.target_tolerance,
             )
             grasp_target = _target_from_cube(env, cube_name, args.grasp_z_offset)().clone()
@@ -891,6 +969,7 @@ def _run_state_machine(
                 trace,
                 command,
                 recorder,
+                expert_recorder,
                 tolerance=args.target_tolerance,
             )
             _phase(
@@ -905,6 +984,7 @@ def _run_state_machine(
                 trace,
                 command,
                 recorder,
+                expert_recorder,
                 tolerance=args.target_tolerance,
             )
             grasped = _cube_lifted(env, cube_name)
@@ -920,7 +1000,16 @@ def _run_state_machine(
 
             retry_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
             retry_open_steps = max(args.open_steps, args.command_settle_steps // 2)
-            _hold_joint_target(env, retry_hold, args.gripper_open, retry_open_steps, command, recorder)
+            _hold_joint_target(
+                env,
+                retry_hold,
+                args.gripper_open,
+                retry_open_steps,
+                command,
+                recorder,
+                expert_recorder,
+                phase=f"{attempt_prefix}.retry_open",
+            )
             trace.append({
                 "phase": f"{attempt_prefix}.retry_open",
                 "steps": retry_open_steps,
@@ -950,6 +1039,7 @@ def _run_state_machine(
             trace,
             command,
             recorder,
+            expert_recorder,
             tolerance=args.target_tolerance,
         )
         _phase(
@@ -962,19 +1052,38 @@ def _run_state_machine(
             trace,
             command,
             recorder,
+            expert_recorder,
             tolerance=args.target_tolerance,
         )
         # 열 때는 마지막 joint target을 유지한다. 위치 IK가 그릇 안 큐브를 다시
         # 추적하며 건드리지 않도록, release 동안 관절 목표를 고정한다.
         joint_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
-        _hold_joint_target(env, joint_hold, args.gripper_open, args.open_steps, command, recorder)
+        _hold_joint_target(
+            env,
+            joint_hold,
+            args.gripper_open,
+            args.open_steps,
+            command,
+            recorder,
+            expert_recorder,
+            phase=f"{phase_prefix}.open",
+        )
         trace.append({
             "phase": f"{phase_prefix}.open",
             "steps": args.open_steps,
             "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
             "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
         })
-        _hold_joint_target(env, joint_hold, args.gripper_open, args.final_settle_steps, command, recorder)
+        _hold_joint_target(
+            env,
+            joint_hold,
+            args.gripper_open,
+            args.final_settle_steps,
+            command,
+            recorder,
+            expert_recorder,
+            phase=f"{phase_prefix}.final_settle",
+        )
 
         cube_end = scene[cube_name].data.root_pos_w[0].clone()
         trace.append({
@@ -1006,6 +1115,7 @@ def _run_state_machine(
 def main() -> None:
     env = None
     recorder: LeRobotV3EpisodeRecorder | None = None
+    expert_recorder: ExpertTrajectoryRecorder | None = None
     try:
         device: str = args.device
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
@@ -1052,12 +1162,14 @@ def main() -> None:
                 overwrite=args.overwrite_dataset,
                 videos=not args.no_videos,
             )
+        if args.expert_dataset_pt is not None:
+            expert_recorder = ExpertTrajectoryRecorder(args.expert_dataset_pt)
         zero_action = torch.zeros((1, 6), device=device)
         zero_action[0, 5] = args.gripper_open
         for _ in range(max(0, args.warmup_steps)):
             env.step(zero_action)
         active_names = CUBE_NAMES[: args.active_objects]
-        result = _run_state_machine(env, device, active_names, recorder)
+        result = _run_state_machine(env, device, active_names, recorder, expert_recorder)
         passed = bool(result["placed_and_released"])
         payload = {
             "task_id": "TA.CUBE.STATE_MACHINE",
@@ -1084,6 +1196,9 @@ def main() -> None:
         if recorder is not None:
             payload["dataset"] = recorder.finalize(task_name=CUBE_TASK_NAME, run_result=payload)
             recorder = None
+        if expert_recorder is not None:
+            payload["expert_dataset"] = expert_recorder.finalize(run_result=payload)
+            expert_recorder = None
         env.close()
         env = None
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
