@@ -12,6 +12,36 @@
 
 ---
 
+## 작업 인계 (2026-06-04 — TB.4 dynamic Bowl target 정정 + 재학습)
+
+- **목표**: TB.4 PickCube curriculum을 실제 랜덤화된 Bowl pose 기준으로 다시 진행한다.
+- **상태**: 진행 중. 이전 TB.4 eval은 reward/termination이 고정 `BOWL_CENTER_XY`를 목표로 쓴 상태라 폐기한다.
+- **발견한 버그**:
+  - `Bowl`/`PenCup`은 reset event에서 arc 랜덤화되지만, `pick_pen.mdp.rewards`와 `terminations.task_done`은 고정 `cup_center_xy=(2.2,-0.17)`만 사용했다.
+  - scale이 커질수록 정책이 실제 Bowl이 아니라 옛 고정 좌표를 향하게 되어, 고정 좌표 기준 eval은 높아도 실제 Bowl 기준 eval은 낮았다.
+- **적용 변경**:
+  - `src/sim_to_real/tasks/pick_pen/mdp/rewards.py`: optional `cup_cfg` 추가. 전달되면 `RigidObject.root_pos_w - env_origins`의 실제 cup/bowl xy를 사용하고, 없으면 기존 고정 좌표 fallback.
+  - `src/sim_to_real/tasks/pick_pen/mdp/terminations.py`: `task_done(..., cup_cfg=...)` 추가.
+  - `pick_cube_env_cfg.py`: 모든 cup/bowl reward와 termination params에 `SceneEntityCfg(BOWL_NAME)` 전달.
+  - `pick_pen_env_cfg.py`: shared MDP 회귀 방지를 위해 모든 cup reward와 termination params에 `SceneEntityCfg(PEN_CUP_NAME)` 전달.
+  - 4096 env PPO에서 PhysX `totalAggregatePairsCapacity` 요구량이 134k까지 올라가 `gpu_total_aggregate_pairs_capacity = 256 * 1024`로 상향(PickPen/PickCube 공통), `docs/TROUBLESHOOTING.md` 갱신.
+- **검증 결과**:
+  - 로컬 `uv run python -m py_compile src\sim_to_real\tasks\pick_cube\pick_cube_env_cfg.py src\sim_to_real\tasks\pick_pen\pick_pen_env_cfg.py src\sim_to_real\tasks\pick_pen\mdp\rewards.py src\sim_to_real\tasks\pick_pen\mdp\terminations.py` 통과.
+  - 서버 동일 py_compile 통과.
+  - 서버 smoke: `/DISK1/so101-sim2real/outputs/tb4_dynamic_bowl_train_smoke`, 512 env × 2 iter, `status=passed`.
+  - 동적 Bowl 기준 기존 model749 baseline: scale0.25 deterministic 20/128·stochastic 29/128, scale1.0 deterministic 9/128·stochastic 11/128. 즉 이전 고정 좌표 TB.4 eval은 gate 근거로 사용 금지.
+- **현재 실행 중(서버)**:
+  - Run: `/DISK1/so101-sim2real/outputs/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604`
+  - Log: `/DISK1/so101-sim2real/logs/rl/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604.log`
+  - PID: `3053264` → Python `3053283`
+  - Command: 4096 env, 200 iterations, active_objects=1, object/container scale=0.25, resume from old `model_749.pt`, LR `1e-4`, entropy `1e-4`, `--resume_without_optimizer`.
+  - 초기 확인: aggregate warning 0건, iteration 757/949 부근 success termination 약 0.12.
+- **다음**:
+  - run 완료 후 checkpoints(`model_800`, `model_850`, `model_900`, final)를 동적 Bowl scale0.25에서 deterministic/stochastic 평가.
+  - scale0.25가 안정적으로 ≥0.7이면 scale0.5→0.75→1.0 순서로 재개. full default(4 objects)는 그 다음.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.3 PickCube no-assist PPO checkpoint 선별)
 
 - **목표**: rule-based state machine으로 cube_desk pick-and-place 가능성을 확인했으므로, grab/teleport assist 없이 PickCube state-based PPO 전문가를 다시 학습하고 TB.4 커리큘럼 시작 checkpoint를 고른다.

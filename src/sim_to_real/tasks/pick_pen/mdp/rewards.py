@@ -61,17 +61,33 @@ def _pen_pos_w(env: ManagerBasedRLEnv, pen_cfg: SceneEntityCfg) -> torch.Tensor:
     return pen.data.root_pos_w
 
 
+def _cup_xy(
+    env: ManagerBasedRLEnv,
+    cup_center_xy: tuple[float, float],
+    cup_cfg: SceneEntityCfg | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """컵/그릇 xy를 env-local frame으로 반환한다."""
+    if cup_cfg is not None:
+        cup: RigidObject = env.scene[cup_cfg.name]
+        local = cup.data.root_pos_w - env.scene.env_origins
+        return local[:, 0], local[:, 1]
+
+    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
+    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    return cx, cy
+
+
 def _pen_inside_cup_mask(
     env: ManagerBasedRLEnv,
     pen_pos: torch.Tensor,
     cup_center_xy: tuple[float, float],
     radius: float,
     height_range: tuple[float, float],
+    cup_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """펜이 컵 안에 있는지 여부, shape (num_envs,) bool."""
     local_pos = pen_pos - env.scene.env_origins
-    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
-    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
     inside_xy = torch.hypot(local_pos[:, 0] - cx, local_pos[:, 1] - cy) < radius
     above = local_pos[:, 2] > (_DESK_TOP_Z + height_range[0])
     below = local_pos[:, 2] < (_DESK_TOP_Z + height_range[1])
@@ -94,6 +110,7 @@ def reach_reward(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     reach_range: float = 0.30,
@@ -111,7 +128,7 @@ def reach_reward(
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
         dist = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
-        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
         # 배치된 펜은 reach_range 로 마스킹 (탐색 대상 제외)
         masked = torch.where(placed, torch.full_like(dist, reach_range), dist)
         per_pen_dists.append(masked)
@@ -133,6 +150,7 @@ def grasp_bonus(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     diff_threshold: float = 0.07,
@@ -157,7 +175,7 @@ def grasp_bonus(
         pen_local_z = pen_pos[:, 2] - env.scene.env_origins[:, 2]
         lifted = pen_local_z > (_DESK_TOP_Z + lift_min)
         dist = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
-        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
         near = dist < diff_threshold
         total = total + (near & gripper_closed & lifted & ~placed).float()
     return total
@@ -173,6 +191,7 @@ def carry_pen(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     lift_min: float = 0.02,
@@ -191,8 +210,7 @@ def carry_pen(
     gripper_closed = robot.data.joint_pos[:, -1] < close_threshold
     ee_pos = _get_gripper_pos(env, robot_cfg)
 
-    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
-    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
     total = torch.zeros(env.num_envs, device=env.device)
 
     for cfg in cfgs:
@@ -203,7 +221,7 @@ def carry_pen(
         lifted = pen_local_z > (_DESK_TOP_Z + lift_min)
         dist_ee = torch.linalg.vector_norm(pen_pos - ee_pos, dim=1)
         near = dist_ee < diff_threshold
-        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        placed = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
 
         xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
         xy_rew = torch.clamp(1.0 - xy_dist / max(carry_range, 1e-6), 0.0, 1.0)
@@ -250,6 +268,7 @@ def transport_reward(
     env: ManagerBasedRLEnv,
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     lift_height: float = 0.05,
     transport_range: float = 0.40,
 ) -> torch.Tensor:
@@ -258,8 +277,7 @@ def transport_reward(
     들어올린 펜만 계산. cup 반경 이내면 펜 당 1.0.
     """
     cfgs = _make_pen_cfgs(pen_cfgs)
-    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
-    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
     total = torch.zeros(env.num_envs, device=env.device)
 
     for cfg in cfgs:
@@ -282,6 +300,7 @@ def place_height_reward(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     target_height: float = 0.07,
@@ -304,8 +323,7 @@ def place_height_reward(
     gripper_closed = robot.data.joint_pos[:, -1] < close_threshold
     ee_pos = _get_gripper_pos(env, robot_cfg)
 
-    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
-    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
     total = torch.zeros(env.num_envs, device=env.device)
 
     for cfg in cfgs:
@@ -337,6 +355,7 @@ def insert_reward(
     env: ManagerBasedRLEnv,
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
 ) -> torch.Tensor:
@@ -346,7 +365,7 @@ def insert_reward(
 
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
-        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
         total = total + inside.float()
     return total
 
@@ -361,6 +380,7 @@ def release_bonus(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     open_threshold: float = 0.60,
@@ -373,7 +393,7 @@ def release_bonus(
 
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
-        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
         total = total + (inside & gripper_open).float()
     return total
 
@@ -388,6 +408,7 @@ def task_success_bonus(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     pen_cfgs: list[SceneEntityCfg] | None = None,
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
     open_threshold: float = 0.60,
@@ -401,7 +422,7 @@ def task_success_bonus(
 
     for cfg in cfgs:
         pen_pos = _pen_pos_w(env, cfg)
-        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range)
+        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
         all_placed = all_placed & inside
 
     if require_open:

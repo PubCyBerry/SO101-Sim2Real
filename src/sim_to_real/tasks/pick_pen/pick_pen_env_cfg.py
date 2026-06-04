@@ -550,6 +550,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -560,6 +561,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -570,6 +572,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -583,7 +586,10 @@ class PickPenRewardsCfg:
     transport_pen = RewTerm(
         func=task_mdp.transport_reward,
         weight=8.0,
-        params={"cup_center_xy": PEN_CUP_CENTER_XY},
+        params={
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+        },
     )
 
     # Stage 4.5: 컵 XY 근처에서 컵 안 높이로 낮추기 (밀집)
@@ -593,6 +599,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -600,7 +607,10 @@ class PickPenRewardsCfg:
     insert_pen = RewTerm(
         func=task_mdp.insert_reward,
         weight=25.0,
-        params={"cup_center_xy": PEN_CUP_CENTER_XY},
+        params={
+            "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+        },
     )
 
     # Stage 6: 컵 안 + 그리퍼 열림 완료 (밀집, 배치된 펜 수)
@@ -610,6 +620,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -620,6 +631,7 @@ class PickPenRewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
         },
     )
 
@@ -647,6 +659,7 @@ class PickPenTerminationsCfg:
         params={
             "pens_cfg": [SceneEntityCfg(name) for name in PEN_NAMES],
             "cup_center_xy": PEN_CUP_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
             "require_rest_pose": False,  # rest-pose check is TA.1 territory
         },
     )
@@ -710,8 +723,8 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        # 2048+ env PPO에서 aggregate pair가 18k를 넘는다. 64k로 여유 확보.
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
+        # 4096 env PPO에서 aggregate pair가 134k 근처까지 올라간다. 256k로 여유 확보.
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 256 * 1024
 
 
 # ---------------------------------------------------------------------------

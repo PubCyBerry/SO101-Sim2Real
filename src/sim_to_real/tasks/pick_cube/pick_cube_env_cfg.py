@@ -455,6 +455,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
         },
@@ -468,6 +469,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
         },
@@ -481,6 +483,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
         },
@@ -502,6 +505,7 @@ class PickCubeRewardsCfg:
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
         },
     )
 
@@ -513,6 +517,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
             "require_carry": False,
@@ -526,6 +531,7 @@ class PickCubeRewardsCfg:
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
         },
@@ -539,6 +545,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot"),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
         },
@@ -552,6 +559,7 @@ class PickCubeRewardsCfg:
             "robot_cfg": SceneEntityCfg("robot"),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
             # PickCube termination은 "큐브가 그릇 안에 있음"과 일치한다.
@@ -584,6 +592,7 @@ class PickCubeTerminationsCfg:
         params={
             "pens_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "radius": BOWL_SUCCESS_RADIUS,
             "height_range": BOWL_HEIGHT_RANGE,
             "require_rest_pose": False,  # rest-pose check is TA.1 territory
@@ -649,8 +658,8 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        # 2048+ env PPO에서 aggregate pair가 18k를 넘는다. 64k로 여유 확보.
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
+        # 4096 env PPO에서 aggregate pair가 134k 근처까지 올라간다. 256k로 여유 확보.
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 256 * 1024
 
 
 # ---------------------------------------------------------------------------

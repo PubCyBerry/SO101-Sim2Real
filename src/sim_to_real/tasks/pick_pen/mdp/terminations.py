@@ -20,18 +20,34 @@ def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:
     return (joint_pos.abs() < _REST_THRESHOLD_RAD).all(dim=-1)
 
 
+def _cup_xy(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    cup_center_xy: tuple[float, float],
+    cup_cfg: SceneEntityCfg | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return cup/bowl xy in env-local frame."""
+    if cup_cfg is not None:
+        cup: RigidObject = env.scene[cup_cfg.name]
+        local = cup.data.root_pos_w - env.scene.env_origins
+        return local[:, 0], local[:, 1]
+
+    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
+    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    return cx, cy
+
+
 def task_done(
     env: ManagerBasedRLEnv | DirectRLEnv,
     pens_cfg: list[SceneEntityCfg],
     cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
     radius: float = 0.05,
     height_range: tuple[float, float] = (0.005, 0.18),
     require_rest_pose: bool = True,
 ) -> torch.Tensor:
     """All listed pens are inside the cup footprint and the arm is at rest."""
     done = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
-    cx = torch.full((env.num_envs,), cup_center_xy[0], device=env.device)
-    cy = torch.full((env.num_envs,), cup_center_xy[1], device=env.device)
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
 
     for pen_cfg in pens_cfg:
         pen: RigidObject = env.scene[pen_cfg.name]
