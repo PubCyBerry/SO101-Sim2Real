@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — TB.4 BC warm-start 시도와 폐기)
+
+- **목표**: dynamic Bowl target 정정 뒤 PPO-only continuation이 하락하므로, state-machine expert trajectory로 ActorCritic actor를 BC warm-start해 TB.4 재개 후보를 만든다.
+- **상태**: 진행 중. BC warm-start checkpoint는 closed-loop eval 0/128로 폐기. 다음은 `model_550.pt`에서 더 작은 Bowl curriculum으로 PPO를 재시도한다.
+- **적용 변경**:
+  - `scripts/environments/pick_cube_state_machine.py`: `--expert_dataset_pt` 추가. `env.step(action)` 직전 `rl_state(37)`와 raw 6-dim joint-position action, phase를 `.pt`로 저장한다.
+  - `scripts/reinforcement_learning/bc_warmstart.py`: rsl_rl ActorCritic actor를 expert MSE로 warm-start하고 `model_*.pt` checkpoint를 저장한다.
+  - BC target은 RSL-RL wrapper의 실제 executable action 범위와 맞추기 위해 기본 `--target_clip_actions 1.0`으로 clamp한다. raw expert action 중 전체 13.64%가 `[-1,1]`을 넘었다.
+- **서버 expert dataset**:
+  - 위치: `/DISK1/so101-sim2real/outputs/expert/dynamic_bowl_s025_20260605`
+  - 조건: `active_objects=1`, `object_radius_scale=0.0`, `container_angle_scale=0.25`, `container_radius_scale=1.0`, state-machine slew limit arm `0.01`, gripper `0.005`.
+  - 결과: seed 10,13,14,15,16,17 성공(6개), seed 11/12 실패. 성공 expert frames 합계 16,451(raw), BC 필터 후 14,863 samples.
+- **BC 결과**:
+  - raw-target BC: `/DISK1/so101-sim2real/outputs/tb4_bc_dynamic_bowl_obj0_bowl025_from550_20260605/model_0.pt`, loss 0.00314, deterministic eval 0/128.
+  - clipped-target BC: `/DISK1/so101-sim2real/outputs/tb4_bc_clip_dynamic_bowl_obj0_bowl025_from550_20260605/model_0.pt`, loss 0.00521, deterministic eval 0/128.
+  - 결론: 현재 `rl_policy` 37-dim으로 전체 state-machine phase를 단일 MLP actor에 MSE 모방시키는 BC는 closed-loop에서 실패한다. PPO resume 후보로 사용하지 않는다.
+- **다음**:
+  - BC checkpoint 대신 clean fixed-spawn best `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`에서 시작한다.
+  - Bowl curriculum을 `container_angle_scale=0.05` 또는 `0.10`처럼 더 작게 시작하고, `--resume_without_optimizer`, 낮은 LR(`1e-5`~`3e-5`), 4096 env, `num_learning_epochs>=20`로 재시도한다.
+
+---
+
 ## 작업 인계 (2026-06-04 — TB.4 dynamic Bowl target 정정 + 재학습)
 
 - **목표**: TB.4 PickCube curriculum을 실제 랜덤화된 Bowl pose 기준으로 다시 진행한다.

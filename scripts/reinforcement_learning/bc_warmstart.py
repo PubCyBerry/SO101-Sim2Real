@@ -43,6 +43,12 @@ parser.add_argument("--learning_rate", type=float, default=1e-4)
 parser.add_argument("--epochs", type=int, default=50)
 parser.add_argument("--batch_size", type=int, default=1024)
 parser.add_argument("--max_samples_per_phase", type=int, default=2000)
+parser.add_argument(
+    "--target_clip_actions",
+    type=float,
+    default=1.0,
+    help="Clip expert action targets to the executable RSL-RL action range; <=0 disables clipping.",
+)
 parser.add_argument("--exclude_phase_contains", nargs="*", default=["settle"])
 parser.add_argument("--require_success", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--active_objects", "--active_pens", dest="active_objects", type=int, default=1, choices=[1, 2, 3, 4])
@@ -190,6 +196,9 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         obs_cpu, actions_cpu, phases, metas = _load_expert_dataset(args.expert_dataset_pt)
+        if args.target_clip_actions > 0:
+            clip = abs(args.target_clip_actions)
+            actions_cpu = actions_cpu.clamp(-clip, clip)
 
         env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
         _apply_task_curriculum(env_cfg, args)
@@ -238,6 +247,7 @@ def main() -> None:
                 "batch_size": args.batch_size,
                 "learning_rate": args.learning_rate,
                 "final_loss": final_loss,
+                "target_clip_actions": args.target_clip_actions,
                 "phase_hist": phase_hist,
                 "metas": metas,
             },
@@ -261,6 +271,7 @@ def main() -> None:
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "final_loss": final_loss,
+            "target_clip_actions": args.target_clip_actions,
             "phase_hist": phase_hist,
             "base_checkpoint": args.base_checkpoint,
             "curriculum": {

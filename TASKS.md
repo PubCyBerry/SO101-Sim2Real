@@ -62,6 +62,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TB.4 in_progress — state-machine expert `.pt` 6 success/2 fail 생성 후 BC warm-start 2종(raw target·clipped target) 시도, 둘 다 dynamic Bowl deterministic eval 0/128로 폐기; BC target clipping(`--target_clip_actions 1.0`)은 보정으로 유지 / 다음: clean `model_550.pt`에서 Bowl scale 0.05~0.10 소 curriculum PPO 재시도
 - [2026-06-04] TB.4 in_progress — 동적 Bowl 기준 PPO continuation 3종(old model749, clean model550 scale0.25, clean model550 Bowl-only scale0.25)이 모두 baseline 대비 하락; PPO-only continuation 중단 / 다음: state machine expert trajectory 기반 BC/warm-start 설계 및 구현
 - [2026-06-04] TB.4 in_progress — Bowl/PenCup reset 랜덤화 후 reward/termination이 고정 cup xy를 쓰던 버그 수정(`cup_cfg`로 실제 pose 사용), 4096 env PhysX aggregate capacity 256k로 상향; 이전 TB.4 eval은 고정 좌표 기준이라 폐기, 동적 Bowl 기준 baseline model749 scale0.25 stochastic 29/128·scale1.0 11/128 / 다음: `/DISK1/so101-sim2real/outputs/tb4_pickcube_dynamic_bowl_s025_4096_from749_20260604` 학습 완료 후 재평가
 - [2026-06-04] TB.4 in_progress — TB.3 best no-assist checkpoint는 `/DISK1/so101-sim2real/outputs/tb3_pickcube_noassist_1cube_fixed_placeboost_cont_2048_20260604/model_550.pt`, 1-cube fixed eval deterministic 87/128(success_rate 0.6797)·stochastic 81/128(0.6328); fine-tune model600/624는 하락 / 다음: model550에서 spawn/cup curriculum 확대
