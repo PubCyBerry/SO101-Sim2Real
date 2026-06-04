@@ -60,6 +60,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-04] TC.4 midcheck — 사용자 요청으로 2k rollout을 `1024 successes/1514 attempts`에서 kill하고 별도 10 success ep dataset 생성(`/DISK1/so101-sim2real/outputs/tc4_rollout_10ep_midcheck_codex_20260604`), 10 successes/15 attempts/427 frames, schema PASS, 3cam mp4 valid / 다음: visual 점검 후 2k-5k 재생성+HF push
 - [2026-06-04] TC.4 in_progress — 서버 `/DISK1` 여유 3.4T와 GPU 상태 확인 후 최소 목표 2,000 successful episodes로 대량 rollout/HF push 착수, target `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604` / 다음: rollout 완료 후 schema validate + HF dataset push
 - [2026-06-04] TC.3 done — `segmentation_overlay_preview.py` 추가, TA.3 real/sim 3cam PNG로 Squint-style foreground-mask overlay preview 생성, 서버 산출물 `/DISK1/so101-sim2real/outputs/tc3_segmentation_overlay_preview_codex_20260604_v2`, top/front=color mask·wrist=ROI fallback 기록 / 다음: TC.4 2k-5k success rollout + HF push
 - [2026-06-04] TC.2 done — serial 1-env full DR + 3cam rollout 200 success ep 생성(`/DISK1/so101-sim2real/outputs/tc2_rollout_200ep_codex_20260604_0458`), 200 successes/289 attempts/89 failures filtered/10,473 frames, dataset 266MB, validator PASS / 다음: TC.3 optional segmentation overlay

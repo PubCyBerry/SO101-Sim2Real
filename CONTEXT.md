@@ -12,21 +12,23 @@
 
 ---
 
-## 작업 인계 (2026-06-04 — TC.4 대량 rollout 진행 중)
+## 작업 인계 (2026-06-04 — TC.4 대량 rollout 중간 점검)
 
 - **목표**: TC.4 — TC.2에서 검증된 serial 1-env recorder로 최소 목표 2,000 successful episodes를 생성하고 LeRobot v3 validator 통과 후 Hugging Face dataset repo로 push한다.
-- **상태**: 진행 중. 서버 git clean, `/DISK1` 여유 3.4T, GPU는 remote desktop 프로세스 외 heavy workload 없음. `gpu.lock` 파일은 존재하므로 long rollout은 `flock`으로 직렬화해서 실행한다.
+- **상태**: 사용자 중간 점검 요청으로 2,000ep run을 중단하고, 별도 10 successful episodes 검사용 dataset을 완성했다. TC.4 본 목표(2k-5k + HF push)는 아직 미완료/in_progress다.
+- **중단한 run**: `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`는 `1024 successes / 1514 attempts` 시점에서 process tree를 kill했다. recorder가 완료 시점에 parquet/meta를 쓰는 구조라 이 디렉터리는 schema-valid dataset이 아니며 재사용하지 않는다.
 - **대상 산출물**:
-  - Dataset: `/DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
-  - Log: `/DISK1/so101-sim2real/logs/rollout/tc4_rollout_2000ep_codex_20260604.log`
-  - 목표: `episodes=2000`, `max_attempts=5000`, 3-camera h264 videos 포함. 초기 실행은 `max_attempts=3500`이었으나 성공률 변동 여유를 위해 몇 분 뒤 재시작했다.
+  - Midcheck dataset: `/DISK1/so101-sim2real/outputs/tc4_rollout_10ep_midcheck_codex_20260604`
+  - Midcheck log: `/DISK1/so101-sim2real/logs/rollout/tc4_rollout_10ep_midcheck_codex_20260604.log`
+  - Result: 10 successes / 15 attempts / 5 failures filtered / 427 frames, 3-camera h264 videos 포함, size 약 11MB.
 - **검증 계획**:
-  - `scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc4_rollout_2000ep_codex_20260604`
-  - `meta/info.json.total_episodes == 2000`, data parquet rows와 episode parquet rows 확인.
-  - HF push 후 repo URL/commit 또는 `hf` upload 성공 로그 확인.
+  - 완료: `scripts/validate_lerobot_schema.py /DISK1/so101-sim2real/outputs/tc4_rollout_10ep_midcheck_codex_20260604` PASS.
+  - 완료: `meta/info.json.total_episodes == 10`, `total_frames == 427`; 3개 mp4 모두 h264 640x480 30fps, 427 frames.
+  - 남은 TC.4 본 검증: 2k-5k dataset 재생성 후 `validate_lerobot_schema.py`, episode/frame rows 확인, HF push.
 - **주의**:
   - `scripts/author_pick_pen_scene.py`는 사용자 추가 untracked 참고 파일이므로 TC.4 상태 커밋에 포함하지 않는다.
   - TC.1 recorder는 top/front world-absolute camera 제약 때문에 `num_envs=1` serial로 실행한다.
+  - 다음 2k 재시작 전에는 recorder에 `--checkpoint_every_episodes` 같은 periodic flush/finalize 옵션을 추가하면 중간 점검/재개성이 좋아진다.
 
 ---
 
