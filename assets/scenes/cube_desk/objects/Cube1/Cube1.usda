@@ -51,7 +51,7 @@ def Xform "Cube1" (
     )
     {
         bool physics:collisionEnabled = 1
-        float physxCollision:contactOffset = 0.004
+        float physxCollision:contactOffset = 0.002
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
         float physxCollision:minTorsionalPatchRadius = 0.001

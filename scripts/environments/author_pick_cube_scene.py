@@ -59,18 +59,22 @@ CUBES = (
 BOWL_LOCAL: tuple[float, float, float] = (0.0, 0.40, 0.006)
 
 # 큐브와 그릇 물리 상수
-# mass: 35 g — 폼보다 무겁게 잡아 grasp 가 안정적이면서 SO-101 gripper 토크(1.5 Nm)
+# mass: 35 g — 폼보다 무겁게 잡아 grasp 가 안정적이면서 SO-101 gripper 토크
 #   안에서 충분히 들어올려진다. 6 g 처럼 너무 가벼우면 빠른 가속 시 contact 가 끊겨
 #   잘 잡아도 떨어진다.
 CUBE_MASS: float = 0.035  # kg
-# contactOffset: 그리퍼가 빠르게 접근할 때 한 step 안에 큐브를 관통하는 문제를 막기
-#   위해 contact 를 더 일찍(4 mm) 생성한다. 0.0015 는 빠른 동작에서 관통이 발생.
-CUBE_CONTACT_OFFSET = 0.004
-CUBE_COLLISION_MARGIN = 0.001
+
+# 정적·두꺼운 콜라이더 기본 contactOffset: 빠른 접근에서 한 step 관통을 막도록
+#   contact 를 4 mm 일찍 생성한다. 책상/매트/그릇처럼 두꺼운 면에 적용.
+CONTACT_OFFSET_DEFAULT = 0.004
+
+# 큐브(grasp 대상) 전용 contactOffset. 4 mm 는 그리퍼 손가락 콜라이더 offset 과
+#   합산되어 큐브가 표면에서 ~1 cm 떨어진 채 contact 가 trigger 되는 "거리 두고
+#   잡힘"을 유발한다. 2 mm 로 줄여 실제 표면 근처에서 접촉이 생기게 한다
+#   (큐브 CCD + solverPositionIterationCount 32 가 관통을 방어).
+CUBE_CONTACT_OFFSET = 0.002
 
 BOWL_MASS: float = 0.15  # kg, 동적 그릇
-BOWL_CONTACT_OFFSET = 0.0015
-BOWL_COLLISION_MARGIN = 0.001
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +175,18 @@ def _collision_api(level: int, *, contact_tuning: bool) -> str:
     return ' (\n' + f"{'    ' * (level + 1)}prepend apiSchemas = [{schemas_text}]\n{'    ' * level})"
 
 
-def _collision_attrs(lines: list[str], level: int, *, contact_tuning: bool, enabled: bool = True) -> None:
+def _collision_attrs(
+    lines: list[str],
+    level: int,
+    *,
+    contact_tuning: bool,
+    enabled: bool = True,
+    contact_offset: float = CONTACT_OFFSET_DEFAULT,
+) -> None:
     _block(lines, level, f"bool physics:collisionEnabled = {1 if enabled else 0}")
     if not contact_tuning:
         return
-    _block(lines, level, f"float physxCollision:contactOffset = {_num(CUBE_CONTACT_OFFSET)}")
+    _block(lines, level, f"float physxCollision:contactOffset = {_num(contact_offset)}")
     _block(lines, level, "float physxCollision:restOffset = 0")
     _block(lines, level, f"float physxCollision:torsionalPatchRadius = {_num(0.004)}")
     _block(lines, level, "float physxCollision:minTorsionalPatchRadius = 0.001")
@@ -196,13 +207,20 @@ def _cube(
     physics_material_path: str | None = None,
     contact_tuning: bool = False,
     collision_enabled: bool = True,
+    contact_offset: float = CONTACT_OFFSET_DEFAULT,
 ) -> None:
     _block(lines, level, f'def Cube "{name}"{_collision_api(level, contact_tuning=contact_tuning) if collision else ""}')
     _block(lines, level, "{")
     if not visible:
         _block(lines, level + 1, 'token visibility = "invisible"')
     if collision:
-        _collision_attrs(lines, level + 1, contact_tuning=contact_tuning, enabled=collision_enabled)
+        _collision_attrs(
+            lines,
+            level + 1,
+            contact_tuning=contact_tuning,
+            enabled=collision_enabled,
+            contact_offset=contact_offset,
+        )
     _block(lines, level + 1, "double size = 1")
     if material_path is not None:
         _material_binding(lines, level + 1, material_path)
@@ -343,6 +361,7 @@ def author_cube_usda(name: str) -> str:
         collision=True,
         physics_material_path=cube_friction_path,
         contact_tuning=True,
+        contact_offset=CUBE_CONTACT_OFFSET,
     )
     _block(lines, 0, "}")
     return "\n".join(lines) + "\n"
@@ -501,6 +520,7 @@ def author_bowl_usda() -> str:
 def _scene_desk(lines: list[str]) -> None:
     desk_mat = "/Scene/Looks/DeskWood"
     mat_mat = "/Scene/Looks/DeskMat"
+    desk_phys = "/Scene/Looks/DeskFriction"
 
     _block(lines, 1, "# The desk top is shifted so its top face sits at z=0.76 and the legs touch z=0.")
     _cube(
@@ -512,6 +532,7 @@ def _scene_desk(lines: list[str]) -> None:
         material_path=desk_mat,
         collision=True,
         contact_tuning=True,
+        physics_material_path=desk_phys,
     )
     for name, pos in (
         ("DeskLegBackLeft", (-0.52, 0.64, -0.40)),
@@ -529,6 +550,7 @@ def _scene_desk(lines: list[str]) -> None:
         material_path=mat_mat,
         collision=True,
         contact_tuning=True,
+        physics_material_path=desk_phys,
     )
 
 
@@ -566,6 +588,19 @@ def author_scene_usda() -> str:
     for mat_name in ("DeskWood", "DeskMat", "Ceiling"):
         color, roughness, metallic = MATERIALS[mat_name]
         _material(lines, 2, mat_name, "/Scene/Looks", color, roughness, metallic)
+    # 책상 상판/매트용 friction 물리 머티리얼. 미지정 시 PhysX 기본(마찰 ~0.5)이라
+    #   큐브가 면 위에서 미끄러지거나 그릇이 밀릴 수 있다. combine=max 라 상대편
+    #   머티리얼 마찰이 낮아도 이 값이 적용된다(restitution 은 min → 0 유지).
+    _block(lines, 2, 'def Material "DeskFriction" (')
+    _block(lines, 3, 'prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]')
+    _block(lines, 2, ")")
+    _block(lines, 2, "{")
+    _block(lines, 3, "float physics:staticFriction = 0.9")
+    _block(lines, 3, "float physics:dynamicFriction = 0.8")
+    _block(lines, 3, "float physics:restitution = 0")
+    _block(lines, 3, 'uniform token physxMaterial:frictionCombineMode = "max"')
+    _block(lines, 3, 'uniform token physxMaterial:restitutionCombineMode = "min"')
+    _block(lines, 2, "}")
     _block(lines, 1, "}")
 
     _scene_ceiling(lines)

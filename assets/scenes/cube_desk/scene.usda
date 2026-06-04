@@ -46,6 +46,16 @@ def Xform "Scene"
                 token outputs:surface
             }
         }
+        def Material "DeskFriction" (
+            prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
+        )
+        {
+            float physics:staticFriction = 0.9
+            float physics:dynamicFriction = 0.8
+            float physics:restitution = 0
+            uniform token physxMaterial:frictionCombineMode = "max"
+            uniform token physxMaterial:restitutionCombineMode = "min"
+        }
     }
     def Cube "Ceiling"
     {
@@ -67,6 +77,7 @@ def Xform "Scene"
         float physxCollision:minTorsionalPatchRadius = 0.001
         double size = 1
         rel material:binding = </Scene/Looks/DeskWood>
+        rel material:binding:physics = </Scene/Looks/DeskFriction>
         double3 xformOp:translate = (2.2, -0.26, 0.74)
         float3 xformOp:scale = (1.2, 0.78, 0.04)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
@@ -114,6 +125,7 @@ def Xform "Scene"
         float physxCollision:minTorsionalPatchRadius = 0.001
         double size = 1
         rel material:binding = </Scene/Looks/DeskMat>
+        rel material:binding:physics = </Scene/Looks/DeskFriction>
         double3 xformOp:translate = (2.18, -0.22, 0.763)
         float3 xformOp:scale = (1.04, 0.57, 0.006)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]

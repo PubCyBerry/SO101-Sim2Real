@@ -5,10 +5,45 @@
 ## 🧭 North Star (불변 — 매 사이클·compaction 후 재확인)
 
 - **마스터플랜**: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) · **현황**: [`TASKS.md`](TASKS.md)
-- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist,front}` 480×640×3 h264 **fps 30** · task `"pick up the pen and place it in the holder"`.
+- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist,front}` 480×640×3 h264 **fps 30** · task `"pick up the cube and place it in the bowl"`.
 - **자율 계약**: Codex `/goal` 시작 후 **A~E 무인 자율**(묻지 않음). 멈추는 경우는 둘뿐 — F~G 실기기 경계 / 복구불가 블로커(동일 task 3회 재시도 후 우회·기록). 게이트 미통과 task는 done 금지.
 - **복구 프로토콜**: 세션/compaction 직후 ① 마스터플랜 §0·§1·§7 → ② TASKS.md(현재 phase·in_progress·blocked) → ③ 아래 최근 인계 1~2개 순서로 재로드. 추측 금지 — 상태 파일에 없으면 새 task로.
 - **머신**: GPU 중량(Isaac·RL·롤아웃·GR00T) = 서버 konan147(48GB), 산출물 `/DISK1/so101-sim2real`. 경량·실기기·오케스트레이터 = Windows. sync 허브 = `origin`(github PubCyBerry/SO101-Sim2Real).
+
+---
+
+## 작업 인계 (2026-06-04 — grasp 물리 재점검 + leisaac actuator 이식)
+
+- **계기**: GUI teleop 녹화에서 ①큐브가 그리퍼 몸체에 박힘 ②잡혀야 할 때 미끄러짐 ③들어올릴 때 떨어짐. 큐브/매트/책상/로봇팔 물리·충돌 전면 재점검 요청.
+- **진단(핵심)**: 큐브 자체 물성은 양호(해석적 Box=완전 평면, mass 0.035, friction 1.8/1.5, solverPos 32, CCD). **근본 원인은 actuator** — 이전 gripper `stiffness=300 + effort_limit_sim=1.5`는 위치오차 0.3°만에 토크 포화 → leader를 더 닫아도 클램프력이 1.5 Nm를 못 넘어 들어올릴 때 미끄러짐. leisaac은 `stiffness=17.8 + effort=10`이라 오버클로즈할수록 최대 10 Nm까지 그립력이 오른다(convexDecomposition 손가락 line-contact 한계를 강한 클램프로 보완). leisaac grasp "판정"은 물리가 아니라 기하 프록시(EE-jaw frame 2cm + gripper<0.26rad).
+- **적용 변경(사용자 승인)**:
+  - **actuator 전체 이식(PickPen+PickCube 양쪽 `*_env_cfg.py`)**: arm·gripper 모두 `stiffness=17.8 / damping=0.6 / effort_limit_sim=10 / velocity_limit_sim=10`, `enabled_self_collisions=True`, solver iteration 8/1→4/4, `soft_joint_pos_limit_factor=1.0`. = leisaac `SO101_FOLLOWER_CFG` 검증값.
+  - **P3** `author_pick_cube_scene.py`: 큐브 전용 `CUBE_CONTACT_OFFSET=0.002`(이전 0.004), 책상/매트/그릇은 `CONTACT_OFFSET_DEFAULT=0.004` 유지(`_collision_attrs`/`_cube`에 `contact_offset` 파라미터 추가). dead 상수(BOWL_CONTACT_OFFSET 등) 제거.
+  - **P4** 같은 스크립트: `DeskFriction`(static 0.9/dyn 0.8/rest 0/combine max) 물리 머티리얼 추가 → `DeskTop`·`DeskMat`에 bind(이전 미지정→PhysX 기본 ~0.5).
+  - USD 6쌍 재생성 완료, 바이너리 .usd 물리 정합 검증(Cube=0.002, Desk=DeskFriction, Bowl=0.004 유지).
+  - 문서: `docs/GRASP_PHYSICS.md` 신설(leisaac 비교·근거·검증법·트레이드오프), `AGENTS.md` 문서표에 추가.
+- **검증 결과**: `py_compile` 3파일 통과. USD 재생성·정합 검증 OK. **GPU 시뮬 실행 검증(GUI teleop·smoke)은 미실시** — 사용자 GUI 확인 대기.
+- **주의/트레이드오프**: actuator 변경으로 **TA.1 PD 튜닝·TB.3 RL(`model_70.pt`) 당시 동역학과 달라짐** → 기존 체크포인트 재평가 필요. `enabled_self_collisions=True`로 자세별 self-collision 막힘 GUI 확인 필요.
+- **다음**:
+  - `uv run scripts\environments\pick_cube_physics_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda --output_json outputs\pick_cube_physics_smoke.json` (gripper contact hold fixture가 새 actuator로 통과하는지).
+  - GUI teleop으로 grasp 체감(§docs/GRASP_PHYSICS.md §6). 큐브가 여전히 몸체에 박히면 손가락 안쪽 면 box 충돌 패드 추가(robot USD 패치) 검토.
+  - grasp 안정 확인 후 PickCube PPO 재학습(이전 체크포인트 무효).
+
+---
+
+## 작업 인계 (2026-06-04 — PickCube 물리/RL 재시작 정리)
+
+- **목표 전환**: 사용자 지시에 따라 이후 목표를 `pick_pen`/`pen_desk`에서 `pick_cube`/`cube_task`로 전환. 실기기 데이터셋과 맞춰야 하는 feature 계약(action/state 6-dim, 3cam 480×640@30, LeRobot v3 schema)은 유지하고 task 문자열은 `"pick up the cube and place it in the bowl"`로 변경.
+- **상태**: 진행 중. 사용자가 GUI에서 조정한 top/front/wrist 카메라 값은 `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`에 이미 반영되어 있다. 기존 PickPen assisted RL/rollout 결과는 새 목표의 기준으로 사용하지 않는다.
+- **이번 정리**:
+  - PickPen/PickCube 학습 경로의 grab/teleport 보조 event와 CLI 옵션을 제거했다. `pick_pen.mdp.events`에는 보조 event 구현이 남아 있지 않다.
+  - `train.py`/`eval_success.py` 기본 task를 `SimToReal-SO101-PickCube-v0`로 두고 PPO 기본값을 `num_learning_epochs=20`, `num_mini_batches=4`, `max_iterations=200`로 늘렸다.
+  - `rollout_to_lerobot.py`는 PickCube 기본 task, `max_episode_steps=900`, checkpoint 명시 필수로 바꿔 예전 PickPen checkpoint가 실수로 재사용되지 않게 했다.
+  - `scripts/environments/pick_cube_physics_smoke.py`를 추가해 USD static 물성, reset/settle 안정성, gripper contact hold fixture를 RL 전 gate로 확인한다.
+- **다음**:
+  - `uv run scripts\environments\pick_cube_physics_smoke.py --task SimToReal-SO101-PickCube-v0 --num_envs 1 --device cuda --output_json outputs\pick_cube_physics_smoke.json`
+  - gate 실패 시 cube/gripper friction, collision offset/contactOffset, cube mass/damping, actuator effort/drive, gripper geometry를 조정하고 smoke 재실행.
+  - gate 통과 후 서버에서 no-assist PickCube PPO를 20epoch+ 설정으로 재학습하고 `eval_success.py --max_episode_steps 900`으로 평가.
 
 ---
 
