@@ -96,6 +96,12 @@ parser.add_argument(
     help="Object execution order. near_bowl_first reduces incidental collisions in the 4-cube layout.",
 )
 parser.add_argument(
+    "--object_cycles",
+    type=int,
+    default=2,
+    help="Repeat the object order this many times, skipping cubes already inside the bowl.",
+)
+parser.add_argument(
     "--bowl_place_offset_radius",
     type=float,
     default=0.022,
@@ -1123,15 +1129,26 @@ def _run_diff_ik_state_machine(
         if recorder is not None:
             recorder.record(env, action)
 
-    operation_order = _ordered_active_names(env, active_names)
+    operation_order_base = _ordered_active_names(env, active_names)
+    operation_order = operation_order_base * max(1, args.object_cycles)
     trace.append({
         "phase": "operation_order",
+        "base_object_order": operation_order_base,
         "object_order": operation_order,
         "order_mode": args.object_order,
+        "object_cycles": args.object_cycles,
         "bowl_place_offset_radius": args.bowl_place_offset_radius,
     })
 
     for placement_index, cube_name in enumerate(operation_order):
+        if _cube_inside_bowl(env, cube_name, bowl_radius):
+            trace.append({
+                "phase": f"{cube_name.lower()}.skip_inside",
+                "cycle_index": placement_index // max(1, len(operation_order_base)),
+                "inside_bowl": True,
+                "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
+            })
+            continue
         cube_start = scene[cube_name].data.root_pos_w[0].clone()
         phase_prefix = cube_name.lower()
         bowl_offset_xy = _bowl_place_offset(device, placement_index)
@@ -1317,15 +1334,26 @@ def _run_state_machine(
         if recorder is not None:
             recorder.record(env, zero_action)
 
-    operation_order = _ordered_active_names(env, active_names)
+    operation_order_base = _ordered_active_names(env, active_names)
+    operation_order = operation_order_base * max(1, args.object_cycles)
     trace.append({
         "phase": "operation_order",
+        "base_object_order": operation_order_base,
         "object_order": operation_order,
         "order_mode": args.object_order,
+        "object_cycles": args.object_cycles,
         "bowl_place_offset_radius": args.bowl_place_offset_radius,
     })
 
     for placement_index, cube_name in enumerate(operation_order):
+        if _cube_inside_bowl(env, cube_name, bowl_radius):
+            trace.append({
+                "phase": f"{cube_name.lower()}.skip_inside",
+                "cycle_index": placement_index // max(1, len(operation_order_base)),
+                "inside_bowl": True,
+                "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
+            })
+            continue
         cube_start = scene[cube_name].data.root_pos_w[0].clone()
         phase_prefix = cube_name.lower()
         bowl_offset_xy = _bowl_place_offset(device, placement_index)
@@ -1550,6 +1578,7 @@ def main() -> None:
         total_steps = (
             args.settle_steps
             + args.active_objects
+            * max(1, args.object_cycles)
             * max(1, args.max_grasp_attempts)
             * (
                 args.approach_steps
@@ -1559,6 +1588,7 @@ def main() -> None:
                 + args.command_settle_steps * 4
             )
             + args.active_objects
+            * max(1, args.object_cycles)
             * (
                 args.transport_steps
                 + args.place_steps
@@ -1621,6 +1651,7 @@ def main() -> None:
             "retreat_steps": args.retreat_steps,
             "max_grasp_attempts": args.max_grasp_attempts,
             "object_order": args.object_order,
+            "object_cycles": args.object_cycles,
             "bowl_place_offset_radius": args.bowl_place_offset_radius,
             "gripper_open": args.gripper_open,
             "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
