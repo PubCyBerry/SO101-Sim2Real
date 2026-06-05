@@ -67,8 +67,8 @@ _BOWL_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
 #   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
 #   · 포즈/FOV 는 cube_task GUI 튜너와 실제 데이터셋 프레임 기준으로 보정.
-#   · top 은 world frame 절대 좌표, front/wrist 는 각각 shoulder/gripper 링크
-#     자식 prim 의 local offset. num_envs=1 smoke 기준.
+#   · top 은 world frame 절대 좌표, wrist 는 gripper 링크 자식 prim 의 local offset.
+#     num_envs=1 smoke 기준.
 # ---------------------------------------------------------------------------
 
 # 값은 GUI 카메라 튜너(teleop_se3_agent.py)로 보정한 결과. rot 은 모두
@@ -80,11 +80,6 @@ _TOP_CAMERA_POS = (2.2, -0.93, 1.70)
 _TOP_CAMERA_ROT = (0.6124, -0.3536, 0.3536, 0.6124)
 _TOP_CAMERA_TARGET = (2.14, -0.15, 0.76)
 _TOP_CAMERA_FOCAL = 19.0
-
-# front: shoulder_pan 전면부에 붙은 카메라.
-_FRONT_CAM_LOCAL_POS = (-0.03, -0.01, 0.03)
-_FRONT_CAM_LOCAL_ROT = (0.0, 0.0872, 0.9962, 0.0)
-_FRONT_CAMERA_FOCAL = 19.0
 
 # wrist: gripper 위/옆에 강결합된 카메라.
 _WRIST_CAM_LOCAL_POS = (0.0, 0.05, -0.08)
@@ -208,45 +203,35 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
 
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 (선택 주입) — observation.images.{top,front,wrist}
+# 카메라 리그 (선택 주입) — observation.images.{top,wrist}
 # ---------------------------------------------------------------------------
 
 
 def make_pick_cube_camera_cfgs(
     *,
     top_pos: tuple[float, float, float] | None = None,
-    top_rot: tuple[float, float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_local_pos: tuple[float, float, float] | None = None,
-    front_local_rot: tuple[float, float, float, float] | None = None,
-    front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
 ) -> dict[str, TiledCameraCfg]:
-    """top/front/wrist 카메라 cfg 3개를 반환.
+    """top/wrist 카메라 cfg 2개를 반환.
 
     기본 PickCubeSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
     gym.make() 전에 add_pick_cube_cameras() 로 scene cfg 에 주입해서 쓴다.
     각 카메라는 480×640 RGB.
 
-    top 회전: ``top_rot``(world-conv wxyz quat) 우선 → 없고 ``top_target`` 도 없으면
-    보정된 기본 ``_TOP_CAMERA_ROT`` → ``top_target`` 만 주어지면 look_at 계산.
+    top 회전: ``top_target`` 이 주어지면 look_at 계산, 없으면 튜닝된 기본 ``_TOP_CAMERA_ROT``.
     """
 
     top_pos = _TOP_CAMERA_POS if top_pos is None else top_pos
     top_focal = _TOP_CAMERA_FOCAL if top_focal is None else top_focal
-    front_local_pos = _FRONT_CAM_LOCAL_POS if front_local_pos is None else front_local_pos
-    front_local_rot = _FRONT_CAM_LOCAL_ROT if front_local_rot is None else front_local_rot
-    front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
     wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
     wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
     wrist_focal = _WRIST_CAMERA_FOCAL if wrist_focal is None else wrist_focal
 
-    if top_rot is not None:
-        top_quat = top_rot
-    elif top_target is not None:
+    if top_target is not None:
         top_quat = _look_at_quat_world(top_pos, top_target)
     else:
         top_quat = _TOP_CAMERA_ROT
@@ -259,16 +244,8 @@ def make_pick_cube_camera_cfgs(
         focus_distance=1.3,
         clipping_range=(0.1, 6.0),
     )
-    front = _pinhole_camera_cfg(
-        "{ENV_REGEX_NS}/Robot/shoulder/FrontCamera",
-        front_local_pos,
-        front_local_rot,
-        front_focal,
-        focus_distance=0.6,
-        clipping_range=(0.05, 6.0),
-    )
-    # front/wrist: robot 링크의 자식 prim → 각 링크 회전을 따라 이동/회전한다.
-    # pos/rot 은 해당 부모 링크 local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
+    # wrist: robot 링크의 자식 prim → gripper 회전을 따라 이동/회전한다.
+    # pos/rot 은 gripper local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
     wrist = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
         wrist_local_pos,
@@ -277,24 +254,20 @@ def make_pick_cube_camera_cfgs(
         focus_distance=0.2,
         clipping_range=(0.02, 3.0),
     )
-    return {"top_camera": top, "front_camera": front, "wrist_camera": wrist}
+    return {"top_camera": top, "wrist_camera": wrist}
 
 
 def add_pick_cube_cameras(
     scene_cfg: PickCubeSceneCfg,
     *,
     top_pos: tuple[float, float, float] | None = None,
-    top_rot: tuple[float, float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_local_pos: tuple[float, float, float] | None = None,
-    front_local_rot: tuple[float, float, float, float] | None = None,
-    front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
 ) -> PickCubeSceneCfg:
-    """카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
+    """top/wrist 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
 
     InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
     gym.make() 시 센서로 등록된다.
@@ -302,12 +275,8 @@ def add_pick_cube_cameras(
 
     for name, cam_cfg in make_pick_cube_camera_cfgs(
         top_pos=top_pos,
-        top_rot=top_rot,
         top_target=top_target,
         top_focal=top_focal,
-        front_local_pos=front_local_pos,
-        front_local_rot=front_local_rot,
-        front_focal=front_focal,
         wrist_local_pos=wrist_local_pos,
         wrist_local_rot=wrist_local_rot,
         wrist_focal=wrist_focal,

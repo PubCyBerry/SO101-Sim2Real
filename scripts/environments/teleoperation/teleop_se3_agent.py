@@ -27,10 +27,9 @@ if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
 
 
-CAMERA_NAMES = ("top_camera", "front_camera", "wrist_camera")
+CAMERA_NAMES = ("top_camera", "wrist_camera")
 CAMERA_PRIM_PATHS = {
     "top_camera": "/World/envs/env_0/TopCamera",
-    "front_camera": "/World/envs/env_0/Robot/shoulder/FrontCamera",
     "wrist_camera": "/World/envs/env_0/Robot/gripper/WristCamera",
 }
 KEY_BINDINGS = {
@@ -103,7 +102,7 @@ parser.add_argument("--quality", action="store_true", help="Enable quality rende
 parser.add_argument(
     "--tune_cameras",
     action="store_true",
-    help="카메라 보정 모드: top/front/wrist viewport 2x2 docking + 실시간 튜너 위젯을 띄운다. "
+    help="카메라 보정 모드: top/wrist viewport 분할 docking + 실시간 튜너 위젯을 띄운다. "
     "미지정 시 메인 viewport 만 렌더해 실시간 제어 성능을 확보한다(카메라 sensor 는 30fps 유지).",
 )
 parser.add_argument("--use_lerobot_recorder", action="store_true", help="Accepted for CLI compatibility; ignored.")
@@ -140,10 +139,6 @@ parser.add_argument("--gripper_step", type=float, default=0.05, help="Keyboard g
 parser.add_argument("--top_pos", type=_vec3, default=None, help="x,y,z world position")
 parser.add_argument("--top_target", type=_vec3, default=None, help="x,y,z world look-at target")
 parser.add_argument("--top_focal", type=float, default=None, help="top focal length in mm")
-parser.add_argument("--front_pos", type=_vec3, default=None, help="x,y,z shoulder-local position")
-parser.add_argument("--front_rot", type=_quat, default=None, help="w,x,y,z shoulder-local quaternion")
-parser.add_argument("--front_target", type=_vec3, default=None, help="Deprecated world target; ignored for shoulder-mounted front camera")
-parser.add_argument("--front_focal", type=float, default=None, help="front focal length in mm")
 parser.add_argument("--wrist_pos", type=_vec3, default=None, help="x,y,z gripper-local position")
 parser.add_argument("--wrist_rot", type=_quat, default=None, help="w,x,y,z gripper-local quaternion")
 parser.add_argument("--wrist_focal", type=float, default=None, help="wrist focal length in mm")
@@ -163,9 +158,6 @@ if args_cli.remote_endpoint:
 if args_cli.enable_cameras and not args_cli.experience:
     # Windows Isaac Sim 5.1 camera rendering is more stable with this experience.
     args_cli.experience = "isaaclab.python.rendering.kit"
-if args_cli.front_target is not None:
-    print("[camera] --front_target is ignored because front camera is mounted under Robot/shoulder; use --front_rot.")
-
 simulation_app = AppLauncher(vars(args_cli)).app
 
 import carb  # noqa: E402
@@ -246,7 +238,7 @@ class GuiKeyboard:
         print("  B: start control")
         print("  R: reset simulation and mark current recording as failure")
         print("  N: reset simulation and mark current recording as success")
-        print("  c: save top/front/wrist camera PNGs + camera metadata JSON")
+        print("  c: save top/wrist camera PNGs + camera metadata JSON")
         print("  Ctrl+C or close Isaac window: quit")
         if teleop_device == "keyboard":
             print("  Keyboard joint controls: q/a, w/s, e/d, u/j, t/g, y/h")
@@ -600,10 +592,6 @@ def capture_camera_views(env, capture_dir: Path) -> None:
             "top_pos": args_cli.top_pos,
             "top_target": args_cli.top_target,
             "top_focal": args_cli.top_focal,
-            "front_pos": args_cli.front_pos,
-            "front_rot": args_cli.front_rot,
-            "front_target": args_cli.front_target,
-            "front_focal": args_cli.front_focal,
             "wrist_pos": args_cli.wrist_pos,
             "wrist_rot": args_cli.wrist_rot,
             "wrist_focal": args_cli.wrist_focal,
@@ -617,14 +605,14 @@ def capture_camera_views(env, capture_dir: Path) -> None:
 
 
 def create_camera_viewports() -> list[object]:
-    """3개 센서 카메라 viewport 를 메인 Perspective 뷰포트와 함께 2x2 사분면으로 docking.
+    """2개 센서 카메라 viewport 를 메인 Perspective 뷰포트와 함께 수직 분할로 docking.
 
     레이아웃::
 
         ┌─────────────┬─────────────┐
-        │ Perspective │ Front Cam   │
-        ├─────────────┼─────────────┤
-        │ Wrist Cam   │ Top Cam     │
+        │ Perspective │ Top Cam     │
+        │             ├─────────────┤
+        │             │ Wrist Cam   │
         └─────────────┴─────────────┘
     """
 
@@ -649,14 +637,13 @@ def create_camera_viewports() -> list[object]:
         print(f"[viewport] camera viewport windows unavailable: {exc}")
         return []
 
-    # 카메라 viewport window 3개 생성. 위치/크기는 아래 docking 으로 덮어쓰므로
+    # 카메라 viewport window 2개 생성. 위치/크기는 아래 docking 으로 덮어쓰므로
     # floating 좌표를 지정하지 않는다.
     created: dict[str, object] = {}
     windows: list[object] = []
     for title, camera_name in (
-        ("Front Camera", "front_camera"),
-        ("Wrist Camera", "wrist_camera"),
         ("Top Camera", "top_camera"),
+        ("Wrist Camera", "wrist_camera"),
     ):
         prim_path = CAMERA_PRIM_PATHS[camera_name]
         try:
@@ -670,42 +657,38 @@ def create_camera_viewports() -> list[object]:
         except Exception as exc:
             print(f"[viewport] failed to open {title} ({prim_path}): {exc}")
 
-    # 메인 Perspective viewport + 카메라 3개를 2x2 사분면으로 docking.
-    #   front → 메인 오른쪽 절반  (좌:메인,   우:front)
-    #   wrist → 메인 아래 절반    (좌상:메인, 좌하:wrist)
-    #   top   → front 아래 절반   (우상:front, 우하:top)
+    # 메인 Perspective viewport + 카메라 2개를 수직 분할로 docking.
+    #   top   → 메인 오른쪽 절반  (좌:메인,   우:top)
+    #   wrist → top 아래 절반     (우상:top, 우하:wrist)
     try:
         app = omni.kit.app.get_app()
         for _ in range(3):
             app.update()  # 새 window 들이 dock space 에 mount 될 시간을 준다
         main_vp = ui.Workspace.get_window("Viewport")
-        front = created.get("front_camera")
-        wrist = created.get("wrist_camera")
         top = created.get("top_camera")
-        if main_vp is not None and front is not None:
-            front.dock_in(main_vp, ui.DockPosition.RIGHT, 0.5)
-        if main_vp is not None and wrist is not None:
-            wrist.dock_in(main_vp, ui.DockPosition.BOTTOM, 0.5)
-        if front is not None and top is not None:
-            top.dock_in(front, ui.DockPosition.BOTTOM, 0.5)
+        wrist = created.get("wrist_camera")
+        if main_vp is not None and top is not None:
+            top.dock_in(main_vp, ui.DockPosition.RIGHT, 0.5)
+        if top is not None and wrist is not None:
+            wrist.dock_in(top, ui.DockPosition.BOTTOM, 0.5)
         for _ in range(3):
             app.update()
-        print("[viewport] docked cameras into 2x2 grid (TL=Perspective, TR=Front, BL=Wrist, BR=Top)")
+        print("[viewport] docked cameras (L=Perspective, RT=Top, RB=Wrist)")
     except Exception as exc:
-        print(f"[viewport] 2x2 docking failed (windows remain floating): {exc}")
+        print(f"[viewport] docking failed (windows remain floating): {exc}")
 
     return windows
 
 
 def create_camera_tuner(env) -> object | None:
-    """omni.ui 패널로 top/front/wrist 카메라의 위치·회전(deg)·focal 을 실시간 조정.
+    """omni.ui 패널로 top/wrist 카메라의 위치·회전(deg)·focal 을 실시간 조정.
 
     슬라이더를 움직이면 해당 카메라 USD prim 의 local transform(translate/orient)과
-    focalLength 가 즉시 갱신되어 viewport 에 바로 반영된다. front/wrist 는 부모
-    링크(shoulder/gripper) 기준 local, top 은 env(거의 world) 기준.
+    focalLength 가 즉시 갱신되어 viewport 에 바로 반영된다. wrist 는 부모
+    링크(gripper) 기준 local, top 은 env(거의 world) 기준.
 
     'Print cfg values' 버튼은 현재 값을 pick_cube_env_cfg.py 의
-    _TOP_*/_FRONT_CAM_*/_WRIST_CAM_* 형식(pos + world-convention wxyz quat + focal)
+    _TOP_*/_WRIST_CAM_* 형식(pos + world-convention wxyz quat + focal)
     으로 콘솔에 출력한다. 회전은 prim(opengl) → Isaac Lab world convention 으로
     변환해 출력하므로 그대로 cfg 상수에 붙여넣을 수 있다.
     """
@@ -768,7 +751,6 @@ def create_camera_tuner(env) -> object | None:
 
     specs = [
         ("Top Camera", "top_camera", CAMERA_PRIM_PATHS["top_camera"], "world"),
-        ("Front Camera", "front_camera", CAMERA_PRIM_PATHS["front_camera"], "shoulder-local"),
         ("Wrist Camera", "wrist_camera", CAMERA_PRIM_PATHS["wrist_camera"], "gripper-local"),
     ]
     state: dict[str, dict] = {}
@@ -889,9 +871,6 @@ def main() -> None:  # noqa: C901
             top_pos=args_cli.top_pos,
             top_target=args_cli.top_target,
             top_focal=args_cli.top_focal,
-            front_local_pos=args_cli.front_pos,
-            front_local_rot=args_cli.front_rot,
-            front_focal=args_cli.front_focal,
             wrist_local_pos=args_cli.wrist_pos,
             wrist_local_rot=args_cli.wrist_rot,
             wrist_focal=args_cli.wrist_focal,

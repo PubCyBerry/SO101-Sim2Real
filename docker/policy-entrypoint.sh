@@ -92,9 +92,9 @@ OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/${JOB_NAME:-run}}"
 DEVICE="${DEVICE:-cuda}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
 # RENAME_MAP: 데이터셋 카메라 키 → 정책 입력 키 매핑 (JSON 문자열).
-# 데이터셋이 wrist/front/top 키를 쓰고 정책(SmolVLA)이 camera1/2/3 을 기대할 때 필요.
-# 보통 env/smolvla.env 에서 설정한다(논문 표준 슬롯: top→1, wrist→2, front→3).
-# 예: '{"observation.images.top":"observation.images.camera1","observation.images.wrist":"observation.images.camera2","observation.images.front":"observation.images.camera3"}'
+# 데이터셋이 top/wrist 키를 쓰고 정책(SmolVLA)이 camera1/2 을 기대할 때 필요.
+# 보통 env/smolvla.env 에서 설정한다(논문 표준 슬롯: top→1, wrist→2).
+# 예: '{"observation.images.top":"observation.images.camera1","observation.images.wrist":"observation.images.camera2"}'
 RENAME_MAP="${RENAME_MAP:-}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
 # ── 학습 속도 최적화 환경 변수 ────────────────────────────────────────────────

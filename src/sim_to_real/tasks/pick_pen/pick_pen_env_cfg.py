@@ -159,32 +159,20 @@ _PEN_INIT_STATES = {
 _PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
+# 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist}
 #   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
-#   · 포즈/FOV 는 실제 데이터셋 프레임(outputs/ta3_camera_refs/{top,front,wrist}
-#     _t*.png)을 기준으로 튜닝. docs/pics 사무실 사진은 물리 배치 맥락일 뿐 —
-#     특히 top 카메라는 사무실 사진보다 더 높게 물리 조정되었으므로 사진 포즈가
-#     아니라 top 비디오 구도(로봇 베이스가 프레임 하단, 매트/컵이 위로 넓게)에
-#     맞춘다.
-#   · top 은 world frame 절대 좌표, front/wrist 는 각각 shoulder/gripper 링크
-#     자식 prim 의 local offset. num_envs=1 smoke 기준.
+#   · 포즈/FOV 는 실제 데이터셋 프레임을 기준으로 튜닝.
+#   · top 은 world frame 절대 좌표, wrist 는 gripper 링크 자식 prim 의 local offset.
+#     num_envs=1 smoke 기준.
 # ---------------------------------------------------------------------------
 
 # top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique. 로봇 베이스가 하단,
-# 펜/컵/매트가 위로 펼쳐진다. 사무실 사진보다 높게 올린 실제 top 비디오에 맞춤.
+# 펜/컵/매트가 위로 펼쳐진다.
 _TOP_CAMERA_POS = (2.2, -1.12, 1.72)
 _TOP_CAMERA_TARGET = (2.14, -0.15, 0.76)
 _TOP_CAMERA_FOCAL = 16.0
 
-# front: shoulder_pan 전면부에 붙은 카메라. shoulder 링크의 자식 prim 이라
-# shoulder_pan 이 좌우 회전하면 함께 회전한다. 아래 local transform 은 기존 잘못된
-# world-fixed front 카메라의 초기 구도를 shoulder frame 으로 역산한 1차값이다.
-_FRONT_CAM_LOCAL_POS = (-0.0269, -0.3008, 0.0198)
-_FRONT_CAM_LOCAL_ROT = (-0.0078, 0.2683, 0.9633, 0.0022)
-_FRONT_CAMERA_FOCAL = 14.0
-
-# wrist: gripper 위/옆에 강결합된 카메라. 사용자가 표시한 실제 장착 위치처럼
-# gripper 하단보다 위쪽에 두고, gripper 움직임을 그대로 따라간다.
+# wrist: gripper 위/옆에 강결합된 카메라. gripper 움직임을 그대로 따라간다.
 # gripper-local 축은 rest 자세에서 대략 localX->+Z, localY->-X, localZ->-Y.
 _WRIST_CAM_LOCAL_POS = (0.035, 0.035, -0.075)
 # gripper parent 회전을 역산해, rest 자세에서 camera world pos≈(2.149,-0.213,0.956)
@@ -346,14 +334,11 @@ def make_pick_pen_camera_cfgs(
     top_pos: tuple[float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_local_pos: tuple[float, float, float] | None = None,
-    front_local_rot: tuple[float, float, float, float] | None = None,
-    front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
 ) -> dict[str, TiledCameraCfg]:
-    """top/front/wrist 카메라 cfg 3개를 반환.
+    """top/wrist 카메라 cfg 2개를 반환.
 
     기본 PickPenSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
     gym.make() 전에 add_pick_pen_cameras() 로 scene cfg 에 주입해서 쓴다.
@@ -363,9 +348,6 @@ def make_pick_pen_camera_cfgs(
     top_pos = _TOP_CAMERA_POS if top_pos is None else top_pos
     top_target = _TOP_CAMERA_TARGET if top_target is None else top_target
     top_focal = _TOP_CAMERA_FOCAL if top_focal is None else top_focal
-    front_local_pos = _FRONT_CAM_LOCAL_POS if front_local_pos is None else front_local_pos
-    front_local_rot = _FRONT_CAM_LOCAL_ROT if front_local_rot is None else front_local_rot
-    front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
     wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
     wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
     wrist_focal = _WRIST_CAMERA_FOCAL if wrist_focal is None else wrist_focal
@@ -378,16 +360,8 @@ def make_pick_pen_camera_cfgs(
         focus_distance=1.3,
         clipping_range=(0.1, 6.0),
     )
-    front = _pinhole_camera_cfg(
-        "{ENV_REGEX_NS}/Robot/shoulder/FrontCamera",
-        front_local_pos,
-        front_local_rot,
-        front_focal,
-        focus_distance=0.6,
-        clipping_range=(0.05, 6.0),
-    )
-    # front/wrist: robot 링크의 자식 prim → 각 링크 회전을 따라 이동/회전한다.
-    # pos/rot 은 해당 부모 링크 local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
+    # wrist: robot 링크의 자식 prim → gripper 회전을 따라 이동/회전한다.
+    # pos/rot 은 gripper local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
     wrist = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
         wrist_local_pos,
@@ -396,7 +370,7 @@ def make_pick_pen_camera_cfgs(
         focus_distance=0.2,
         clipping_range=(0.02, 3.0),
     )
-    return {"top_camera": top, "front_camera": front, "wrist_camera": wrist}
+    return {"top_camera": top, "wrist_camera": wrist}
 
 
 def add_pick_pen_cameras(
@@ -405,14 +379,11 @@ def add_pick_pen_cameras(
     top_pos: tuple[float, float, float] | None = None,
     top_target: tuple[float, float, float] | None = None,
     top_focal: float | None = None,
-    front_local_pos: tuple[float, float, float] | None = None,
-    front_local_rot: tuple[float, float, float, float] | None = None,
-    front_focal: float | None = None,
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
 ) -> PickPenSceneCfg:
-    """카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
+    """top/wrist 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
 
     InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
     gym.make() 시 센서로 등록된다.
@@ -422,9 +393,6 @@ def add_pick_pen_cameras(
         top_pos=top_pos,
         top_target=top_target,
         top_focal=top_focal,
-        front_local_pos=front_local_pos,
-        front_local_rot=front_local_rot,
-        front_focal=front_focal,
         wrist_local_pos=wrist_local_pos,
         wrist_local_rot=wrist_local_rot,
         wrist_focal=wrist_focal,

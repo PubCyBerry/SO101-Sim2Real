@@ -27,7 +27,7 @@
 #
 # ■ 환경 변수 요약 (docker-compose.yaml ↔ .env 에서 주입)
 #   하드웨어 : TELEOP_PORT  TELEOP_ID  ROBOT_PORT  ROBOT_ID
-#             ENABLED_CAMERAS  FRONT_CAM_PORT  WRIST_CAM_PORT  TOP_CAM_PORT
+#             ENABLED_CAMERAS  TOP_CAM_PORT  WRIST_CAM_PORT  (FRONT_CAM_PORT 선택)
 #             CAM_WIDTH  CAM_HEIGHT  CAM_FPS  CAM_WARMUP_S  CAM_FOURCC
 #   record  : HF_DATASET_REPO_ID  SINGLE_TASK  NUM_EPISODES
 #             EPISODE_TIME_S  RESET_TIME_S  RECORD_FPS  PUSH_TO_HUB
@@ -47,11 +47,11 @@ TELEOP_PORT="${TELEOP_PORT:-/dev/ttyACM0}"
 TELEOP_ID="${TELEOP_ID:-so101_teleop}"
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"
 ROBOT_ID="${ROBOT_ID:-so101_robot}"
-# 활성 카메라 부분집합 (콤마 구분, 순서 보존). 예: "wrist,front" / "wrist,front,top" / "wrist"
-ENABLED_CAMERAS="${ENABLED_CAMERAS:-wrist,front}"
-FRONT_CAM_PORT="${FRONT_CAM_PORT:-/dev/video0}"
-WRIST_CAM_PORT="${WRIST_CAM_PORT:-/dev/video2}"
+# 활성 카메라 부분집합 (콤마 구분, 순서 보존). 예: "top,wrist" / "top,wrist,front" / "wrist"
+ENABLED_CAMERAS="${ENABLED_CAMERAS:-top,wrist}"
 TOP_CAM_PORT="${TOP_CAM_PORT:-/dev/video4}"
+WRIST_CAM_PORT="${WRIST_CAM_PORT:-/dev/video2}"
+FRONT_CAM_PORT="${FRONT_CAM_PORT:-/dev/video0}"
 CAM_WIDTH="${CAM_WIDTH:-640}"
 CAM_HEIGHT="${CAM_HEIGHT:-480}"
 CAM_FPS="${CAM_FPS:-25}"

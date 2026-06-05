@@ -105,12 +105,12 @@ usbipd list
 usbipd bind --busid <leader-port>
 usbipd bind --busid <follower-port>
 usbipd bind --busid <wrist-cam-port>
-usbipd bind --busid <front-cam-port>
+usbipd bind --busid <top-cam-port>
 # usb 재연결할 때마다 / WSL 리부트할 때마다 실행
 usbipd attach --wsl --busid <leader-port>
 usbipd attach --wsl --busid <follower-port>
 usbipd attach --wsl --busid <wrist-cam-port>
-usbipd attach --wsl --busid <front-cam-port>
+usbipd attach --wsl --busid <top-cam-port>
 # Windows로 포트를 되돌릴 경우
 usbipd detach --busid <port>
 ```
@@ -120,7 +120,7 @@ WSL 안에서 디바이스 권한 설정:
 ```bash
 # Leader Arm, Follower Arm USB
 sudo chmod 666 /dev/ttyACM0 /dev/ttyACM1
-# Wrist Cam, Front Cam
+# Top Cam, Wrist Cam
 sudo chmod 666 /dev/video0 /dev/video2
 sudo usermod -aG dialout $USER
 ```
@@ -198,8 +198,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot ca
 
 | 이름 | 설명 |
 |-----|------|
-| ENABLED_CAMERAS | 활성 카메라 부분집합. 기본 `wrist,front`. 3개 운영 시 `wrist,front,top` |
-| FRONT_CAM_PORT / WRIST_CAM_PORT / TOP_CAM_PORT | 카메라 포트 (`/dev/video*`) |
+| ENABLED_CAMERAS | 활성 카메라 부분집합. 기본 `top,wrist`. front 추가 시 `top,wrist,front` |
+| TOP_CAM_PORT / WRIST_CAM_PORT | 카메라 포트 (`/dev/video*`). front 추가 시 FRONT_CAM_PORT 도 설정. |
 | CAM_WIDTH / CAM_HEIGHT / CAM_FPS / CAM_FOURCC | 카메라 해상도·FPS·fourcc |
 | DISPLAY_DATA | 데이터 시각화 여부 |
 | DISPLAY_IP / DISPLAY_PORT | Docker 송출 시 `host.docker.internal:9876` |
@@ -374,8 +374,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
     --robot.type=so101_follower \
     --robot.port=${ROBOT_PORT} \
     --robot.cameras="{
+        top: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, warmup_s: ${CAM_WARMUP_S}, fourcc: ${CAM_FOURCC}},
         wrist: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, warmup_s: ${CAM_WARMUP_S}, fourcc: ${CAM_FOURCC}},
-        front: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, warmup_s: ${CAM_WARMUP_S}, fourcc: ${CAM_FOURCC}},
         }" \
     --robot.id=${ROBOT_ID} \
     --dataset.single_task="pick up the pen and place it in the holder" \
@@ -388,7 +388,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot re
 
 - **leader 불필요**: 정책이 팔로워를 구동하므로 리더 암 없이 동작한다 (위에서 `--teleop.*` 생략). 단 docker `record` 모드는 leader 포트 점검 경고를 띄울 수 있다 — 리더 미연결 평가는 native 경로([PATH_A §6](PATH_A_NATIVE.md#6-smolvla-모델-준비와-학습))가 더 깔끔하다.
 - **모델 지정**: 위처럼 `--policy.path=` 를 직접 적거나, 셸에서 `--policy.path=$(grep …)` 대신 그냥 리포 ID 를 그대로 쓴다. (`.env` 의 `${POLICY_REPO_ID}` 는 컨테이너 안에서만 채워지므로 호스트 셸의 `${POLICY_REPO_ID}` 보간에 의존하지 말 것.)
-- **카메라 key**: SmolVLA fine-tune 은 `camera1/2/3`, GR00T 는 `wrist/front/top` ([§12](#12-fine-tune-워크플로-pick_pen)).
+- **카메라 key**: SmolVLA fine-tune 은 `camera1/2`, GR00T 는 `top/wrist` ([§12](#12-fine-tune-워크플로-pick_pen)).
 
 **시뮬 평가** — `eval` 모드는 `lerobot-eval` 에 인자 완전 위임:
 
@@ -483,7 +483,7 @@ AGGREGATE_FN_NAME=weighted_average
 POLICY_CLIENT_FPS=30
 ```
 
-GR00T fine-tune checkpoint 의 input key 는 `observation.images.wrist/front/top` 이다. 클라이언트 카메라 key 도 `wrist/front/top` 를 그대로 사용한다. SmolVLA fine-tune 은 `camera1/2/3` 를 기대하므로 정책별로 카메라 key 를 혼동하지 않는다.
+GR00T fine-tune checkpoint 의 input key 는 `observation.images.top/wrist` 이다. 클라이언트 카메라 key 도 `top/wrist` 를 그대로 사용한다. SmolVLA fine-tune 은 `camera1/2` 를 기대하므로 정책별로 카메라 key 를 혼동하지 않는다.
 
 보안상 직접 포트 노출을 피하려면 SSH 터널을 사용한다.
 
@@ -509,8 +509,8 @@ POLICY_SERVER_ADDRESS=127.0.0.1:8080 \
 
 앞 단계(2~11)를 엮은 end-to-end 시나리오.
 
-- **SmolVLA**: `lerobot/smolvla_base` config 가 입력 키로 `camera1/2/3` 을 명시하므로, SO-101 데이터셋(`wrist/front/top`)을 매핑하는 `--rename_map` 이 **필수**다(자동 생성 아님 — 없으면 학습이 feature mismatch 로 실패). `env/smolvla.env` 의 `RENAME_MAP` 이 논문 표준 슬롯 순서(`top→camera1, wrist→camera2, front→camera3`)로 설정되어 있다. 추론 클라이언트 카메라 key 도 `camera1/2/3` 로 맞추되 물리 매핑(`camera1=top, camera2=wrist, camera3=front`)을 학습과 동일하게 유지한다(SmolVLA 는 순서로 카메라를 구분).
-- **GR00T N1.5**: fine-tune 결과 checkpoint 의 `input_features` 는 `observation.images.wrist/front/top` 그대로다. 추론 클라이언트도 `wrist/front/top` key 를 그대로 쓴다. GR00T action horizon 은 16 이므로 `POLICY_CHUNK_SIZE=16`, `POLICY_N_ACTION_STEPS=16`, `ACTIONS_PER_CHUNK=16` 을 맞춘다.
+- **SmolVLA**: `lerobot/smolvla_base` config 가 입력 키로 `camera1/2` 을 명시하므로, SO-101 데이터셋(`top/wrist`)을 매핑하는 `--rename_map` 이 **필수**다(자동 생성 아님 — 없으면 학습이 feature mismatch 로 실패). `env/smolvla.env` 의 `RENAME_MAP` 이 논문 표준 슬롯 순서(`top→camera1, wrist→camera2`)로 설정되어 있다. 추론 클라이언트 카메라 key 도 `camera1/2` 로 맞추되 물리 매핑(`camera1=top, camera2=wrist`)을 학습과 동일하게 유지한다(SmolVLA 는 순서로 카메라를 구분).
+- **GR00T N1.5**: fine-tune 결과 checkpoint 의 `input_features` 는 `observation.images.top/wrist` 그대로다. 추론 클라이언트도 `top/wrist` key 를 그대로 쓴다. GR00T action horizon 은 16 이므로 `POLICY_CHUNK_SIZE=16`, `POLICY_N_ACTION_STEPS=16`, `ACTIONS_PER_CHUNK=16` 을 맞춘다.
 
 **1) 데이터셋 수집** (Windows 워크스테이션 `lerobot` 컨테이너):
 
@@ -520,7 +520,7 @@ POLICY_SERVER_ADDRESS=127.0.0.1:8080 \
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot record
 ```
 
-- 카메라 키 `wrist`, `front`, `top` 으로 저장 (변경 불필요)
+- 카메라 키 `top`, `wrist` 으로 저장 (변경 불필요)
 - `PUSH_TO_HUB=true` 면 학습 머신에서 HF Hub pull 가능
 - 50+ 에피소드, 다양한 grasp pose / pen 위치로 시연
 
@@ -600,6 +600,6 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot policy-client
 ```
 
-fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2/3` 다. 추론 클라의 카메라 키를 `camera1/camera2/camera3` 로 맞추되 물리 매핑은 학습 `rename_map` 과 동일하게 `camera1=top, camera2=wrist, camera3=front` (논문 표준 슬롯). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.
+fine-tuned 체크포인트의 `input_features` 는 (SmolVLA rename 으로) `camera1/2` 다. 추론 클라의 카메라 키를 `camera1/camera2` 로 맞추되 물리 매핑은 학습 `rename_map` 과 동일하게 `camera1=top, camera2=wrist` (논문 표준 슬롯). native 클라 예시는 [PATH_A §7](PATH_A_NATIVE.md#7-async-policy-server--client) 참고.
 
-GR00T fine-tuned checkpoint 는 `wrist/front/top` key 를 그대로 기대한다. `POLICY_TYPE=groot`, `ACTIONS_PER_CHUNK=16`, `POLICY_REPO_ID=${HF_USER}/so101_groot_n15_pick_pen` 로 맞춘 뒤 같은 `policy-client` 모드를 사용한다.
+GR00T fine-tuned checkpoint 는 `top/wrist` key 를 그대로 기대한다. `POLICY_TYPE=groot`, `ACTIONS_PER_CHUNK=16`, `POLICY_REPO_ID=${HF_USER}/so101_groot_n15_pick_pen` 로 맞춘 뒤 같은 `policy-client` 모드를 사용한다.

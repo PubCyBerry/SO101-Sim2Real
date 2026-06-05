@@ -57,9 +57,9 @@ services:
     #   OpenCV 는 캡처 노드만 사용하지만, UVC 드라이버가 메타데이터 노드도
     #   함께 열려 있어야 정상 스트리밍되는 경우가 있어 둘 다 마운트.
     #
-    #   front cam  → /dev/video0 (캡처), /dev/video1 (메타)  — 전면부 시점
-    #   wrist cam  → /dev/video2 (캡처), /dev/video3 (메타)  — 손목 시점
-    #   top   cam  → /dev/video4 (캡처), /dev/video5 (메타)  — 탑뷰 시점 (선택)
+    #   top   cam  → /dev/video* (캡처), /dev/video* (메타)  — 탑뷰 시점 (기본)
+    #   wrist cam  → /dev/video* (캡처), /dev/video* (메타)  — 손목 시점 (기본)
+    #   front cam  → /dev/video* (캡처), /dev/video* (메타)  — 전면부 시점 (선택)
     #
     #   실제 활성 카메라는 .env 의 ENABLED_CAMERAS 가 결정 (entrypoint 가 JSON 빌드).
     #   사용하지 않는 카메라는 .env 에서 해당 *_CAM_PORT 를 비워두면 /dev/null 폴백
@@ -69,15 +69,15 @@ services:
       # Arm 직렬 포트
       - "${TELEOP_PORT}:${TELEOP_PORT}"                                              # /dev/ttyACM0
       - "${ROBOT_PORT}:${ROBOT_PORT}"                                                # /dev/ttyACM1
-      # front cam (전면부 시점)
-      - "${FRONT_CAM_PORT:-/dev/null}:${FRONT_CAM_PORT:-/dev/null}"                  # /dev/video0
-      - "${FRONT_CAM_META_PORT:-/dev/null}:${FRONT_CAM_META_PORT:-/dev/null}"        # /dev/video1
-      # wrist cam (손목 시점)
-      - "${WRIST_CAM_PORT:-/dev/null}:${WRIST_CAM_PORT:-/dev/null}"                  # /dev/video2
-      - "${WRIST_CAM_META_PORT:-/dev/null}:${WRIST_CAM_META_PORT:-/dev/null}"        # /dev/video3
-      # top cam (탑뷰 시점, 선택)
+      # top cam (탑뷰 시점, 기본)
       - "${TOP_CAM_PORT:-/dev/null}:${TOP_CAM_PORT:-/dev/null}"                      # /dev/video4
       - "${TOP_CAM_META_PORT:-/dev/null}:${TOP_CAM_META_PORT:-/dev/null}"            # /dev/video5
+      # wrist cam (손목 시점, 기본)
+      - "${WRIST_CAM_PORT:-/dev/null}:${WRIST_CAM_PORT:-/dev/null}"                  # /dev/video2
+      - "${WRIST_CAM_META_PORT:-/dev/null}:${WRIST_CAM_META_PORT:-/dev/null}"        # /dev/video3
+      # front cam (전면부 시점, 선택 — .env 에서 FRONT_CAM_PORT 주석 해제 시 활성)
+      - "${FRONT_CAM_PORT:-/dev/null}:${FRONT_CAM_PORT:-/dev/null}"                  # /dev/video0
+      - "${FRONT_CAM_META_PORT:-/dev/null}:${FRONT_CAM_META_PORT:-/dev/null}"        # /dev/video1
 
     # udev 접근 & USB 권한에 필요 (개발/테스트 용도)
     privileged: true

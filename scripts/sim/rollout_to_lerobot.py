@@ -38,11 +38,10 @@ FPS = 30
 IMAGE_HEIGHT = 480
 IMAGE_WIDTH = 640
 IMAGE_CHANNELS = 3
-CAMERA_KEYS = ("top", "wrist", "front")
+CAMERA_KEYS = ("top", "wrist")
 CAMERA_SCENE_NAMES = {
     "top": "top_camera",
     "wrist": "wrist_camera",
-    "front": "front_camera",
 }
 JOINT_FEATURE_NAMES = [
     "shoulder_pan.pos",

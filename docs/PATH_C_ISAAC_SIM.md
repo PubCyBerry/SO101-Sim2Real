@@ -215,7 +215,6 @@ GUI 창에서 `C`를 누르면 `outputs/captured_images`에 다음 파일이 생
 | 파일 | 내용 |
 |---|---|
 | `<timestamp>_top_camera.png` | `observation.images.top` 대응 렌더 |
-| `<timestamp>_front_camera.png` | `observation.images.front` 대응 렌더 |
 | `<timestamp>_wrist_camera.png` | `observation.images.wrist` 대응 렌더 |
 | `<timestamp>_camera_metadata.json` | 저장 파일 경로, 각 카메라 prim path, local/world position/quaternion/euler/FOV/focal length |
 | `latest_camera_metadata.json` | 가장 최근 metadata 복사본 |
@@ -227,7 +226,7 @@ GUI 창에서 `C`를 누르면 `outputs/captured_images`에 다음 파일이 생
 GUI 카메라 튜너 위젯으로 보면서 직접 맞추는 것이 가장 정확하다. `--tune_cameras`
 를 붙여 실행하면:
 
-1. top/front/wrist viewport 가 메인 Perspective 와 함께 2×2 사분면으로 docking 된다.
+1. top/wrist viewport 가 메인 Perspective 와 함께 분할 docking 된다(L=Perspective, RT=Top, RB=Wrist).
 2. `SO101 Camera Tuner` 패널에서 각 카메라의 **Pos X/Y/Z**, **Rot X/Y/Z(deg)**,
    **Focal(mm)** 슬라이더를 움직이면 카메라 prim 의 transform/focal 이 **실시간** 갱신된다.
 3. 만족스러우면 **Print cfg values** 버튼을 눌러 콘솔에 값을 출력한다. 카메라마다
@@ -248,15 +247,13 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py \
 | 카메라 | 위치 | 각도 | FOV |
 |---|---|---|---|
 | top | `_TOP_CAMERA_POS` (world) | `_TOP_CAMERA_ROT` (wxyz quat 직접 지정. None 이면 `_TOP_CAMERA_TARGET` look_at) | `_TOP_CAMERA_FOCAL` |
-| front | `_FRONT_CAM_LOCAL_POS` (shoulder-local) | `_FRONT_CAM_LOCAL_ROT` (wxyz quat) | `_FRONT_CAMERA_FOCAL` |
 | wrist | `_WRIST_CAM_LOCAL_POS` (gripper-local) | `_WRIST_CAM_LOCAL_ROT` (wxyz quat) | `_WRIST_CAMERA_FOCAL` |
 
-front 는 `/World/envs/env_0/Robot/shoulder/FrontCamera` 로 shoulder_pan 회전을 따라가고
-(위치/회전 shoulder-local), wrist 는 `.../Robot/gripper/WristCamera` 로 gripper 를
-따라간다(gripper-local). top 은 world 절대 좌표다.
+wrist 는 `.../Robot/gripper/WristCamera` 로 gripper 를 따라가고(gripper-local),
+top 은 world 절대 좌표다.
 
-CLI override(`--top_pos/--top_target/--top_focal/--front_pos/--front_rot/--wrist_pos/
---wrist_rot/--wrist_focal`)로도 임시 실험할 수 있으나, 위젯 실시간 조정이 더 빠르다.
+CLI override(`--top_pos/--top_target/--top_focal/--wrist_pos/--wrist_rot/--wrist_focal`)
+로도 임시 실험할 수 있으나, 위젯 실시간 조정이 더 빠르다.
 실제 데이터셋 기준으로 맞출 때는 `observation.images.{top,front,wrist}` 프레임을 1차
 기준으로 삼고, `docs/pics` 사진은 물리 배치 참고용이다.
 

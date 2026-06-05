@@ -52,7 +52,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 ### compose 설정
 
-- **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` `${TOP_CAM_PORT}` `${TOP_CAM_META_PORT}` (UVC 캡처/메타 노드 쌍).
+- **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${TOP_CAM_PORT}` `${TOP_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` (UVC 캡처/메타 노드 쌍; front 추가 시 `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` 도 동일 패턴).
 - **권한·네트워크**: `privileged: true` (udev/USB), `network_mode: host` (rerun 뷰어·ROS 브릿지), `ipc: host`. GPU 1장 예약.
 - **호스트 볼륨**:
   - `./datasets`, `./logs`, `./outputs` → `/workspace/*` (두 서비스)
