@@ -1,7 +1,7 @@
 # TASKS — SO-101 Sim2Real 자율 개발
 
 > **단일 진실 공급원.** Codex가 갱신. 매 사이클 SELECT 전 재로드.
-> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist,front} 480×640@30 · PickCube task 문자열).
+> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist} 480×640@30 · PickCube task 문자열).
 > 자율 계약: 마스터플랜 §0 — A~E 무인, F~G만 사용자 게이트.
 > RELOAD: 매 사이클 시작에 마스터플랜 §0·§1·§7 + 본 파일 + `CONTEXT.md` 최근 인계 1~2개.
 > 복구불가 블로커: 동일 task 3회 실패 시 `blocked` 기록 후 의존 없는 task로 우회.
@@ -24,11 +24,12 @@
 
 - [x] **TA.1** SO-101 articulation position PD 드라이브 튜닝 (Feetech STS3215 근사: stiffness/damping/속도·토크 한계) | machine:any | dep:T0.3 | verify:정적 hold 안정 + step 응답 진동 없음 | status:done
 - [x] **TA.2** 펜 4개·펜컵 spawn 영역·물리 검증 (그린 타원 / 주황 호, 관통·바운스 없음) | machine:any | dep:T0.3 | verify:reset 100회 spawn 영역 내 100% + contact 정상 (`scene_physics_smoke.py`: spawn ellipse/arc/y separation/settle stability 모두 pass) | status:done
-- [x] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:`camera_shape_smoke.py` 3캠 RGB shape/FOV/pose pass + 기본 `env_smoke.py` no-camera pass | status:done
+- [x] **TA.3** 카메라 2대(top/wrist) extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:`camera_shape_smoke.py` 2캠 RGB shape/FOV/pose pass + 기본 `env_smoke.py` no-camera pass | status:done
 - [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
-- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 3cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
+- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
 - [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
-- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 3cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
+- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
+- [ ] **TA.CUBE.STATE_MACHINE_V2** 사용자 재보정 `cube_desk` 기준 PickCube state machine 재작성 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + 서버 dataset `validate_lerobot_schema.py` PASS | status:in_progress
 
 ## Phase B — RL 전문가 (state-based)
 
@@ -42,7 +43,7 @@
 ## Phase C — 데이터 엔진 (롤아웃→LeRobot v3)
 
 - [x] **TC.1** `scripts/sim/rollout_to_lerobot.py` recorder (leisaac LeRobotRecorderManager 대체) | machine:any | dep:TB.3 | verify:10ep 변환 후 `validate_lerobot_schema.py` 통과 | status:done
-- [x] **TC.2** 200ep 파이프라인 관통 (DR + 3캠 렌더 + 성공 ep만 필터) | machine:server | dep:TC.1 | verify:validate 통과 + success filter 동작 확인 | status:done
+- [x] **TC.2** 200ep 파이프라인 관통 (DR + 2캠 렌더 + 성공 ep만 필터) | machine:server | dep:TC.1 | verify:validate 통과 + success filter 동작 확인 | status:done
 - [x] **TC.3** (선택) segmentation 배경 오버레이 (squint식, 카메라별 정합) | machine:server | dep:TC.2 | verify:카메라별 합성 프레임 육안/지표 점검 | status:done
 - [ ] **TC.4** PickCube 대량 롤아웃 (2k–5k 성공 ep) → HF push | machine:server | dep:TB.4,TC.2 | verify:새 PickCube checkpoint 명시, validate 통과 + ep 수 목표 + `/DISK1` 용량 확인 | status:todo
 
@@ -66,6 +67,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — Claude 제안의 RMPFlow standalone 대신 기존 Isaac Lab joint-position env에 맞춘 FSM으로 구현; jaw-offset control point + leisaac-style dynamic gripper effort 조합으로 로컬 headless 1-cube fixed proof `outputs/pick_cube_state_machine_jaw_dynamic_smoke.json` passed(placed_and_released true) / 다음: 서버에서 2cam LeRobot v3 episode 생성+validate
+- [2026-06-05] North Star update — 사용자 지시로 sim/LeRobot 카메라 불변 계약을 `observation.images.{top,wrist}` 2cam으로 확정, `front`는 앞으로 계약에서 제외 / 다음: 새 PickCube state machine과 recorder를 2cam validator 기준으로 검증
 - [2026-06-05] TB.4 in_progress — guided-lift scratch PPO 완료(model219)했지만 deterministic eval model100 0/128, model160 0/128, model219 1/128로 실패; reward-only 보정은 중단 / 다음: state-machine expert 기반 phase-aware imitation/DAgger 또는 oracle phase/progress privileged obs로 전환
 - [2026-06-05] TB.4 in_progress — pregrasp-only PPO는 `pregrasp_cube≈1.6`까지 오르지만 lift/success가 정체되어 중단(model100); closed+near 상태의 초기 lift 연속 보상 `guided_lift_cube`(weight 8.0) 추가, 서버 smoke에서 13 reward terms 확인 / 다음: guided-lift reward 기준 fixed-spawn scratch PPO 재시작
 - [2026-06-05] TB.4 in_progress — 43-dim target-observed scratch PPO는 fixed model160 deterministic 5/128, low-std continuation은 1/128 이하로 악화; reach→close 탐색 장벽 완화를 위해 PickCube `pregrasp_cube` reward(weight 2.0) 추가, 서버 smoke에서 12 reward terms 확인 / 다음: pregrasp reward 기준 fixed-spawn scratch PPO 재시작

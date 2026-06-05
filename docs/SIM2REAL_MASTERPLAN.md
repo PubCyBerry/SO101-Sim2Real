@@ -48,7 +48,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | codebase_version | `v3.0` |
 | robot_type | `so_follower` |
 | action / observation.state | 각 **6-dim joint position** (순서: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) |
-| 카메라 | `observation.images.{top, wrist, front}` · 480×640×3 · h264 · **fps 30** |
+| 카메라 | `observation.images.{top, wrist}` · 480×640×3 · h264 · **fps 30** |
 | task 문자열 | `"pick up the cube and place it in the bowl"` |
 
 이 계약을 **기계가 강제**하도록 `scripts/validate_lerobot_schema.py`(§7)를 가장 먼저 만든다. 모든 데이터 생성 단계는 이 validator를 통과해야 done 처리된다.
@@ -147,7 +147,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | 단계 | env 수 | 카메라 렌더 | VRAM 추정 |
 |---|---|---|---|
 | B: state-기반 RL 학습 | 2048–4096 | OFF | ~6–16GB |
-| C: 롤아웃(3캠 480×640 렌더) | 16–64로 축소 | ON | ~12–28GB |
+| C: 롤아웃(2캠 480×640 렌더) | 16–64로 축소 | ON | ~10–24GB |
 | D: GR00T N1.5 full fine-tune | — | — | ~25GB (부족 시 LoRA/`--no-tune_diffusion_model`) |
 | F: GR00T 추론 | — | — | ~6GB |
 
@@ -170,7 +170,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 ### Phase A — 씬·드라이브·카메라 정합 🔧
 - USD 씬 ✅(`assets/scenes/pen_desk/`, leisaac 비의존). `ASSETS_ROOT`만 자체 경로로 교체.
 - SO-101 articulation: **position PD 드라이브**로 Feetech STS3215 근사(stiffness/damping/속도·토크 한계). 🔧
-- 카메라 3대 extrinsic/intrinsic을 실기와 정합, 480×640@30 고정.
+- 카메라 2대(top/wrist) extrinsic/intrinsic을 실기와 정합, 480×640@30 고정.
 - **게이트**: 정적 reset에서 펜 4개·펜컵이 의도 영역(그린 타원/주황 호)에 spawn, 관통·바운스 없음.
 
 ### Phase B — RL 전문가(state-based) 🆕
@@ -180,7 +180,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 - **게이트**: eval 롤아웃 success rate ≥ 임계(초기 70%→목표 90%).
 
 ### Phase C — 데이터 엔진(롤아웃→LeRobot v3) 🆕
-- 학습된 전문가를 DR+3캠 렌더로 롤아웃, **성공 ep만** 필터.
+- 학습된 전문가를 DR+2캠 렌더로 롤아웃, **성공 ep만** 필터.
 - **롤아웃→LeRobot v3 recorder** 신규(leisaac LeRobotRecorderManager 대체). 🆕
 - (선택) squint식 segmentation 배경 오버레이로 시각 갭 축소 — 카메라별 정합.
 - **게이트**: 생성 데이터셋이 `validate_lerobot_schema.py` 통과. 소규모(200ep)로 파이프라인 관통 검증 후 확장.
@@ -188,7 +188,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 ### Phase D — GR00T N1.5 증류(IL) 🔧✅
 - 학습 인프라 ✅(`docker/Dockerfile.policy`·policy-entrypoint train·`env/groot.env`). 데이터 소스만 sim 롤아웃으로.
 - (i)순차(sim 대량→50 real 미세조정) vs (ii)co-training(혼합) 둘 다 만들어 §E 비교.
-- modality config 재사용(3캠+state6+action6).
+- modality config 재사용(2캠+state6+action6).
 - **게이트**: 학습 완료 + held-out action MSE 산출 + checkpoint config.type=groot.
 
 ### Phase E — 평가 🆕
@@ -196,7 +196,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 - **게이트**: 비교표 자동 생성 → 사용자 보고(여기까지 무인).
 
 ### Phase F~G — 실기기 배포·Sim2Real 루프 ⛔
-- LeRobot Async(서버 PolicyServer=GR00T, Windows RobotClient=so101_follower+3캠) ✅인프라.
+- LeRobot Async(서버 PolicyServer=GR00T, Windows RobotClient=so101_follower+2캠) ✅인프라.
 - **사용자 개입 필수**(USB·카메라·물리·안전). 자율 루프는 E 완료 시 멈추고 F 준비물 체크리스트를 사용자에게 제시.
 
 ---
@@ -255,7 +255,7 @@ CONTEXT.md: 상단에 **North Star 요약 블록**(불변 계약) 고정 + 기�
 
 - **정밀 삽입 난이도**: 가는 펜+좁은 홀더. 성공기준 단계화(입구 진입→완전 삽입)로 출발.
 - **액추에이터 갭**: 저가 position 서보 → USD PD 튜닝 + 실데이터 co-training 전제(완전 zero-shot 금지).
-- **시각 갭 3배(3캠)**: 카메라별 오버레이·정합.
+- **시각 갭(2캠)**: 카메라별 오버레이·정합.
 - **GPU 직렬화 위반**: 동시 학습으로 OOM. §4.3 가드 필수.
 - **불변 계약 위반**: validator 게이트로 기계 차단.
 - **자율 루프 폭주/비용**: §0 자율계약상 비용 큰 작업도 멈추지 않음 → 대신 GPU 직렬화(§4.3)·검증 게이트(§7)·계약(§1) 미통과 시 done 금지로 폭주를 기계 차단. blocked N회면 우회.

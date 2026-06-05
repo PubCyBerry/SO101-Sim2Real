@@ -5,10 +5,58 @@
 ## 🧭 North Star (불변 — 매 사이클·compaction 후 재확인)
 
 - **마스터플랜**: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) · **현황**: [`TASKS.md`](TASKS.md)
-- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist,front}` 480×640×3 h264 **fps 30** · task `"pick up the cube and place it in the bowl"`.
+- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist}` 480×640×3 h264 **fps 30** · task `"pick up the cube and place it in the bowl"`.
 - **자율 계약**: Codex `/goal` 시작 후 **A~E 무인 자율**(묻지 않음). 멈추는 경우는 둘뿐 — F~G 실기기 경계 / 복구불가 블로커(동일 task 3회 재시도 후 우회·기록). 게이트 미통과 task는 done 금지.
 - **복구 프로토콜**: 세션/compaction 직후 ① 마스터플랜 §0·§1·§7 → ② TASKS.md(현재 phase·in_progress·blocked) → ③ 아래 최근 인계 1~2개 순서로 재로드. 추측 금지 — 상태 파일에 없으면 새 task로.
 - **머신**: GPU 중량(Isaac·RL·롤아웃·GR00T) = 서버 konan147(48GB), 산출물 `/DISK1/so101-sim2real`. 경량·실기기·오케스트레이터 = Windows. sync 허브 = `origin`(github PubCyBerry/SO101-Sim2Real).
+
+---
+
+## 작업 인계 (2026-06-05 — North Star 2cam 전환 + PickCube State Machine V2)
+
+- **결정 변경**: 사용자 지시로 앞으로 sim/LeRobot camera feature 계약은 `observation.images.{top,wrist}` 2cam 이다. `front`는 North Star에서 제외한다.
+- **적용 예정/진행**: `docs/SIM2REAL_MASTERPLAN.md`, `TASKS.md`, `CONTEXT.md`, `scripts/validate_lerobot_schema.py`를 2cam 기준으로 정합한다. 기존 state-machine/rollout recorder는 이미 대부분 top/wrist만 쓰므로, 남은 문구·validator만 맞추면 된다.
+- **SM 실패 관찰**: 짧은 headless smoke(`outputs/pick_cube_state_machine_current_smoke.json`)에서 dynamic effort 없이 grasp close 중 Cube1이 옆으로 밀려 lift 실패. midpoint control point는 body origin 기준이라 실제 작업점보다 높아져 lift 실패.
+- **적용 결과**: `scripts/environments/pick_cube_state_machine.py`는 leisaac-style dynamic gripper effort reset을 모든 step 직전에 호출하고, `--control_point {jaw_offset,midpoint}`를 지원한다. 기본은 성공한 `jaw_offset`.
+- **검증 결과**: 로컬 Windows headless `outputs/pick_cube_state_machine_jaw_dynamic_smoke.json` 통과. 조건: `active_objects=1`, fixed cube/bowl, `fk_samples=1200`, `command_settle_steps=200`, `min_gripper_effort=0.5`, `placed_and_released=true`.
+- **다음**: 이 변경을 origin에 올린 뒤 서버에서 2cam LeRobot v3 episode를 생성하고 `scripts/validate_lerobot_schema.py`로 검증한다.
+
+---
+
+## 작업 인계 (2026-06-05 — PickCube gripper impalement 완화)
+
+- **증상**: teleop 중 큐브를 들어 올려 그릇에 놓으려고 release 했는데, 큐브가 gripper/jaw 쪽에 꽂힌 듯 남았다.
+- **leisaac 비교 결론**:
+  - leisaac 은 robot USD/URDF 를 장면마다 수정하지 않는다.
+  - 차이는 teleop/replay 루프에서 `dynamic_reset_gripper_effort_limit_sim()` 을 매 step 호출한다는 점이다. actuator cfg 의 `10 Nm` 은 상한이고, 실제 gripper effort 는 가까운 object 질량에 따라 낮아진다.
+  - leisaac template 은 PhysX contact 전역값도 `bounce_threshold_velocity=0.01`, `friction_correlation_distance=0.00625` 로 둔다.
+- **적용 변경**:
+  - `src/sim_to_real/utils/gripper_effort.py` 신규: leisaac 질량 기반 gripper effort reset 포팅. 기본 `min_effort=0.5`, `max_effort=10.0`, `mass_scale=0.15`.
+  - `scripts/environments/teleoperation/teleop_se3_agent.py`: action 적용 직전 dynamic gripper effort 호출. 옵션: `--disable_dynamic_gripper_effort`, `--min_gripper_effort`.
+  - `scripts/environments/teleoperation/replay.py`: 동일 helper 사용.
+  - `PickPenEnvCfg` / `PickCubeEnvCfg`: `dynamic_reset_gripper_effort_limit=True`, PhysX contact 전역값 leisaac 정합.
+  - `docs/GRASP_PHYSICS.md`: robot asset 미수정 runtime 해결책으로 문서 갱신.
+- **검증 결과**:
+  - py_compile 통과.
+  - headless smoke 에서 PickCube env reset 후 helper 호출 시 gripper effort limit 이 `10.0 → 0.5` 로 내려감 확인.
+  - `assets/robots` / `assets/robots/urdf` diff 없음.
+- **다음**: GUI teleop 에서 같은 release 동작을 재현 확인. 너무 잘 미끄러져 떨어지면 `--min_gripper_effort 0.8` 또는 `1.0`, 여전히 박히면 `0.3` 쪽으로 조정한다.
+
+---
+
+## 작업 인계 (2026-06-05 — PickCube State Machine 재시작 + teleop 저속 원인)
+
+- **목표 변경**: 사용자가 `cube_desk` 물체 배치와 카메라 설정을 다시 GUI에서 보정했다. 지금까지 작성한 강화학습/State Machine 내용은 폐기하고, Isaac Sim 안에서 제대로 된 Pick-and-Place State Machine을 새로 만드는 것부터 다시 시작한다.
+- **teleop 저속 원인**:
+  - leisaac `teleop_se3_agent.py`와 비교 결과, 루프의 `RateLimiter.sleep(env)` render 호출 자체는 leisaac에도 있다.
+  - 직접적인 차이는 우리 포팅본의 leader 입력 command speed cap 기본값이 `0.20 rad/s`였고, 그 cap을 고정 sim dt(1/30s)로 적용해 실제 FPS가 7Hz로 떨어지면 wall-clock 체감 속도가 약 `0.047 rad/s`까지 느려지는 점이다.
+  - 카메라도 leisaac 템플릿은 `update_period=1/30`인데 우리 cfg는 `0.0`이라 render 호출과 결합될 때 더 무거울 수 있었다.
+- **적용 변경**:
+  - `scripts/environments/teleoperation/teleop_se3_agent.py`: speed cap을 wall-clock dt 기준으로 적용하도록 바꿨고, 현재 기본값은 leisaac 비교용으로 `--max_arm_speed=0`, `--max_gripper_speed=0`(cap disabled)이다. `--max_control_dt=0.10`은 cap을 켰을 때 GUI stall 뒤 큰 command jump를 막는다.
+  - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`: `_pinhole_camera_cfg.update_period=1/30`으로 leisaac과 정합.
+  - `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`: 카메라 주석을 `update_period=1/30` 계약으로 갱신(PickCube는 PickPen helper를 사용).
+- **검증 결과**: `uv run python -m py_compile scripts/environments/teleoperation/teleop_se3_agent.py src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py` 통과.
+- **다음**: 사용자가 같은 GUI teleop 명령으로 체감 속도/FPS를 확인한다. 이후 이전 RL/SM artifacts를 정리하고 새 PickCube pick-and-place State Machine을 작성한다.
 
 ---
 
@@ -216,7 +264,7 @@
   - Feetech/Isaac low-stiffness PD가 target을 늦게 따라오는 점을 반영해 `command_settle_steps=200`.
   - 물리 smoke의 성공 조건과 맞춰 gripper close target은 `0.0`으로 확정(`0.4`는 JointPositionAction 경로에서 너무 덜 닫힘).
   - 접촉이 비결정적으로 밀리는 경우가 있어 `max_grasp_attempts=3` retry loop 추가. lift 후 cube z가 `DESK_TOP_Z+0.08`를 넘지 않으면 open/settle 후 현재 cube pose 기준 재시도.
-  - 같은 스크립트가 LeRobot v3 writer를 내장해 `action`, `observation.state`, `observation.images.{top,wrist,front}` h264 mp4, parquet/meta/stats를 저장한다.
+  - 같은 스크립트가 LeRobot v3 writer를 내장해 `action`, `observation.state`, 카메라 h264 mp4, parquet/meta/stats를 저장한다. 당시 산출물은 3cam이었고, 2026-06-05 이후 현재 North Star는 `observation.images.{top,wrist}` 2cam이다.
 - **서버 검증 결과** (`/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`):
   - WIP 30초 dataset(실패 동작, 사용자 중간점검용): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_wip_30s_slow_20260604`, 900 frames/30s, 3cam video, schema PASS, state_machine_status failed.
   - 성공 proof JSON(이전 제한값): `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_retry_probe_20260604.json`, placed_and_released true. Attempt1 grasp false → Attempt2 grasp true.
@@ -254,7 +302,7 @@
 
 ## 작업 인계 (2026-06-04 — PickCube 물리/RL 재시작 정리)
 
-- **목표 전환**: 사용자 지시에 따라 이후 목표를 `pick_pen`/`pen_desk`에서 `pick_cube`/`cube_task`로 전환. 실기기 데이터셋과 맞춰야 하는 feature 계약(action/state 6-dim, 3cam 480×640@30, LeRobot v3 schema)은 유지하고 task 문자열은 `"pick up the cube and place it in the bowl"`로 변경.
+- **목표 전환**: 사용자 지시에 따라 이후 목표를 `pick_pen`/`pen_desk`에서 `pick_cube`/`cube_task`로 전환. 실기기 데이터셋과 맞춰야 하는 feature 계약(action/state 6-dim, 현재 North Star는 top/wrist 2cam 480×640@30, LeRobot v3 schema)은 유지하고 task 문자열은 `"pick up the cube and place it in the bowl"`로 변경.
 - **상태**: 진행 중. 사용자가 GUI에서 조정한 top/front/wrist 카메라 값은 `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`에 이미 반영되어 있다. 기존 PickPen assisted RL/rollout 결과는 새 목표의 기준으로 사용하지 않는다.
 - **이번 정리**:
   - PickPen/PickCube 학습 경로의 grab/teleport 보조 event와 CLI 옵션을 제거했다. `pick_pen.mdp.events`에는 보조 event 구현이 남아 있지 않다.
@@ -424,7 +472,7 @@
 - **주의/다음**:
   - TC.2는 1-env serial로 gate를 통과했다. TC.4 대량 2k-5k 전에는 wall-clock를 줄이려면 camera env-relative 병렬화 또는 chunked multi-process rollout을 검토한다.
   - success filter는 실제로 89 failed attempts를 버렸다. 대량 run에서는 `max_attempts`를 성공률 기준으로 넉넉히 잡는다.
-  - TC.3는 optional이지만 TASKS.md상 다음 todo다. segmentation overlay를 구현할 경우, 카메라별 실제 dataset 구도와 현재 3cam mp4를 기준으로 합성 품질을 육안/간단 지표로 확인한다.
+  - TC.3는 optional이지만 TASKS.md상 다음 todo다. segmentation overlay를 구현할 경우, 카메라별 실제 dataset 구도와 현재 2cam 계약(top/wrist)을 기준으로 합성 품질을 육안/간단 지표로 확인한다.
 
 ---
 
@@ -433,7 +481,7 @@
 - **목표**: TB.3 stochastic expert checkpoint를 3-camera render와 함께 rollout하고, 성공 episode만 LeRobot v3 데이터셋으로 기록하는 `scripts/sim/rollout_to_lerobot.py` recorder를 만든다.
 - **상태**: 완료. 다음 actionable task는 **TC.2 200ep pipeline with DR + 3 cams + success filter**.
 - **완료한 일**:
-  - `scripts/sim/rollout_to_lerobot.py` 추가. Isaac AppLauncher + `RslRlVecEnvWrapper` + `OnPolicyRunner`로 checkpoint를 로드하고, 성공 episode만 `data/chunk-000/file-000.parquet`, `meta/info.json`, `meta/tasks.parquet`, `meta/episodes/chunk-000/file-000.parquet`, `meta/stats.json`, `videos/observation.images.{top,wrist,front}/chunk-000/file-000.mp4`에 기록한다.
+  - `scripts/sim/rollout_to_lerobot.py` 추가. Isaac AppLauncher + `RslRlVecEnvWrapper` + `OnPolicyRunner`로 checkpoint를 로드하고, 성공 episode만 `data/chunk-000/file-000.parquet`, `meta/info.json`, `meta/tasks.parquet`, `meta/episodes/chunk-000/file-000.parquet`, `meta/stats.json`, 카메라 mp4에 기록한다. 당시 기록은 3cam이었고, 2026-06-05 이후 현재 계약은 top/wrist 2cam이다.
   - North Star 계약에 맞춰 action/state는 6-dim SO-101 joint position으로 저장한다. sim radian 값은 real LeRobot 데이터셋 단위에 맞춰 arm 5축 rad→deg, gripper `×31.75`로 변환한다.
   - 기본 rollout 조건은 TB.3/TB.4 gate와 동일: `active_pens=1`, full pen/cup spawn scale 1.0, stochastic policy, `grasp_assist_distance=0.12`, offset `(0.03, 0.10, -0.05)`, `place_assist_distance=0.0`.
 - **검증 결과(서버 canonical repo `/home/konan147/Workspaces/SO101-Sim2Real`, Isaac Lab 2.3.2, GPU `cuda:0`)**:
@@ -559,7 +607,7 @@
 
 ## 작업 인계 (2026-06-04 — TA.3 camera 정합 완료)
 
-- **목표**: TA.3 — `SimToReal-SO101-PickPen-v0`의 top/front/wrist 카메라가 North Star 계약(`observation.images.{top,wrist,front}`, 480×640×3, 30fps)과 실제 데이터셋 구도에 맞게 렌더되는지 검증한다.
+- **목표(당시)**: TA.3 — `SimToReal-SO101-PickPen-v0`의 top/front/wrist 카메라가 당시 North Star 계약(3cam, 480×640×3, 30fps)과 실제 데이터셋 구도에 맞게 렌더되는지 검증한다. 2026-06-05 이후 현재 North Star는 top/wrist 2cam이다.
 - **상태**: 완료. 다음 actionable task는 TB.1(단계형 reward 구현).
 - **완료한 일**:
   - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py`: 로봇 floating 수정. `so101_follower.usd` base bbox 최하단(local z≈0.0301)을 반영해 `_ROBOT_POS.z`를 `0.92` → `0.889`로 낮춤.

@@ -51,6 +51,14 @@ ArticulationRootPropertiesCfg(enabled_self_collisions=True,
 soft_joint_pos_limit_factor=1.0
 ```
 
+### 2.3 teleop/replay 중 gripper effort 는 동적으로 낮춘다
+
+leisaac teleop/replay 루프는 매 step `dynamic_reset_gripper_effort_limit_sim()` 을
+호출한다. 이 함수는 gripper 에 가장 가까운 rigid object 질량을 보고 gripper joint
+effort limit 을 `object_mass / 0.15` 로 낮춘다. 즉 actuator cfg 의 `10 Nm` 은
+상한이고, 작은 큐브를 다룰 때는 과한 클램프력으로 collision hull 안쪽까지 밀어
+넣지 않도록 실시간으로 완화한다.
+
 ## 3. 비교 — 이전 우리 설정 vs leisaac
 
 | 항목 | 이전 (우리) | leisaac = 현재 적용값 | 영향 |
@@ -70,15 +78,16 @@ soft_joint_pos_limit_factor=1.0
 미끄러짐(B)** 발생. leisaac 은 `stiffness=17.8, effort=10` 이라 오버클로즈할수록
 최대 10 Nm 까지 그립력이 올라간다. 이 강한 클램프가 convexDecomposition 손가락의
 line-contact 한계를 보완한다(leisaac 이 finger collision 특수 튜닝 없이도 잡히는
-이유).
+이유). 다만 teleop/replay 에서는 §2.3 의 동적 effort reset 이 함께 적용되어,
+작은 물체를 계속 10 Nm 로 누르지는 않는다.
 
 ## 4. 충돌 형상 점검 결과 (참고)
 
 - 로봇 USD `assets/robots/so101_follower.usd` 의 `jaw`/`gripper` 콜라이더는
   `convexDecomposition` (instanced prim — Isaac Lab modifier 로 런타임 덮어쓰기
   불가). 평평한 그립 패드가 hull 로 둥글려져 평면-평면 대신 line/point contact 가
-  되기 쉽다. 강한 클램프력(§3)으로 1차 보완. 추후 손가락 안쪽 면에 얇은 box
-  충돌 패드를 추가하면 근본 개선 가능(미적용).
+  되기 쉽다. 이번 적용은 leisaac 과 동일하게 로봇 USD/URDF 를 수정하지 않고,
+  동적 gripper effort 와 PhysX contact 전역값으로 과한 관통을 줄인다.
 - 큐브는 해석적 Box(size 1 × scale 0.025) → 완전 평면. 큐브 쪽은 양호.
 
 ## 5. 적용한 변경
@@ -89,6 +98,26 @@ line-contact 한계를 보완한다(leisaac 이 finger collision 특수 튜닝 �
 - `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`
 
 위 §3 의 leisaac 검증값으로 두 task 모두 일치시킴.
+
+### 5.1.1 dynamic gripper effort 포팅 (PickPen + PickCube)
+
+- `src/sim_to_real/utils/gripper_effort.py`: leisaac 의 질량 기반 gripper effort
+  reset 을 프로젝트 내부 helper 로 포팅. 기본은 leisaac 식을 따르되, cube 낙하를
+  피하려고 `min_effort=0.5` 를 둔다.
+- `scripts/environments/teleoperation/teleop_se3_agent.py`: action 적용 직전 매 step
+  helper 호출. `--disable_dynamic_gripper_effort` 로 끌 수 있고,
+  `--min_gripper_effort` 로 최소 effort 를 조절한다.
+- `scripts/environments/teleoperation/replay.py`: replay 도 같은 helper 사용.
+- `PickPenEnvCfg` / `PickCubeEnvCfg`: `dynamic_reset_gripper_effort_limit=True`.
+
+이 변경은 **로봇 USD/URDF 를 수정하지 않는다.** leisaac 처럼 scene/env runtime 에서
+gripper effort 를 완화한다.
+
+### 5.1.2 PhysX contact 전역값 leisaac 정합
+
+`PickPenEnvCfg` / `PickCubeEnvCfg`:
+- `bounce_threshold_velocity = 0.01`
+- `friction_correlation_distance = 0.00625`
 
 ### 5.2 큐브 contactOffset 분리 (P3)
 
@@ -118,8 +147,9 @@ uv run scripts\environments\teleoperation\teleop_se3_agent.py `
 ```
 
 손가락을 큐브 옆면에 정렬해 닫았을 때 (1) 표면 근처에서 잡히고 (2) 들어올릴 때
-떨어지지 않으면 정상. 큐브가 그리퍼 몸체에 박히면 손가락 충돌 패드(미적용 §4)
-또는 contactOffset 재조정 필요.
+떨어지지 않으면 정상. 큐브가 그리퍼 몸체에 박히면 먼저
+`--min_gripper_effort` 를 낮춰 release 전 과한 클램프를 줄이고, 그래도 반복되면
+contactOffset·충돌 형상 보강을 별도 검토한다.
 
 ## 7. 트레이드오프 / 주의
 

@@ -61,10 +61,8 @@ import torch
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 from isaaclab_tasks.utils import parse_env_cfg
-from leisaac.utils.env_utils import (
-    dynamic_reset_gripper_effort_limit_sim,
-    get_task_type,
-)
+from leisaac.utils.env_utils import get_task_type
+from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim
 
 import sim_to_real # noqa: F401
 

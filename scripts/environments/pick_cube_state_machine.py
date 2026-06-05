@@ -1,8 +1,8 @@
 """PickCube rule-based state machine expert.
 
 RL 전에 cube_task 씬이 물리적으로 pick-and-place 가능한지 증명하기 위한
-scripted controller다. 큐브/그리퍼를 순간이동하지 않고, leisaac 과 같은
-jaw-offset grasp point를 목표 위치에 맞춘 뒤 joint-position action으로 실행한다.
+scripted controller다. 큐브/그리퍼를 순간이동하지 않고, gripper tip 작업점을
+목표 위치에 맞춘 뒤 joint-position action으로 실행한다.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ parser.add_argument("--approach_height", type=float, default=0.14)
 parser.add_argument("--lift_height", type=float, default=0.18)
 parser.add_argument("--transport_height", type=float, default=0.18)
 parser.add_argument("--place_height", type=float, default=0.065)
-parser.add_argument("--grasp_z_offset", type=float, default=0.002)
+parser.add_argument("--grasp_z_offset", type=float, default=0.005)
 parser.add_argument("--target_tolerance", type=float, default=0.018)
 parser.add_argument("--ik_damping", type=float, default=0.05)
 parser.add_argument("--ik_gain", type=float, default=0.85)
@@ -69,6 +69,9 @@ parser.add_argument("--continuity_weight", type=float, default=0.015)
 parser.add_argument("--seed", type=int, default=7)
 parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
+parser.add_argument("--control_point", choices=["jaw_offset", "midpoint"], default="jaw_offset")
+parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
+parser.add_argument("--min_gripper_effort", type=float, default=0.5)
 parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_state_machine.json"))
 parser.add_argument("--dataset_dir", type=Path, default=None, help="Optional LeRobot v3 episode output directory")
 parser.add_argument("--expert_dataset_pt", type=Path, default=None, help="Optional raw rl_state/action expert dataset (.pt)")
@@ -111,11 +114,13 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     apply_curriculum,
 )
 from sim_to_real.tasks.pick_pen import mdp as task_mdp  # noqa: E402
+from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
 
 
 ARM_DOF = 5
 DESK_TOP_Z = 0.76
 JAW_GRASP_OFFSET = (-0.021, -0.070, 0.020)
+CONTROL_POINT_NAME = "gripper_jaw_midpoint"
 FPS = 30
 IMAGE_HEIGHT = 480
 IMAGE_WIDTH = 640
@@ -579,6 +584,8 @@ def _jacobian_row(robot, body_name: str) -> torch.Tensor:
 
 
 def _grasp_point_pos(robot) -> torch.Tensor:
+    if args.control_point == "midpoint":
+        return 0.5 * (_body_pos(robot, "gripper") + _body_pos(robot, "jaw"))
     offset = torch.tensor(JAW_GRASP_OFFSET, device=robot.data.joint_pos.device, dtype=torch.float32).reshape(1, 3)
     offset_w = _quat_apply_wxyz(_body_quat(robot, "jaw"), offset)
     return _body_pos(robot, "jaw") + offset_w
@@ -602,15 +609,28 @@ def _diagnostic_pose(env) -> dict[str, Any]:
 
 
 def _grasp_point_jacobian(robot) -> torch.Tensor:
+    if args.control_point == "midpoint":
+        return 0.5 * (_jacobian_row(robot, "gripper")[:, :3, :] + _jacobian_row(robot, "jaw")[:, :3, :])
+
     body_jac = _jacobian_row(robot, "jaw")
     linear = body_jac[:, :3, :]
     angular = body_jac[:, 3:6, :]
     offset = torch.tensor(JAW_GRASP_OFFSET, device=robot.data.joint_pos.device, dtype=torch.float32).reshape(1, 3)
     offset_w = _quat_apply_wxyz(_body_quat(robot, "jaw"), offset)
     point_terms = []
-    for j in range(ARM_DOF):
-        point_terms.append(linear[:, :, j] + torch.cross(angular[:, :, j], offset_w, dim=-1))
+    for joint_id in range(ARM_DOF):
+        point_terms.append(linear[:, :, joint_id] + torch.cross(angular[:, :, joint_id], offset_w, dim=-1))
     return torch.stack(point_terms, dim=-1)
+
+
+def _step_env(env, action: torch.Tensor):
+    if not args.disable_dynamic_gripper_effort and getattr(env.unwrapped.cfg, "dynamic_reset_gripper_effort_limit", False):
+        dynamic_reset_gripper_effort_limit_sim(
+            env.unwrapped,
+            "so101leader",
+            min_effort=args.min_gripper_effort,
+        )
+    return env.step(action)
 
 
 def _arm_limits(robot, device: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -830,7 +850,7 @@ def _phase(
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
         if expert_recorder is not None:
             expert_recorder.record(env, action, name)
-        step_out = env.step(action)
+        step_out = _step_env(env, action)
         if len(step_out) == 5:
             _obs, _rew, terminated, truncated, _infos = step_out
             dones = terminated | truncated
@@ -879,7 +899,7 @@ def _hold_joint_target(
         action = _joint_position_action(robot, command, target[:ARM_DOF], gripper_target, device)
         if expert_recorder is not None:
             expert_recorder.record(env, action, phase)
-        env.step(action)
+        _step_env(env, action)
         if recorder is not None:
             recorder.record(env, action)
 
@@ -921,7 +941,7 @@ def _run_state_machine(
         zero_action = _joint_position_action(robot, command, torch.zeros(ARM_DOF, device=device), args.gripper_open, device)
         if expert_recorder is not None:
             expert_recorder.record(env, zero_action, "settle")
-        env.step(zero_action)
+        _step_env(env, zero_action)
         if recorder is not None:
             recorder.record(env, zero_action)
 
@@ -1166,7 +1186,7 @@ def main() -> None:
         zero_action = torch.zeros((1, 6), device=device)
         zero_action[0, 5] = args.gripper_open
         for _ in range(max(0, args.warmup_steps)):
-            env.step(zero_action)
+            _step_env(env, zero_action)
         active_names = CUBE_NAMES[: args.active_objects]
         result = _run_state_machine(env, device, active_names, recorder, expert_recorder)
         passed = bool(result["placed_and_released"])
@@ -1180,7 +1200,10 @@ def main() -> None:
             "container_radius_scale": args.container_radius_scale,
             "controller": {
                 "type": "random_fk_waypoint_joint_position",
-                "end_effector": "jaw + quat(jaw) * (-0.021, -0.070, 0.020)",
+                "end_effector": "jaw + quat(jaw) * (-0.021, -0.070, 0.020)"
+                if args.control_point == "jaw_offset"
+                else CONTROL_POINT_NAME,
+                "control_point": args.control_point,
                 "fk_samples": args.fk_samples,
                 "continuity_weight": args.continuity_weight,
                 "max_arm_step_delta_rad": args.max_arm_step_delta,
@@ -1189,6 +1212,8 @@ def main() -> None:
                 "max_grasp_attempts": args.max_grasp_attempts,
                 "gripper_open": args.gripper_open,
                 "gripper_closed": args.gripper_closed,
+                "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
+                "min_gripper_effort": args.min_gripper_effort,
             },
             **result,
         }

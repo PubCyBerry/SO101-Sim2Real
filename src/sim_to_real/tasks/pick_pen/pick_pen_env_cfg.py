@@ -160,7 +160,7 @@ _PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist}
-#   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
+#   · 모두 640×480 (W×H) RGB, update_period=1/30
 #   · 포즈/FOV 는 실제 데이터셋 프레임을 기준으로 튜닝.
 #   · top 은 world frame 절대 좌표, wrist 는 gripper 링크 자식 prim 의 local offset.
 #     num_envs=1 smoke 기준.
@@ -297,7 +297,7 @@ class PickPenSceneCfg(InteractiveSceneCfg):
 
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 (선택 주입) — observation.images.{top,front,wrist}
+# 카메라 리그 (선택 주입) — observation.images.{top,wrist}
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +324,7 @@ def _pinhole_camera_cfg(
         ),
         width=640,
         height=480,
-        update_period=0.0,
+        update_period=1.0 / 30.0,
         update_latest_camera_pose=True,
     )
 
@@ -682,6 +682,7 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
     rewards: PickPenRewardsCfg = PickPenRewardsCfg()
     terminations: PickPenTerminationsCfg = PickPenTerminationsCfg()
     events: PickPenEventCfg = PickPenEventCfg()
+    dynamic_reset_gripper_effort_limit: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -692,7 +693,8 @@ class PickPenEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # GPU pipeline
         self.sim.physx.enable_external_forces_every_iteration = True
-        self.sim.physx.bounce_threshold_velocity = 0.2
+        self.sim.physx.bounce_threshold_velocity = 0.01
+        self.sim.physx.friction_correlation_distance = 0.00625
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         # 4096 env PPO에서 aggregate pair가 134k 근처까지 올라간다. 256k로 여유 확보.
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 256 * 1024

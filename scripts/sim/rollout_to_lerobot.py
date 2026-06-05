@@ -2,7 +2,7 @@
 
 This script records successful SimToReal-SO101 PickCube/PickPen episodes only.
 It writes the LeRobot v3 data contract used by the real SO-101 datasets:
-6-dim joint action/state, 30 FPS timestamps, and three h264 camera videos.
+6-dim joint action/state, 30 FPS timestamps, and two h264 camera videos.
 
 Example:
     uv run --group isaac --locked python scripts/sim/rollout_to_lerobot.py \

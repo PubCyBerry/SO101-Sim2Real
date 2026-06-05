@@ -63,8 +63,8 @@ _CUBE_INIT_STATES = {
 _BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
-#   · 모두 640×480 (W×H) RGB, update_period=0.0 (render_interval 마다 갱신)
+# 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist}
+#   · 모두 640×480 (W×H) RGB, update_period=1/30
 #   · 포즈/FOV 는 cube_task GUI 튜너와 실제 데이터셋 프레임 기준으로 보정.
 #   · top 은 world frame 절대 좌표, wrist 는 gripper 링크 자식 prim 의 local offset.
 #     num_envs=1 smoke 기준.
@@ -623,8 +623,11 @@ class PickCubeEventCfg:
     randomize_cube3 = randomize_object_in_ellipse("Cube3", 0.05, 0.02, (-10.0, 10.0))
     randomize_cube4 = randomize_object_in_ellipse("Cube4", 0.05, 0.02, (-10.0, 10.0))
 
-    # Bowl swings along a forward-facing ±20° arc
-    randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-20.0, 20.0))
+    # 그릇은 ±호(arc)로 랜덤화. 범위를 제한해 두 문제를 방지한다:
+    # 1) 매트 왼쪽 이탈: mat world x_min=1.50, 그릇 default x=1.62, 여유=0.12m.
+    #    -5° 시 center_x=1.582 → 가장자리 1.517m (매트 안쪽 17mm). -20° 시 1.47m → 이탈.
+    # 2) 큐브 겹침: +10° 시 그릇과 Cube3 최악 거리 0.115m > 임계 0.093m. +15°는 0.079m → 겹침.
+    randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-5.0, 10.0))
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +645,7 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
     rewards: PickCubeRewardsCfg = PickCubeRewardsCfg()
     terminations: PickCubeTerminationsCfg = PickCubeTerminationsCfg()
     events: PickCubeEventCfg = PickCubeEventCfg()
+    dynamic_reset_gripper_effort_limit: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -652,7 +656,8 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # GPU pipeline
         self.sim.physx.enable_external_forces_every_iteration = True
-        self.sim.physx.bounce_threshold_velocity = 0.2
+        self.sim.physx.bounce_threshold_velocity = 0.01
+        self.sim.physx.friction_correlation_distance = 0.00625
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         # 4096 env PPO에서 aggregate pair가 134k 근처까지 올라간다. 256k로 여유 확보.
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 256 * 1024

@@ -121,16 +121,33 @@ parser.add_argument("--leader_joint_signs", type=_vec6, default=(1.0, 1.0, 1.0, 
 parser.add_argument("--leader_joint_offsets", type=_vec6, default=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
 parser.add_argument("--leader_smoothing", type=float, default=0.0)
 parser.add_argument(
+    "--disable_dynamic_gripper_effort",
+    action="store_true",
+    help="Disable leisaac-style mass-scaled gripper effort limiting.",
+)
+parser.add_argument(
+    "--min_gripper_effort",
+    type=float,
+    default=0.5,
+    help="Minimum dynamic gripper effort in Nm. leisaac formula is max(object_mass/0.15, this value).",
+)
+parser.add_argument(
     "--max_arm_speed",
     type=float,
-    default=0.20,
-    help="Max commanded arm target speed in rad/s of sim time. <=0 disables controller-side limiting.",
+    default=0,
+    help="Max commanded arm target speed in rad/s of wall time. <=0 disables controller-side limiting.",
 )
 parser.add_argument(
     "--max_gripper_speed",
     type=float,
-    default=0.20,
-    help="Max commanded gripper target speed in rad/s of sim time. <=0 disables controller-side limiting.",
+    default=0,
+    help="Max commanded gripper target speed in rad/s of wall time. <=0 disables controller-side limiting.",
+)
+parser.add_argument(
+    "--max_control_dt",
+    type=float,
+    default=0.10,
+    help="Max wall-clock dt used by teleop command slew limiting. Prevents large jumps after GUI stalls.",
 )
 parser.add_argument("--joint_step", type=float, default=0.035, help="Keyboard arm joint step in radians")
 parser.add_argument("--gripper_step", type=float, default=0.05, help="Keyboard gripper joint step")
@@ -174,6 +191,7 @@ from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (  # noqa: E402
     SO101_JOINT_ORDER,
     add_pick_pen_cameras,
 )
+from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
 
 # Task별 카메라 주입 함수 import (PickCube는 향후 추가됨)
 try:
@@ -269,34 +287,41 @@ def _joint_limits(device: str) -> torch.Tensor:
     return torch.tensor(limits, dtype=torch.float32, device=device)
 
 
-def _policy_dt(env) -> float:
-    return float(env.cfg.sim.dt * env.cfg.decimation)
-
-
 def _slew_limited_targets(
     current: torch.Tensor,
     desired: torch.Tensor,
     limits: torch.Tensor,
     *,
-    policy_dt: float,
+    dt: float,
 ) -> torch.Tensor:
     delta = desired - current
     if args_cli.max_arm_speed > 0.0:
-        arm_step = float(args_cli.max_arm_speed) * policy_dt
+        arm_step = float(args_cli.max_arm_speed) * dt
         delta[:5] = torch.clamp(delta[:5], -arm_step, arm_step)
     if args_cli.max_gripper_speed > 0.0:
-        gripper_step = float(args_cli.max_gripper_speed) * policy_dt
+        gripper_step = float(args_cli.max_gripper_speed) * dt
         delta[5] = torch.clamp(delta[5], -gripper_step, gripper_step)
     next_targets = current + delta
     return torch.maximum(torch.minimum(next_targets, limits[:, 1]), limits[:, 0])
 
 
-class KeyboardJointController:
+class WallClockLimiterMixin:
+    def _init_wall_clock(self) -> None:
+        self._last_control_time = time.perf_counter()
+
+    def _control_dt(self) -> float:
+        now = time.perf_counter()
+        dt = now - self._last_control_time
+        self._last_control_time = now
+        return min(max(dt, 1e-4), max(float(args_cli.max_control_dt), 1e-4))
+
+
+class KeyboardJointController(WallClockLimiterMixin):
     def __init__(self, env, keyboard: GuiKeyboard, limits: torch.Tensor) -> None:
         self.env = env
         self.keyboard = keyboard
         self.limits = limits
-        self.policy_dt = _policy_dt(env)
+        self._init_wall_clock()
         self.desired_targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
         self.targets = self.desired_targets.clone()
         keyboard.add_key_listener(self._on_key)
@@ -313,6 +338,7 @@ class KeyboardJointController:
     def reset(self) -> None:
         self.desired_targets = self.env.scene["robot"].data.joint_pos[0, :6].clone().to(self.env.device)
         self.targets = self.desired_targets.clone()
+        self._init_wall_clock()
 
     def close(self) -> None:
         pass
@@ -324,12 +350,12 @@ class KeyboardJointController:
             self.targets,
             self.desired_targets,
             self.limits,
-            policy_dt=self.policy_dt,
+            dt=self._control_dt(),
         )
         return self.targets.unsqueeze(0)
 
 
-class SO101LeaderJointController:
+class SO101LeaderJointController(WallClockLimiterMixin):
     def __init__(self, env, keyboard: GuiKeyboard, limits: torch.Tensor) -> None:
         from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
@@ -340,7 +366,7 @@ class SO101LeaderJointController:
         self.offsets = torch.tensor(args_cli.leader_joint_offsets, dtype=torch.float32, device=env.device)
         self.targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
         self.filtered_targets = self.targets.clone()
-        self.policy_dt = _policy_dt(env)
+        self._init_wall_clock()
         cfg = SO101LeaderConfig(port=args_cli.port, id=args_cli.leader_id, use_degrees=True)
         self.teleop = SO101Leader(cfg)
         print(f"[leader] connecting SO-101 leader on {args_cli.port} (id={args_cli.leader_id})")
@@ -355,6 +381,7 @@ class SO101LeaderJointController:
     def reset(self) -> None:
         self.targets = self.env.scene["robot"].data.joint_pos[0, :6].clone().to(self.env.device)
         self.filtered_targets = self.targets.clone()
+        self._init_wall_clock()
 
     def close(self) -> None:
         if self.teleop.is_connected:
@@ -394,7 +421,7 @@ class SO101LeaderJointController:
             self.targets,
             self.filtered_targets,
             self.limits,
-            policy_dt=self.policy_dt,
+            dt=self._control_dt(),
         )
         return self.targets.unsqueeze(0)
 
@@ -875,9 +902,8 @@ def main() -> None:  # noqa: C901
             wrist_local_rot=args_cli.wrist_rot,
             wrist_focal=args_cli.wrist_focal,
         )
-        # NOTE: 카메라 sensor update_period 는 건드리지 않는다(0.0 유지).
-        # env 가 sim.dt=1/120·decimation=4·render_interval=4 라 카메라는 30 fps 로
-        # 갱신되며, 이는 North Star observation.images.* fps 30 계약과 일치한다.
+        # 카메라 sensor update_period 는 task cfg 기본값(1/30s)을 쓴다.
+        # 이는 North Star observation.images.* fps 30 계약과 leisaac 템플릿 설정에 맞춘 값이다.
         # 실시간 성능은 보조 viewport docking 을 --tune_cameras 일 때만 켜서 확보한다.
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -965,6 +991,12 @@ def main() -> None:  # noqa: C901
                 if action is None:
                     env.sim.render()
                 else:
+                    if not args_cli.disable_dynamic_gripper_effort:
+                        dynamic_reset_gripper_effort_limit_sim(
+                            env,
+                            args_cli.teleop_device,
+                            min_effort=args_cli.min_gripper_effort,
+                        )
                     env.step(action)
                     if recorder is not None:
                         recorder.record_step(env, action)

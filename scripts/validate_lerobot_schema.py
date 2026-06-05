@@ -33,7 +33,7 @@ EXPECTED_JOINT_NAMES = [
     "wrist_roll.pos",
     "gripper.pos",
 ]
-EXPECTED_CAMERAS = ["top", "wrist", "front"]
+EXPECTED_CAMERAS = ["top", "wrist"]
 EXPECTED_TASK = "pick up the cube and place it in the bowl"
 
 EXPECTED_CAMERA_INFO = {
