@@ -45,9 +45,9 @@ parser.add_argument("--final_settle_steps", type=int, default=120)
 parser.add_argument("--retreat_steps", type=int, default=140)
 parser.add_argument("--command_settle_steps", type=int, default=200)
 parser.add_argument("--max_grasp_attempts", type=int, default=3)
-parser.add_argument("--approach_height", type=float, default=0.22)
-parser.add_argument("--lift_height", type=float, default=0.22)
-parser.add_argument("--transport_height", type=float, default=0.24)
+parser.add_argument("--approach_height", type=float, default=0.14)
+parser.add_argument("--lift_height", type=float, default=0.18)
+parser.add_argument("--transport_height", type=float, default=0.18)
 parser.add_argument("--place_height", type=float, default=0.065)
 parser.add_argument("--grasp_z_offset", type=float, default=0.005)
 parser.add_argument("--target_tolerance", type=float, default=0.018)
@@ -55,9 +55,14 @@ parser.add_argument("--ik_damping", type=float, default=0.05)
 parser.add_argument("--ik_gain", type=float, default=0.85)
 parser.add_argument("--max_joint_delta", type=float, default=0.075)
 parser.add_argument(
+    "--enable_jacobian_refine",
+    action="store_true",
+    help="Enable final local Jacobian refinement after random-FK waypoint selection. Off by default; current cube grasp is more stable without it.",
+)
+parser.add_argument(
     "--disable_jacobian_refine",
     action="store_true",
-    help="Disable the final local Jacobian refinement after random-FK waypoint selection.",
+    help=argparse.SUPPRESS,
 )
 parser.add_argument(
     "--max_arm_step_delta",
@@ -98,7 +103,7 @@ parser.add_argument(
 parser.add_argument(
     "--object_order",
     choices=["name", "near_bowl_first", "far_bowl_first", "hard_first"],
-    default="hard_first",
+    default="name",
     help="Object execution order. hard_first handles the large/far cubes before the bowl gets crowded.",
 )
 parser.add_argument(
@@ -110,7 +115,7 @@ parser.add_argument(
 parser.add_argument(
     "--bowl_place_offset_radius",
     type=float,
-    default=0.040,
+    default=0.022,
     help="XY radius for per-cube bowl placement offsets in meters.",
 )
 parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
@@ -995,7 +1000,8 @@ def _phase(
     for step in range(actual_steps):
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
         use_refine = (
-            not args.disable_jacobian_refine
+            args.enable_jacobian_refine
+            and not args.disable_jacobian_refine
             and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
         )
         arm_target = q_goal
@@ -1956,7 +1962,7 @@ def main() -> None:
                 "type": "random_fk_waypoint_joint_position",
                 "fk_samples": args.fk_samples,
                 "continuity_weight": args.continuity_weight,
-                "jacobian_refine": not args.disable_jacobian_refine,
+                "jacobian_refine": args.enable_jacobian_refine and not args.disable_jacobian_refine,
                 "ik_damping": args.ik_damping,
                 "ik_gain": args.ik_gain,
                 "max_joint_delta": args.max_joint_delta,
