@@ -50,6 +50,12 @@ parser.add_argument("--approach_height", type=float, default=0.14)
 parser.add_argument("--lift_height", type=float, default=0.18)
 parser.add_argument("--transport_height", type=float, default=0.18)
 parser.add_argument("--place_height", type=float, default=0.065)
+parser.add_argument(
+    "--stack_place_height_increment",
+    type=float,
+    default=0.025,
+    help="Additional place height per cube already inside the bowl, reducing gripper-pile collisions.",
+)
 parser.add_argument("--grasp_z_offset", type=float, default=0.005)
 parser.add_argument("--target_tolerance", type=float, default=0.018)
 parser.add_argument("--ik_damping", type=float, default=0.05)
@@ -1759,11 +1765,13 @@ def _run_state_machine(
             next_state=PickCubeFSMState.RELEASE,
             reason="descend_to_place_height",
         )
+        stack_level = sum(1 for name in active_names if _cube_inside_bowl(env, name, bowl_radius))
+        place_height = args.place_height + args.stack_place_height_increment * stack_level
         _phase(
             env,
             device,
             f"{phase_prefix}.place_descend",
-            _target_from_bowl(env, args.place_height, bowl_offset_xy),
+            _target_from_bowl(env, place_height, bowl_offset_xy),
             args.gripper_closed,
             args.place_steps,
             trace,
@@ -1772,6 +1780,8 @@ def _run_state_machine(
             expert_recorder,
             tolerance=args.target_tolerance,
         )
+        trace[-1]["stack_level_before_place"] = stack_level
+        trace[-1]["place_height"] = round(float(place_height), 5)
         # 열 때는 마지막 joint target을 유지한다. 위치 IK가 그릇 안 큐브를 다시
         # 추적하며 건드리지 않도록, release 동안 관절 목표를 고정한다.
         joint_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
@@ -1993,6 +2003,7 @@ def main() -> None:
             "retreat_steps": args.retreat_steps,
             "idle_home_steps": args.idle_home_steps,
             "max_grasp_attempts": args.max_grasp_attempts,
+            "stack_place_height_increment": args.stack_place_height_increment,
             "object_order": args.object_order,
             "object_cycles": args.object_cycles,
             "bowl_place_offset_radius": args.bowl_place_offset_radius,
