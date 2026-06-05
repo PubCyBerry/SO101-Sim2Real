@@ -37,6 +37,12 @@ parser.add_argument("--settle_steps", type=int, default=60)
 parser.add_argument("--approach_steps", type=int, default=180)
 parser.add_argument("--descend_steps", type=int, default=140)
 parser.add_argument("--close_steps", type=int, default=80)
+parser.add_argument(
+    "--grasp_settle_steps",
+    type=int,
+    default=60,
+    help="Extra dwell after the slew-limited gripper command can reach the closed target.",
+)
 parser.add_argument("--lift_steps", type=int, default=180)
 parser.add_argument("--transport_steps", type=int, default=240)
 parser.add_argument("--place_steps", type=int, default=160)
@@ -954,6 +960,17 @@ def _slew_limited_step_count(command: torch.Tensor, q_goal: torch.Tensor, grippe
     return max(arm_steps, gripper_steps) + max(0, args.command_settle_steps)
 
 
+def _gripper_transition_step_count(current: float, target: float) -> int:
+    return math.ceil(abs(float(target) - float(current)) / max(abs(args.max_gripper_step_delta), 1e-6))
+
+
+def _grasp_phase_steps(command: torch.Tensor, target: float) -> int:
+    # GRASP는 "닫기 + 대기" 상태다. slew limit 때문에 열린 상태에서 바로 80 step만
+    # 주면 lift 중에야 완전히 닫힐 수 있어, 필요한 닫기 시간과 settle을 보장한다.
+    close_steps = _gripper_transition_step_count(float(command[5].item()), target)
+    return max(1, args.close_steps, close_steps + max(0, args.grasp_settle_steps))
+
+
 def _ik_action(
     robot,
     target_grasp_point_w: torch.Tensor,
@@ -1769,7 +1786,7 @@ def _run_state_machine(
                 f"{attempt_prefix}.grasp",
                 lambda target=grasp_target: target,
                 args.gripper_closed,
-                args.close_steps,
+                _grasp_phase_steps(command, args.gripper_closed),
                 trace,
                 command,
                 recorder,
@@ -2072,6 +2089,13 @@ def main() -> None:
             if args.expert_dataset_pt is not None:
                 raise ValueError("--expert_dataset_pt is only supported with --controller_mode joint_fk")
             env_cfg.actions = PickCubeDiffIkActionsCfg()
+        min_close_steps = math.ceil(
+            abs(args.gripper_open - args.gripper_closed) / max(abs(args.max_gripper_step_delta), 1e-6)
+        )
+        effective_close_steps = max(
+            args.close_steps,
+            min_close_steps + max(0, args.grasp_settle_steps),
+        )
         total_steps = (
             args.settle_steps
             + args.active_objects
@@ -2081,7 +2105,7 @@ def main() -> None:
                 args.open_steps
                 + args.approach_steps
                 + args.descend_steps
-                + args.close_steps
+                + effective_close_steps
                 + args.lift_steps
                 + args.command_settle_steps * 4
             )
@@ -2148,6 +2172,8 @@ def main() -> None:
             else CONTROL_POINT_NAME,
             "control_point": args.control_point,
             "command_settle_steps": args.command_settle_steps,
+            "close_steps": args.close_steps,
+            "grasp_settle_steps": args.grasp_settle_steps,
             "retreat_steps": args.retreat_steps,
             "idle_home_steps": args.idle_home_steps,
             "max_grasp_attempts": args.max_grasp_attempts,
