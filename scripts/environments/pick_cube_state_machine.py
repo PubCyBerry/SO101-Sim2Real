@@ -241,6 +241,8 @@ RMPFLOW_LULA_TO_USD_R = (
     (0.06726, 0.01203, 0.99766),
 )
 RMPFLOW_LULA_TO_USD_T = (2.41099, 1.19214, -0.07616)
+RMPFLOW_BASE_POS_USD = (1.82045509, -0.59309049, 0.71412218)
+RMPFLOW_BASE_QUAT_USD = (0.70338290, -0.01968502, -0.02797320, -0.70998768)
 RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET = (-0.078, 0.010, -0.002)
 
 
@@ -661,18 +663,16 @@ class SO101RmpFlowJointTarget:
         self._sync_base_pose()
 
     def _sync_base_pose(self) -> None:
-        root_pos = self.robot.data.root_pos_w[0].detach().cpu().numpy()
-        root_quat = self.robot.data.root_quat_w[0].detach().cpu().numpy()
-        self._rmpflow.set_robot_base_pose(robot_position=root_pos, robot_orientation=root_quat)
+        self._rmpflow.set_robot_base_pose(
+            robot_position=np.asarray(RMPFLOW_BASE_POS_USD, dtype=np.float32),
+            robot_orientation=np.asarray(RMPFLOW_BASE_QUAT_USD, dtype=np.float32),
+        )
 
     def compute(self, target_w: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
         self._sync_base_pose()
         target_usd = target_w.detach().cpu().reshape(3).numpy()
         target_usd = target_usd + np.asarray(RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET, dtype=np.float32)
-        rot_lula_to_usd = np.asarray(RMPFLOW_LULA_TO_USD_R, dtype=np.float32)
-        trans_lula_to_usd = np.asarray(RMPFLOW_LULA_TO_USD_T, dtype=np.float32)
-        target_lula = rot_lula_to_usd.T @ (target_usd - trans_lula_to_usd)
-        self._rmpflow.set_end_effector_target(target_position=target_lula, target_orientation=None)
+        self._rmpflow.set_end_effector_target(target_position=target_usd, target_orientation=None)
         action = self._policy.get_next_articulation_action()
         q = torch.as_tensor(action.joint_positions[:ARM_DOF], device=self.device, dtype=torch.float32)
         return q, {
@@ -681,7 +681,8 @@ class SO101RmpFlowJointTarget:
             "rmpflow_frame_name": "gripper_frame_link",
             "rmpflow_position_only": True,
             "rmpflow_target_usd": [round(float(v), 5) for v in target_usd.tolist()],
-            "rmpflow_target_lula": [round(float(v), 5) for v in target_lula.tolist()],
+            "rmpflow_base_pos_usd": [round(float(v), 5) for v in RMPFLOW_BASE_POS_USD],
+            "rmpflow_base_quat_usd": [round(float(v), 5) for v in RMPFLOW_BASE_QUAT_USD],
         }
 
 
