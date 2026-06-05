@@ -27,11 +27,15 @@
 - [x] **TA.3** 카메라 3대 extrinsic/intrinsic 실기 정합 (480×640@30 고정) | machine:any | dep:T0.3 | verify:`camera_shape_smoke.py` 3캠 RGB shape/FOV/pose pass + 기본 `env_smoke.py` no-camera pass | status:done
 - [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
 - [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 3cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
+- [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
+- [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 3cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
 
 ## Phase B — RL 전문가 (state-based)
 
 - [x] **TB.1** 단계형 reward 구현 (reach→grasp→lift→transport→insert→release + success + action-rate 페널티) | machine:any | dep:TA.1,TA.2 | verify:`reward_smoke.py` reward term 9개 등록 + 단계별 증가 pass, `env_smoke.py` 500-step pass, `drive_response_smoke.py` pass | status:done
 - [x] **TB.2** rsl_rl PPO train 래퍼 `scripts/reinforcement_learning/train.py` | machine:server | dep:TB.1 | verify:100-step smoke 무크래시 + 체크포인트 저장 | status:done
+- [x] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:done
+- [ ] **TB.4** PickCube 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:`eval_success.py` PickCube full cube/bowl spawn success_rate ≥0.7, `max_episode_steps>=900` | status:in_progress
 - [x] **TB.3** PickCube RL 전문가 full 학습 no-assist 재시작 (2048–4096 env, 카메라 off, PPO `num_learning_epochs>=20`) | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE,TB.2 | verify:`rg`로 grab/teleport 보조 코드 0건 + `train.py` default PickCube/no-assist/20epoch + checkpoint 산출 | status:done
 - [ ] **TB.4** PickCube 커리큘럼 spawn 영역 점진 확대 (현재→목표) | machine:server | dep:TB.3 | verify:`eval_success.py` PickCube full cube/bowl spawn success_rate ≥0.7, `max_episode_steps>=900` | status:in_progress
 
