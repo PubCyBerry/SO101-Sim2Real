@@ -114,6 +114,11 @@ parser.add_argument(
     help="Internal RMPFlow frames rolled out to produce a phase joint target before external slew limiting.",
 )
 parser.add_argument(
+    "--disable_rmpflow_jacobian_refine",
+    action="store_true",
+    help="Disable USD Jacobian grasp-point refinement in the second half of RMPFlow phases.",
+)
+parser.add_argument(
     "--object_order",
     choices=["name", "near_bowl_first", "far_bowl_first", "hard_first"],
     default="name",
@@ -1123,7 +1128,7 @@ def _phase(
     for step in range(actual_steps):
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
         use_refine = (
-            args.enable_jacobian_refine
+            (args.enable_jacobian_refine or (rmpflow_driver is not None and not args.disable_rmpflow_jacobian_refine))
             and not args.disable_jacobian_refine
             and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
         )
@@ -1131,6 +1136,19 @@ def _phase(
         if rmpflow_driver is not None:
             target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
             arm_target, plan = rmpflow_driver.compute(target[0])
+            if use_refine:
+                refine_action, _ = _ik_action(
+                    robot,
+                    target,
+                    gripper_target,
+                    device,
+                    damping=args.ik_damping,
+                    gain=args.ik_gain,
+                    max_joint_delta=args.max_joint_delta,
+                )
+                arm_target = refine_action[0, :ARM_DOF]
+                refine_steps += 1
+                plan["rmpflow_jacobian_refine"] = True
         elif use_refine:
             refine_action, _ = _ik_action(
                 robot,
@@ -2169,6 +2187,7 @@ def main() -> None:
                 "cspace_attractor": "Lula IK solution for the current position-only target",
                 "execution_action": "slew_limited_joint_position",
                 "internal_rollout_steps": args.rmpflow_internal_rollout_steps,
+                "jacobian_refine": not args.disable_rmpflow_jacobian_refine,
                 "max_arm_step_delta_rad": args.max_arm_step_delta,
                 "max_gripper_step_delta_rad": args.max_gripper_step_delta,
                 "gripper_closed": args.ik_gripper_closed,
