@@ -71,6 +71,18 @@ parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
 parser.add_argument("--control_point", choices=["jaw_offset", "midpoint"], default="jaw_offset")
 parser.add_argument(
+    "--controller_mode",
+    choices=["joint_fk", "diff_ik"],
+    default="joint_fk",
+    help="joint_fk uses the legacy random-FK joint target solver; diff_ik uses Isaac Lab task-space IK actions.",
+)
+parser.add_argument(
+    "--ik_gripper_closed",
+    type=float,
+    default=0.0,
+    help="Closed gripper joint target used by --controller_mode diff_ik.",
+)
+parser.add_argument(
     "--object_order",
     choices=["name", "near_bowl_first", "far_bowl_first"],
     default="near_bowl_first",
@@ -113,7 +125,14 @@ simulation_app = launcher.app
 
 import gymnasium as gym  # noqa: E402
 from isaaclab.managers import SceneEntityCfg  # noqa: E402
+from isaaclab.controllers import DifferentialIKControllerCfg  # noqa: E402
+from isaaclab.envs.mdp.actions import (  # noqa: E402
+    BinaryJointPositionActionCfg,
+    DifferentialInverseKinematicsActionCfg,
+)
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+from isaaclab.utils import configclass  # noqa: E402
+from isaaclab.utils.math import quat_apply, quat_inv  # noqa: E402
 import numpy as np  # noqa: E402
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
@@ -129,6 +148,7 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     BOWL_SUCCESS_RADIUS,
     add_pick_cube_cameras,
     CUBE_NAMES,
+    SO101_JOINT_ORDER,
     apply_curriculum,
 )
 from sim_to_real.tasks.pick_pen import mdp as task_mdp  # noqa: E402
@@ -164,6 +184,34 @@ JOINT_FEATURE_NAMES = [
     "gripper.pos",
 ]
 GRIPPER_LEROBOT_SCALE = 31.75
+
+
+@configclass
+class PickCubeDiffIkActionsCfg:
+    """State-machine-only action surface: 3D task-space IK + binary gripper."""
+
+    arm: DifferentialInverseKinematicsActionCfg = DifferentialInverseKinematicsActionCfg(
+        asset_name="robot",
+        joint_names=SO101_JOINT_ORDER[:ARM_DOF],
+        body_name="jaw",
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(
+            pos=JAW_GRASP_OFFSET,
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+        scale=1.0,
+        controller=DifferentialIKControllerCfg(
+            command_type="position",
+            use_relative_mode=False,
+            ik_method="dls",
+            ik_params={"lambda_val": 0.04},
+        ),
+    )
+    gripper: BinaryJointPositionActionCfg = BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["gripper"],
+        open_command_expr={"gripper": args.gripper_open},
+        close_command_expr={"gripper": args.ik_gripper_closed},
+    )
 
 
 @dataclass
@@ -241,7 +289,7 @@ class LeRobotV3EpisodeRecorder:
         frame_idx = self.frame_count
         self.rows.append(
             {
-                "action": _action_to_record(action).tolist(),
+                "action": _action_to_record(env, action).tolist(),
                 "observation.state": _read_joint_state(env).tolist(),
                 "timestamp": frame_idx / FPS,
                 "frame_index": frame_idx,
@@ -525,7 +573,10 @@ def _read_joint_state(env) -> np.ndarray:
     return _to_lerobot_units(robot.data.joint_pos[0, :6].detach().cpu().numpy())
 
 
-def _action_to_record(action_tensor: torch.Tensor) -> np.ndarray:
+def _action_to_record(env, action_tensor: torch.Tensor) -> np.ndarray:
+    if action_tensor.shape[-1] < 6:
+        robot = env.unwrapped.scene["robot"]
+        return _to_lerobot_units(robot.data.joint_pos[0, :6].detach().cpu().numpy())
     action = action_tensor[0, :6].detach().cpu().numpy()
     return _to_lerobot_units(action)
 
@@ -970,6 +1021,254 @@ def _ordered_active_names(env, active_names: list[str]) -> list[str]:
     return names
 
 
+def _ik_position_action(env, target_grasp_point_w: torch.Tensor, gripper_command: float, device: str) -> torch.Tensor:
+    robot = env.unwrapped.scene["robot"]
+    target_w = target_grasp_point_w.to(device=device, dtype=torch.float32).reshape(1, 3)
+    target_b = quat_apply(
+        quat_inv(robot.data.root_quat_w),
+        target_w - robot.data.root_pos_w,
+    )
+    action = torch.zeros((1, 4), device=device, dtype=torch.float32)
+    action[:, :3] = target_b
+    action[:, 3] = float(gripper_command)
+    return action
+
+
+def _ik_phase(
+    env,
+    device: str,
+    name: str,
+    target_fn: Callable[[], torch.Tensor],
+    gripper_command: float,
+    steps: int,
+    trace: list[dict[str, Any]],
+    recorder: LeRobotV3EpisodeRecorder | None,
+    *,
+    tolerance: float,
+) -> dict[str, Any]:
+    robot = env.unwrapped.scene["robot"]
+    min_error = float("inf")
+    final_error = float("inf")
+    reached_step: int | None = None
+    done_seen = False
+    actual_steps = max(1, int(steps))
+    for step in range(actual_steps):
+        target = target_fn().to(device=device, dtype=torch.float32).reshape(3)
+        action = _ik_position_action(env, target, gripper_command, device)
+        err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target).item())
+        step_out = _step_env(env, action)
+        if len(step_out) == 5:
+            _obs, _rew, terminated, truncated, _infos = step_out
+            dones = terminated | truncated
+        else:
+            _obs, _rew, dones, _infos = step_out
+        if recorder is not None:
+            recorder.record(env, action)
+        min_error = min(min_error, err)
+        final_error = err
+        if bool(dones[0].item()):
+            done_seen = True
+        if err <= tolerance and reached_step is None:
+            reached_step = step + 1
+
+    target = target_fn().to(device=device, dtype=torch.float32).reshape(3)
+    stat = {
+        "phase": name,
+        "steps": int(actual_steps),
+        "requested_steps": int(steps),
+        "reached_step": reached_step,
+        "min_error_m": round(min_error, 5),
+        "final_error_m": round(final_error, 5),
+        "done_seen": done_seen,
+        "target_grasp_point_w": _round_list(target),
+        "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
+        "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+        **_diagnostic_pose(env),
+    }
+    trace.append(stat)
+    return stat
+
+
+def _run_diff_ik_state_machine(
+    env,
+    device: str,
+    active_names: list[str],
+    recorder: LeRobotV3EpisodeRecorder | None = None,
+) -> dict[str, Any]:
+    scene = env.unwrapped.scene
+    robot = scene["robot"]
+    trace: list[dict[str, Any]] = []
+    bowl_radius = BOWL_SUCCESS_RADIUS * max(0.1, args.container_radius_scale)
+
+    current_target = lambda: _grasp_point_pos(robot)[0].clone()
+    for _ in range(args.settle_steps):
+        action = _ik_position_action(env, current_target(), args.gripper_open, device)
+        _step_env(env, action)
+        if recorder is not None:
+            recorder.record(env, action)
+
+    operation_order = _ordered_active_names(env, active_names)
+    trace.append({
+        "phase": "operation_order",
+        "object_order": operation_order,
+        "order_mode": args.object_order,
+        "bowl_place_offset_radius": args.bowl_place_offset_radius,
+    })
+
+    for placement_index, cube_name in enumerate(operation_order):
+        cube_start = scene[cube_name].data.root_pos_w[0].clone()
+        phase_prefix = cube_name.lower()
+        bowl_offset_xy = _bowl_place_offset(device, placement_index)
+        grasped = False
+        for attempt in range(1, max(1, args.max_grasp_attempts) + 1):
+            attempt_prefix = f"{phase_prefix}.attempt{attempt}"
+            _ik_phase(
+                env,
+                device,
+                f"{attempt_prefix}.approach",
+                _target_from_cube(env, cube_name, args.approach_height),
+                args.gripper_open,
+                args.approach_steps,
+                trace,
+                recorder,
+                tolerance=args.target_tolerance,
+            )
+            _ik_phase(
+                env,
+                device,
+                f"{attempt_prefix}.descend",
+                _target_from_cube(env, cube_name, args.grasp_z_offset),
+                args.gripper_open,
+                args.descend_steps,
+                trace,
+                recorder,
+                tolerance=args.target_tolerance,
+            )
+            grasp_target = _target_from_cube(env, cube_name, args.grasp_z_offset)().clone()
+            _ik_phase(
+                env,
+                device,
+                f"{attempt_prefix}.close",
+                lambda target=grasp_target: target,
+                -1.0,
+                args.close_steps,
+                trace,
+                recorder,
+                tolerance=args.target_tolerance,
+            )
+            _ik_phase(
+                env,
+                device,
+                f"{attempt_prefix}.lift",
+                lambda target=grasp_target: target
+                + torch.tensor([0.0, 0.0, args.lift_height], device=device, dtype=torch.float32),
+                -1.0,
+                args.lift_steps,
+                trace,
+                recorder,
+                tolerance=args.target_tolerance,
+            )
+            grasped = _cube_lifted(env, cube_name)
+            trace.append({
+                "phase": f"{attempt_prefix}.lift_check",
+                "grasped": grasped,
+                "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
+                "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+                **_diagnostic_pose(env),
+            })
+            if grasped:
+                break
+
+            _ik_phase(
+                env,
+                device,
+                f"{attempt_prefix}.retry_open",
+                lambda: _grasp_point_pos(robot)[0].clone(),
+                args.gripper_open,
+                max(args.open_steps, args.command_settle_steps // 2),
+                trace,
+                recorder,
+                tolerance=args.target_tolerance,
+            )
+
+        if not grasped:
+            cube_end = scene[cube_name].data.root_pos_w[0].clone()
+            trace.append({
+                "phase": f"{phase_prefix}.result",
+                "cube_start_w": _round_list(cube_start),
+                "cube_end_w": _round_list(cube_end),
+                "inside_bowl": _cube_inside_bowl(env, cube_name, bowl_radius),
+                "grasped": False,
+            })
+            continue
+
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.transport",
+            _target_from_bowl(env, args.transport_height, bowl_offset_xy),
+            -1.0,
+            args.transport_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.place",
+            _target_from_bowl(env, args.place_height, bowl_offset_xy),
+            -1.0,
+            args.place_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
+        release_target = _grasp_point_pos(robot)[0].clone()
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.open",
+            lambda target=release_target: target,
+            args.gripper_open,
+            args.open_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.final_settle",
+            lambda target=release_target: target,
+            args.gripper_open,
+            args.final_settle_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
+
+        cube_end = scene[cube_name].data.root_pos_w[0].clone()
+        trace.append({
+            "phase": f"{phase_prefix}.result",
+            "cube_start_w": _round_list(cube_start),
+            "cube_end_w": _round_list(cube_end),
+            "inside_bowl": _cube_inside_bowl(env, cube_name, bowl_radius),
+        })
+
+    final_inside = {name: _cube_inside_bowl(env, name, bowl_radius) for name in active_names}
+    return {
+        "trace": trace,
+        "final_inside": final_inside,
+        "placed_and_released": _placed_and_released(env, active_names, bowl_radius),
+        "final_gripper": round(float(robot.data.joint_pos[0, 5].item()), 5),
+        "final_grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
+        "final_joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+        "bowl_w": _round_list(scene[BOWL_NAME].data.root_pos_w[0]),
+        "cube_w": {name: _round_list(scene[name].data.root_pos_w[0]) for name in active_names},
+    }
+
+
 def _run_state_machine(
     env,
     device: str,
@@ -1204,6 +1503,10 @@ def main() -> None:
         # State-machine 검증 중에는 중간 성공 termination으로 자동 reset되지 않게
         # 끄고, 마지막에 gripper release까지 포함해 직접 판정한다.
         env_cfg.terminations.success = None
+        if args.controller_mode == "diff_ik":
+            if args.expert_dataset_pt is not None:
+                raise ValueError("--expert_dataset_pt is only supported with --controller_mode joint_fk")
+            env_cfg.actions = PickCubeDiffIkActionsCfg()
         total_steps = (
             args.settle_steps
             + args.active_objects
@@ -1253,13 +1556,56 @@ def main() -> None:
             )
         if args.expert_dataset_pt is not None:
             expert_recorder = ExpertTrajectoryRecorder(args.expert_dataset_pt)
-        zero_action = torch.zeros((1, 6), device=device)
-        zero_action[0, 5] = args.gripper_open
+        if args.controller_mode == "diff_ik":
+            robot = env.unwrapped.scene["robot"]
+            zero_action = _ik_position_action(env, _grasp_point_pos(robot)[0], args.gripper_open, device)
+        else:
+            zero_action = torch.zeros((1, 6), device=device)
+            zero_action[0, 5] = args.gripper_open
         for _ in range(max(0, args.warmup_steps)):
             _step_env(env, zero_action)
         active_names = CUBE_NAMES[: args.active_objects]
-        result = _run_state_machine(env, device, active_names, recorder, expert_recorder)
+        if args.controller_mode == "diff_ik":
+            result = _run_diff_ik_state_machine(env, device, active_names, recorder)
+        else:
+            result = _run_state_machine(env, device, active_names, recorder, expert_recorder)
         passed = bool(result["placed_and_released"])
+        common_controller = {
+            "mode": args.controller_mode,
+            "end_effector": "jaw + quat(jaw) * (-0.021, -0.070, 0.020)"
+            if args.control_point == "jaw_offset"
+            else CONTROL_POINT_NAME,
+            "control_point": args.control_point,
+            "command_settle_steps": args.command_settle_steps,
+            "max_grasp_attempts": args.max_grasp_attempts,
+            "object_order": args.object_order,
+            "bowl_place_offset_radius": args.bowl_place_offset_radius,
+            "gripper_open": args.gripper_open,
+            "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
+            "min_gripper_effort": args.min_gripper_effort,
+        }
+        if args.controller_mode == "diff_ik":
+            controller_payload = {
+                **common_controller,
+                "type": "differential_ik_position_binary_gripper",
+                "body_name": "jaw",
+                "body_offset": list(JAW_GRASP_OFFSET),
+                "ik_method": "dls",
+                "ik_lambda": 0.04,
+                "gripper_closed": args.ik_gripper_closed,
+                "close_action_command": -1.0,
+                "open_action_command": args.gripper_open,
+            }
+        else:
+            controller_payload = {
+                **common_controller,
+                "type": "random_fk_waypoint_joint_position",
+                "fk_samples": args.fk_samples,
+                "continuity_weight": args.continuity_weight,
+                "max_arm_step_delta_rad": args.max_arm_step_delta,
+                "max_gripper_step_delta_rad": args.max_gripper_step_delta,
+                "gripper_closed": args.gripper_closed,
+            }
         payload = {
             "task_id": "TA.CUBE.STATE_MACHINE",
             "task": args.task,
@@ -1268,25 +1614,7 @@ def main() -> None:
             "object_radius_scale": args.object_radius_scale,
             "container_angle_scale": args.container_angle_scale,
             "container_radius_scale": args.container_radius_scale,
-            "controller": {
-                "type": "random_fk_waypoint_joint_position",
-                "end_effector": "jaw + quat(jaw) * (-0.021, -0.070, 0.020)"
-                if args.control_point == "jaw_offset"
-                else CONTROL_POINT_NAME,
-                "control_point": args.control_point,
-                "fk_samples": args.fk_samples,
-                "continuity_weight": args.continuity_weight,
-                "max_arm_step_delta_rad": args.max_arm_step_delta,
-                "max_gripper_step_delta_rad": args.max_gripper_step_delta,
-                "command_settle_steps": args.command_settle_steps,
-                "max_grasp_attempts": args.max_grasp_attempts,
-                "object_order": args.object_order,
-                "bowl_place_offset_radius": args.bowl_place_offset_radius,
-                "gripper_open": args.gripper_open,
-                "gripper_closed": args.gripper_closed,
-                "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
-                "min_gripper_effort": args.min_gripper_effort,
-            },
+            "controller": controller_payload,
             **result,
         }
         if recorder is not None:
