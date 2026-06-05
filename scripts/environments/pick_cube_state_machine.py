@@ -653,6 +653,7 @@ class SO101RmpFlowJointTarget:
             end_effector_frame_name="gripper_frame_link",
             maximum_substep_size=physics_dt / 5.0,
         )
+        self._kinematics = self._rmpflow.get_kinematics_solver()
         self._policy = ArticulationMotionPolicy(self._articulation, self._rmpflow, physics_dt)
         self.active_dof_names = list(self._rmpflow.get_active_joints())
 
@@ -661,15 +662,25 @@ class SO101RmpFlowJointTarget:
         self._sync_base_pose()
 
     def _sync_base_pose(self) -> None:
-        self._rmpflow.set_robot_base_pose(
-            robot_position=np.asarray(RMPFLOW_BASE_POS_USD, dtype=np.float32),
-            robot_orientation=np.asarray(RMPFLOW_BASE_QUAT_USD, dtype=np.float32),
-        )
+        base_pos = np.asarray(RMPFLOW_BASE_POS_USD, dtype=np.float32)
+        base_quat = np.asarray(RMPFLOW_BASE_QUAT_USD, dtype=np.float32)
+        self._rmpflow.set_robot_base_pose(robot_position=base_pos, robot_orientation=base_quat)
+        self._kinematics.set_robot_base_pose(robot_position=base_pos, robot_orientation=base_quat)
 
     def compute(self, target_w: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
         self._sync_base_pose()
         target_usd = target_w.detach().cpu().reshape(3).numpy()
         target_usd = target_usd + np.asarray(RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET, dtype=np.float32)
+        warm_start = self.robot.data.joint_pos[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
+        ik_q, ik_success = self._kinematics.compute_inverse_kinematics(
+            "gripper_frame_link",
+            target_usd.astype(np.float64),
+            target_orientation=None,
+            warm_start=warm_start,
+            position_tolerance=0.005,
+        )
+        if ik_success:
+            self._rmpflow.set_cspace_target(np.asarray(ik_q, dtype=np.float64))
         self._rmpflow.set_end_effector_target(target_position=target_usd, target_orientation=None)
         action = self._policy.get_next_articulation_action()
         q = torch.as_tensor(action.joint_positions[:ARM_DOF], device=self.device, dtype=torch.float32)
@@ -679,6 +690,8 @@ class SO101RmpFlowJointTarget:
             "rmpflow_frame_name": "gripper_frame_link",
             "rmpflow_position_only": True,
             "rmpflow_target_usd": [round(float(v), 5) for v in target_usd.tolist()],
+            "rmpflow_ik_success": bool(ik_success),
+            "rmpflow_ik_cspace_target": [round(float(v), 5) for v in np.asarray(ik_q).tolist()],
             "rmpflow_base_pos_usd": [round(float(v), 5) for v in RMPFLOW_BASE_POS_USD],
             "rmpflow_base_quat_usd": [round(float(v), 5) for v in RMPFLOW_BASE_QUAT_USD],
         }
@@ -2132,12 +2145,13 @@ def main() -> None:
         elif args.controller_mode == "rmpflow":
             controller_payload = {
                 **common_controller,
-                "type": "rmpflow_position_only_joint_target",
+                "type": "rmpflow_position_only_ik_guided_joint_target",
                 "urdf_file": str(RMPFLOW_URDF_PATH),
                 "collision_file": str(RMPFLOW_DESCRIPTOR_PATH),
                 "config_file": str(RMPFLOW_CONFIG_PATH),
                 "frame_name": "gripper_frame_link",
                 "target_orientation": None,
+                "cspace_attractor": "Lula IK solution for the current position-only target",
                 "execution_action": "slew_limited_joint_position",
                 "max_arm_step_delta_rad": args.max_arm_step_delta,
                 "max_gripper_step_delta_rad": args.max_gripper_step_delta,
