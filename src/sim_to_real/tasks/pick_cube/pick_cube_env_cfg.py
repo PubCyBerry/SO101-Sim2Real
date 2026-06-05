@@ -70,7 +70,8 @@ _BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
 # y 상한 -0.33: 그릇 기본 위치(y=-0.26)와의 충분한 이격 확보
 #   (그릇-큐브 최소 거리 0.18m는 randomize_cubes_scattered 의 min_bowl_sep 로 추가 보장).
 _CUBE_SCATTER_X_RANGE: tuple[float, float] = (1.60, 2.08)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.48, -0.33)
+# y_lo = mat_back_edge(-0.52) + 50mm 여유 = -0.47 (로봇팔 도달이 어려운 매트 아래쪽 가장자리 회피)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.47, -0.33)
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
