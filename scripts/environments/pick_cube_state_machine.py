@@ -44,15 +44,20 @@ parser.add_argument("--final_settle_steps", type=int, default=120)
 parser.add_argument("--retreat_steps", type=int, default=140)
 parser.add_argument("--command_settle_steps", type=int, default=200)
 parser.add_argument("--max_grasp_attempts", type=int, default=3)
-parser.add_argument("--approach_height", type=float, default=0.14)
-parser.add_argument("--lift_height", type=float, default=0.18)
-parser.add_argument("--transport_height", type=float, default=0.18)
+parser.add_argument("--approach_height", type=float, default=0.22)
+parser.add_argument("--lift_height", type=float, default=0.22)
+parser.add_argument("--transport_height", type=float, default=0.24)
 parser.add_argument("--place_height", type=float, default=0.065)
 parser.add_argument("--grasp_z_offset", type=float, default=0.005)
 parser.add_argument("--target_tolerance", type=float, default=0.018)
 parser.add_argument("--ik_damping", type=float, default=0.05)
 parser.add_argument("--ik_gain", type=float, default=0.85)
 parser.add_argument("--max_joint_delta", type=float, default=0.075)
+parser.add_argument(
+    "--disable_jacobian_refine",
+    action="store_true",
+    help="Disable the final local Jacobian refinement after random-FK waypoint selection.",
+)
 parser.add_argument(
     "--max_arm_step_delta",
     type=float,
@@ -941,9 +946,27 @@ def _phase(
     actual_steps = max(1, requested_steps, _slew_limited_step_count(command, q_goal, gripper_target))
     carry_phase = any(token in name for token in (".lift", ".transport", ".place"))
     phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_target <= args.gripper_closed else None
+    refine_steps = 0
     for step in range(actual_steps):
-        action = _joint_position_action(robot, command, q_goal, gripper_target, device)
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
+        use_refine = (
+            not args.disable_jacobian_refine
+            and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
+        )
+        arm_target = q_goal
+        if use_refine:
+            refine_action, _ = _ik_action(
+                robot,
+                target,
+                gripper_target,
+                device,
+                damping=args.ik_damping,
+                gain=args.ik_gain,
+                max_joint_delta=args.max_joint_delta,
+            )
+            arm_target = refine_action[0, :ARM_DOF]
+            refine_steps += 1
+        action = _joint_position_action(robot, command, arm_target, gripper_target, device)
         if expert_recorder is not None:
             expert_recorder.record(env, action, name)
         step_out = _step_env(env, action, min_gripper_effort=phase_min_effort)
@@ -972,6 +995,7 @@ def _phase(
         "target_grasp_point_w": _round_list(target[0]),
         "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
         "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+        "jacobian_refine_steps": refine_steps,
         **_diagnostic_pose(env),
         **plan,
     }
@@ -1042,7 +1066,7 @@ def _ordered_active_names(env, active_names: list[str]) -> list[str]:
     if args.object_order == "name":
         return list(active_names)
     if args.object_order == "hard_first":
-        hard_order = ["Cube4", "Cube2", "Cube3", "Cube1"]
+        hard_order = ["Cube4", "Cube1", "Cube2", "Cube3"]
         active = set(active_names)
         return [name for name in hard_order if name in active] + [name for name in active_names if name not in hard_order]
 
@@ -1730,6 +1754,10 @@ def main() -> None:
                 "type": "random_fk_waypoint_joint_position",
                 "fk_samples": args.fk_samples,
                 "continuity_weight": args.continuity_weight,
+                "jacobian_refine": not args.disable_jacobian_refine,
+                "ik_damping": args.ik_damping,
+                "ik_gain": args.ik_gain,
+                "max_joint_delta": args.max_joint_delta,
                 "max_arm_step_delta_rad": args.max_arm_step_delta,
                 "max_gripper_step_delta_rad": args.max_gripper_step_delta,
                 "gripper_closed": args.gripper_closed,
