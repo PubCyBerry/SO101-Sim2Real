@@ -163,12 +163,14 @@ simulation_app = launcher.app
 import gymnasium as gym  # noqa: E402
 from isaaclab.managers import SceneEntityCfg  # noqa: E402
 from isaaclab.controllers import DifferentialIKControllerCfg  # noqa: E402
-from isaaclab.controllers.rmp_flow import RmpFlowControllerCfg  # noqa: E402
 from isaaclab.envs.mdp.actions import (  # noqa: E402
     BinaryJointPositionActionCfg,
     DifferentialInverseKinematicsActionCfg,
 )
-from isaaclab.envs.mdp.actions.rmpflow_actions_cfg import RMPFlowActionCfg  # noqa: E402
+import isaaclab.sim as sim_utils  # noqa: E402
+from isaacsim.core.prims import SingleArticulation  # noqa: E402
+from isaacsim.robot_motion.motion_generation import ArticulationMotionPolicy  # noqa: E402
+from isaacsim.robot_motion.motion_generation.lula.motion_policies import RmpFlow  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
 from isaaclab.utils.math import quat_apply, quat_inv  # noqa: E402
@@ -228,7 +230,6 @@ RMPFLOW_URDF_PATH = Path("assets/robots/urdf/so_arm101.urdf").resolve()
 RMPFLOW_DESCRIPTOR_PATH = RMPFLOW_DIR / "so101_robot_description.yaml"
 RMPFLOW_CONFIG_PATH = RMPFLOW_DIR / "so101_rmpflow_config.yaml"
 GRIPPER_FRAME_OFFSET = (-0.0079, -0.000218121, -0.0981274)
-GRIPPER_FRAME_ROT = (0.0, 0.0, 1.0, 0.0)
 
 
 class PickCubeFSMState(str, Enum):
@@ -268,37 +269,6 @@ class PickCubeDiffIkActionsCfg:
             ik_method="dls",
             ik_params={"lambda_val": 0.04},
         ),
-    )
-    gripper: BinaryJointPositionActionCfg = BinaryJointPositionActionCfg(
-        asset_name="robot",
-        joint_names=["gripper"],
-        open_command_expr={"gripper": args.gripper_open},
-        close_command_expr={"gripper": args.ik_gripper_closed},
-    )
-
-
-@configclass
-class PickCubeRmpFlowActionsCfg:
-    """State-machine-only action surface: RMPFlow relative pose + binary gripper."""
-
-    arm: RMPFlowActionCfg = RMPFlowActionCfg(
-        asset_name="robot",
-        joint_names=SO101_JOINT_ORDER[:ARM_DOF],
-        body_name="gripper",
-        body_offset=RMPFlowActionCfg.OffsetCfg(
-            pos=GRIPPER_FRAME_OFFSET,
-            rot=GRIPPER_FRAME_ROT,
-        ),
-        scale=1.0,
-        controller=RmpFlowControllerCfg(
-            config_file=str(RMPFLOW_CONFIG_PATH),
-            urdf_file=str(RMPFLOW_URDF_PATH),
-            collision_file=str(RMPFLOW_DESCRIPTOR_PATH),
-            frame_name="gripper_frame_link",
-            evaluations_per_frame=5,
-        ),
-        articulation_prim_expr="/World/envs/env_.*/Robot",
-        use_relative_mode=False,
     )
     gripper: BinaryJointPositionActionCfg = BinaryJointPositionActionCfg(
         asset_name="robot",
@@ -649,6 +619,54 @@ class ExpertTrajectoryRecorder:
         }
 
 
+class SO101RmpFlowJointTarget:
+    """Thin RMPFlow wrapper that returns SO-101 arm joint targets.
+
+    Isaac Lab's built-in RMPFlowAction always passes an orientation target.
+    SO-101 has only 5 arm DOFs, so for this pick-place controller we use the
+    lower-level RmpFlow API directly and send position-only targets.
+    """
+
+    def __init__(self, env, device: str) -> None:
+        self.env = env
+        self.device = device
+        self.robot = env.unwrapped.scene["robot"]
+        self._articulation = SingleArticulation("/World/envs/env_0/Robot")
+        self._articulation.initialize()
+        physics_dt = sim_utils.SimulationContext.instance().get_physics_dt()
+        self._rmpflow = RmpFlow(
+            robot_description_path=str(RMPFLOW_DESCRIPTOR_PATH),
+            urdf_path=str(RMPFLOW_URDF_PATH),
+            rmpflow_config_path=str(RMPFLOW_CONFIG_PATH),
+            end_effector_frame_name="gripper_frame_link",
+            maximum_substep_size=physics_dt / 5.0,
+        )
+        self._policy = ArticulationMotionPolicy(self._articulation, self._rmpflow, physics_dt)
+        self.active_dof_names = list(self._rmpflow.get_active_joints())
+
+    def reset(self) -> None:
+        self._rmpflow.reset()
+        self._sync_base_pose()
+
+    def _sync_base_pose(self) -> None:
+        root_pos = self.robot.data.root_pos_w[0].detach().cpu().numpy()
+        root_quat = self.robot.data.root_quat_w[0].detach().cpu().numpy()
+        self._rmpflow.set_robot_base_pose(robot_position=root_pos, robot_orientation=root_quat)
+
+    def compute(self, target_w: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        self._sync_base_pose()
+        target_np = target_w.detach().cpu().reshape(3).numpy()
+        self._rmpflow.set_end_effector_target(target_position=target_np, target_orientation=None)
+        action = self._policy.get_next_articulation_action()
+        q = torch.as_tensor(action.joint_positions[:ARM_DOF], device=self.device, dtype=torch.float32)
+        return q, {
+            "rmpflow_active_dof_names": self.active_dof_names,
+            "rmpflow_joint_target": _round_list(q),
+            "rmpflow_frame_name": "gripper_frame_link",
+            "rmpflow_position_only": True,
+        }
+
+
 def _round_list(values: torch.Tensor, digits: int = 5) -> list[float]:
     return [round(float(v), digits) for v in values.detach().cpu().flatten().tolist()]
 
@@ -694,7 +712,7 @@ def _read_joint_state(env) -> np.ndarray:
 
 
 def _action_to_record(env, action_tensor: torch.Tensor) -> np.ndarray:
-    if args.controller_mode in ("diff_ik", "rmpflow") or action_tensor.shape[-1] != 6:
+    if args.controller_mode == "diff_ik" or action_tensor.shape[-1] != 6:
         robot = env.unwrapped.scene["robot"]
         return _to_lerobot_units(robot.data.joint_pos[0, :6].detach().cpu().numpy())
     action = action_tensor[0, :6].detach().cpu().numpy()
@@ -1026,6 +1044,7 @@ def _phase(
     command: torch.Tensor,
     recorder: LeRobotV3EpisodeRecorder | None,
     expert_recorder: ExpertTrajectoryRecorder | None = None,
+    rmpflow_driver: SO101RmpFlowJointTarget | None = None,
     *,
     tolerance: float,
 ) -> dict[str, Any]:
@@ -1035,18 +1054,24 @@ def _phase(
     reached_step: int | None = None
     done_seen = False
     target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
-    q_goal, plan = _fk_solve_joint_target(
-        env,
-        target,
-        gripper_target,
-        device,
-        samples=args.fk_samples,
-        continuity_weight=args.continuity_weight,
-        seed_offset=len(trace) * 997,
-    )
+    if rmpflow_driver is None:
+        q_goal, plan = _fk_solve_joint_target(
+            env,
+            target,
+            gripper_target,
+            device,
+            samples=args.fk_samples,
+            continuity_weight=args.continuity_weight,
+            seed_offset=len(trace) * 997,
+        )
+    else:
+        q_goal, plan = rmpflow_driver.compute(target[0])
 
     requested_steps = int(steps)
-    actual_steps = max(1, requested_steps, _slew_limited_step_count(command, q_goal, gripper_target))
+    if rmpflow_driver is None:
+        actual_steps = max(1, requested_steps, _slew_limited_step_count(command, q_goal, gripper_target))
+    else:
+        actual_steps = max(1, requested_steps)
     carry_phase = any(token in name for token in (".lift", ".transport", ".place", ".move_to_pre_place", ".place_descend"))
     phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_target <= args.gripper_closed else None
     refine_steps = 0
@@ -1058,7 +1083,10 @@ def _phase(
             and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
         )
         arm_target = q_goal
-        if use_refine:
+        if rmpflow_driver is not None:
+            target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
+            arm_target, plan = rmpflow_driver.compute(target[0])
+        elif use_refine:
             refine_action, _ = _ik_action(
                 robot,
                 target,
@@ -1238,15 +1266,6 @@ def _ik_position_action(env, target_grasp_point_w: torch.Tensor, gripper_command
     max_step = max(1.0e-6, float(args.diff_ik_step_size))
     delta_norm = torch.linalg.vector_norm(delta_b, dim=-1, keepdim=True).clamp_min(1.0e-6)
     delta_b = delta_b * torch.clamp(max_step / delta_norm, max=1.0)
-    if args.controller_mode == "rmpflow":
-        action = torch.zeros((1, 8), device=device, dtype=torch.float32)
-        action[:, :3] = target_b
-        # Keep the current gripper orientation as the target. SO-101 has only
-        # 5 arm DOFs, so this makes RMPFlow behave mainly as a position policy.
-        action[:, 3:7] = _body_quat(robot, "gripper").to(device=device, dtype=torch.float32)
-        action[:, 7] = float(gripper_command)
-        return action
-
     action = torch.zeros((1, 4), device=device, dtype=torch.float32)
     action[:, :3] = delta_b
     action[:, 3] = float(gripper_command)
@@ -1538,6 +1557,9 @@ def _run_state_machine(
     fsm_trace: list[dict[str, Any]] = []
     bowl_radius = BOWL_SUCCESS_RADIUS * max(0.1, args.container_radius_scale)
     command = robot.data.joint_pos[0, :6].clone()
+    rmpflow_driver = SO101RmpFlowJointTarget(env, device) if args.controller_mode == "rmpflow" else None
+    if rmpflow_driver is not None:
+        rmpflow_driver.reset()
 
     for _ in range(args.settle_steps):
         zero_action = _joint_position_action(robot, command, torch.zeros(ARM_DOF, device=device), args.gripper_open, device)
@@ -1636,6 +1658,7 @@ def _run_state_machine(
                 command,
                 recorder,
                 expert_recorder,
+                rmpflow_driver,
                 tolerance=args.target_tolerance,
             )
             _append_fsm_event(
@@ -1665,6 +1688,7 @@ def _run_state_machine(
                 command,
                 recorder,
                 expert_recorder,
+                rmpflow_driver,
                 tolerance=args.target_tolerance,
             )
             grasp_target = _target_from_cube(env, cube_name, args.grasp_z_offset)().clone()
@@ -1687,6 +1711,7 @@ def _run_state_machine(
                 command,
                 recorder,
                 expert_recorder,
+                rmpflow_driver,
                 tolerance=args.target_tolerance,
             )
             _append_fsm_event(
@@ -1710,6 +1735,7 @@ def _run_state_machine(
                 command,
                 recorder,
                 expert_recorder,
+                rmpflow_driver,
                 tolerance=args.target_tolerance,
             )
             grasped = _cube_lifted(env, cube_name)
@@ -1811,6 +1837,7 @@ def _run_state_machine(
             command,
             recorder,
             expert_recorder,
+            rmpflow_driver,
             tolerance=args.target_tolerance,
         )
         _append_fsm_event(
@@ -1833,6 +1860,7 @@ def _run_state_machine(
             command,
             recorder,
             expert_recorder,
+            rmpflow_driver,
             tolerance=args.target_tolerance,
         )
         trace[-1]["stack_level_before_place"] = stack_level
@@ -1887,6 +1915,7 @@ def _run_state_machine(
             command,
             recorder,
             expert_recorder,
+            rmpflow_driver,
             tolerance=args.target_tolerance,
         )
         _phase(
@@ -1900,6 +1929,7 @@ def _run_state_machine(
             command,
             recorder,
             expert_recorder,
+            rmpflow_driver,
             tolerance=args.target_tolerance,
         )
         _move_to_idle_home(
@@ -1975,13 +2005,10 @@ def main() -> None:
         # State-machine 검증 중에는 중간 성공 termination으로 자동 reset되지 않게
         # 끄고, 마지막에 gripper release까지 포함해 직접 판정한다.
         env_cfg.terminations.success = None
-        if args.controller_mode in ("diff_ik", "rmpflow"):
+        if args.controller_mode == "diff_ik":
             if args.expert_dataset_pt is not None:
                 raise ValueError("--expert_dataset_pt is only supported with --controller_mode joint_fk")
-            if args.controller_mode == "diff_ik":
-                env_cfg.actions = PickCubeDiffIkActionsCfg()
-            else:
-                env_cfg.actions = PickCubeRmpFlowActionsCfg()
+            env_cfg.actions = PickCubeDiffIkActionsCfg()
         total_steps = (
             args.settle_steps
             + args.active_objects
@@ -2037,7 +2064,7 @@ def main() -> None:
             )
         if args.expert_dataset_pt is not None:
             expert_recorder = ExpertTrajectoryRecorder(args.expert_dataset_pt)
-        if args.controller_mode in ("diff_ik", "rmpflow"):
+        if args.controller_mode == "diff_ik":
             robot = env.unwrapped.scene["robot"]
             zero_action = _ik_position_action(env, _grasp_point_pos(robot)[0], args.gripper_open, device)
         else:
@@ -2046,7 +2073,7 @@ def main() -> None:
         for _ in range(max(0, args.warmup_steps)):
             _step_env(env, zero_action)
         active_names = CUBE_NAMES[: args.active_objects]
-        if args.controller_mode in ("diff_ik", "rmpflow"):
+        if args.controller_mode == "diff_ik":
             result = _run_diff_ik_state_machine(env, device, active_names, recorder)
         else:
             result = _run_state_machine(env, device, active_names, recorder, expert_recorder)
@@ -2088,18 +2115,16 @@ def main() -> None:
         elif args.controller_mode == "rmpflow":
             controller_payload = {
                 **common_controller,
-                "type": "rmpflow_relative_pose_binary_gripper",
+                "type": "rmpflow_position_only_joint_target",
                 "urdf_file": str(RMPFLOW_URDF_PATH),
                 "collision_file": str(RMPFLOW_DESCRIPTOR_PATH),
                 "config_file": str(RMPFLOW_CONFIG_PATH),
                 "frame_name": "gripper_frame_link",
-                "body_name": "gripper",
-                "body_offset": list(GRIPPER_FRAME_OFFSET),
-                "relative_mode": False,
-                "target_frame": "robot_root",
+                "target_orientation": None,
+                "execution_action": "slew_limited_joint_position",
+                "max_arm_step_delta_rad": args.max_arm_step_delta,
+                "max_gripper_step_delta_rad": args.max_gripper_step_delta,
                 "gripper_closed": args.ik_gripper_closed,
-                "close_action_command": -1.0,
-                "open_action_command": args.gripper_open,
             }
         else:
             controller_payload = {
