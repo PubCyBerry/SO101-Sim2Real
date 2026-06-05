@@ -486,14 +486,15 @@ def author_bowl_usda() -> str:
     #   각 밴드는 아래/위 레벨을 잇는 경사 panel 24개. tilt = 수직→바깥 경사각.
     #   panel 길이를 1.25배로 늘려 인접 밴드와 겹쳐 이음매를 없앤다.
     panel_count = 24
-    bands = 8
+    bands = 20           # 밴드 수 증가 → 곡면 더 부드러움
     r_bottom = 0.0325  # 바닥 쪽 반경 32.5mm (바닥 지름 65mm)
     r_top = 0.075      # 상단 반경 75mm (위 지름 150mm)
     depth = 0.058      # 벽 높이 = 총높이(0.070) - 바닥 두께(0.012)
     z_base = 0.012  # Bottom disk 윗면
 
     def _profile_r(t: float) -> float:
-        return r_bottom + (r_top - r_bottom) * (t ** 0.6)
+        # t^0.2: 바닥 근처 넓게 유지 U자 곡면
+        return r_bottom + (r_top - r_bottom) * (t ** 0.2)
 
     wall_index = 0
     for band in range(bands):
