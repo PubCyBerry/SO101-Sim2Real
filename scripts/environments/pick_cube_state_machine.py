@@ -298,7 +298,7 @@ class PickCubeRmpFlowActionsCfg:
             evaluations_per_frame=5,
         ),
         articulation_prim_expr="/World/envs/env_.*/Robot",
-        use_relative_mode=True,
+        use_relative_mode=False,
     )
     gripper: BinaryJointPositionActionCfg = BinaryJointPositionActionCfg(
         asset_name="robot",
@@ -1232,9 +1232,12 @@ def _ik_position_action(env, target_grasp_point_w: torch.Tensor, gripper_command
     delta_norm = torch.linalg.vector_norm(delta_b, dim=-1, keepdim=True).clamp_min(1.0e-6)
     delta_b = delta_b * torch.clamp(max_step / delta_norm, max=1.0)
     if args.controller_mode == "rmpflow":
-        action = torch.zeros((1, 7), device=device, dtype=torch.float32)
-        action[:, :3] = delta_b
-        action[:, 6] = float(gripper_command)
+        action = torch.zeros((1, 8), device=device, dtype=torch.float32)
+        action[:, :3] = target_w
+        # Keep the current gripper orientation as the target. SO-101 has only
+        # 5 arm DOFs, so this makes RMPFlow behave mainly as a position policy.
+        action[:, 3:7] = _body_quat(robot, "gripper").to(device=device, dtype=torch.float32)
+        action[:, 7] = float(gripper_command)
         return action
 
     action = torch.zeros((1, 4), device=device, dtype=torch.float32)
@@ -2085,8 +2088,8 @@ def main() -> None:
                 "frame_name": "gripper_frame_link",
                 "body_name": "gripper",
                 "body_offset": list(GRIPPER_FRAME_OFFSET),
-                "relative_mode": True,
-                "max_cartesian_step_m": args.diff_ik_step_size,
+                "relative_mode": False,
+                "target_frame": "world",
                 "gripper_closed": args.ik_gripper_closed,
                 "close_action_command": -1.0,
                 "open_action_command": args.gripper_open,
