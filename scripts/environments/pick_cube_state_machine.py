@@ -83,6 +83,12 @@ parser.add_argument(
     help="Closed gripper joint target used by --controller_mode diff_ik.",
 )
 parser.add_argument(
+    "--diff_ik_step_size",
+    type=float,
+    default=0.012,
+    help="Max per-step relative Cartesian command in meters for --controller_mode diff_ik.",
+)
+parser.add_argument(
     "--object_order",
     choices=["name", "near_bowl_first", "far_bowl_first"],
     default="near_bowl_first",
@@ -201,7 +207,7 @@ class PickCubeDiffIkActionsCfg:
         scale=1.0,
         controller=DifferentialIKControllerCfg(
             command_type="position",
-            use_relative_mode=False,
+            use_relative_mode=True,
             ik_method="dls",
             ik_params={"lambda_val": 0.04},
         ),
@@ -1028,8 +1034,17 @@ def _ik_position_action(env, target_grasp_point_w: torch.Tensor, gripper_command
         quat_inv(robot.data.root_quat_w),
         target_w - robot.data.root_pos_w,
     )
+    current_w = _grasp_point_pos(robot).to(device=device, dtype=torch.float32)
+    current_b = quat_apply(
+        quat_inv(robot.data.root_quat_w),
+        current_w - robot.data.root_pos_w,
+    )
+    delta_b = target_b - current_b
+    max_step = max(1.0e-6, float(args.diff_ik_step_size))
+    delta_norm = torch.linalg.vector_norm(delta_b, dim=-1, keepdim=True).clamp_min(1.0e-6)
+    delta_b = delta_b * torch.clamp(max_step / delta_norm, max=1.0)
     action = torch.zeros((1, 4), device=device, dtype=torch.float32)
-    action[:, :3] = target_b
+    action[:, :3] = delta_b
     action[:, 3] = float(gripper_command)
     return action
 
@@ -1587,9 +1602,11 @@ def main() -> None:
         if args.controller_mode == "diff_ik":
             controller_payload = {
                 **common_controller,
-                "type": "differential_ik_position_binary_gripper",
+                "type": "differential_ik_relative_position_binary_gripper",
                 "body_name": "jaw",
                 "body_offset": list(JAW_GRASP_OFFSET),
+                "relative_mode": True,
+                "max_cartesian_step_m": args.diff_ik_step_size,
                 "ik_method": "dls",
                 "ik_lambda": 0.04,
                 "gripper_closed": args.ik_gripper_closed,
