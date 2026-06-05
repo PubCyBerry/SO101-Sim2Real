@@ -16,6 +16,7 @@ import shutil
 import sys
 import traceback
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable
 
 from isaaclab.app import AppLauncher
@@ -208,6 +209,24 @@ JOINT_FEATURE_NAMES = [
     "gripper.pos",
 ]
 GRIPPER_LEROBOT_SCALE = 31.75
+
+
+class PickCubeFSMState(str, Enum):
+    IDLE = "IDLE"
+    OPEN_GRIPPER = "OPEN_GRIPPER"
+    MOVE_TO_PRE_PICK = "MOVE_TO_PRE_PICK"
+    ORIENT_WRIST = "ORIENT_WRIST"
+    DESCEND = "DESCEND"
+    GRASP = "GRASP"
+    LIFT = "LIFT"
+    MOVE_TO_PRE_PLACE = "MOVE_TO_PRE_PLACE"
+    PLACE_DESCEND = "PLACE_DESCEND"
+    RELEASE = "RELEASE"
+    MARK_DONE = "MARK_DONE"
+    ALL_DONE = "ALL_DONE"
+
+
+PICK_CUBE_FSM_SEQUENCE = tuple(state.value for state in PickCubeFSMState)
 
 
 @configclass
@@ -583,6 +602,32 @@ def _round_list(values: torch.Tensor, digits: int = 5) -> list[float]:
     return [round(float(v), digits) for v in values.detach().cpu().flatten().tolist()]
 
 
+def _append_fsm_event(
+    fsm_trace: list[dict[str, Any]],
+    state: PickCubeFSMState,
+    *,
+    cube_name: str | None = None,
+    attempt: int | None = None,
+    next_state: PickCubeFSMState | None = None,
+    reason: str | None = None,
+    **fields: Any,
+) -> None:
+    event: dict[str, Any] = {
+        "index": len(fsm_trace),
+        "state": state.value,
+    }
+    if cube_name is not None:
+        event["cube"] = cube_name
+    if attempt is not None:
+        event["attempt"] = attempt
+    if next_state is not None:
+        event["next_state"] = next_state.value
+    if reason is not None:
+        event["reason"] = reason
+    event.update(fields)
+    fsm_trace.append(event)
+
+
 def _to_lerobot_units(values_rad: np.ndarray) -> np.ndarray:
     """Convert Isaac joint radians to the real LeRobot SO-101 convention."""
 
@@ -944,7 +989,7 @@ def _phase(
 
     requested_steps = int(steps)
     actual_steps = max(1, requested_steps, _slew_limited_step_count(command, q_goal, gripper_target))
-    carry_phase = any(token in name for token in (".lift", ".transport", ".place"))
+    carry_phase = any(token in name for token in (".lift", ".transport", ".place", ".move_to_pre_place", ".place_descend"))
     phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_target <= args.gripper_closed else None
     refine_steps = 0
     for step in range(actual_steps):
@@ -1119,7 +1164,7 @@ def _ik_phase(
     reached_step: int | None = None
     done_seen = False
     actual_steps = max(1, int(steps))
-    carry_phase = any(token in name for token in (".lift", ".transport", ".place"))
+    carry_phase = any(token in name for token in (".lift", ".transport", ".place", ".move_to_pre_place", ".place_descend"))
     phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_command < 0.0 else None
     for step in range(actual_steps):
         target = target_fn().to(device=device, dtype=torch.float32).reshape(3)
@@ -1383,6 +1428,7 @@ def _run_state_machine(
     scene = env.unwrapped.scene
     robot = scene["robot"]
     trace: list[dict[str, Any]] = []
+    fsm_trace: list[dict[str, Any]] = []
     bowl_radius = BOWL_SUCCESS_RADIUS * max(0.1, args.container_radius_scale)
     command = robot.data.joint_pos[0, :6].clone()
 
@@ -1403,10 +1449,28 @@ def _run_state_machine(
         "order_mode": args.object_order,
         "object_cycles": args.object_cycles,
         "bowl_place_offset_radius": args.bowl_place_offset_radius,
+        "state_machine_sequence": list(PICK_CUBE_FSM_SEQUENCE),
     })
 
     for placement_index, cube_name in enumerate(operation_order):
+        _append_fsm_event(
+            fsm_trace,
+            PickCubeFSMState.IDLE,
+            cube_name=cube_name,
+            next_state=PickCubeFSMState.OPEN_GRIPPER,
+            reason="select_next_object",
+            placement_index=placement_index,
+        )
         if _cube_inside_bowl(env, cube_name, bowl_radius):
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.MARK_DONE,
+                cube_name=cube_name,
+                next_state=PickCubeFSMState.IDLE,
+                reason="already_inside_bowl",
+                done=True,
+                cube_w=_round_list(scene[cube_name].data.root_pos_w[0]),
+            )
             trace.append({
                 "phase": f"{cube_name.lower()}.skip_inside",
                 "cycle_index": placement_index // max(1, len(operation_order_base)),
@@ -1420,10 +1484,44 @@ def _run_state_machine(
         grasped = False
         for attempt in range(1, max(1, args.max_grasp_attempts) + 1):
             attempt_prefix = f"{phase_prefix}.attempt{attempt}"
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.OPEN_GRIPPER,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.MOVE_TO_PRE_PICK,
+                reason="command_open_before_pick",
+            )
+            open_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
+            _hold_joint_target(
+                env,
+                open_hold,
+                args.gripper_open,
+                args.open_steps,
+                command,
+                recorder,
+                expert_recorder,
+                phase=f"{attempt_prefix}.open_gripper",
+            )
+            trace.append({
+                "phase": f"{attempt_prefix}.open_gripper",
+                "state": PickCubeFSMState.OPEN_GRIPPER.value,
+                "steps": args.open_steps,
+                "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
+                "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+            })
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.MOVE_TO_PRE_PICK,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.ORIENT_WRIST,
+                reason="move_above_object_safe_height",
+            )
             _phase(
                 env,
                 device,
-                f"{attempt_prefix}.approach",
+                f"{attempt_prefix}.move_to_pre_pick",
                 _target_from_cube(env, cube_name, args.approach_height),
                 args.gripper_open,
                 args.approach_steps,
@@ -1432,6 +1530,22 @@ def _run_state_machine(
                 recorder,
                 expert_recorder,
                 tolerance=args.target_tolerance,
+            )
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.ORIENT_WRIST,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.DESCEND,
+                reason="cube_has_no_elongated_axis_skip",
+            )
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.DESCEND,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.GRASP,
+                reason="descend_to_pick_height",
             )
             _phase(
                 env,
@@ -1447,10 +1561,18 @@ def _run_state_machine(
                 tolerance=args.target_tolerance,
             )
             grasp_target = _target_from_cube(env, cube_name, args.grasp_z_offset)().clone()
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.GRASP,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.LIFT,
+                reason="close_gripper_and_wait",
+            )
             _phase(
                 env,
                 device,
-                f"{attempt_prefix}.close",
+                f"{attempt_prefix}.grasp",
                 lambda target=grasp_target: target,
                 args.gripper_closed,
                 args.close_steps,
@@ -1459,6 +1581,14 @@ def _run_state_machine(
                 recorder,
                 expert_recorder,
                 tolerance=args.target_tolerance,
+            )
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.LIFT,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.MOVE_TO_PRE_PLACE,
+                reason="lift_to_safe_height",
             )
             _phase(
                 env,
@@ -1484,7 +1614,28 @@ def _run_state_machine(
                 **_diagnostic_pose(env),
             })
             if grasped:
+                _append_fsm_event(
+                    fsm_trace,
+                    PickCubeFSMState.LIFT,
+                    cube_name=cube_name,
+                    attempt=attempt,
+                    next_state=PickCubeFSMState.MOVE_TO_PRE_PLACE,
+                    reason="lift_check_passed",
+                    grasped=True,
+                    cube_w=_round_list(scene[cube_name].data.root_pos_w[0]),
+                )
                 break
+
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.LIFT,
+                cube_name=cube_name,
+                attempt=attempt,
+                next_state=PickCubeFSMState.OPEN_GRIPPER,
+                reason="lift_check_failed_retry",
+                grasped=False,
+                cube_w=_round_list(scene[cube_name].data.root_pos_w[0]),
+            )
 
             retry_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
             retry_open_steps = max(args.open_steps, args.command_settle_steps // 2)
@@ -1508,6 +1659,15 @@ def _run_state_machine(
 
         if not grasped:
             cube_end = scene[cube_name].data.root_pos_w[0].clone()
+            _append_fsm_event(
+                fsm_trace,
+                PickCubeFSMState.MARK_DONE,
+                cube_name=cube_name,
+                next_state=PickCubeFSMState.IDLE,
+                reason="max_grasp_attempts_exhausted",
+                done=False,
+                cube_w=_round_list(cube_end),
+            )
             trace.append({
                 "phase": f"{phase_prefix}.result",
                 "cube_start_w": _round_list(cube_start),
@@ -1517,10 +1677,17 @@ def _run_state_machine(
             })
             continue
 
+        _append_fsm_event(
+            fsm_trace,
+            PickCubeFSMState.MOVE_TO_PRE_PLACE,
+            cube_name=cube_name,
+            next_state=PickCubeFSMState.PLACE_DESCEND,
+            reason="move_above_bowl_safe_height",
+        )
         _phase(
             env,
             device,
-            f"{phase_prefix}.transport",
+            f"{phase_prefix}.move_to_pre_place",
             _target_from_bowl(env, args.transport_height, bowl_offset_xy),
             args.gripper_closed,
             args.transport_steps,
@@ -1530,10 +1697,17 @@ def _run_state_machine(
             expert_recorder,
             tolerance=args.target_tolerance,
         )
+        _append_fsm_event(
+            fsm_trace,
+            PickCubeFSMState.PLACE_DESCEND,
+            cube_name=cube_name,
+            next_state=PickCubeFSMState.RELEASE,
+            reason="descend_to_place_height",
+        )
         _phase(
             env,
             device,
-            f"{phase_prefix}.place",
+            f"{phase_prefix}.place_descend",
             _target_from_bowl(env, args.place_height, bowl_offset_xy),
             args.gripper_closed,
             args.place_steps,
@@ -1546,6 +1720,13 @@ def _run_state_machine(
         # 열 때는 마지막 joint target을 유지한다. 위치 IK가 그릇 안 큐브를 다시
         # 추적하며 건드리지 않도록, release 동안 관절 목표를 고정한다.
         joint_hold = robot.data.joint_pos[0, :ARM_DOF].clone()
+        _append_fsm_event(
+            fsm_trace,
+            PickCubeFSMState.RELEASE,
+            cube_name=cube_name,
+            next_state=PickCubeFSMState.MARK_DONE,
+            reason="open_gripper_and_wait",
+        )
         _hold_joint_target(
             env,
             joint_hold,
@@ -1554,10 +1735,11 @@ def _run_state_machine(
             command,
             recorder,
             expert_recorder,
-            phase=f"{phase_prefix}.open",
+            phase=f"{phase_prefix}.release",
         )
         trace.append({
-            "phase": f"{phase_prefix}.open",
+            "phase": f"{phase_prefix}.release",
+            "state": PickCubeFSMState.RELEASE.value,
             "steps": args.open_steps,
             "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
             "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
@@ -1602,19 +1784,37 @@ def _run_state_machine(
         )
 
         cube_end = scene[cube_name].data.root_pos_w[0].clone()
+        inside_bowl = _cube_inside_bowl(env, cube_name, bowl_radius)
+        _append_fsm_event(
+            fsm_trace,
+            PickCubeFSMState.MARK_DONE,
+            cube_name=cube_name,
+            next_state=PickCubeFSMState.IDLE,
+            reason="object_cycle_complete",
+            done=inside_bowl,
+            cube_w=_round_list(cube_end),
+        )
         trace.append({
             "phase": f"{phase_prefix}.result",
             "cube_start_w": _round_list(cube_start),
             "cube_end_w": _round_list(cube_end),
-            "inside_bowl": _cube_inside_bowl(env, cube_name, bowl_radius),
+            "inside_bowl": inside_bowl,
         })
 
     final_inside = {
         name: _cube_inside_bowl(env, name, bowl_radius)
         for name in active_names
     }
+    _append_fsm_event(
+        fsm_trace,
+        PickCubeFSMState.ALL_DONE,
+        reason="operation_order_exhausted",
+        final_inside=final_inside,
+    )
     return {
         "trace": trace,
+        "fsm_trace": fsm_trace,
+        "fsm_state_sequence": list(PICK_CUBE_FSM_SEQUENCE),
         "final_inside": final_inside,
         "placed_and_released": _placed_and_released(env, active_names, bowl_radius),
         "final_gripper": round(float(robot.data.joint_pos[0, 5].item()), 5),
@@ -1656,7 +1856,8 @@ def main() -> None:
             * max(1, args.object_cycles)
             * max(1, args.max_grasp_attempts)
             * (
-                args.approach_steps
+                args.open_steps
+                + args.approach_steps
                 + args.descend_steps
                 + args.close_steps
                 + args.lift_steps
@@ -1733,6 +1934,7 @@ def main() -> None:
             "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
             "min_gripper_effort": args.min_gripper_effort,
             "carry_min_gripper_effort": args.carry_min_gripper_effort,
+            "fsm_state_sequence": list(PICK_CUBE_FSM_SEQUENCE),
         }
         if args.controller_mode == "diff_ik":
             controller_payload = {
