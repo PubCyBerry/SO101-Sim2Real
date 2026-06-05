@@ -134,6 +134,21 @@ gripper effort 를 완화한다.
   frictionCombineMode max) 을 `DeskTop`·`DeskMat` 에 bind. 이전엔 미지정 →
   PhysX 기본(마찰 ~0.5)이라 큐브 미끄러짐·그릇 밀림 가능.
 
+### 5.4 그릇 미끄러짐 보정 (P5)
+
+4-cube state machine triage에서 각 큐브를 넣는 순간에는 `inside=True`였지만,
+다음 큐브로 이동하는 접촉 때문에 동적 그릇이 10 cm 이상 밀리고 먼저 넣은 큐브가
+밖으로 튕겨 나갔다. 실제 데스크매트 위 150 mm 그릇은 이렇게 쉽게 움직이지 않도록
+다음 값을 적용했다.
+
+- `BOWL_MASS = 0.80 kg`
+- `BowlFriction`: static 1.8 / dynamic 1.5 / combine max
+- `physxRigidBody:angularDamping = 8.0`, `linearDamping = 2.0`
+
+State machine도 release 후 바로 다음 큐브로 가는 대신 bowl 위 `transport_height`까지
+후퇴하는 `retreat` phase를 추가해, 이미 넣은 큐브/그릇을 낮은 자세로 긁고 지나가는
+경로를 줄였다.
+
 ## 6. 검증 방법
 
 ```powershell

@@ -94,7 +94,10 @@ CUBE_CONTACT_OFFSET = 0.002
 # 26-face chamfered 메시를 사용하고, Box prim 은 충돌 전용(invisible) 으로 남긴다.
 CUBE_BEVEL: float = 0.003
 
-BOWL_MASS: float = 0.15  # kg, 동적 그릇
+# 150 mm plastic bowl on a rubber desk mat. In early 4-cube scripted runs the
+# bowl slid 10+ cm from light robot/cube contacts, so model it as a heavier
+# high-friction container rather than a toy-light shell.
+BOWL_MASS: float = 0.80  # kg, dynamic but hard to push on the desk mat
 
 
 # ---------------------------------------------------------------------------
@@ -535,8 +538,8 @@ def author_bowl_usda() -> str:
     _block(lines, 1, "bool physics:rigidBodyEnabled = 1")
     _block(lines, 1, "bool physxRigidBody:disableGravity = 0")
     _block(lines, 1, "bool physxRigidBody:enableCCD = 1")
-    _block(lines, 1, "float physxRigidBody:angularDamping = 4.0")
-    _block(lines, 1, "float physxRigidBody:linearDamping = 0.6")
+    _block(lines, 1, "float physxRigidBody:angularDamping = 8.0")
+    _block(lines, 1, "float physxRigidBody:linearDamping = 2.0")
     _block(lines, 1, "float physxRigidBody:sleepThreshold = 0.0005")
     _block(lines, 1, "float physxRigidBody:stabilizationThreshold = 0.0005")
     _block(lines, 1, "int physxRigidBody:solverPositionIterationCount = 16")
@@ -553,8 +556,8 @@ def author_bowl_usda() -> str:
     _block(lines, 3, 'prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]')
     _block(lines, 2, ")")
     _block(lines, 2, "{")
-    _block(lines, 3, "float physics:staticFriction = 1.0")
-    _block(lines, 3, "float physics:dynamicFriction = 0.8")
+    _block(lines, 3, "float physics:staticFriction = 1.8")
+    _block(lines, 3, "float physics:dynamicFriction = 1.5")
     _block(lines, 3, "float physics:restitution = 0")
     _block(lines, 3, 'uniform token physxMaterial:frictionCombineMode = "max"')
     _block(lines, 3, 'uniform token physxMaterial:restitutionCombineMode = "min"')

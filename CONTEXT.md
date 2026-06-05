@@ -21,18 +21,21 @@
 - **직접 SM 현황**:
   - 기존 `pick_cube_state_machine.py`는 `active_objects=4` 루프 구조는 있으나 서버 2cam 기록 run `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_v2_2cam_20260605`는 실패했다. 파일은 생성됐지만 `state_machine_status=failed`, `Cube1=false`이므로 RL expert로 사용 금지.
   - 같은 조건 no-video 서버 triage는 1-cube pass였지만, 4-cube no-video triage에서는 random-FK waypoint가 주변 큐브/그릇을 밀며 실패했다. 따라서 `joint_fk` 경로는 비교용으로 보존하고, 직접 SM의 주 경로는 Isaac Lab `DifferentialInverseKinematicsActionCfg` 기반 `--controller_mode diff_ik`로 전환한다.
+  - 서버 새 `cube_desk`(c315610, rounded cube + 3mm bowl) 기준으로 `joint_fk` 1-cube는 pass. `diff_ik` 1-cube는 action manager 연결은 됐지만 jaw-offset 작업점이 descend/close에서 6~11cm 높게 남아 실패했다.
+  - `joint_fk` 4-cube는 각 큐브를 놓는 순간에는 `inside=True`가 찍혔지만, release 후 낮은 자세로 다음 큐브 approach에 들어가며 bowl/기존 큐브를 밀어 최종 `Cube3=false`, `Cube4=false`가 됐다.
 - **적용 변경**:
   - SM env에 `env_cfg.seed=args.seed` 주입.
   - 4-cube와 retry를 고려해 `episode_length_s` 산정을 보수화하고 `--episode_length_s` override 추가.
   - 실패 run으로 만든 LeRobot dataset meta는 더 이상 `status=passed`로 기록하지 않게 수정.
   - `--controller_mode diff_ik` 추가: jaw body + `JAW_GRASP_OFFSET`을 task-space end-effector로 쓰고, gripper는 `BinaryJointPositionActionCfg`로 open/close한다. LeRobot v3 dataset action/state는 North Star 유지를 위해 계속 6D joint position으로 기록한다.
+  - release 후 bowl 위 `transport_height`로 빠지는 `retreat` phase 추가.
+  - bowl이 10cm 이상 밀리는 현상을 줄이기 위해 `BOWL_MASS=0.80kg`, `BowlFriction=1.8/1.5`, damping 8.0/2.0으로 상향하고 `Bowl.usd` 재생성.
   - `TASKS.md`의 TA.CUBE.STATE_MACHINE_V2 verify를 4-cube fixed-spawn + 2cam dataset PASS로 상향, RMPFlow controller task를 별도 todo로 추가.
 - **다음**:
   1. 변경 커밋/푸시 후 서버 pull.
-  2. 서버에서 1-cube `diff_ik` smoke로 action manager 호환성을 확인한다.
-  3. 서버에서 4-cube fixed-spawn no-video proof를 돌린다.
-  4. 통과하면 record_seconds를 충분히 길게 잡아 2cam LeRobot v3 영상 dataset을 저장하고 validator 통과.
-  5. RMPFlow는 SO-101 descriptor/RMPFlow config scaffold/스모크를 별도 진행한다.
+  2. 서버에서 4-cube fixed-spawn no-video proof를 다시 돌린다.
+  3. 통과하면 record_seconds를 충분히 길게 잡아 2cam LeRobot v3 영상 dataset을 저장하고 validator 통과.
+  4. RMPFlow는 SO-101 descriptor/RMPFlow config scaffold/스모크를 별도 진행한다.
 
 ---
 

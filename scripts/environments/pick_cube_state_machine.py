@@ -41,6 +41,7 @@ parser.add_argument("--transport_steps", type=int, default=240)
 parser.add_argument("--place_steps", type=int, default=160)
 parser.add_argument("--open_steps", type=int, default=80)
 parser.add_argument("--final_settle_steps", type=int, default=120)
+parser.add_argument("--retreat_steps", type=int, default=140)
 parser.add_argument("--command_settle_steps", type=int, default=200)
 parser.add_argument("--max_grasp_attempts", type=int, default=3)
 parser.add_argument("--approach_height", type=float, default=0.14)
@@ -1262,6 +1263,17 @@ def _run_diff_ik_state_machine(
             recorder,
             tolerance=args.target_tolerance,
         )
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.retreat",
+            _target_from_bowl(env, args.transport_height, bowl_offset_xy),
+            args.gripper_open,
+            args.retreat_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
 
         cube_end = scene[cube_name].data.root_pos_w[0].clone()
         trace.append({
@@ -1472,6 +1484,19 @@ def _run_state_machine(
             expert_recorder,
             phase=f"{phase_prefix}.final_settle",
         )
+        _phase(
+            env,
+            device,
+            f"{phase_prefix}.retreat",
+            _target_from_bowl(env, args.transport_height, bowl_offset_xy),
+            args.gripper_open,
+            args.retreat_steps,
+            trace,
+            command,
+            recorder,
+            expert_recorder,
+            tolerance=args.target_tolerance,
+        )
 
         cube_end = scene[cube_name].data.root_pos_w[0].clone()
         trace.append({
@@ -1539,6 +1564,7 @@ def main() -> None:
                 + args.place_steps
                 + args.open_steps
                 + args.final_settle_steps
+                + args.retreat_steps
                 + args.command_settle_steps * 2
             )
             + 120
@@ -1592,6 +1618,7 @@ def main() -> None:
             else CONTROL_POINT_NAME,
             "control_point": args.control_point,
             "command_settle_steps": args.command_settle_steps,
+            "retreat_steps": args.retreat_steps,
             "max_grasp_attempts": args.max_grasp_attempts,
             "object_order": args.object_order,
             "bowl_place_offset_radius": args.bowl_place_offset_radius,

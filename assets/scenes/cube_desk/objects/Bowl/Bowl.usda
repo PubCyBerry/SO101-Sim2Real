@@ -9,13 +9,13 @@ def Xform "Bowl" (
     prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysxRigidBodyAPI"]
 )
 {
-    float physics:mass = 0.15
+    float physics:mass = 0.8
     bool physics:kinematicEnabled = 0
     bool physics:rigidBodyEnabled = 1
     bool physxRigidBody:disableGravity = 0
     bool physxRigidBody:enableCCD = 1
-    float physxRigidBody:angularDamping = 4.0
-    float physxRigidBody:linearDamping = 0.6
+    float physxRigidBody:angularDamping = 8.0
+    float physxRigidBody:linearDamping = 2.0
     float physxRigidBody:sleepThreshold = 0.0005
     float physxRigidBody:stabilizationThreshold = 0.0005
     int physxRigidBody:solverPositionIterationCount = 16
@@ -38,8 +38,8 @@ def Xform "Bowl" (
             prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
         )
         {
-            float physics:staticFriction = 1.0
-            float physics:dynamicFriction = 0.8
+            float physics:staticFriction = 1.8
+            float physics:dynamicFriction = 1.5
             float physics:restitution = 0
             uniform token physxMaterial:frictionCombineMode = "max"
             uniform token physxMaterial:restitutionCombineMode = "min"

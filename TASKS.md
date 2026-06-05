@@ -68,6 +68,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 서버 새 cube_desk에서 `joint_fk` 1-cube pass, 4-cube는 각 place 순간 inside였지만 release 후 다음 이동이 bowl/기존 큐브를 밀어 최종 Cube3/4 false; SM에 post-release retreat 추가, bowl mass/friction/damping 상향 후 USD 재생성 / 다음: 서버 4-cube no-video 재검증
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 기존 random-FK 직접 SM은 4-cube no-video triage에서 주변 큐브/그릇을 밀며 실패하므로 유지하되 비교용으로 격하, `--controller_mode diff_ik`(Isaac Lab Differential IK + binary gripper)을 추가해 task-space 직접 SM 경로로 전환 / 다음: 서버 1-cube diff_ik smoke → 4-cube fixed proof → 2cam 영상 dataset
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 사용자 재요청과 Isaac Sim 5.1 PickPlace/RMPFlow 참고문서 확인 후 목표를 1-cube proof에서 4-cube fixed-spawn proof로 상향, RMPFlow controller는 SO-101 Lula descriptor/XRDF+rmpflow yaml 준비가 별도 선행 게이트임을 기록; SM script에 seed 고정/4-cube timeout 보수화/failed dataset status 반영 추가 / 다음: 서버 4-cube no-video proof → 2cam 영상 dataset
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — Claude 제안의 RMPFlow standalone 대신 기존 Isaac Lab joint-position env에 맞춘 FSM으로 구현; jaw-offset control point + leisaac-style dynamic gripper effort 조합으로 로컬 headless 1-cube fixed proof `outputs/pick_cube_state_machine_jaw_dynamic_smoke.json` passed(placed_and_released true) / 다음: 서버에서 2cam LeRobot v3 episode 생성+validate
