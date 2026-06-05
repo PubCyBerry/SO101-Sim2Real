@@ -43,6 +43,7 @@ parser.add_argument("--place_steps", type=int, default=160)
 parser.add_argument("--open_steps", type=int, default=80)
 parser.add_argument("--final_settle_steps", type=int, default=120)
 parser.add_argument("--retreat_steps", type=int, default=140)
+parser.add_argument("--idle_home_steps", type=int, default=180)
 parser.add_argument("--command_settle_steps", type=int, default=200)
 parser.add_argument("--max_grasp_attempts", type=int, default=3)
 parser.add_argument("--approach_height", type=float, default=0.14)
@@ -1075,6 +1076,45 @@ def _hold_joint_target(
             recorder.record(env, action)
 
 
+def _idle_home_arm_target(robot, device: str) -> torch.Tensor:
+    default_joint_pos = getattr(robot.data, "default_joint_pos", None)
+    if default_joint_pos is not None:
+        return default_joint_pos[0, :ARM_DOF].to(device=device, dtype=torch.float32).clone()
+    return torch.zeros(ARM_DOF, device=device, dtype=torch.float32)
+
+
+def _move_to_idle_home(
+    env,
+    device: str,
+    command: torch.Tensor,
+    trace: list[dict[str, Any]],
+    recorder: LeRobotV3EpisodeRecorder | None,
+    expert_recorder: ExpertTrajectoryRecorder | None,
+    *,
+    phase: str,
+) -> None:
+    robot = env.unwrapped.scene["robot"]
+    home_arm = _idle_home_arm_target(robot, device)
+    _hold_joint_target(
+        env,
+        home_arm,
+        args.gripper_open,
+        args.idle_home_steps,
+        command,
+        recorder,
+        expert_recorder,
+        phase=phase,
+    )
+    trace.append({
+        "phase": phase,
+        "state": PickCubeFSMState.IDLE.value,
+        "steps": args.idle_home_steps,
+        "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
+        "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
+        **_diagnostic_pose(env),
+    })
+
+
 def _target_from_cube(env, cube_name: str, dz: float) -> Callable[[], torch.Tensor]:
     def target() -> torch.Tensor:
         cube = env.unwrapped.scene[cube_name]
@@ -1664,6 +1704,15 @@ def _run_state_machine(
             })
 
         if not grasped:
+            _move_to_idle_home(
+                env,
+                device,
+                command,
+                trace,
+                recorder,
+                expert_recorder,
+                phase=f"{phase_prefix}.idle_home_after_failed_pick",
+            )
             cube_end = scene[cube_name].data.root_pos_w[0].clone()
             _append_fsm_event(
                 fsm_trace,
@@ -1788,6 +1837,15 @@ def _run_state_machine(
             expert_recorder,
             tolerance=args.target_tolerance,
         )
+        _move_to_idle_home(
+            env,
+            device,
+            command,
+            trace,
+            recorder,
+            expert_recorder,
+            phase=f"{phase_prefix}.idle_home_after_mark_done",
+        )
 
         cube_end = scene[cube_name].data.root_pos_w[0].clone()
         inside_bowl = _cube_inside_bowl(env, cube_name, bowl_radius)
@@ -1878,6 +1936,7 @@ def main() -> None:
                 + args.final_settle_steps
                 + args.retreat_steps  # release_lift 수직 이탈
                 + args.retreat_steps
+                + args.idle_home_steps
                 + args.command_settle_steps * 2
             )
             + 120
@@ -1932,6 +1991,7 @@ def main() -> None:
             "control_point": args.control_point,
             "command_settle_steps": args.command_settle_steps,
             "retreat_steps": args.retreat_steps,
+            "idle_home_steps": args.idle_home_steps,
             "max_grasp_attempts": args.max_grasp_attempts,
             "object_order": args.object_order,
             "object_cycles": args.object_cycles,
