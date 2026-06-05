@@ -623,11 +623,19 @@ class PickCubeEventCfg:
     randomize_cube3 = randomize_object_in_ellipse("Cube3", 0.05, 0.02, (-10.0, 10.0))
     randomize_cube4 = randomize_object_in_ellipse("Cube4", 0.05, 0.02, (-10.0, 10.0))
 
-    # 그릇은 ±호(arc)로 랜덤화. 범위를 제한해 두 문제를 방지한다:
-    # 1) 매트 왼쪽 이탈: mat world x_min=1.50, 그릇 default x=1.62, 여유=0.12m.
-    #    -5° 시 center_x=1.582 → 가장자리 1.517m (매트 안쪽 17mm). -20° 시 1.47m → 이탈.
-    # 2) 큐브 겹침: +10° 시 그릇과 Cube3 최악 거리 0.115m > 임계 0.093m. +15°는 0.079m → 겹침.
-    randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-5.0, 10.0))
+    # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
+    #
+    # 제약 A — 매트 왼쪽 경계(world x=1.50):
+    #   bowl_center_x - r_top(0.075) >= 1.50 + 0.01(여유)
+    #   1.62 + 0.44*sin(a) >= 1.585  →  sin(a) >= -0.0795  →  a >= -4.56°
+    #   → 왼쪽 한계 -4°
+    #
+    # 제약 B — 그릇-Cube3 겹침:
+    #   유효 충돌 반경 = r_top(0.075) + Cube3 half-diag(0.0354)
+    #                   + cube_contactOffset(0.002) + bowl_contactOffset(0.004) = 0.1164m
+    #   Cube3 최악 위치 (1.79, -0.33) 기준 임계 각도 풀면 9.48°.
+    #   → 안전 여유 포함 오른쪽 한계 +8°
+    randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
 
 
 # ---------------------------------------------------------------------------
