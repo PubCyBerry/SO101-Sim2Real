@@ -91,9 +91,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--object_order",
-    choices=["name", "near_bowl_first", "far_bowl_first"],
-    default="near_bowl_first",
-    help="Object execution order. near_bowl_first reduces incidental collisions in the 4-cube layout.",
+    choices=["name", "near_bowl_first", "far_bowl_first", "hard_first"],
+    default="hard_first",
+    help="Object execution order. hard_first handles the large/far cubes before the bowl gets crowded.",
 )
 parser.add_argument(
     "--object_cycles",
@@ -104,7 +104,7 @@ parser.add_argument(
 parser.add_argument(
     "--bowl_place_offset_radius",
     type=float,
-    default=0.022,
+    default=0.040,
     help="XY radius for per-cube bowl placement offsets in meters.",
 )
 parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
@@ -112,7 +112,7 @@ parser.add_argument("--min_gripper_effort", type=float, default=0.5)
 parser.add_argument(
     "--carry_min_gripper_effort",
     type=float,
-    default=1.0,
+    default=0.5,
     help="Minimum gripper effort during lift/transport/place closed-gripper phases.",
 )
 parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_state_machine.json"))
@@ -1022,6 +1022,15 @@ def _target_from_bowl(env, dz: float, xy_offset: torch.Tensor | None = None) -> 
     return target
 
 
+def _fixed_target(target_w: torch.Tensor) -> Callable[[], torch.Tensor]:
+    target = target_w.clone()
+
+    def get_target() -> torch.Tensor:
+        return target.clone()
+
+    return get_target
+
+
 def _bowl_place_offset(device: str, placement_index: int) -> torch.Tensor:
     radius = max(0.0, float(args.bowl_place_offset_radius))
     direction = BOWL_PLACE_OFFSET_DIRECTIONS[placement_index % len(BOWL_PLACE_OFFSET_DIRECTIONS)]
@@ -1032,6 +1041,10 @@ def _bowl_place_offset(device: str, placement_index: int) -> torch.Tensor:
 def _ordered_active_names(env, active_names: list[str]) -> list[str]:
     if args.object_order == "name":
         return list(active_names)
+    if args.object_order == "hard_first":
+        hard_order = ["Cube4", "Cube2", "Cube3", "Cube1"]
+        active = set(active_names)
+        return [name for name in hard_order if name in active] + [name for name in active_names if name not in hard_order]
 
     scene = env.unwrapped.scene
     names = list(active_names)
@@ -1290,6 +1303,19 @@ def _run_diff_ik_state_machine(
             recorder,
             tolerance=args.target_tolerance,
         )
+        release_lift_target = release_target.clone()
+        release_lift_target[2] = DESK_TOP_Z + args.transport_height
+        _ik_phase(
+            env,
+            device,
+            f"{phase_prefix}.release_lift",
+            _fixed_target(release_lift_target),
+            args.gripper_open,
+            args.retreat_steps,
+            trace,
+            recorder,
+            tolerance=args.target_tolerance,
+        )
         _ik_phase(
             env,
             device,
@@ -1522,6 +1548,21 @@ def _run_state_machine(
             expert_recorder,
             phase=f"{phase_prefix}.final_settle",
         )
+        release_lift_target = _grasp_point_pos(robot)[0].clone()
+        release_lift_target[2] = DESK_TOP_Z + args.transport_height
+        _phase(
+            env,
+            device,
+            f"{phase_prefix}.release_lift",
+            _fixed_target(release_lift_target),
+            args.gripper_open,
+            args.retreat_steps,
+            trace,
+            command,
+            recorder,
+            expert_recorder,
+            tolerance=args.target_tolerance,
+        )
         _phase(
             env,
             device,
@@ -1604,6 +1645,7 @@ def main() -> None:
                 + args.place_steps
                 + args.open_steps
                 + args.final_settle_steps
+                + args.retreat_steps  # release_lift 수직 이탈
                 + args.retreat_steps
                 + args.command_settle_steps * 2
             )
