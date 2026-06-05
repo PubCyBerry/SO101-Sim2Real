@@ -29,7 +29,7 @@ from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (
 )
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES
 from sim_to_real.utils.domain_randomization import (
-    randomize_object_in_ellipse,
+    randomize_cubes_scattered,
     randomize_object_on_arc,
 )
 
@@ -61,6 +61,23 @@ _CUBE_INIT_STATES = {
 }
 # BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(2.2, -0.52, 0.705) = (1.62, -0.26, 0.715)
 _BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
+
+# ---------------------------------------------------------------------------
+# 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준
+# ---------------------------------------------------------------------------
+
+# 로봇 도달 범위 안쪽, 매트 경계(x:[1.50,2.36], y:[-0.52,-0.12])에서 마진 확보.
+# y 상한 -0.33: 그릇 기본 위치(y=-0.26)와의 충분한 이격 확보
+#   (그릇-큐브 최소 거리 0.18m는 randomize_cubes_scattered 의 min_bowl_sep 로 추가 보장).
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (1.60, 2.08)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.48, -0.33)
+
+# 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
+# fallback(default 위치) 동작을 유도하는 데 사용한다.
+_CUBE_SCATTER_CENTER: tuple[float, float] = (
+    sum(v[0][0] for v in _CUBE_INIT_STATES.values()) / 4,  # ≈ 1.8375
+    sum(v[0][1] for v in _CUBE_INIT_STATES.values()) / 4,  # ≈ -0.4075
+)
 
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist}
@@ -617,11 +634,16 @@ class PickCubeEventCfg:
         },
     )
 
-    # Cubes scatter inside a small ellipse around their authored positions
-    randomize_cube1 = randomize_object_in_ellipse("Cube1", 0.05, 0.02, (-10.0, 10.0))
-    randomize_cube2 = randomize_object_in_ellipse("Cube2", 0.05, 0.02, (-10.0, 10.0))
-    randomize_cube3 = randomize_object_in_ellipse("Cube3", 0.05, 0.02, (-10.0, 10.0))
-    randomize_cube4 = randomize_object_in_ellipse("Cube4", 0.05, 0.02, (-10.0, 10.0))
+    # 큐브 4개를 workspace 내에서 완전 무작위 배치 (rejection sampling)
+    randomize_cubes = randomize_cubes_scattered(
+        CUBE_NAMES,
+        BOWL_NAME,
+        x_range=_CUBE_SCATTER_X_RANGE,
+        y_range=_CUBE_SCATTER_Y_RANGE,
+        yaw_range_deg=(-30.0, 30.0),
+        min_cube_sep=0.10,
+        min_bowl_sep=0.18,
+    )
 
     # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
     #
@@ -731,12 +753,24 @@ def apply_curriculum(
     env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
     env_cfg.terminations.success.params["radius"] = bowl_radius
 
-    for cube_name in CUBE_NAMES:
-        term = getattr(env_cfg.events, "randomize_" + cube_name.lower(), None)
-        if term is not None and object_radius_scale != 1.0:
-            p = term.params
-            p["x_radius"] = p["x_radius"] * object_radius_scale
-            p["y_radius"] = p["y_radius"] * object_radius_scale
+    # 큐브 scatter workspace 를 scale 에 비례해 중심으로부터 확장/축소.
+    # scale=0: workspace 가 중심점(_CUBE_SCATTER_CENTER)으로 수렴 → 면적 0
+    #          → rejection sampling 전부 실패 → 각 큐브가 default 위치로 fallback.
+    # scale=1: 전체 workspace 사용.
+    scatter_term = getattr(env_cfg.events, "randomize_cubes", None)
+    if scatter_term is not None and object_radius_scale != 1.0:
+        cx, cy = _CUBE_SCATTER_CENTER
+        x_lo_full, x_hi_full = _CUBE_SCATTER_X_RANGE
+        y_lo_full, y_hi_full = _CUBE_SCATTER_Y_RANGE
+        s = max(0.0, float(object_radius_scale))
+        scatter_term.params["x_range"] = (
+            cx - (cx - x_lo_full) * s,
+            cx + (x_hi_full - cx) * s,
+        )
+        scatter_term.params["y_range"] = (
+            cy - (cy - y_lo_full) * s,
+            cy + (y_hi_full - cy) * s,
+        )
 
     bowl_term = getattr(env_cfg.events, "randomize_bowl", None)
     if bowl_term is not None and container_angle_scale != 1.0:

@@ -160,6 +160,95 @@ def randomize_object_in_ellipse(
     )
 
 
+def _randomize_cubes_scattered_fn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    cube_cfgs: list[SceneEntityCfg],
+    bowl_cfg: SceneEntityCfg,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    yaw_range_deg: tuple[float, float],
+    min_cube_sep: float,
+    min_bowl_sep: float,
+    max_attempts: int,
+) -> None:
+    """큐브들을 workspace 내에서 무작위로 배치한다.
+
+    순차 rejection sampling: 큐브를 하나씩 놓으면서 이미 놓인 큐브·그릇과의
+    최소 거리 조건이 깨지는 후보를 버린다.  max_attempts 내 조건을 충족 못하면
+    해당 env 는 default_root_state 위치로 fallback 한다.
+
+    bowl 의 DR 은 이 함수 실행 전(reset_scene → randomize_bowl 순서)에 완료되지
+    않으므로 bowl 기준점으로는 default_root_state 를 사용하고, min_bowl_sep 에
+    bowl arc 이동량(≈0.05 m)을 흡수할 여유를 두어야 한다.
+    """
+    n = len(env_ids)
+    if n == 0:
+        return
+
+    device = env.device
+    x_lo, x_hi = x_range
+    y_lo, y_hi = y_range
+    yaw_lo = yaw_range_deg[0] * math.pi / 180.0
+    yaw_hi = yaw_range_deg[1] * math.pi / 180.0
+
+    bowl_asset: RigidObject = env.scene[bowl_cfg.name]
+    bowl_default_xy = bowl_asset.data.default_root_state[env_ids, :2]  # (n, 2) env-local
+
+    # 누적 배치 xy — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
+    placed_xy: list[torch.Tensor] = []
+
+    min_bowl_sep_sq = min_bowl_sep ** 2
+    min_cube_sep_sq = min_cube_sep ** 2
+
+    for cube_cfg in cube_cfgs:
+        asset: RigidObject = env.scene[cube_cfg.name]
+        default = asset.data.default_root_state[env_ids].clone()  # (n, 13)
+
+        # 최종 위치. 조건 충족 못한 env 는 default 좌표로 유지
+        final_x = default[:, 0].clone()
+        final_y = default[:, 1].clone()
+        placed = torch.zeros(n, dtype=torch.bool, device=device)
+
+        for _ in range(max_attempts):
+            unplaced_mask = ~placed
+            if not unplaced_mask.any():
+                break
+            idx = unplaced_mask.nonzero(as_tuple=True)[0]  # (m,) 미배치 env 인덱스
+
+            cand_x = torch.rand(len(idx), device=device) * (x_hi - x_lo) + x_lo
+            cand_y = torch.rand(len(idx), device=device) * (y_hi - y_lo) + y_lo
+
+            # 그릇 최소 거리 확인
+            bxy = bowl_default_xy[idx]
+            ok = (cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= min_bowl_sep_sq
+
+            # 이미 배치된 큐브들과의 최소 거리 확인
+            for prev in placed_xy:
+                pxy = prev[idx]
+                ok = ok & (
+                    (cand_x - pxy[:, 0]).pow(2) + (cand_y - pxy[:, 1]).pow(2) >= min_cube_sep_sq
+                )
+
+            accept = idx[ok]
+            final_x[accept] = cand_x[ok]
+            final_y[accept] = cand_y[ok]
+            placed[accept] = True
+
+        placed_xy.append(torch.stack([final_x, final_y], dim=-1))
+
+        # 무작위 yaw
+        yaw_delta = torch.rand(n, device=device) * (yaw_hi - yaw_lo) + yaw_lo
+        zero = torch.zeros(n, device=device)
+        yaw_quat = math_utils.quat_from_euler_xyz(zero, zero, yaw_delta)
+        new_quat = math_utils.quat_mul(default[:, 3:7], yaw_quat)
+
+        positions = torch.stack([final_x, final_y, default[:, 2]], dim=-1) + env.scene.env_origins[env_ids]
+        pose = torch.cat([positions, new_quat], dim=-1)
+        asset.write_root_pose_to_sim(pose, env_ids=env_ids)
+        asset.write_root_velocity_to_sim(torch.zeros(n, 6, device=device), env_ids=env_ids)
+
+
 def randomize_object_on_arc(
     name: str,
     radius: float,
@@ -183,5 +272,45 @@ def randomize_object_on_arc(
             "asset_cfg": SceneEntityCfg(name),
             "radius": float(radius),
             "angle_range_deg": angle_range_deg,
+        },
+    )
+
+
+def randomize_cubes_scattered(
+    cube_names: list[str],
+    bowl_name: str,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    yaw_range_deg: tuple[float, float] = (-30.0, 30.0),
+    min_cube_sep: float = 0.10,
+    min_bowl_sep: float = 0.18,
+    max_attempts: int = 50,
+) -> EventTerm:
+    """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
+
+    Args:
+        cube_names: 배치할 큐브 prim 이름 목록. 순서대로 처리한다.
+        bowl_name: 그릇 prim 이름 (거리 제약 기준).
+        x_range: workspace x 범위 (world/env-local).
+        y_range: workspace y 범위 (world/env-local).
+        yaw_range_deg: 각 큐브에 적용할 yaw jitter 범위 (도).
+        min_cube_sep: 큐브 간 최소 중심 거리 (m).
+        min_bowl_sep: 큐브-그릇 간 최소 중심 거리 (m). bowl DR 이동량(≈0.05 m)을
+            흡수할 여유를 포함해야 한다.
+        max_attempts: env 당 rejection sampling 최대 시도 횟수. 초과 시 해당
+            env 의 큐브는 default_root_state 위치로 fallback.
+    """
+    return EventTerm(
+        func=_randomize_cubes_scattered_fn,
+        mode="reset",
+        params={
+            "cube_cfgs": [SceneEntityCfg(n) for n in cube_names],
+            "bowl_cfg": SceneEntityCfg(bowl_name),
+            "x_range": x_range,
+            "y_range": y_range,
+            "yaw_range_deg": yaw_range_deg,
+            "min_cube_sep": float(min_cube_sep),
+            "min_bowl_sep": float(min_bowl_sep),
+            "max_attempts": int(max_attempts),
         },
     )
