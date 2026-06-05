@@ -168,13 +168,11 @@ from isaaclab.envs.mdp.actions import (  # noqa: E402
     DifferentialInverseKinematicsActionCfg,
 )
 import isaaclab.sim as sim_utils  # noqa: E402
-from isaacsim.core.prims import SingleArticulation  # noqa: E402
 from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
 
 enable_extension("isaacsim.robot_motion.lula")
 enable_extension("isaacsim.robot_motion.motion_generation")
 
-from isaacsim.robot_motion.motion_generation import ArticulationMotionPolicy  # noqa: E402
 from isaacsim.robot_motion.motion_generation.lula.motion_policies import RmpFlow  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
@@ -643,9 +641,8 @@ class SO101RmpFlowJointTarget:
         self.env = env
         self.device = device
         self.robot = env.unwrapped.scene["robot"]
-        self._articulation = SingleArticulation("/World/envs/env_0/Robot")
-        self._articulation.initialize()
         physics_dt = sim_utils.SimulationContext.instance().get_physics_dt()
+        self._frame_dt = float(getattr(env.unwrapped, "step_dt", physics_dt))
         self._rmpflow = RmpFlow(
             robot_description_path=str(RMPFLOW_DESCRIPTOR_PATH),
             urdf_path=str(RMPFLOW_URDF_PATH),
@@ -654,7 +651,6 @@ class SO101RmpFlowJointTarget:
             maximum_substep_size=physics_dt / 5.0,
         )
         self._kinematics = self._rmpflow.get_kinematics_solver()
-        self._policy = ArticulationMotionPolicy(self._articulation, self._rmpflow, physics_dt)
         self.active_dof_names = list(self._rmpflow.get_active_joints())
 
     def reset(self) -> None:
@@ -682,8 +678,16 @@ class SO101RmpFlowJointTarget:
         if ik_success:
             self._rmpflow.set_cspace_target(np.asarray(ik_q, dtype=np.float64))
         self._rmpflow.set_end_effector_target(target_position=target_usd, target_orientation=None)
-        action = self._policy.get_next_articulation_action()
-        q = torch.as_tensor(action.joint_positions[:ARM_DOF], device=self.device, dtype=torch.float32)
+        current_q = self.robot.data.joint_pos[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
+        current_v = self.robot.data.joint_vel[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
+        q_next, _v_next = self._rmpflow.compute_joint_targets(
+            current_q,
+            current_v,
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+            self._frame_dt,
+        )
+        q = torch.as_tensor(q_next[:ARM_DOF], device=self.device, dtype=torch.float32)
         return q, {
             "rmpflow_active_dof_names": self.active_dof_names,
             "rmpflow_joint_target": _round_list(q),
@@ -694,6 +698,7 @@ class SO101RmpFlowJointTarget:
             "rmpflow_ik_cspace_target": [round(float(v), 5) for v in np.asarray(ik_q).tolist()],
             "rmpflow_base_pos_usd": [round(float(v), 5) for v in RMPFLOW_BASE_POS_USD],
             "rmpflow_base_quat_usd": [round(float(v), 5) for v in RMPFLOW_BASE_QUAT_USD],
+            "rmpflow_frame_dt": round(float(self._frame_dt), 6),
         }
 
 
