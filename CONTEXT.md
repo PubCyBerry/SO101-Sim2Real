@@ -12,6 +12,23 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — PickCube 명시 FSM V2 완료, 다음 RMPFlow)
+
+- **사용자 질문 답변**: 현재 `scripts/environments/pick_cube_state_machine.py`는 사용자가 제시한 전이 구조를 명시적으로 따른다. `PickCubeFSMState`와 결과 JSON의 `fsm_state_sequence`는 `IDLE → OPEN_GRIPPER → MOVE_TO_PRE_PICK → ORIENT_WRIST → DESCEND → GRASP → LIFT → MOVE_TO_PRE_PLACE → PLACE_DESCEND → RELEASE → MARK_DONE → ALL_DONE` 순서다.
+- **핵심 변경**:
+  - `joint_fk` 직접 SM을 명시 FSM trace로 재구성하고, 각 object attempt마다 `OPEN_GRIPPER/MOVE_TO_PRE_PICK/.../MARK_DONE` 이벤트를 남긴다.
+  - object 사이에는 `IDLE` home posture로 복귀해 bowl/기존 큐브를 치지 않게 했다.
+  - 4개 큐브를 같은 bowl에 쌓을 때 마지막 큐브가 튕겨 나가던 문제를 줄이기 위해 `--stack_place_height_increment` 기반 place 높이 보정을 추가했다.
+- **서버 검증 완료**:
+  - no-video proof: `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_explicit_fsm_stackheight_4cube_nocam_20260605.json`
+  - 2cam LeRobot v3 dataset: `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_explicit_fsm_stackheight_4cube_2cam_20260605`
+  - 결과 JSON: `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_explicit_fsm_stackheight_4cube_2cam_20260605.json`
+  - 결과: `status=passed`, `placed_and_released=true`, `final_inside.Cube1~Cube4=true`, dataset 9000 frames/300.0s, `validate_lerobot_schema.py` PASS.
+- **현재 TASKS 상태**: `TA.CUBE.STATE_MACHINE_V2` done. 다음 actionable task는 `TA.CUBE.RMPFLOW_CONTROLLER`.
+- **다음 작업 메모**: RMPFlow는 SO-101용 Lula robot descriptor/XRDF 및 rmpflow config가 아직 게이트다. Isaac Sim PickPlace/RMPFlow 예제처럼 `end_effector_offset`, phase timing, planner reset을 분리해 직접 SM 성공 산출물과 같은 4-cube fixed-spawn + 2cam 영상 기준으로 검증한다.
+
+---
+
 ## 작업 인계 (2026-06-05 — PickCube 4-cube SM/RMPFlow 방향 재설정)
 
 - **사용자 요청**: 참고문서 2개를 확인해 진행방향을 다시 잡고, 가능하면 직접 State Machine과 Controller+RMPFlow 두 경로 모두 `cube_desk`의 4개 큐브를 전부 그릇으로 Pick-and-Place하는 수준까지 구현·영상 기록 후 RL로 넘어간다.
