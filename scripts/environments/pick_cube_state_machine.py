@@ -169,6 +169,11 @@ from isaaclab.envs.mdp.actions import (  # noqa: E402
 )
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaacsim.core.prims import SingleArticulation  # noqa: E402
+from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
+
+enable_extension("isaacsim.robot_motion.lula")
+enable_extension("isaacsim.robot_motion.motion_generation")
+
 from isaacsim.robot_motion.motion_generation import ArticulationMotionPolicy  # noqa: E402
 from isaacsim.robot_motion.motion_generation.lula.motion_policies import RmpFlow  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
