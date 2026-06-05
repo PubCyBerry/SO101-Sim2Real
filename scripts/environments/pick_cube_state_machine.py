@@ -70,6 +70,18 @@ parser.add_argument("--seed", type=int, default=7)
 parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
 parser.add_argument("--control_point", choices=["jaw_offset", "midpoint"], default="jaw_offset")
+parser.add_argument(
+    "--object_order",
+    choices=["name", "near_bowl_first", "far_bowl_first"],
+    default="near_bowl_first",
+    help="Object execution order. near_bowl_first reduces incidental collisions in the 4-cube layout.",
+)
+parser.add_argument(
+    "--bowl_place_offset_radius",
+    type=float,
+    default=0.022,
+    help="XY radius for per-cube bowl placement offsets in meters.",
+)
 parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
 parser.add_argument("--min_gripper_effort", type=float, default=0.5)
 parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_state_machine.json"))
@@ -136,6 +148,12 @@ CAMERA_SCENE_NAMES = {
     "top": "top_camera",
     "wrist": "wrist_camera",
 }
+BOWL_PLACE_OFFSET_DIRECTIONS = (
+    (-1.0, -1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (1.0, 1.0),
+)
 CUBE_TASK_NAME = "pick up the cube and place it in the bowl"
 JOINT_FEATURE_NAMES = [
     "shoulder_pan.pos",
@@ -920,14 +938,36 @@ def _target_from_cube(env, cube_name: str, dz: float) -> Callable[[], torch.Tens
     return target
 
 
-def _target_from_bowl(env, dz: float) -> Callable[[], torch.Tensor]:
+def _target_from_bowl(env, dz: float, xy_offset: torch.Tensor | None = None) -> Callable[[], torch.Tensor]:
     def target() -> torch.Tensor:
         bowl = env.unwrapped.scene[BOWL_NAME]
         pos = bowl.data.root_pos_w[0].clone()
+        if xy_offset is not None:
+            pos[:2] += xy_offset.to(device=pos.device, dtype=pos.dtype)
         pos[2] = DESK_TOP_Z + dz
         return pos
 
     return target
+
+
+def _bowl_place_offset(device: str, placement_index: int) -> torch.Tensor:
+    radius = max(0.0, float(args.bowl_place_offset_radius))
+    direction = BOWL_PLACE_OFFSET_DIRECTIONS[placement_index % len(BOWL_PLACE_OFFSET_DIRECTIONS)]
+    scale = radius / math.sqrt(2.0)
+    return torch.tensor([direction[0] * scale, direction[1] * scale], device=device, dtype=torch.float32)
+
+
+def _ordered_active_names(env, active_names: list[str]) -> list[str]:
+    if args.object_order == "name":
+        return list(active_names)
+
+    scene = env.unwrapped.scene
+    names = list(active_names)
+    reverse = args.object_order == "near_bowl_first"
+    # 현재 reset pose 기준으로 bowl에 가까운 y(덜 음수) 큐브부터 집으면,
+    # 아래쪽 큐브를 지나가며 중앙 큐브를 밀어내는 일이 줄어든다.
+    names.sort(key=lambda name: float(scene[name].data.root_pos_w[0, 1].item()), reverse=reverse)
+    return names
 
 
 def _run_state_machine(
@@ -951,9 +991,18 @@ def _run_state_machine(
         if recorder is not None:
             recorder.record(env, zero_action)
 
-    for cube_name in active_names:
+    operation_order = _ordered_active_names(env, active_names)
+    trace.append({
+        "phase": "operation_order",
+        "object_order": operation_order,
+        "order_mode": args.object_order,
+        "bowl_place_offset_radius": args.bowl_place_offset_radius,
+    })
+
+    for placement_index, cube_name in enumerate(operation_order):
         cube_start = scene[cube_name].data.root_pos_w[0].clone()
         phase_prefix = cube_name.lower()
+        bowl_offset_xy = _bowl_place_offset(device, placement_index)
         grasped = False
         for attempt in range(1, max(1, args.max_grasp_attempts) + 1):
             attempt_prefix = f"{phase_prefix}.attempt{attempt}"
@@ -1058,7 +1107,7 @@ def _run_state_machine(
             env,
             device,
             f"{phase_prefix}.transport",
-            _target_from_bowl(env, args.transport_height),
+            _target_from_bowl(env, args.transport_height, bowl_offset_xy),
             args.gripper_closed,
             args.transport_steps,
             trace,
@@ -1071,7 +1120,7 @@ def _run_state_machine(
             env,
             device,
             f"{phase_prefix}.place",
-            _target_from_bowl(env, args.place_height),
+            _target_from_bowl(env, args.place_height, bowl_offset_xy),
             args.gripper_closed,
             args.place_steps,
             trace,
@@ -1231,6 +1280,8 @@ def main() -> None:
                 "max_gripper_step_delta_rad": args.max_gripper_step_delta,
                 "command_settle_steps": args.command_settle_steps,
                 "max_grasp_attempts": args.max_grasp_attempts,
+                "object_order": args.object_order,
+                "bowl_place_offset_radius": args.bowl_place_offset_radius,
                 "gripper_open": args.gripper_open,
                 "gripper_closed": args.gripper_closed,
                 "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
