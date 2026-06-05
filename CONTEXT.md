@@ -12,6 +12,28 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — PickCube 4-cube SM/RMPFlow 방향 재설정)
+
+- **사용자 요청**: 참고문서 2개를 확인해 진행방향을 다시 잡고, 가능하면 직접 State Machine과 Controller+RMPFlow 두 경로 모두 `cube_desk`의 4개 큐브를 전부 그릇으로 Pick-and-Place하는 수준까지 구현·영상 기록 후 RL로 넘어간다.
+- **참고문서 확인 결과**:
+  - Isaac Sim 5.1 Tutorial 9는 URDF/robot descriptor(XRDF 또는 YAML)/RMPFlow config가 준비된 manipulator를 전제로 `PickPlaceController` 또는 8-phase RMPFlow state machine을 사용한다.
+  - `end_effector_offset`, `events_dt`, planner reset/tuning이 성공에 직접 영향. SO-101은 현재 URDF만 있고 Lula descriptor/RMPFlow config는 아직 없다.
+- **직접 SM 현황**:
+  - 기존 `pick_cube_state_machine.py`는 `active_objects=4` 루프 구조는 있으나 서버 2cam 기록 run `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_v2_2cam_20260605`는 실패했다. 파일은 생성됐지만 `state_machine_status=failed`, `Cube1=false`이므로 RL expert로 사용 금지.
+  - 같은 조건 no-video 서버 triage는 1-cube pass. 실패는 seed 미고정/접촉 비결정성 + 카메라 기록 run에서 단일 grasp attempt만 허용한 점이 원인 후보.
+- **적용 변경**:
+  - SM env에 `env_cfg.seed=args.seed` 주입.
+  - 4-cube와 retry를 고려해 `episode_length_s` 산정을 보수화하고 `--episode_length_s` override 추가.
+  - 실패 run으로 만든 LeRobot dataset meta는 더 이상 `status=passed`로 기록하지 않게 수정.
+  - `TASKS.md`의 TA.CUBE.STATE_MACHINE_V2 verify를 4-cube fixed-spawn + 2cam dataset PASS로 상향, RMPFlow controller task를 별도 todo로 추가.
+- **다음**:
+  1. 변경 커밋/푸시 후 서버 pull.
+  2. 서버에서 4-cube no-video proof를 먼저 돌린다.
+  3. 통과하면 record_seconds를 충분히 길게 잡아 2cam LeRobot v3 영상 dataset을 저장하고 validator 통과.
+  4. RMPFlow는 SO-101 descriptor/RMPFlow config scaffold/스모크를 별도 진행한다.
+
+---
+
 ## 작업 인계 (2026-06-05 — North Star 2cam 전환 + PickCube State Machine V2)
 
 - **결정 변경**: 사용자 지시로 앞으로 sim/LeRobot camera feature 계약은 `observation.images.{top,wrist}` 2cam 이다. `front`는 North Star에서 제외한다.

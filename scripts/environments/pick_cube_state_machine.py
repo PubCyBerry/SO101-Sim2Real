@@ -76,6 +76,12 @@ parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_
 parser.add_argument("--dataset_dir", type=Path, default=None, help="Optional LeRobot v3 episode output directory")
 parser.add_argument("--expert_dataset_pt", type=Path, default=None, help="Optional raw rl_state/action expert dataset (.pt)")
 parser.add_argument("--record_seconds", type=float, default=30.0, help="Seconds to record when --dataset_dir is set")
+parser.add_argument(
+    "--episode_length_s",
+    type=float,
+    default=None,
+    help="Optional simulation episode timeout override. Defaults to a conservative multi-cube estimate.",
+)
 parser.add_argument("--overwrite_dataset", action="store_true", help="Replace --dataset_dir if it already exists")
 parser.add_argument("--no_videos", action="store_true", help="Skip camera videos in the LeRobot dataset")
 parser.add_argument("--warmup_steps", type=int, default=5, help="Render warmup steps before recording starts")
@@ -242,7 +248,7 @@ class LeRobotV3EpisodeRecorder:
         self._write_stats()
         meta = {
             "task_id": "TA.CUBE.STATE_MACHINE.DATASET",
-            "status": "passed",
+            "status": "passed" if run_result.get("status") == "passed" else "failed",
             "output_dir": str(self.root),
             "frames": self.frame_count,
             "seconds": self.frame_count / FPS,
@@ -1138,6 +1144,7 @@ def main() -> None:
     try:
         device: str = args.device
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
+        env_cfg.seed = args.seed
         apply_curriculum(
             env_cfg,
             active_objects=args.active_objects,
@@ -1151,23 +1158,37 @@ def main() -> None:
         total_steps = (
             args.settle_steps
             + args.active_objects
+            * max(1, args.max_grasp_attempts)
             * (
                 args.approach_steps
                 + args.descend_steps
                 + args.close_steps
                 + args.lift_steps
-                + args.transport_steps
+                + args.command_settle_steps * 4
+            )
+            + args.active_objects
+            * (
+                args.transport_steps
                 + args.place_steps
                 + args.open_steps
                 + args.final_settle_steps
+                + args.command_settle_steps * 2
             )
             + 120
         )
-        env_cfg.episode_length_s = max(
-            env_cfg.episode_length_s,
+        estimated_episode_length_s = max(
             total_steps * env_cfg.sim.dt * env_cfg.decimation + 5.0,
             args.record_seconds + 30.0,
+            # 4-cube scripted rollouts can legitimately run for several
+            # minutes because command slew limiting is part of the proof.
+            150.0 * args.active_objects * max(1, args.max_grasp_attempts),
             180.0,
+        )
+        if args.episode_length_s is not None:
+            estimated_episode_length_s = max(estimated_episode_length_s, args.episode_length_s)
+        env_cfg.episode_length_s = max(
+            env_cfg.episode_length_s,
+            estimated_episode_length_s,
         )
         if args.dataset_dir is not None and not args.no_videos:
             add_pick_cube_cameras(env_cfg.scene)

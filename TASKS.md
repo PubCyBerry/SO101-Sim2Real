@@ -29,7 +29,8 @@
 - [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
 - [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
 - [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
-- [ ] **TA.CUBE.STATE_MACHINE_V2** 사용자 재보정 `cube_desk` 기준 PickCube state machine 재작성 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + 서버 dataset `validate_lerobot_schema.py` PASS | status:in_progress
+- [ ] **TA.CUBE.STATE_MACHINE_V2** 사용자 재보정 `cube_desk` 기준 PickCube 직접 state machine 재작성 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 4-cube fixed-spawn placed_and_released pass + 서버 dataset `validate_lerobot_schema.py` PASS | status:in_progress
+- [ ] **TA.CUBE.RMPFLOW_CONTROLLER** Isaac Sim Controller + RMPFlow/PickPlaceController 경로로 4-cube Pick-and-Place 검증 | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE_V2 | verify:SO-101 URDF + Lula descriptor/XRDF + RMPFlow config 준비, controller run 4-cube placed_and_released pass + 2cam 영상 산출 | status:todo
 
 ## Phase B — RL 전문가 (state-based)
 
@@ -67,6 +68,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 사용자 재요청과 Isaac Sim 5.1 PickPlace/RMPFlow 참고문서 확인 후 목표를 1-cube proof에서 4-cube fixed-spawn proof로 상향, RMPFlow controller는 SO-101 Lula descriptor/XRDF+rmpflow yaml 준비가 별도 선행 게이트임을 기록; SM script에 seed 고정/4-cube timeout 보수화/failed dataset status 반영 추가 / 다음: 서버 4-cube no-video proof → 2cam 영상 dataset
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — Claude 제안의 RMPFlow standalone 대신 기존 Isaac Lab joint-position env에 맞춘 FSM으로 구현; jaw-offset control point + leisaac-style dynamic gripper effort 조합으로 로컬 headless 1-cube fixed proof `outputs/pick_cube_state_machine_jaw_dynamic_smoke.json` passed(placed_and_released true) / 다음: 서버에서 2cam LeRobot v3 episode 생성+validate
 - [2026-06-05] North Star update — 사용자 지시로 sim/LeRobot 카메라 불변 계약을 `observation.images.{top,wrist}` 2cam으로 확정, `front`는 앞으로 계약에서 제외 / 다음: 새 PickCube state machine과 recorder를 2cam validator 기준으로 검증
 - [2026-06-05] TB.4 in_progress — guided-lift scratch PPO 완료(model219)했지만 deterministic eval model100 0/128, model160 0/128, model219 1/128로 실패; reward-only 보정은 중단 / 다음: state-machine expert 기반 phase-aware imitation/DAgger 또는 oracle phase/progress privileged obs로 전환
