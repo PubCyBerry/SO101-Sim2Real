@@ -1,0 +1,45 @@
+# SO-101 follower Lula robot descriptor for Isaac Lab RMPFlowAction.
+#
+# This file is intentionally separate from the source URDF/USD assets.  It
+# describes only the arm cspace used by Lula/RMPFlow; the gripper joint remains
+# controlled by the Isaac Lab binary gripper action.
+
+api_version: 1.0
+
+cspace:
+  - shoulder_pan
+  - shoulder_lift
+  - elbow_flex
+  - wrist_flex
+  - wrist_roll
+
+default_q: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+acceleration_limits: [10.0, 10.0, 10.0, 10.0, 10.0]
+jerk_limits: [1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+
+cspace_to_urdf_rules:
+
+collision_spheres:
+  - base_link:
+      - center: [0.02, 0.0, 0.04]
+        radius: 0.06
+  - shoulder_link:
+      - center: [-0.03, 0.0, 0.0]
+        radius: 0.06
+  - upper_arm_link:
+      - center: [-0.05, 0.0, 0.02]
+        radius: 0.045
+      - center: [-0.11, 0.0, 0.02]
+        radius: 0.04
+  - lower_arm_link:
+      - center: [-0.05, -0.02, 0.02]
+        radius: 0.04
+      - center: [-0.11, -0.01, 0.02]
+        radius: 0.04
+  - wrist_link:
+      - center: [0.0, -0.03, 0.02]
+        radius: 0.035
+  - gripper_link:
+      - center: [0.0, 0.0, -0.035]
+        radius: 0.035
