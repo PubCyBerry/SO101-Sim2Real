@@ -755,11 +755,12 @@ def apply_curriculum(
     env_cfg.terminations.success.params["radius"] = bowl_radius
 
     # 큐브 scatter workspace 를 scale 에 비례해 중심으로부터 확장/축소.
-    # scale=0: workspace 가 중심점(_CUBE_SCATTER_CENTER)으로 수렴 → 면적 0
-    #          → rejection sampling 전부 실패 → 각 큐브가 default 위치로 fallback.
+    # scale=0: DR 비활성화 → authored default fixed-spawn.
     # scale=1: 전체 workspace 사용.
     scatter_term = getattr(env_cfg.events, "randomize_cubes", None)
-    if scatter_term is not None and object_radius_scale != 1.0:
+    if scatter_term is not None and object_radius_scale <= 0.0:
+        env_cfg.events.randomize_cubes = None
+    elif scatter_term is not None and object_radius_scale != 1.0:
         cx, cy = _CUBE_SCATTER_CENTER
         x_lo_full, x_hi_full = _CUBE_SCATTER_X_RANGE
         y_lo_full, y_hi_full = _CUBE_SCATTER_Y_RANGE
