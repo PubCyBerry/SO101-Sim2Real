@@ -89,6 +89,11 @@ CONTACT_OFFSET_DEFAULT = 0.004
 #   (큐브 CCD + solverPositionIterationCount 32 가 관통을 방어).
 CUBE_CONTACT_OFFSET = 0.002
 
+# 큐브 모서리 챔퍼(bevel) 크기: 3 mm.
+# 시각적 라운딩을 위해 Box 시각 메시 대신 _bevel_mesh_visual() 로 생성된
+# 26-face chamfered 메시를 사용하고, Box prim 은 충돌 전용(invisible) 으로 남긴다.
+CUBE_BEVEL: float = 0.003
+
 BOWL_MASS: float = 0.15  # kg, 동적 그릇
 
 
@@ -245,6 +250,89 @@ def _cube(
     _block(lines, level, "}")
 
 
+def _bevel_mesh_visual(
+    lines: list[str],
+    level: int,
+    name: str,
+    *,
+    sx: float,
+    sy: float,
+    sz: float,
+    bevel: float,
+    material_path: str | None,
+) -> None:
+    """시각 전용 26-face chamfered box 메시 (충돌 없음).
+
+    각 모서리를 bevel 크기만큼 잘라낸다:
+      8 main quads (각 면) + 12 edge bevels (모서리 띠) + 8 corner tris (꼭지점)
+    모든 face normal 이 바깥을 향하도록 winding 검증 완료.
+    doubleSided=1 로 설정해 렌더러 face-culling 문제를 방지한다.
+    """
+    ax, ay, az = sx / 2.0, sy / 2.0, sz / 2.0
+    c = bevel
+
+    # 24 vertices: corner i=(qx,qy,qz) → 3i=v_x, 3i+1=v_y, 3i+2=v_z
+    corner_signs = [
+        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+        (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1),
+    ]
+    pts: list[tuple[float, float, float]] = []
+    for (qx, qy, qz) in corner_signs:
+        pts.append((qx * ax, qy * (ay - c), qz * (az - c)))      # v_x
+        pts.append((qx * (ax - c), qy * ay, qz * (az - c)))      # v_y
+        pts.append((qx * (ax - c), qy * (ay - c), qz * az))      # v_z
+
+    # 26-face connectivity (외향 normal, CCW winding 검증 완료)
+    faces: list[list[int]] = [
+        # 6 main quads
+        [0, 3, 9, 6],      # +x
+        [12, 18, 21, 15],  # -x
+        [1, 13, 16, 4],    # +y
+        [7, 10, 22, 19],   # -y
+        [2, 8, 20, 14],    # +z
+        [5, 17, 23, 11],   # -z
+        # 4 edge bevels (z-parallel)
+        [0, 3, 4, 1],      # +x+y
+        [6, 7, 10, 9],     # +x-y
+        [12, 13, 16, 15],  # -x+y
+        [18, 21, 22, 19],  # -x-y
+        # 4 edge bevels (y-parallel)
+        [0, 2, 8, 6],      # +x+z
+        [3, 9, 11, 5],     # +x-z
+        [12, 18, 20, 14],  # -x+z
+        [15, 17, 23, 21],  # -x-z
+        # 4 edge bevels (x-parallel)
+        [1, 13, 14, 2],    # +y+z
+        [4, 5, 17, 16],    # +y-z
+        [7, 8, 20, 19],    # -y+z
+        [10, 22, 23, 11],  # -y-z
+        # 8 corner triangles
+        [0, 1, 2],         # +++
+        [3, 5, 4],         # ++-
+        [6, 8, 7],         # +-+
+        [9, 10, 11],       # +--
+        [12, 14, 13],      # -++
+        [15, 16, 17],      # -+-
+        [18, 19, 20],      # --+
+        [21, 23, 22],      # ---
+    ]
+
+    counts = [len(f) for f in faces]
+    indices = [i for f in faces for i in f]
+    pts_str = ", ".join(f"({_num(x)}, {_num(y)}, {_num(z)})" for x, y, z in pts)
+
+    _block(lines, level, f'def Mesh "{name}"')
+    _block(lines, level, "{")
+    _block(lines, level + 1, "uniform int doubleSided = 1")
+    _block(lines, level + 1, f"int[] faceVertexCounts = [{', '.join(str(x) for x in counts)}]")
+    _block(lines, level + 1, f"int[] faceVertexIndices = [{', '.join(str(x) for x in indices)}]")
+    _block(lines, level + 1, f"point3f[] points = [{pts_str}]")
+    _block(lines, level + 1, 'uniform token subdivisionScheme = "none"')
+    if material_path is not None:
+        _material_binding(lines, level + 1, material_path)
+    _block(lines, level, "}")
+
+
 def _cylinder(
     lines: list[str],
     level: int,
@@ -365,14 +453,24 @@ def author_cube_usda(name: str) -> str:
     gray_foam_path = f"{looks_parent}/GrayFoam"
     cube_friction_path = f"{looks_parent}/CubeFriction"
 
-    # 큐브: Box — Cube1/2 = 4cm, Cube3/4 = 5cm
+    # 시각 메시: 3mm 챔퍼 bevel 로 모서리·꼭지점 라운딩 (충돌 없음)
+    sx, sy, sz = CUBE_SCALES[name]
+    _bevel_mesh_visual(
+        lines, 1, "Visual",
+        sx=sx, sy=sy, sz=sz,
+        bevel=CUBE_BEVEL,
+        material_path=gray_foam_path,
+    )
+
+    # 충돌 전용 Box — invisible, physics material 적용
     _cube(
         lines,
         1,
         "Box",
         translate=(0, 0, 0),
         scale=CUBE_SCALES[name],
-        material_path=gray_foam_path,
+        material_path=None,
+        visible=False,
         collision=True,
         physics_material_path=cube_friction_path,
         contact_tuning=True,
@@ -520,7 +618,7 @@ def author_bowl_usda() -> str:
                 center=(r_mid * math.cos(angle), r_mid * math.sin(angle), z_mid),
                 tangent_deg=math.degrees(angle) + 90.0,
                 tilt_deg=tilt_deg,
-                size=(width, 0.004, wall_len),
+                size=(width, 0.003, wall_len),
                 material_path=bowl_blue_path,
                 physics_material_path=bowl_friction_path,
             )
