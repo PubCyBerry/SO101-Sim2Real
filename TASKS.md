@@ -30,7 +30,7 @@
 - [x] **TA.CUBE.PHYSICS** PickCube cube_task 물리 검증/튜닝 (큐브·그릇·데스크매트·책상·그리퍼 contact, mass/friction/offset/drive) | machine:any | dep:TA.1,TA.3 | verify:`pick_cube_physics_smoke.py` static_usd + settle + grasp_hold pass, 실패 시 USD/actuator 물성 조정 후 재검증 | status:done
 - [x] **TA.CUBE.STATE_MACHINE** PickCube rule-based state machine으로 cube_desk pick-and-place 가능성 입증 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 1-cube fixed-spawn placed_and_released pass + `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_success_100s_retry_20260604` schema PASS | status:done
 - [x] **TA.CUBE.STATE_MACHINE_V2** 사용자 재보정 `cube_desk` 기준 PickCube 직접 state machine 재작성 + LeRobot v3 2cam episode 저장 | machine:server | dep:TA.CUBE.PHYSICS | verify:`pick_cube_state_machine.py` 4-cube fixed-spawn placed_and_released pass + 서버 dataset `validate_lerobot_schema.py` PASS | status:done
-- [ ] **TA.CUBE.RMPFLOW_CONTROLLER** Isaac Sim Controller + RMPFlow/PickPlaceController 경로로 4-cube Pick-and-Place 검증 | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE_V2 | verify:SO-101 URDF + Lula descriptor/XRDF + RMPFlow config 준비, controller run 4-cube placed_and_released pass + 2cam 영상 산출 | status:todo
+- [ ] **TA.CUBE.RMPFLOW_CONTROLLER** Isaac Sim Controller + RMPFlow/PickPlaceController 경로로 4-cube Pick-and-Place 검증 | machine:server | dep:TA.CUBE.PHYSICS,TA.CUBE.STATE_MACHINE_V2 | verify:SO-101 URDF + Lula descriptor/XRDF + RMPFlow config 준비, controller run 4-cube placed_and_released pass + 2cam 영상 산출 | status:blocked — 1-cube는 pass이나 4-cube fixed-spawn에서 기본/긴 grasp wait/hard-first+2cycle 3회 실패(Cube 누적 밀림·position-only grasp 불안정). direct FSM 산출물 기준으로 RL 우회.
 
 ## Phase B — RL 전문가 (state-based)
 
@@ -68,6 +68,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-05] TA.CUBE.RMPFLOW_CONTROLLER blocked — RMPFlow low-level controller는 1-cube smoke pass 후 4-cube fixed-spawn에서 `pick_cube_rmpflow_refine_4cube`, `pick_cube_rmpflow_graspwait_4cube`, `pick_cube_rmpflow_hardfirst_cycles2_shortgrasp_4cube` 모두 failed(`final_inside` 최대 2/4); 공통 `GRASP` close+settle 보강 후 direct `joint_fk` 4-cube 회귀 proof `/DISK1/so101-sim2real/outputs/pick_cube_jointfk_graspwait_regression_4cube_nocam_20260605.json`는 pass / 다음: direct FSM 2cam expert 기준으로 RL/IL 우회
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 done — 사용자 전이표와 같은 명시 FSM(`IDLE→OPEN_GRIPPER→MOVE_TO_PRE_PICK→ORIENT_WRIST→DESCEND→GRASP→LIFT→MOVE_TO_PRE_PLACE→PLACE_DESCEND→RELEASE→MARK_DONE→ALL_DONE`)으로 서버 4-cube fixed-spawn proof 통과, 2cam LeRobot v3 dataset `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_explicit_fsm_stackheight_4cube_2cam_20260605` 생성(9000 frames/300.0s/schema PASS, `Cube1~4=true`) / 다음: TA.CUBE.RMPFLOW_CONTROLLER
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 서버 새 cube_desk에서 `joint_fk` 1-cube pass, 4-cube는 각 place 순간 inside였지만 release 후 다음 이동이 bowl/기존 큐브를 밀어 최종 Cube3/4 false; SM에 post-release retreat 추가, bowl mass/friction/damping 상향 후 USD 재생성 / 다음: 서버 4-cube no-video 재검증
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 in_progress — 기존 random-FK 직접 SM은 4-cube no-video triage에서 주변 큐브/그릇을 밀며 실패하므로 유지하되 비교용으로 격하, `--controller_mode diff_ik`(Isaac Lab Differential IK + binary gripper)을 추가해 task-space 직접 SM 경로로 전환 / 다음: 서버 1-cube diff_ik smoke → 4-cube fixed proof → 2cam 영상 dataset

@@ -12,6 +12,22 @@
 
 ---
 
+## 작업 인계 (2026-06-05 — FSM 전이 확인 + RMPFlow 4-cube blocked)
+
+- **사용자 질문 답변**: 현재 `scripts/environments/pick_cube_state_machine.py`는 사용자가 제시한 전이 구조를 따른다. enum/result JSON 순서는 `IDLE → OPEN_GRIPPER → MOVE_TO_PRE_PICK → ORIENT_WRIST → DESCEND → GRASP → LIFT → MOVE_TO_PRE_PLACE → PLACE_DESCEND → RELEASE → MARK_DONE → ALL_DONE`이다. cube는 elongated object가 아니므로 `ORIENT_WRIST`는 `cube_has_no_elongated_axis_skip` trace만 남기고 `DESCEND`로 넘어간다.
+- **추가 보정**: `GRASP` 상태가 실제로 "그리퍼 닫기 + 대기"가 되도록, slew-limited gripper command가 closed target에 도달하는 최소 step과 `--grasp_settle_steps`를 보장하게 했다. 기본값 기준 open 1.0 → closed 0.0은 200 step + 60 settle.
+- **검증**:
+  - `uv run python -m py_compile scripts/environments/pick_cube_state_machine.py` 통과.
+  - 서버 direct `joint_fk` 4-cube 회귀 proof 통과: `/DISK1/so101-sim2real/outputs/pick_cube_jointfk_graspwait_regression_4cube_nocam_20260605.json` (`status=passed`, `final_inside.Cube1~4=true`).
+  - RMPFlow 1-cube smoke는 이전에 pass했지만, 4-cube fixed-spawn은 3개 조합 모두 failed:
+    - `/DISK1/so101-sim2real/outputs/pick_cube_rmpflow_refine_4cube_nocam_20260605.json` → `Cube1/4=true`, `Cube2/3=false`
+    - `/DISK1/so101-sim2real/outputs/pick_cube_rmpflow_graspwait_4cube_nocam_20260605.json` → `Cube2=true`만 최종 inside
+    - `/DISK1/so101-sim2real/outputs/pick_cube_rmpflow_hardfirst_cycles2_shortgrasp_4cube_nocam_20260605.json` → `Cube2/4=true`, `Cube1/3=false`
+- **결정**: 자율 루프의 동일 task 3회 실패 기준으로 `TA.CUBE.RMPFLOW_CONTROLLER`는 `blocked` 처리. 4-cube direct FSM 2cam dataset은 이미 PASS이므로 RL/IL은 direct FSM expert 산출물을 기준으로 우회한다.
+- **다음 actionable**: RMPFlow를 더 붙잡지 말고, direct FSM 2cam expert dataset/trajectory에서 BC warm-start 또는 phase-aware imitation/DAgger 쪽으로 RL 재진입.
+
+---
+
 ## 작업 인계 (2026-06-05 — PickCube 명시 FSM V2 완료, 다음 RMPFlow)
 
 - **사용자 질문 답변**: 현재 `scripts/environments/pick_cube_state_machine.py`는 사용자가 제시한 전이 구조를 명시적으로 따른다. `PickCubeFSMState`와 결과 JSON의 `fsm_state_sequence`는 `IDLE → OPEN_GRIPPER → MOVE_TO_PRE_PICK → ORIENT_WRIST → DESCEND → GRASP → LIFT → MOVE_TO_PRE_PLACE → PLACE_DESCEND → RELEASE → MARK_DONE → ALL_DONE` 순서다.
