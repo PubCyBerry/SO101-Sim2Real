@@ -12,8 +12,12 @@ Layout follows the kitchen_with_orange pattern:
       ├── Cube4/Cube4.usd       + .usda
       └── Bowl/Bowl.usd         + .usda
 
-Coordinates are shifted to match the SO-101 follower init_state.pos = (2.2,
--0.61, 0.7299). The desk top right-front corner lands at the robot base.
+Coordinates are shifted to match the SO-101 follower init_state.pos = (1.84,
+-0.555, 0.6749).
+  SCENE_OFFSET.z = 다리(0.68) + 상판(0.025) = 0.705.
+  SCENE_OFFSET.y = -0.52: 책상 앞 모서리(scene-local y=-0.09) = world y=-0.61.
+  로봇 x = desk_left_edge(1.40) + 440mm = 1.84.
+  로봇 y = -0.565: 책상 앞 모서리(-0.61)에서 10mm 뒤로 당겨 장착.
 """
 
 from __future__ import annotations
@@ -30,33 +34,44 @@ SCENE_USD_PATH = SCENE_DIR / "scene.usd"
 SCENE_USDA_PATH = SCENE_DIR / "scene.usda"
 OBJECTS_DIR = SCENE_DIR / "objects"
 
-# Shift the whole scene so the robot base sits at the front-edge clamp of the
-# desk (not at the center). With offset.y = -0.55 the desk front edge lands at
-# world y ≈ -0.64, putting the robot mount on the edge just like the real
-# clamp setup. offset.z = 0.76 places the desk leg bottoms on the Isaac ground
-# plane (z=0) and keeps the tabletop at a plausible real desk height.
-SCENE_OFFSET: tuple[float, float, float] = (2.2, -0.57, 0.76)
+# offset.y = -0.52: 책상 앞 모서리(scene-local y=-0.09)가 world y=-0.61에
+# 오도록 맞춰 로봇 베이스 마운트와 정확히 맞닿음.
+# offset.z = 다리(0.68) + 상판(0.025) = 0.705: leg bottoms on Isaac ground(z=0).
+SCENE_OFFSET: tuple[float, float, float] = (2.2, -0.52, 0.705)
 
 
 MATERIALS = {
     "DeskWood": ((0.67, 0.51, 0.32), 0.78, 0.0),
     "DeskMat": ((0.025, 0.026, 0.032), 0.93, 0.0),
     "GrayFoam": ((0.45, 0.46, 0.47), 0.92, 0.0),
-    "BowlBlue": ((0.72, 0.82, 0.90), 0.45, 0.0),
+    "BowlBlue": ((0.65, 0.83, 0.96), 0.28, 0.0),
     "Ceiling": ((0.88, 0.86, 0.82), 0.95, 0.0),
 }
 
-# 큐브 4개 scene-local 배치 (매트 중앙).
-# z = 매트윗면 0.006 + 큐브 반높이 0.0125 + slack 0.001 = 0.0195
+# 큐브 4개 scene-local 배치 — 로봇팔(x≈-0.36) 아래 매트 앞쪽에 흩뿌림.
+# 매트 x 범위 [-0.70, 0.16], y 범위 [0.00, 0.40].
+# z = 매트 윗면(0.004) + 큐브 반높이 + slack 0.001
+# 작은 큐브(40mm): 0.004 + 0.020 + 0.001 = 0.025
+# 큰  큐브(50mm): 0.004 + 0.025 + 0.001 = 0.030
 CUBES = (
-    ("Cube1", (-0.15, 0.22, 0.0195), 25.0),
-    ("Cube2", (0.15, 0.22, 0.0195), -30.0),
-    ("Cube3", (0.05, 0.26, 0.0195), 60.0),
-    ("Cube4", (-0.05, 0.26, 0.0195), -10.0),
+    ("Cube1", (-0.50, 0.08, 0.025), 20.0),   # 작은 큐브 40mm
+    ("Cube2", (-0.22, 0.06, 0.025), -35.0),  # 작은 큐브 40mm
+    ("Cube3", (-0.46, 0.17, 0.030), 50.0),   # 큰  큐브 50mm
+    ("Cube4", (-0.27, 0.14, 0.030), -20.0),  # 큰  큐브 50mm
 )
 
-# 그릇 scene-local: (0.0, 0.40, 0.006) — 펜컵 위치와 동일(전방 호 정점)
-BOWL_LOCAL: tuple[float, float, float] = (0.0, 0.40, 0.006)
+# 그릇 scene-local (=바닥 중심): 매트 왼쪽 모서리(-0.70)에서 +x 120mm, 위쪽(0.40)에서 -y 140mm.
+# 바닥 중심 x = -0.70 + 0.12 = -0.58 → 매트 왼쪽까지 r_top(0.075) 여백 = 45mm ≈ 40mm ✓.
+# y = 0.40 - 0.14 = 0.26.
+BOWL_LOCAL: tuple[float, float, float] = (-0.58, 0.26, 0.010)
+
+# 큐브별 scale: Cube1/2 = 40mm 작은 큐브, Cube3/4 = 50mm 큰 큐브
+CUBE_SCALES: dict[str, tuple[float, float, float]] = {
+    "Cube1": (0.04, 0.04, 0.04),
+    "Cube2": (0.04, 0.04, 0.04),
+    "Cube3": (0.05, 0.05, 0.05),
+    "Cube4": (0.05, 0.05, 0.05),
+}
 
 # 큐브와 그릇 물리 상수
 # mass: 35 g — 폼보다 무겁게 잡아 grasp 가 안정적이면서 SO-101 gripper 토크
@@ -303,7 +318,7 @@ def _scene_header() -> list[str]:
 def author_cube_usda(name: str) -> str:
     """Author a cube USDA at origin with self-contained materials.
 
-    큐브는 2.5cm × 2.5cm × 2.5cm 정육면체 (scale=0.025, USD Cube size=1)
+    Cube1/2: 4cm × 4cm × 4cm (scale=0.04), Cube3/4: 5cm × 5cm × 5cm (scale=0.05).
     GrayFoam 머티리얼과 CubeFriction 물리 머티리얼 자체 포함.
     """
     lines = _object_header(name)
@@ -350,13 +365,13 @@ def author_cube_usda(name: str) -> str:
     gray_foam_path = f"{looks_parent}/GrayFoam"
     cube_friction_path = f"{looks_parent}/CubeFriction"
 
-    # 큐브: Box (scale=0.025 → 2.5cm × 2.5cm × 2.5cm)
+    # 큐브: Box — Cube1/2 = 4cm, Cube3/4 = 5cm
     _cube(
         lines,
         1,
         "Box",
         translate=(0, 0, 0),
-        scale=(0.025, 0.025, 0.025),
+        scale=CUBE_SCALES[name],
         material_path=gray_foam_path,
         collision=True,
         physics_material_path=cube_friction_path,
@@ -452,11 +467,12 @@ def author_bowl_usda() -> str:
     bowl_friction_path = f"{looks_parent}/BowlFriction"
 
     # Bottom: 곡면 벽 최하단 반경과 이어지는 평평한 바닥 disk.
+    # 그릇 위 지름 150mm(r_top=0.075), 바닥 지름 65mm(r_bottom=0.0325), 높이 70mm.
     _cylinder(
         lines,
         1,
         "Bottom",
-        radius=0.037,
+        radius=0.0325,
         height=0.012,
         material_path=bowl_blue_path,
         translate=(0, 0, 0.006),
@@ -471,9 +487,9 @@ def author_bowl_usda() -> str:
     #   panel 길이를 1.25배로 늘려 인접 밴드와 겹쳐 이음매를 없앤다.
     panel_count = 24
     bands = 8
-    r_bottom = 0.035
-    r_top = 0.065
-    depth = 0.045
+    r_bottom = 0.0325  # 바닥 쪽 반경 32.5mm (바닥 지름 65mm)
+    r_top = 0.075      # 상단 반경 75mm (위 지름 150mm)
+    depth = 0.058      # 벽 높이 = 총높이(0.070) - 바닥 두께(0.012)
     z_base = 0.012  # Bottom disk 윗면
 
     def _profile_r(t: float) -> float:
@@ -522,31 +538,38 @@ def _scene_desk(lines: list[str]) -> None:
     mat_mat = "/Scene/Looks/DeskMat"
     desk_phys = "/Scene/Looks/DeskFriction"
 
-    _block(lines, 1, "# The desk top is shifted so its top face sits at z=0.76 and the legs touch z=0.")
+    # 상판: 1600×800×25mm. 윗면이 scene local z=0 (= world z=SCENE_OFFSET.z=0.705).
+    # 상판 중심 z = -두께/2 = -0.0125.
+    _block(lines, 1, "# 상판 윗면 = world z=0.705. 다리 바닥 = world z=0.")
     _cube(
         lines,
         1,
         "DeskTop",
-        translate=_shift((0.0, 0.31, -0.02)),
-        scale=(1.20, 0.78, 0.04),
+        translate=_shift((0.0, 0.31, -0.0125)),
+        scale=(1.60, 0.80, 0.025),
         material_path=desk_mat,
         collision=True,
         contact_tuning=True,
         physics_material_path=desk_phys,
     )
+    # 다리: 25×25×680mm. 중심 z = -0.705 + 0.34 = -0.365 (scene local).
     for name, pos in (
-        ("DeskLegBackLeft", (-0.52, 0.64, -0.40)),
-        ("DeskLegBackRight", (0.52, 0.64, -0.40)),
-        ("DeskLegFrontLeft", (-0.52, -0.02, -0.40)),
-        ("DeskLegFrontRight", (0.52, -0.02, -0.40)),
+        ("DeskLegBackLeft",  (-0.72, 0.64, -0.365)),
+        ("DeskLegBackRight", (0.72, 0.64, -0.365)),
+        ("DeskLegFrontLeft",  (-0.72, -0.02, -0.365)),
+        ("DeskLegFrontRight", (0.72, -0.02, -0.365)),
     ):
-        _cube(lines, 1, name, translate=_shift(pos), scale=(0.06, 0.06, 0.72), material_path=desk_mat)
+        _cube(lines, 1, name, translate=_shift(pos), scale=(0.025, 0.025, 0.68), material_path=desk_mat)
+    # 매트: 860×400×4mm.
+    # 기준: 책상 앞-왼 모서리(scene-local -0.80, -0.09)에서 가로 100mm, 세로 90mm.
+    # 매트 좌하단 모서리: (-0.80+0.10, -0.09+0.09) = (-0.70, 0.00)
+    # 매트 중심: (-0.70+0.43, 0.00+0.20) = (-0.27, 0.20)
     _cube(
         lines,
         1,
         "DeskMat",
-        translate=_shift((-0.02, 0.35, 0.003)),
-        scale=(1.04, 0.57, 0.006),
+        translate=_shift((-0.27, 0.20, 0.002)),
+        scale=(0.86, 0.40, 0.004),
         material_path=mat_mat,
         collision=True,
         contact_tuning=True,
@@ -555,11 +578,13 @@ def _scene_desk(lines: list[str]) -> None:
 
 
 def _scene_ceiling(lines: list[str]) -> None:
+    # 천장 높이 지상 2500mm = world z 2.5.
+    # scene local z = 2.5 - SCENE_OFFSET.z(0.705) = 1.795.
     _cube(
         lines,
         1,
         "Ceiling",
-        translate=_shift((0.0, 0.31, 1.2)),
+        translate=_shift((0.0, 0.31, 1.795)),
         scale=(5.0, 4.0, 0.05),
         material_path="/Scene/Looks/Ceiling",
     )

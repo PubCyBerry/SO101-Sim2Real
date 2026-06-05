@@ -37,31 +37,30 @@ from sim_to_real.tasks.pick_pen import mdp as task_mdp
 
 
 # World-frame (x, y) of the bowl at scene authoring time.
-# BOWL_LOCAL=(0, 0.40) + SCENE_OFFSET=(2.2, -0.57) = (2.2, -0.17)
-BOWL_CENTER_XY: tuple[float, float] = (2.2, -0.17)
+# BOWL_LOCAL=(-0.58, 0.26) + SCENE_OFFSET=(2.2, -0.52) = (1.62, -0.26)
+BOWL_CENTER_XY: tuple[float, float] = (1.62, -0.26)
 BOWL_SUCCESS_RADIUS: float = 0.06
 BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
 
-# Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
-#
-# z 정합: 책상 상판(DeskTop) 윗면은 world z=0.76 (SCENE_OFFSET.z 0.76 + center
-# -0.02 + half-thickness 0.02). 그러나 so101_follower.usd 의 articulation root
-# 원점(z=0)은 베이스 바닥이 아니다 — 베이스 최하단 지오메트리가 local z=+0.0301
-# 에 있다(USD bbox 측정). 따라서 원점을 0.76 에 두면 팔 전체가 ~3 cm 떠버린다
-# (사용자가 보고한 "로봇이 책상 위에 떠 있는" 현상). 베이스 판이 상판에 닿도록
-# 원점을 내린다:  robot_z = desk_top(0.76) - base_min_z(0.0301) ≈ 0.7299.
-_ROBOT_POS = (2.2, -0.61, 0.7299)
+# Robot base position.
+# x: desk_left_edge(1.40) + 440mm = 1.84
+# y: -0.565 (책상 앞 모서리 기준 10mm 뒤로 장착)
+# z: desk_top(0.705) - base_min_z(0.0301) = 0.6749
+_ROBOT_POS = (1.84, -0.565, 0.6749)
 # Identity rotation; articulation USD already faces the desk objects.
 _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 
+# 큐브 world 좌표 = SCENE_OFFSET(2.2, -0.52, 0.705) + scene-local 위치.
+# 로봇팔 아래 매트 앞쪽 흩뿌림. 작은(Cube1/2): z=0.730, 큰(Cube3/4): z=0.735.
 _CUBE_INIT_STATES = {
-    "Cube1": ((2.05, -0.35, 0.7795), _yaw_quat(25.0)),
-    "Cube2": ((2.35, -0.35, 0.7795), _yaw_quat(-30.0)),
-    "Cube3": ((2.25, -0.31, 0.7795), _yaw_quat(60.0)),
-    "Cube4": ((2.15, -0.31, 0.7795), _yaw_quat(-10.0)),
+    "Cube1": ((1.70, -0.44, 0.730), _yaw_quat(20.0)),
+    "Cube2": ((1.98, -0.46, 0.730), _yaw_quat(-35.0)),
+    "Cube3": ((1.74, -0.35, 0.735), _yaw_quat(50.0)),
+    "Cube4": ((1.93, -0.38, 0.735), _yaw_quat(-20.0)),
 }
-_BOWL_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
+# BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(2.2, -0.52, 0.705) = (1.62, -0.26, 0.715)
+_BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,front,wrist}
@@ -74,17 +73,17 @@ _BOWL_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 # 값은 GUI 카메라 튜너(teleop_se3_agent.py)로 보정한 결과. rot 은 모두
 # wxyz, Isaac Lab world-convention(forward +X, up +Z).
 # top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique.
-_TOP_CAMERA_POS = (2.2, -0.93, 1.70)
+_TOP_CAMERA_POS = (1.87, -0.58, 1.72)
 # _TOP_CAMERA_ROT 가 None 이 아니면 이 quat 을 직접 쓰고, None 이면 _TOP_CAMERA_TARGET
 # 으로 look_at 을 계산한다(하위호환).
-_TOP_CAMERA_ROT = (0.6124, -0.3536, 0.3536, 0.6124)
+_TOP_CAMERA_ROT = (0.5716, -0.4238, 0.4466, 0.5424)
 _TOP_CAMERA_TARGET = (2.14, -0.15, 0.76)
-_TOP_CAMERA_FOCAL = 19.0
+_TOP_CAMERA_FOCAL = 23.0
 
 # wrist: gripper 위/옆에 강결합된 카메라.
-_WRIST_CAM_LOCAL_POS = (0.0, 0.05, -0.08)
-_WRIST_CAM_LOCAL_ROT = (-0.183, 0.683, -0.683, -0.183)
-_WRIST_CAMERA_FOCAL = 19.0
+_WRIST_CAM_LOCAL_POS = (0.0, 0.045, -0.04)
+_WRIST_CAM_LOCAL_ROT = (-0.3642, 0.6061, -0.6061, -0.3642)
+_WRIST_CAMERA_FOCAL = 23.0
 
 
 # ---------------------------------------------------------------------------
