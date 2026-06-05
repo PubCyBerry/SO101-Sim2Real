@@ -109,6 +109,12 @@ parser.add_argument(
 )
 parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
 parser.add_argument("--min_gripper_effort", type=float, default=0.5)
+parser.add_argument(
+    "--carry_min_gripper_effort",
+    type=float,
+    default=1.0,
+    help="Minimum gripper effort during lift/transport/place closed-gripper phases.",
+)
 parser.add_argument("--output_json", type=Path, default=Path("outputs/pick_cube_state_machine.json"))
 parser.add_argument("--dataset_dir", type=Path, default=None, help="Optional LeRobot v3 episode output directory")
 parser.add_argument("--expert_dataset_pt", type=Path, default=None, help="Optional raw rl_state/action expert dataset (.pt)")
@@ -711,12 +717,12 @@ def _grasp_point_jacobian(robot) -> torch.Tensor:
     return torch.stack(point_terms, dim=-1)
 
 
-def _step_env(env, action: torch.Tensor):
+def _step_env(env, action: torch.Tensor, *, min_gripper_effort: float | None = None):
     if not args.disable_dynamic_gripper_effort and getattr(env.unwrapped.cfg, "dynamic_reset_gripper_effort_limit", False):
         dynamic_reset_gripper_effort_limit_sim(
             env.unwrapped,
             "so101leader",
-            min_effort=args.min_gripper_effort,
+            min_effort=args.min_gripper_effort if min_gripper_effort is None else min_gripper_effort,
         )
     return env.step(action)
 
@@ -933,12 +939,14 @@ def _phase(
 
     requested_steps = int(steps)
     actual_steps = max(1, requested_steps, _slew_limited_step_count(command, q_goal, gripper_target))
+    carry_phase = any(token in name for token in (".lift", ".transport", ".place"))
+    phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_target <= args.gripper_closed else None
     for step in range(actual_steps):
         action = _joint_position_action(robot, command, q_goal, gripper_target, device)
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
         if expert_recorder is not None:
             expert_recorder.record(env, action, name)
-        step_out = _step_env(env, action)
+        step_out = _step_env(env, action, min_gripper_effort=phase_min_effort)
         if len(step_out) == 5:
             _obs, _rew, terminated, truncated, _infos = step_out
             dones = terminated | truncated
@@ -1074,11 +1082,13 @@ def _ik_phase(
     reached_step: int | None = None
     done_seen = False
     actual_steps = max(1, int(steps))
+    carry_phase = any(token in name for token in (".lift", ".transport", ".place"))
+    phase_min_effort = args.carry_min_gripper_effort if carry_phase and gripper_command < 0.0 else None
     for step in range(actual_steps):
         target = target_fn().to(device=device, dtype=torch.float32).reshape(3)
         action = _ik_position_action(env, target, gripper_command, device)
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target).item())
-        step_out = _step_env(env, action)
+        step_out = _step_env(env, action, min_gripper_effort=phase_min_effort)
         if len(step_out) == 5:
             _obs, _rew, terminated, truncated, _infos = step_out
             dones = terminated | truncated
@@ -1656,6 +1666,7 @@ def main() -> None:
             "gripper_open": args.gripper_open,
             "dynamic_gripper_effort": not args.disable_dynamic_gripper_effort,
             "min_gripper_effort": args.min_gripper_effort,
+            "carry_min_gripper_effort": args.carry_min_gripper_effort,
         }
         if args.controller_mode == "diff_ik":
             controller_payload = {
