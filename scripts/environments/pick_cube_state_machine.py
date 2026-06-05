@@ -791,9 +791,16 @@ def _diagnostic_pose(env) -> dict[str, Any]:
     robot = scene["robot"]
     gripper = _body_pos(robot, "gripper")[0]
     jaw = _body_pos(robot, "jaw")[0]
+    gripper_frame_offset = torch.tensor(
+        GRIPPER_FRAME_OFFSET,
+        device=robot.data.joint_pos.device,
+        dtype=torch.float32,
+    ).reshape(1, 3)
+    gripper_frame_w = _body_pos(robot, "gripper") + _quat_apply_wxyz(_body_quat(robot, "gripper"), gripper_frame_offset)
     return {
         "gripper_w": _round_list(gripper),
         "jaw_w": _round_list(jaw),
+        "gripper_frame_w": _round_list(gripper_frame_w[0]),
         "gripper_jaw_midpoint_w": _round_list(0.5 * (gripper + jaw)),
         "cube_w": {
             name: _round_list(scene[name].data.root_pos_w[0])
