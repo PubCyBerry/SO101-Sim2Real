@@ -235,14 +235,12 @@ RMPFLOW_URDF_PATH = Path("assets/robots/urdf/so_arm101.urdf").resolve()
 RMPFLOW_DESCRIPTOR_PATH = RMPFLOW_DIR / "so101_robot_description.yaml"
 RMPFLOW_CONFIG_PATH = RMPFLOW_DIR / "so101_rmpflow_config.yaml"
 GRIPPER_FRAME_OFFSET = (-0.0079, -0.000218121, -0.0981274)
-RMPFLOW_LULA_TO_USD_R = (
-    (-0.00973, 0.99989, -0.01140),
-    (-0.99769, -0.00894, 0.06737),
-    (0.06726, 0.01203, 0.99766),
-)
-RMPFLOW_LULA_TO_USD_T = (2.41099, 1.19214, -0.07616)
-RMPFLOW_BASE_POS_USD = (1.82045509, -0.59309049, 0.71412218)
-RMPFLOW_BASE_QUAT_USD = (0.70338290, -0.01968502, -0.02797320, -0.70998768)
+# Lula solves FK in the URDF-local SO-101 frame, while the Isaac Lab USD
+# articulation is authored under the cube_desk scene transform.  These values
+# are the least-squares base pose that maps Lula gripper_frame_link FK to the
+# USD gripper_frame_w diagnostics from successful direct-FSM poses.
+RMPFLOW_BASE_POS_USD = (1.81791970, -0.58952723, 0.70832908)
+RMPFLOW_BASE_QUAT_USD = (0.71116823, -0.00950808, 0.01529776, 0.70279110)
 RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET = (-0.078, 0.010, -0.002)
 
 
