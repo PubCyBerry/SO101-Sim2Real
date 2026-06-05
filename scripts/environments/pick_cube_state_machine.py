@@ -108,6 +108,12 @@ parser.add_argument(
     help="Max per-step relative Cartesian command in meters for --controller_mode diff_ik.",
 )
 parser.add_argument(
+    "--rmpflow_internal_rollout_steps",
+    type=int,
+    default=90,
+    help="Internal RMPFlow frames rolled out to produce a phase joint target before external slew limiting.",
+)
+parser.add_argument(
     "--object_order",
     choices=["name", "near_bowl_first", "far_bowl_first", "hard_first"],
     default="name",
@@ -680,13 +686,16 @@ class SO101RmpFlowJointTarget:
         self._rmpflow.set_end_effector_target(target_position=target_usd, target_orientation=None)
         current_q = self.robot.data.joint_pos[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
         current_v = self.robot.data.joint_vel[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
-        q_next, _v_next = self._rmpflow.compute_joint_targets(
-            current_q,
-            current_v,
-            np.empty(0, dtype=np.float64),
-            np.empty(0, dtype=np.float64),
-            self._frame_dt,
-        )
+        q_next = current_q
+        v_next = current_v
+        for _ in range(max(1, args.rmpflow_internal_rollout_steps)):
+            q_next, v_next = self._rmpflow.compute_joint_targets(
+                q_next,
+                v_next,
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                self._frame_dt,
+            )
         q = torch.as_tensor(q_next[:ARM_DOF], device=self.device, dtype=torch.float32)
         return q, {
             "rmpflow_active_dof_names": self.active_dof_names,
@@ -699,6 +708,7 @@ class SO101RmpFlowJointTarget:
             "rmpflow_base_pos_usd": [round(float(v), 5) for v in RMPFLOW_BASE_POS_USD],
             "rmpflow_base_quat_usd": [round(float(v), 5) for v in RMPFLOW_BASE_QUAT_USD],
             "rmpflow_frame_dt": round(float(self._frame_dt), 6),
+            "rmpflow_internal_rollout_steps": int(args.rmpflow_internal_rollout_steps),
         }
 
 
@@ -2158,6 +2168,7 @@ def main() -> None:
                 "target_orientation": None,
                 "cspace_attractor": "Lula IK solution for the current position-only target",
                 "execution_action": "slew_limited_joint_position",
+                "internal_rollout_steps": args.rmpflow_internal_rollout_steps,
                 "max_arm_step_delta_rad": args.max_arm_step_delta,
                 "max_gripper_step_delta_rad": args.max_gripper_step_delta,
                 "gripper_closed": args.ik_gripper_closed,
