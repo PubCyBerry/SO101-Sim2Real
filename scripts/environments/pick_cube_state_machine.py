@@ -97,9 +97,13 @@ parser.add_argument("--gripper_closed", type=float, default=0.0)
 parser.add_argument("--control_point", choices=["jaw_offset", "midpoint"], default="jaw_offset")
 parser.add_argument(
     "--controller_mode",
-    choices=["joint_fk", "diff_ik", "rmpflow"],
+    choices=["joint_fk", "diff_ik", "rmpflow", "lula_ik", "ikpy"],
     default="joint_fk",
-    help="joint_fk uses random-FK joint targets; diff_ik/rmpflow use Isaac Lab task-space actions.",
+    help=(
+        "joint_fk=random-FK joint targets; diff_ik/rmpflow=Isaac Lab task-space; "
+        "lula_ik=Lula LulaKinematicsSolver position-only IK(경로2); ikpy=ikpy IK(경로3). "
+        "lula_ik/ikpy 는 rmpflow 와 같은 phase driver 슬롯을 쓴다(Jacobian refine 공유)."
+    ),
 )
 parser.add_argument(
     "--ik_gripper_closed",
@@ -191,6 +195,7 @@ enable_extension("isaacsim.robot_motion.lula")
 enable_extension("isaacsim.robot_motion.motion_generation")
 
 from isaacsim.robot_motion.motion_generation.lula.motion_policies import RmpFlow  # noqa: E402
+from isaacsim.robot_motion.motion_generation.lula.kinematics import LulaKinematicsSolver  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
 from isaaclab.utils.math import quat_apply, quat_inv  # noqa: E402
@@ -721,6 +726,157 @@ class SO101RmpFlowJointTarget:
             "rmpflow_frame_dt": round(float(self._frame_dt), 6),
             "rmpflow_internal_rollout_steps": int(args.rmpflow_internal_rollout_steps),
         }
+
+
+def _quat_wxyz_to_matrix(q: np.ndarray) -> np.ndarray:
+    """wxyz quaternion → 3x3 회전행렬 (base→world 변환용)."""
+    w, x, y, z = (float(v) for v in q)
+    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+class SO101LulaIkJointTarget:
+    """경로 2 — Lula ``LulaKinematicsSolver`` position-only IK (RmpFlow 미경유).
+
+    RmpFlow driver 와 동일한 ``compute(target_w) -> (q, plan)`` 인터페이스. base pose 와
+    grasp-frame offset 은 RmpFlow 가 쓰는 검증 상수(``RMPFLOW_BASE_POS/QUAT_USD``,
+    ``RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET``)를 그대로 재사용한다.
+
+    Lula IK 는 local 솔버라 warm_start 에서 먼 target 은 한 번에 못 푼다 → 현재 EE 에서
+    target 까지 ``max_step`` 간격으로 보간하며 warm-start 를 체이닝한다.
+    """
+
+    def __init__(self, env, device: str, *, max_step: float = 0.04, tolerance: float = 0.005) -> None:
+        self.env = env
+        self.device = device
+        self.robot = env.unwrapped.scene["robot"]
+        self._max_step = float(max_step)
+        self._tol = float(tolerance)
+        self._kin = LulaKinematicsSolver(
+            robot_description_path=str(RMPFLOW_DESCRIPTOR_PATH),
+            urdf_path=str(RMPFLOW_URDF_PATH),
+        )
+        self._sync_base_pose()
+
+    def reset(self) -> None:
+        self._sync_base_pose()
+
+    def _sync_base_pose(self) -> None:
+        self._kin.set_robot_base_pose(
+            np.asarray(RMPFLOW_BASE_POS_USD, dtype=np.float32),
+            np.asarray(RMPFLOW_BASE_QUAT_USD, dtype=np.float32),
+        )
+
+    def compute(self, target_w: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        self._sync_base_pose()
+        target_usd = target_w.detach().cpu().reshape(3).numpy().astype(np.float64) + np.asarray(
+            RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET, dtype=np.float64
+        )
+        q = self.robot.data.joint_pos[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
+        start, _rot = self._kin.compute_forward_kinematics("gripper_frame_link", q)
+        start = np.asarray(start, dtype=np.float64)
+        dist = float(np.linalg.norm(target_usd - start))
+        n = max(1, int(math.ceil(dist / max(self._max_step, 1e-3))))
+        ok = False
+        for i in range(1, n + 1):
+            sub = start + (target_usd - start) * (float(i) / n)
+            # compute_inverse_kinematics 는 (joint_positions: np.array, success: bool) 직접 반환.
+            q_sol, ok = self._kin.compute_inverse_kinematics(
+                "gripper_frame_link",
+                sub,
+                target_orientation=None,
+                warm_start=q,
+                position_tolerance=self._tol,
+            )
+            if q_sol is not None:
+                q = np.asarray(q_sol, dtype=np.float64)[:ARM_DOF]
+        ach, _r = self._kin.compute_forward_kinematics("gripper_frame_link", q)
+        err = float(np.linalg.norm(np.asarray(ach, dtype=np.float64) - target_usd))
+        q_t = torch.as_tensor(q[:ARM_DOF], device=self.device, dtype=torch.float32)
+        return q_t, {
+            "lula_ik_joint_target": _round_list(q_t),
+            "lula_ik_success": bool(ok) and err <= self._tol * 3.0,
+            "lula_ik_error_m": round(err, 5),
+            "lula_ik_target_usd": [round(float(v), 5) for v in target_usd.tolist()],
+            "lula_ik_frame_name": "gripper_frame_link",
+        }
+
+
+class SO101IkpyJointTarget:
+    """경로 3 — ikpy ``Chain`` position-only IK (URDF 만).
+
+    ikpy 는 base pose setter 가 없어, RmpFlow 와 동일한 base pose 상수로 world→base 변환
+    후 풀고 다시 arm joint 만 반환한다. scipy least_squares 라 먼 target 도 견고.
+    """
+
+    def __init__(self, env, device: str, *, tolerance: float = 0.005) -> None:
+        from ikpy.chain import Chain  # lazy: ikpy 는 순수 python
+
+        self.env = env
+        self.device = device
+        self.robot = env.unwrapped.scene["robot"]
+        self._tol = float(tolerance)
+        self._mask = [False] + [True] * ARM_DOF + [False]
+        self._chain = Chain.from_urdf_file(
+            str(RMPFLOW_URDF_PATH), base_elements=["base_link"], active_links_mask=self._mask
+        )
+        self._n = len(self._chain.links)
+        self._base_pos = np.asarray(RMPFLOW_BASE_POS_USD, dtype=np.float64)
+        self._base_R = _quat_wxyz_to_matrix(np.asarray(RMPFLOW_BASE_QUAT_USD, dtype=np.float64))
+        # arm joint 한계 (URDF 순서) — seed clamp 용.
+        self._lo = np.array([-1.91986, -1.74533, -1.69, -1.65806, -2.74385], dtype=np.float64)
+        self._hi = np.array([1.91986, 1.74533, 1.69, 1.65806, 2.84121], dtype=np.float64)
+
+    def reset(self) -> None:  # ikpy 는 상태 없음
+        pass
+
+    def _full_q(self, q_arm: np.ndarray) -> np.ndarray:
+        full = np.zeros(self._n, dtype=np.float64)
+        full[1 : 1 + ARM_DOF] = q_arm
+        return full
+
+    def compute(self, target_w: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        target_usd = target_w.detach().cpu().reshape(3).numpy().astype(np.float64) + np.asarray(
+            RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET, dtype=np.float64
+        )
+        target_base = self._base_R.T @ (target_usd - self._base_pos)
+        warm = self.robot.data.joint_pos[0, :ARM_DOF].detach().cpu().numpy().astype(np.float64)
+        # least_squares 는 seed 가 bound 를 부동소수점만큼 넘으면 거부 → 안쪽 clamp.
+        warm = np.minimum(np.maximum(warm, self._lo + 1e-4), self._hi - 1e-4)
+        sol = self._chain.inverse_kinematics(
+            target_position=target_base, orientation_mode=None, initial_position=self._full_q(warm)
+        )
+        q = np.minimum(np.maximum(np.asarray(sol[1 : 1 + ARM_DOF], dtype=np.float64), self._lo), self._hi)
+        ach = np.asarray(self._chain.forward_kinematics(self._full_q(q))[:3, 3], dtype=np.float64)
+        err = float(np.linalg.norm(ach - target_base))
+        q_t = torch.as_tensor(q, device=self.device, dtype=torch.float32)
+        return q_t, {
+            "ikpy_joint_target": _round_list(q_t),
+            "ikpy_success": err <= self._tol,
+            "ikpy_error_m": round(err, 5),
+            "ikpy_target_usd": [round(float(v), 5) for v in target_usd.tolist()],
+            "ikpy_frame_name": "gripper_frame_link",
+        }
+
+
+def _make_cartesian_driver(env, device: str):
+    """controller_mode 에 맞는 phase driver 를 만든다. joint_fk/diff_ik → None."""
+    mode = args.controller_mode
+    if mode == "rmpflow":
+        return SO101RmpFlowJointTarget(env, device)
+    if mode == "lula_ik":
+        return SO101LulaIkJointTarget(env, device)
+    if mode == "ikpy":
+        return SO101IkpyJointTarget(env, device)
+    return None
 
 
 def _round_list(values: torch.Tensor, digits: int = 5) -> list[float]:
@@ -1637,7 +1793,7 @@ def _run_state_machine(
     fsm_trace: list[dict[str, Any]] = []
     bowl_radius = BOWL_SUCCESS_RADIUS * max(0.1, args.container_radius_scale)
     command = robot.data.joint_pos[0, :6].clone()
-    rmpflow_driver = SO101RmpFlowJointTarget(env, device) if args.controller_mode == "rmpflow" else None
+    rmpflow_driver = _make_cartesian_driver(env, device)
     if rmpflow_driver is not None:
         rmpflow_driver.reset()
 

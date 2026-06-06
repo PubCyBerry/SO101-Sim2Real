@@ -2255,3 +2255,27 @@ SO101-Leader connected.
 - `ConnectionError: Could not connect on port 'COMx'` → 리더 암 시리얼 연결 실패. 포트 번호 / 드라이버 확인
 - `AssertionError: the dataset file already exists, please use '--resume' to resume recording` → 기존 데이터셋 파일 삭제하거나 `--resume` 플래그 추가
 - `Crash detected in pid ... thread ...` + `carb.crashreporter-breakpad.plugin` → 실제 프로세스 크래시. 직전에 찍힌 Python traceback 을 분석해야 함
+
+## PickCube lula_ik / ikpy controller_mode 통합 시 함정
+
+`--controller_mode lula_ik`(경로 2, Lula `LulaKinematicsSolver` 직접) / `ikpy`(경로 3) 를
+붙일 때 만난 함정. rmpflow driver 와 같은 phase 슬롯·base 상수를 재사용하지만 IK 호출
+규약이 다르다.
+
+### `LulaKinematicsSolver.compute_inverse_kinematics` 반환·인자 규약
+
+- 반환은 **`(joint_positions: np.array, success: bool)`** — joint 배열을 직접 돌려준다. `ArticulationAction` 이 아니므로 `.joint_positions` 속성으로 꺼내면 항상 `None` 이라 IK 가 안 풀린 것처럼 팔이 멈춘다.
+- position-only(5-DOF)는 **`target_orientation=None`**. orientation 인자를 주면 quaternion(wxyz)을 기대하며, 이 빌드는 orientation 제약 시 수렴 실패 후 warm_start 를 그대로 반환한다.
+- **Lula IK 는 local 솔버** → warm_start 에서 먼 target(>~0.1 m)은 한 번에 수렴 못 한다. 현재 EE→target 을 0.04 m 간격으로 보간하며 warm-start 를 체이닝하면(`SO101LulaIkJointTarget.compute`) 멀리까지 끌고 간다. (단, `_phase` 가 매 step `compute()` 를 다시 호출하므로 slew 진행만으로도 점진 수렴하긴 한다.)
+
+### solver(URDF base) ↔ USD/world frame 정합
+
+- Lula 는 `set_robot_base_pose(RMPFLOW_BASE_POS_USD, RMPFLOW_BASE_QUAT_USD)` 로 USD/world 좌표 target 을 직접 받는다. **ikpy 는 base pose setter 가 없으므로** 같은 base 상수로 `base = R(base_quat)ᵀ·(target_usd − base_pos)` 변환 후 풀어야 한다(안 하면 grasp 가 0.3~0.4 m 빗나감).
+- grasp 작업점 ↔ EE frame(`gripper_frame_link`) 차이는 `RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET` 상수(world-frame 근사)로 보정한다. (RmpFlow driver 와 동일.)
+
+### ikpy 함정
+
+- `scipy.optimize.least_squares` 는 초기 guess(=현재 joint)가 URDF bound 를 부동소수점만큼 넘으면 `ValueError: Initial guess is outside of provided bounds` → seed 를 bound 안쪽(여유 1e-4)으로 clamp.
+- `Chain.from_urdf_file(..., base_elements=["base_link"], active_links_mask=[False]+[True]*5+[False])` 가 `gripper`(revolute) 가지 대신 `gripper_frame_joint`(fixed) 가지를 자동 선택 → EE = `gripper_frame_link` 로 Lula 와 일치.
+
+> 한계(공통): 5-DOF position-only IK 는 큐브별 grasp 자세 편차가 커서 **4-cube 신뢰성은 검증된 `joint_fk` direct FSM 이 우위**다. lula_ik/ikpy 는 단일 큐브 검증·대안 백엔드 용도.

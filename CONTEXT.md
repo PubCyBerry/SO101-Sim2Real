@@ -12,6 +12,22 @@
 
 ---
 
+## 작업 인계 (2026-06-06 — controller_mode 에 lula_ik(경로2)/ikpy(경로3) 백엔드 포팅)
+
+- **브랜치**: `feat/cube-ik-backends` (main `d33f61d` 기준). 별도 worktree `cube-ik-port`.
+- **배경**: 참고 가이드의 경로 2(Lula `LulaKinematicsSolver` 직접 IK)·경로 3(ikpy)을 추가. main 은 경로 1(RMPFlow, 4-cube blocked) + diff_ik + joint_fk 만 보유했었다.
+- **구현**(`scripts/environments/pick_cube_state_machine.py`):
+  - `--controller_mode` 에 `lula_ik`, `ikpy` 추가.
+  - `SO101LulaIkJointTarget`(경로2) / `SO101IkpyJointTarget`(경로3) — 기존 `SO101RmpFlowJointTarget` 과 **동일한 `compute(target_w)->(q,plan)` 인터페이스**. `_make_cartesian_driver()` 팩토리로 dispatch → `_phase` 의 검증된 2nd-half Jacobian refine·slew 그대로 활용.
+  - base pose·grasp offset 은 RmpFlow 가 쓰는 검증 상수(`RMPFLOW_BASE_POS/QUAT_USD`, `RMPFLOW_GRIPPER_FRAME_TARGET_OFFSET`) 재사용. Lula descriptor 도 `so101_robot_description.yaml` 재사용(신규 파일 없음).
+  - lula_ik: target stepping(0.04m) + position-only(`target_orientation=None`) + 반환 배열 직접 사용. ikpy: base 상수로 world→base 변환 + seed clamp.
+  - `pyproject.toml` isaac 그룹에 `ikpy>=3.4,<3.5`. 함정 4건 `docs/TROUBLESHOOTING.md`.
+- **검증**: py_compile OK, ikpy URDF 파싱+IK 오프라인 err 0.0. in-sim lula_ik/ikpy 1-cube 스모크 = (sync 후 진행).
+- **한계**: 5-DOF position-only IK 라 4-cube 신뢰성은 검증된 `joint_fk` direct FSM 이 우위. lula_ik/ikpy 는 단일 큐브·대안 백엔드 용도.
+- **출처 메모**: 이 작업은 worktree `goofy-honking-pie`(옛 base c172d1f, 미커밋)에서 만든 ikpy/Lula 백엔드를, main 의 explicit-FSM/controller_mode 구조에 맞게 재구현한 것. 옛 worktree 의 `pick_cube_state_machine.py` diff·중복 Lula descriptor 는 폐기.
+
+---
+
 ## 작업 인계 (2026-06-05 — FSM 전이 확인 + RMPFlow 4-cube blocked)
 
 - **사용자 질문 답변**: 현재 `scripts/environments/pick_cube_state_machine.py`는 사용자가 제시한 전이 구조를 따른다. enum/result JSON 순서는 `IDLE → OPEN_GRIPPER → MOVE_TO_PRE_PICK → ORIENT_WRIST → DESCEND → GRASP → LIFT → MOVE_TO_PRE_PLACE → PLACE_DESCEND → RELEASE → MARK_DONE → ALL_DONE`이다. cube는 elongated object가 아니므로 `ORIENT_WRIST`는 `cube_has_no_elongated_axis_skip` trace만 남기고 `DESCEND`로 넘어간다.
