@@ -130,9 +130,48 @@ parser.add_argument(
         "팔(--max_arm_step_delta)은 5 rad/s 로 빠르게, 그리퍼만 느리게. (env velocity 한계 5 rad/s 내)"
     ),
 )
+parser.add_argument(
+    "--grasp_arm_step_delta",
+    type=float,
+    default=0.0,
+    help=(
+        "Descend/grasp 단계 전용 팔 per-step 한계(rad). 0=비활성(--max_arm_step_delta 사용). >0 이면 grasp "
+        "단계에서만 팔을 더 천천히 움직여(예: 0.05≈1.5 rad/s) 큐브를 쳐내지 않고 정밀 접근한다. 접근/이송은 "
+        "여전히 --max_arm_step_delta(5 rad/s)로 빠르게. (5 rad/s 는 상한 cap 이라 더 느리게 움직여도 무방.)"
+    ),
+)
 parser.add_argument("--fk_samples", type=int, default=5000)
-parser.add_argument("--continuity_weight", type=float, default=0.015)
+parser.add_argument(
+    "--continuity_weight",
+    type=float,
+    default=0.05,
+    help=(
+        "random-FK 후보 점수 = dist + 이 값*|q-q_now|. 0.015(과거 기본)는 너무 낮아 FK 가 global 샘플로 "
+        "큰 자세 점프를 골라 5 rad/s 팔이 큐브를 쳐내 날렸다(full-DR 평균 1.4/4). 0.05 면 도달 유지+가까운 "
+        "자세 선호로 매끄러운 궤적 → flinging 거의 소멸(full-DR 평균 3.0/4, all-4 0%→40%)."
+    ),
+)
+parser.add_argument(
+    "--grasp_tilt_weight",
+    type=float,
+    default=0.0,
+    help=(
+        "Descend/grasp FK 후보 선택 시, 이동 jaw 가 바닥(CUBE_DESK_TOP_Z)까지 + 고정 finger 아래로 "
+        "내려가는(=tilt 강한) pose 를 선호하는 점수 가중치. 0=off(거리·연속성만). SO-101 그리퍼는 "
+        "고정 finger 가 길어 약한 tilt 면 이동 jaw 가 큐브 위에 남아 grasp 실패 — 이 항이 검증된 강tilt "
+        "grasp(이동 jaw 가 큐브 바닥까지) 를 결정적으로 선택하게 한다."
+    ),
+)
 parser.add_argument("--seed", type=int, default=7)
+parser.add_argument(
+    "--num_episodes",
+    type=int,
+    default=1,
+    help=(
+        "신뢰성 sweep: >1 이면 한 Isaac 세션에서 env.reset()+SM 을 N회 반복하고(매 reset 마다 DR "
+        "재추첨) all-4 성공률·per-cube 성공률을 집계해 --output_json 에 기록한다. dataset 기록은 무시한다."
+    ),
+)
 parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
 parser.add_argument(
@@ -1173,6 +1212,40 @@ def _finger_world_aabb(robot, body_name: str) -> dict[str, list[float]]:
     return {"min": _round_list(wmin), "max": _round_list(wmax)}
 
 
+# finger collision 메시의 link-frame 코너 8개를 캐시(매 FK 샘플마다 재계산 회피).
+_FINGER_LINK_CORNERS: dict[str, torch.Tensor] = {}
+
+
+def _finger_link_corners(body_name: str, device, dtype) -> torch.Tensor:
+    key = f"{body_name}:{device}"
+    cached = _FINGER_LINK_CORNERS.get(key)
+    if cached is None:
+        g = _FINGER_GEOM[body_name]
+        R_coll = _rpy_matrix(g["orpy"], device, dtype)
+        oxyz = torch.tensor(g["oxyz"], device=device, dtype=dtype)
+        lo, hi = g["lo"], g["hi"]
+        corners = [
+            [cx, cy, cz]
+            for cx in (lo[0], hi[0])
+            for cy in (lo[1], hi[1])
+            for cz in (lo[2], hi[2])
+        ]
+        p_mesh = torch.tensor(corners, device=device, dtype=dtype)  # (8,3)
+        cached = (R_coll @ p_mesh.T).T + oxyz  # (8,3) link-frame
+        _FINGER_LINK_CORNERS[key] = cached
+    return cached
+
+
+def _finger_min_z(robot, body_name: str) -> float:
+    """finger collision 메시 AABB 의 world z 최저점(빠른 경로). grasp tilt 점수용."""
+    dev = robot.data.joint_pos.device
+    p_link = _finger_link_corners(body_name, dev, torch.float32)
+    body_pos = _body_pos(robot, body_name)  # (1,3)
+    body_quat = _body_quat(robot, body_name)  # (1,4)
+    p_world = body_pos + _quat_apply_wxyz(body_quat.expand(8, 4), p_link)  # (8,3)
+    return float(p_world[:, 2].min().item())
+
+
 def _jacobian_row(robot, body_name: str) -> torch.Tensor:
     """Return body Jacobian row, shape (1, 6, ARM_DOF).
 
@@ -1262,6 +1335,14 @@ def _arm_limits(robot, device: str) -> tuple[torch.Tensor, torch.Tensor]:
     return lower, upper
 
 
+# 단계별 팔 step 한계 override(grasp 단계만 느리게). None → args.max_arm_step_delta 사용.
+_ARM_STEP_OVERRIDE: float | None = None
+
+
+def _eff_arm_step() -> float:
+    return abs(_ARM_STEP_OVERRIDE if _ARM_STEP_OVERRIDE is not None else args.max_arm_step_delta)
+
+
 def _joint_position_action(
     robot,
     command: torch.Tensor,
@@ -1279,10 +1360,11 @@ def _joint_position_action(
     arm_target = arm_target[:ARM_DOF].to(device=device, dtype=torch.float32)
     lower, upper = _arm_limits(robot, device)
 
+    arm_step = _eff_arm_step()
     arm_delta = torch.clamp(
         arm_target - command[:ARM_DOF],
-        -abs(args.max_arm_step_delta),
-        abs(args.max_arm_step_delta),
+        -arm_step,
+        arm_step,
     )
     gripper_delta = torch.clamp(
         torch.tensor(float(gripper_target), device=device, dtype=torch.float32) - command[5],
@@ -1298,7 +1380,7 @@ def _joint_position_action(
 def _slew_limited_step_count(command: torch.Tensor, q_goal: torch.Tensor, gripper_target: float) -> int:
     arm_delta = float(torch.max(torch.abs(q_goal[:ARM_DOF] - command[:ARM_DOF])).item())
     gripper_delta = abs(float(gripper_target) - float(command[5].item()))
-    arm_steps = math.ceil(arm_delta / max(abs(args.max_arm_step_delta), 1e-6))
+    arm_steps = math.ceil(arm_delta / max(_eff_arm_step(), 1e-6))
     gripper_steps = math.ceil(gripper_delta / max(abs(args.max_gripper_step_delta), 1e-6))
     return max(arm_steps, gripper_steps) + max(0, args.command_settle_steps)
 
@@ -1389,6 +1471,8 @@ def _fk_solve_joint_target(
     samples: int,
     continuity_weight: float,
     seed_offset: int,
+    grasp_tilt_weight: float = 0.0,
+    floor_z: float = CUBE_DESK_TOP_Z,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Random-FK waypoint solver.
 
@@ -1413,10 +1497,12 @@ def _fk_solve_joint_target(
     best_dist = float("inf")
     best_q = current_arm.clone()
     best_grasp_point = _grasp_point_pos(robot)[0].clone()
+    best_tilt_pen = 0.0
     zero_vel = torch.zeros((1, 6), device=device)
+    use_tilt = grasp_tilt_weight > 0.0
 
     def evaluate(q_arm: torch.Tensor) -> None:
-        nonlocal best_score, best_dist, best_q, best_grasp_point
+        nonlocal best_score, best_dist, best_q, best_grasp_point, best_tilt_pen
         q = torch.zeros((1, 6), device=device)
         q[0, :ARM_DOF] = q_arm
         q[0, 5] = float(gripper_target)
@@ -1426,11 +1512,20 @@ def _fk_solve_joint_target(
         dist = float(torch.linalg.norm(grasp_point - target).item())
         continuity = float(torch.linalg.norm(q_arm - current_arm).item())
         score = dist + continuity_weight * continuity
+        tilt_pen = 0.0
+        if use_tilt:
+            # 이동 jaw 가 (1) 바닥까지 내려오고 (2) 고정 finger 아래로 가는 pose 를 선호.
+            # SO-101 은 고정 finger 가 길어, 약tilt 면 이동 jaw 가 큐브 위에 남아 grasp 실패한다.
+            jaw_z = _finger_min_z(robot, "jaw")
+            fix_z = _finger_min_z(robot, "gripper")
+            tilt_pen = max(0.0, jaw_z - floor_z) + max(0.0, jaw_z - fix_z)
+            score = score + grasp_tilt_weight * tilt_pen
         if score < best_score:
             best_score = score
             best_dist = dist
             best_q = q_arm.clone()
             best_grasp_point = grasp_point.clone()
+            best_tilt_pen = tilt_pen
 
     # 현재 근처 후보와 전역 후보를 섞는다. 전역 후보가 테이블 근처 자세를 찾고,
     # 근처 후보가 불필요한 큰 관절 점프를 줄인다.
@@ -1448,6 +1543,7 @@ def _fk_solve_joint_target(
     return best_q, {
         "planned_error_m": round(best_dist, 5),
         "planned_score": round(best_score, 5),
+        "planned_tilt_pen": round(best_tilt_pen, 5),
         "planned_grasp_point_w": _round_list(best_grasp_point),
         "planned_joint_target": _round_list(best_q),
     }
@@ -1520,6 +1616,16 @@ def _phase(
         return None if target_R_fn is None else np.asarray(target_R_fn(), dtype=np.float64)
 
     target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
+    # descend/grasp 단계에서만 grasp tilt 점수항을 켜고(이동 jaw 를 큐브 바닥까지 내리는 pose 선호),
+    # 팔 속도를 늦추며(큐브 쳐냄 방지), arm 이 tilted q_goal 에 도달할 때까지 완주(early-exit 로 tilt 잘림 방지).
+    is_grasp_phase = (".descend" in name) or (".grasp" in name)
+    global _ARM_STEP_OVERRIDE
+    _prev_arm_override = _ARM_STEP_OVERRIDE
+    if is_grasp_phase and args.grasp_arm_step_delta > 0.0:
+        _ARM_STEP_OVERRIDE = abs(args.grasp_arm_step_delta)
+    # tilt 는 descend 에서 완성해야 한다(arm 이 tilted q_goal 에 도달할 때까지 완주). grasp(닫기)
+    # 단계까지 settle 을 강제하면 닫는 동안 arm 이 재계산된 자세로 움직여 큐브를 밀어내 grip 이 풀린다.
+    require_arm_settled = (".descend" in name) and rmpflow_driver is None
     if rmpflow_driver is None:
         q_goal, plan = _fk_solve_joint_target(
             env,
@@ -1529,6 +1635,8 @@ def _phase(
             samples=args.fk_samples,
             continuity_weight=args.continuity_weight,
             seed_offset=len(trace) * 997,
+            grasp_tilt_weight=(args.grasp_tilt_weight if is_grasp_phase else 0.0),
+            floor_z=CUBE_DESK_TOP_Z,
         )
     else:
         q_goal, plan = rmpflow_driver.compute(target[0], _cur_R())
@@ -1606,10 +1714,18 @@ def _phase(
         # ── early-exit: 단계가 성공하면 남은 step 을 소진하지 않고 바로 다음 단계로 ──
         if step + 1 >= max(1, min_steps):
             gripper_reached = abs(float(command[5].item()) - float(gripper_target)) <= 1.0e-3
+            # grasp 단계는 arm 이 tilted q_goal 에 도달해야 tilt 가 실제 실행된다(제어점만 닿으면
+            # 자세가 덜 기운 채 끊김). 그 외 단계는 위치 도달이면 충분.
+            if require_arm_settled:
+                arm_settled = float(
+                    torch.max(torch.abs(command[:ARM_DOF] - q_goal[:ARM_DOF])).item()
+                ) <= 2.0e-3
+            else:
+                arm_settled = True
             if success_fn is not None:
                 done_phase = bool(success_fn())
             else:
-                done_phase = (err_now <= tolerance) and gripper_reached
+                done_phase = (err_now <= tolerance) and gripper_reached and arm_settled
             if done_phase:
                 early_exit_step = step + 1
                 break
@@ -1632,6 +1748,7 @@ def _phase(
         **plan,
     }
     trace.append(stat)
+    _ARM_STEP_OVERRIDE = _prev_arm_override
     return stat
 
 
@@ -2649,6 +2766,57 @@ def main() -> None:
         for _ in range(max(0, args.warmup_steps)):
             _step_env(env, zero_action)
         active_names = CUBE_NAMES[: args.active_objects]
+        if args.num_episodes > 1:
+            # 신뢰성 sweep: 한 세션에서 N회 reset+SM. dataset/expert 기록은 비활성.
+            episodes: list[dict[str, Any]] = []
+            for ep in range(args.num_episodes):
+                if ep > 0:
+                    env.reset()
+                    for _ in range(max(0, args.warmup_steps)):
+                        _step_env(env, zero_action)
+                ep_result = _run_state_machine(env, device, active_names, None, None)
+                inside = ep_result.get("final_inside", {})
+                n_inside = int(sum(1 for v in inside.values() if v))
+                episodes.append({
+                    "episode": ep,
+                    "final_inside": inside,
+                    "n_inside": n_inside,
+                    "all_placed": bool(ep_result.get("placed_and_released", False)),
+                    "bowl_w": ep_result.get("bowl_w"),
+                    "cube_w": ep_result.get("cube_w"),
+                })
+                print(f"[sweep] ep {ep}: n_inside={n_inside} inside={inside}", flush=True)
+            n_eps = len(episodes)
+            all4 = int(sum(1 for e in episodes if e["n_inside"] >= args.active_objects))
+            per_cube = {
+                name: round(sum(1 for e in episodes if e["final_inside"].get(name)) / n_eps, 3)
+                for name in active_names
+            }
+            sweep_payload = {
+                "task_id": "TA.CUBE.STATE_MACHINE",
+                "task": args.task,
+                "status": "passed" if all4 == n_eps else "partial",
+                "sweep": True,
+                "num_episodes": n_eps,
+                "active_objects": args.active_objects,
+                "object_radius_scale": args.object_radius_scale,
+                "container_angle_scale": args.container_angle_scale,
+                "controller_mode": args.controller_mode,
+                "grasp_pick_offset": args.grasp_pick_offset,
+                "grasp_lateral_offset": args.grasp_lateral_offset,
+                "grasp_tilt_weight": args.grasp_tilt_weight,
+                "object_cycles": args.object_cycles,
+                "all4_success_rate": round(all4 / n_eps, 3),
+                "mean_inside": round(sum(e["n_inside"] for e in episodes) / n_eps, 3),
+                "per_cube_success_rate": per_cube,
+                "episodes": episodes,
+            }
+            env.close()
+            env = None
+            args.output_json.parent.mkdir(parents=True, exist_ok=True)
+            args.output_json.write_text(json.dumps(sweep_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(json.dumps(sweep_payload, indent=2, ensure_ascii=False))
+            return
         if args.controller_mode == "diff_ik":
             result = _run_diff_ik_state_machine(env, device, active_names, recorder)
         else:
@@ -2713,6 +2881,7 @@ def main() -> None:
                 "type": "random_fk_waypoint_joint_position",
                 "fk_samples": args.fk_samples,
                 "continuity_weight": args.continuity_weight,
+                "grasp_tilt_weight": args.grasp_tilt_weight,
                 "jacobian_refine": args.enable_jacobian_refine and not args.disable_jacobian_refine,
                 "ik_damping": args.ik_damping,
                 "ik_gain": args.ik_gain,

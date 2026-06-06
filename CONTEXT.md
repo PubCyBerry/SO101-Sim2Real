@@ -27,10 +27,27 @@
      - 성공(20260605, down≈0.34 강한 tilt): 모터 jaw 바닥 z≈0.689 (큐브 바닥 0.717 아래) → 큐브를 감쌈. `/DISK1/so101-sim2real/outputs/pickcube_geom_success_20260606.json`.
      - 즉 **강한 tilt 가 모터 jaw 를 큐브 옆/아래로 내려보내 grip 성립**. ikpy 최소동작 IK 는 먼 큐브에서 tilt 가 약해 실패. joint_fk(random-FK)는 자연히 강한 tilt 를 찾음(20260605 4/4).
 - **검증된 동작 config**: ikpy + tilt + slow gripper 0.005 + grasp_pick_offset 0.005 + cycles 2 → **1-cube full-DR PASS**(sm14). joint_fk + DR-off + slow slew → 4/4(20260605 재현).
-- **현재 상태(미완)**: ikpy 4-cube full-DR = **2/4**(먼 큐브 tilt 부족). lateral offset sweep 은 단독으론 4/4 안 됨.
-- **진행 중**: `joint_fk + full-DR + slow gripper + cycles2` 4-cube 테스트(random-FK 가 강한 tilt 자연 생성하는지 신뢰성 확인) → `/DISK1/so101-sim2real/outputs/pickcube_jfk_fulldr_4cube_20260606.json`.
-- **다음 후보**: ① joint_fk full-DR 신뢰성 OK 면 그걸 deliverable controller 로(+내 모든 개선) ② 아니면 ikpy 에 "모터 jaw 를 큐브로 내리는" tilt 강제(approach 축을 큐브-수직 대신 의도적 tilt 로). placed 큐브 이탈 방지(place 위치/순서)도.
-- **남은 일**: ① grasp 4/4 controller 확정 ② 10 seed × 4-cube 신뢰성 8~9/10 ③ ≤120s ④ 성공 seed 로 v3 dataset(`--dataset_dir`)+`validate_lerobot_schema.py` ⑤ docs/TROUBLESHOOTING.md·TASKS.md 갱신.
+- **🔑 2차 진단(2026-06-06 후속)**: joint_fk full-DR 도 **2/4**(`pickcube_jfk_fulldr_4cube_20260606.json`). ikpy와 동률 → controller 문제 아님.
+  - 근본 원인: **random-FK 스코어러가 `dist+continuity_weight*continuity`만 보고 tilt/grasp 품질을 점수화 안 함** → 목표 닿는 pose 중 운에 맡겨 tilt 들쭉날쭉(descend down_dot 0.35~0.84). 좋으면 성공, 약하면 실패.
+  - 성공/실패 판별식: **모터 jaw 바닥 z 가 고정 finger 아래로 + 큐브 바닥까지** 내려가면 성공(cube1 성공 jaw 0.694<fix 0.713). 약tilt면 모터 jaw 가 fix 위·큐브 위에 남음(cube3 jaw 0.79>fix 0.75).
+  - 2가지 실패: ① 약tilt 로 모터 jaw 가 큐브 중심(0.72~0.74)에 멈춤(cube2, **stochastic**·retry/cycle2 로 복구됨) ② 워크스페이스 가장자리 먼 큐브(cube3 x=2.06, scatter x∈[1.60,2.08] 끝)는 자세가 안 나와 jaw 0.79 갇힘(**deterministic**·retry 무효).
+  - **깊은 descend(grasp_pick_offset -0.022) 는 비추**: unreachable 목표라 descend early-exit 안 걸려 full-steps 소진 → 시간↑(≤120s 역효과). tilt 를 z 과주입 대신 **자세로** 해결해야.
+- **🔧 채택 수정(미검증, 코드 반영·scp 완료)**:
+  - `_fk_solve_joint_target` 에 **`grasp_tilt_weight`** 점수항 추가(descend/grasp 단계만): `score += w*(max(0,jaw_z-floor)+max(0,jaw_z-fix_z))` → 모터 jaw 가 desk(0.705)까지+고정 finger 아래로 내려가는 강tilt pose 를 결정적으로 선택. `_finger_min_z()` 헬퍼(캐시된 link-frame 코너).
+  - **`--num_episodes N`** sweep: 한 Isaac 세션에서 reset+SM N회(매 reset DR 재추첨, `torch.rand` default RNG advancing 확인) → all4/per-cube 성공률 집계. dataset 기록 비활성.
+- **🔑 3차 — 정직한 baseline sweep(5 ep, full-DR, 검증 params, cycles2)**: `pickcube_sweep_baseline_20260606.json` → **all-4 = 0.0, 평균 1.4/4**, per-cube Cube1 0.4·Cube2 0.4·**Cube3 0.0**·Cube4 0.6. 8~9/10(per-cube ~95% 필요)과 격차 큼. 실패=① grip 안 잡힘(큐브 책상 제자리) ② 일부 충돌로 날아감(z=0.025 바닥 추락 등).
+- **❌ 실패한 실험들(모두 baseline 이하)**:
+  - tilt_weight 0.4 + offset -0.005: 1/4, 큐브 날아감(자세 thrashing).
+  - 깊은 descend(offset -0.022): unreachable 목표 → early-exit 안 됨 → 시간↑·비추.
+  - combo(tilt_weight 0.15 + grasp_arm_step 0.05 + continuity 0.04 + descend-only settle): seed7 0/4. **positioning 은 개선**(모터 jaw mvz 0.69~0.71 로 내려옴, grip 2개 유지) 됐으나 **bowl 이 z=0.794 로 변위**(tilted 자세의 transport/place 가 그릇 들이받음) → place 회귀. baseline sweep 은 bowl 0.71 정상.
+- **결론**: 정직한 full-DR 4-cube 신뢰성은 grip 한계로 낮음(평균 1.4/4). tilt 점수화로 positioning 은 고쳤으나 후속(transport/place/bowl-knock) 회귀. **추가 튜닝(>3회) 으로 미해결 — 블로커 성격.**
+- **추가 코드(기본 OFF, 무해)**: `--grasp_tilt_weight`(FK tilt 점수), `--grasp_arm_step_delta`(grasp 단계 팔 속도), `--num_episodes`(sweep), `_finger_min_z`, descend `require_arm_settled`. py_compile OK, scp 완료.
+- **🔑🔑 4차 — 진짜 돌파(continuity)**: 0.7 reach sweep(`pickcube_sweep_dr07_20260606.json`)에서 ep1·ep3 가 **0/4 + 큐브가 x=3.58·z=0.02 로 테이블 밖 폭력적 사출** 발견 → reach 아니라 **5 rad/s 팔이 random-FK 의 global 자세 점프를 통과하며 큐브를 배트로 치듯 날림**이 지배적 실패. `--continuity_weight` 0.015→**0.05**(시간-중립, grip·속도 불변) 한 줄로:
+  - **full-DR: 평균 1.4→3.0/4, all-4 0%→40%(5중 2개 4/4), flinging 거의 소멸**(`pickcube_sweep_cont05_20260606.json`). per-cube C1 1.0·C2 0.6·C3 0.8·C4 0.6.
+  - 교훈: 낮은 continuity(0.015)는 1 rad 점프가 0.015 밖에 안 들어 FK 가 global 샘플로 마구 점프 → 폭력 sweep. 0.05 면 도달 유지+가까운 자세 선호로 매끄러운 궤적.
+- **남은 실패=grip**(이제 날아가는 게 아니라 책상 제자리). 진행 중: `continuity 0.07 + descend tilt 0.15 + settle(descend전용) + slow arm 없음` 5-ep → `pickcube_sweep_cont07tilt_20260606.json` (tilt positioning 으로 grip↑ 시도. 회귀 시 순수 continuity 0.05=3.0 으로 복귀).
+- **deliverable 기준선**: **joint_fk + full-DR + raster + cycles2 + grasp_pick_offset 0.005 + continuity_weight 0.05** = 평균 3.0/4, all-4 40%. (기존 experimental 인자는 OFF.)
+- **남은 일**: ① continuity/tilt 미세조정으로 all-4↑(목표 8~9/10) ② 안정 config 8~10ep 재확인 ③ ≤120s 시간 확인 ④ 4/4 seed 로 v3 dataset+validate ⑤ docs/TROUBLESHOOTING(continuity 교훈)·TASKS 갱신.
 
 ---
 
