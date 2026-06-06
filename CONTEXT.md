@@ -21,11 +21,16 @@
 - **🔑 핵심 돌파(grasp)**:
   1. **그리퍼를 5 rad/s 로 빠르게 닫으면 큐브를 못 쥠**. 천천히(`--max_gripper_step_delta 0.005`≈0.15 rad/s) 쥐어야 안착·마찰. 팔은 5 rad/s 유지(env 한계 5 내). 이게 grasp 반복 실패의 진짜 원인.
   2. **strict 수직 top-down pick 불가**(5-DOF reach: jaw 가 큐브 ~3cm 위 정지). → pick=자연 tilt, drop=palm-down(level). `--topdown_pick`(기본 off).
-  3. **그리퍼=고정 finger+모터 jaw**(URDF: `gripper_link` 고정 + `moving_jaw_so101_v1_link` revolute). 수직 강하 시 고정 finger 가 큐브를 위에서 찌름 → 개방축 따라 옆 오프셋 필요(`--grasp_lateral_offset`, `_gripper_open_axis_h`).
-- **검증된 동작 config**: ikpy + tilt(pick R=None) + slow gripper 0.005 + grasp_pick_offset 0.005 + cycles 2 → **1-cube full-DR PASS**(sm14). 현재 기본값에 반영.
-- **현재 상태(미완)**: 4-cube full-DR = **2/4**(Cube1·2 inside; 일부 pose grasp 실패, 일부 placed 후 이탈). 총 ~7684 step(~256s).
-- **진행 중**: `--grasp_lateral_offset` sweep(-0.02,-0.012,0.012,0.02, 4-cube seed7) → 고정-finger 찌름 해결 방향/크기 탐색. 결과: `/DISK1/so101-sim2real/outputs/pickcube_lat_*_20260606.json`.
-- **남은 일**: ① lateral offset 확정 → grasp 4/4 ② 10 seed × 4-cube 신뢰성 8~9/10 ③ placed 큐브 이탈 방지 ④ ≤120s ⑤ 성공 seed 로 v3 dataset(`--dataset_dir`)+`validate_lerobot_schema.py` ⑥ docs/TROUBLESHOOTING.md·TASKS.md 갱신.
+  3. **그리퍼=고정 finger+모터 jaw**(URDF: `gripper_link` 고정 + `moving_jaw_so101_v1_link` revolute).
+  4. **🔑 grasp 성패 = 모터 jaw 가 큐브 높이까지 내려오는가 = tilt 강도**. finger AABB 측정(`_diagnostic_pose`):
+     - 실패(centered, down≈0.81): 모터 jaw 바닥 z≈0.743 (큐브 윗면 0.741 위) → 닿지 않음. 고정 finger 가 책상(0.705)에 닿아 더 못 내려감.
+     - 성공(20260605, down≈0.34 강한 tilt): 모터 jaw 바닥 z≈0.689 (큐브 바닥 0.717 아래) → 큐브를 감쌈. `/DISK1/so101-sim2real/outputs/pickcube_geom_success_20260606.json`.
+     - 즉 **강한 tilt 가 모터 jaw 를 큐브 옆/아래로 내려보내 grip 성립**. ikpy 최소동작 IK 는 먼 큐브에서 tilt 가 약해 실패. joint_fk(random-FK)는 자연히 강한 tilt 를 찾음(20260605 4/4).
+- **검증된 동작 config**: ikpy + tilt + slow gripper 0.005 + grasp_pick_offset 0.005 + cycles 2 → **1-cube full-DR PASS**(sm14). joint_fk + DR-off + slow slew → 4/4(20260605 재현).
+- **현재 상태(미완)**: ikpy 4-cube full-DR = **2/4**(먼 큐브 tilt 부족). lateral offset sweep 은 단독으론 4/4 안 됨.
+- **진행 중**: `joint_fk + full-DR + slow gripper + cycles2` 4-cube 테스트(random-FK 가 강한 tilt 자연 생성하는지 신뢰성 확인) → `/DISK1/so101-sim2real/outputs/pickcube_jfk_fulldr_4cube_20260606.json`.
+- **다음 후보**: ① joint_fk full-DR 신뢰성 OK 면 그걸 deliverable controller 로(+내 모든 개선) ② 아니면 ikpy 에 "모터 jaw 를 큐브로 내리는" tilt 강제(approach 축을 큐브-수직 대신 의도적 tilt 로). placed 큐브 이탈 방지(place 위치/순서)도.
+- **남은 일**: ① grasp 4/4 controller 확정 ② 10 seed × 4-cube 신뢰성 8~9/10 ③ ≤120s ④ 성공 seed 로 v3 dataset(`--dataset_dir`)+`validate_lerobot_schema.py` ⑤ docs/TROUBLESHOOTING.md·TASKS.md 갱신.
 
 ---
 
