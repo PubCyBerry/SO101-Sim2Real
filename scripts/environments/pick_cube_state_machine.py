@@ -40,13 +40,13 @@ parser.add_argument("--container_radius_scale", type=float, default=1.0)
 # 훨씬 일찍 끝난다. settle/hold 류 대기는 사용자 요청대로 최소화했다.
 parser.add_argument("--settle_steps", type=int, default=30, help="reset 후 물리 안정화(큐브 정지) 대기")
 parser.add_argument("--approach_steps", type=int, default=120)
-parser.add_argument("--descend_steps", type=int, default=100)
+parser.add_argument("--descend_steps", type=int, default=160)
 parser.add_argument("--close_steps", type=int, default=20)
 parser.add_argument(
     "--grasp_settle_steps",
     type=int,
-    default=4,
-    help="Extra dwell after the slew-limited gripper command can reach the closed target.",
+    default=20,
+    help="그리퍼가 닫힌 뒤 grip 이 큐브에 안정적으로 물릴 때까지의 추가 dwell(step).",
 )
 parser.add_argument("--lift_steps", type=int, default=120)
 parser.add_argument("--transport_steps", type=int, default=160)
@@ -69,12 +69,28 @@ parser.add_argument(
 )
 parser.add_argument("--grasp_z_offset", type=float, default=0.005, help="(legacy) cube center 기준 grasp z 오프셋. floor grasp 미사용 시 fallback.")
 parser.add_argument(
-    "--grasp_floor_clearance",
+    "--grasp_pick_offset",
     type=float,
-    default=0.001,
-    help="Grasp point 가 책상 상판 위 이 높이(m)까지 내려간다. 기본 1mm — 그리퍼가 바닥을 쓸듯 닫게 한다.",
+    default=0.005,
+    help=(
+        "Descend/grasp grasp-point 목표 z = 큐브 중심 + 이 값(m). 0 = 큐브 중심을 노린다. descend 는 "
+        "별도의 tight tolerance(--descend_tolerance)로 이 목표 가까이 눌러 내려가, grasp point 가 "
+        "큐브를 감싸는 높이에 오게 한다. 손가락은 grasp point 아래로 뻗어 바닥을 쓸듯 큐브를 잡는다."
+    ),
 )
-parser.add_argument("--target_tolerance", type=float, default=0.012)
+parser.add_argument(
+    "--descend_tolerance",
+    type=float,
+    default=0.014,
+    help="Descend 단계 early-exit 허용 오차(m). 일반 tolerance 보다 빡빡하게 해 grasp point 를 큐브까지 충분히 내린다.",
+)
+parser.add_argument(
+    "--ik_ori_weight",
+    type=float,
+    default=0.06,
+    help="Isaac-frame DLS refine 에서 top-down(접근축 수직) orientation task 가중치. 0 이면 위치만.",
+)
+parser.add_argument("--target_tolerance", type=float, default=0.014)
 parser.add_argument("--ik_damping", type=float, default=0.05)
 parser.add_argument("--ik_gain", type=float, default=0.85)
 parser.add_argument("--max_joint_delta", type=float, default=0.075)
@@ -97,14 +113,28 @@ parser.add_argument(
 parser.add_argument(
     "--max_gripper_step_delta",
     type=float,
-    default=0.16667,
-    help="Max per-step gripper joint command change in radians (0.16667 ~= 5.0 rad/s at 30 Hz)",
+    default=0.005,
+    help=(
+        "Max per-step gripper joint command change in radians. 그리퍼는 *천천히* 닫아야(≈0.15 rad/s) "
+        "큐브가 손가락 사이에 안착해 마찰로 잡힌다 — 5 rad/s(0.167)로 빠르게 닫으면 큐브를 못 쥐고 튕긴다. "
+        "팔(--max_arm_step_delta)은 5 rad/s 로 빠르게, 그리퍼만 느리게. (env velocity 한계 5 rad/s 내)"
+    ),
 )
 parser.add_argument("--fk_samples", type=int, default=5000)
 parser.add_argument("--continuity_weight", type=float, default=0.015)
 parser.add_argument("--seed", type=int, default=7)
 parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
+parser.add_argument(
+    "--descend_gripper",
+    type=float,
+    default=0.5,
+    help=(
+        "Descend 동안 그리퍼 개방 정도(0=닫힘,1=완전개방). 완전개방이면 벌어진 손가락이 책상에 닿아 "
+        "grasp point 가 큐브 위 ~1.6cm 에서 멈춘다(top-down). 덜 벌리면 손가락이 더 수직이라 큐브까지 "
+        "내려가 잡을 수 있다. 큐브(2.5cm)가 들어갈 만큼은 벌려야 한다."
+    ),
+)
 parser.add_argument("--control_point", choices=["jaw_offset", "midpoint"], default="jaw_offset")
 parser.add_argument(
     "--controller_mode",
@@ -119,7 +149,16 @@ parser.add_argument(
 parser.add_argument(
     "--disable_topdown",
     action="store_true",
-    help="Disable top-down(palm-down) orientation constraint on pick/carry/drop phases (ikpy/lula only).",
+    help="Disable top-down(palm-down) orientation constraint everywhere (drop 도 자유 자세).",
+)
+parser.add_argument(
+    "--topdown_pick",
+    action="store_true",
+    help=(
+        "Pick(approach/descend/grasp/lift) 에도 strict top-down 을 강제한다. 기본 off — 이 5-DOF 팔은 "
+        "수직 자세로는 책상 위 큐브에 손이 닿지 않아(jaw 가 ~3cm 위에서 멈춤) grasp 가 실패한다. "
+        "기본은 자연 tilt 로 위에서 내려 집고, drop 만 palm-down(level) 으로 한다."
+    ),
 )
 parser.add_argument(
     "--ikpy_orientation_mode",
@@ -907,12 +946,18 @@ class SO101IkpyJointTarget:
         # least_squares 는 seed 가 bound 를 부동소수점만큼 넘으면 거부 → 안쪽 clamp.
         warm = np.minimum(np.maximum(warm, self._lo + 1e-4), self._hi - 1e-4)
         if target_R_w is not None:
-            # world 목표 회전 → base frame. orientation_mode 가 쓰는 축(열)만 유효.
+            # world 목표 회전 → base frame. ikpy 는 single-axis mode(X/Y/Z)에서
+            # target_orientation 으로 "그 축의 방향 3-벡터"를 기대한다(3x3 아님). "all" 만 3x3.
             target_R_base = self._base_R.T @ np.asarray(target_R_w, dtype=np.float64)
+            mode = args.ikpy_orientation_mode
+            if mode == "all":
+                ori_arg = target_R_base
+            else:
+                ori_arg = target_R_base[:, {"X": 0, "Y": 1, "Z": 2}[mode]]
             sol = self._chain.inverse_kinematics(
                 target_position=target_base,
-                target_orientation=target_R_base,
-                orientation_mode=args.ikpy_orientation_mode,
+                target_orientation=ori_arg,
+                orientation_mode=mode,
                 initial_position=self._full_q(warm),
             )
         else:
@@ -1098,11 +1143,16 @@ def _diagnostic_pose(env) -> dict[str, Any]:
         dtype=torch.float32,
     ).reshape(1, 3)
     gripper_frame_w = _body_pos(robot, "gripper") + _quat_apply_wxyz(_body_quat(robot, "gripper"), gripper_frame_offset)
+    # 실제 접근축(jaw→grasp point)의 world 방향과 down(−Z) 정렬도 — top-down 검증용.
+    approach_w = _approach_axis_world(robot)
+    down_dot = float((approach_w @ torch.tensor([0.0, 0.0, -1.0], device=approach_w.device, dtype=approach_w.dtype)).item())
     return {
         "gripper_w": _round_list(gripper),
         "jaw_w": _round_list(jaw),
         "gripper_frame_w": _round_list(gripper_frame_w[0]),
         "gripper_jaw_midpoint_w": _round_list(0.5 * (gripper + jaw)),
+        "jaw_approach_axis_w": _round_list(approach_w),
+        "jaw_approach_down_dot": round(down_dot, 4),
         "cube_w": {
             name: _round_list(scene[name].data.root_pos_w[0])
             for name in CUBE_NAMES[: args.active_objects]
@@ -1198,6 +1248,14 @@ def _grasp_phase_steps(command: torch.Tensor, target: float) -> int:
     return max(1, args.close_steps, close_steps + max(0, args.grasp_settle_steps))
 
 
+def _approach_axis_world(robot) -> torch.Tensor:
+    """jaw 원점 → grasp point 방향(접근축)의 world 단위벡터. top-down 이면 ≈ (0,0,-1)."""
+    a_local = torch.tensor(JAW_GRASP_OFFSET, device=robot.data.joint_pos.device, dtype=torch.float32)
+    a_local = (a_local / torch.linalg.norm(a_local)).reshape(1, 3)
+    a_w = _quat_apply_wxyz(_body_quat(robot, "jaw"), a_local)[0]
+    return a_w / torch.linalg.norm(a_w)
+
+
 def _ik_action(
     robot,
     target_grasp_point_w: torch.Tensor,
@@ -1207,14 +1265,40 @@ def _ik_action(
     damping: float,
     gain: float,
     max_joint_delta: float,
+    topdown: bool = False,
+    ori_weight: float = 0.0,
 ) -> tuple[torch.Tensor, float]:
-    grasp_point = _grasp_point_pos(robot)
-    error = target_grasp_point_w - grasp_point
-    jac = _grasp_point_jacobian(robot)  # (1, 3, 5)
-    j = jac[0]
-    err = error[0]
+    """Isaac-frame damped-least-squares IK on the *actual* grasp point.
 
-    eye = torch.eye(3, device=device, dtype=j.dtype)
+    ``topdown`` 이면 접근축(jaw→grasp point)을 world −Z 로 정렬하는 orientation task 를
+    위치 task 와 함께 푼다(5-DOF: 위치 3 + 접근축 정렬 2). URDF/offset 불일치가 없어 grasp
+    point 가 큐브에 정확히 맞고 수직으로 강하한다."""
+    grasp_point = _grasp_point_pos(robot)
+    error = (target_grasp_point_w - grasp_point)[0]
+    j_pos = _grasp_point_jacobian(robot)[0]  # (3, 5)
+
+    if topdown and ori_weight > 0.0 and args.control_point != "midpoint":
+        jaw_jac = _jacobian_row(robot, "jaw")[0]  # (6, 5)
+        j_ang = jaw_jac[3:6, :]  # (3, 5)
+        a_w = _approach_axis_world(robot)  # (3,)
+        a_des = torch.tensor([0.0, 0.0, -1.0], device=device, dtype=a_w.dtype)
+        e_ori = a_des - a_w
+        # d(a_w)/dq = -[a_w]_x @ J_ang  (body-fixed 단위벡터의 회전).
+        ax, ay, az = a_w[0], a_w[1], a_w[2]
+        skew_a = torch.stack([
+            torch.stack([torch.zeros_like(ax), -az, ay]),
+            torch.stack([az, torch.zeros_like(ax), -ax]),
+            torch.stack([-ay, ax, torch.zeros_like(ax)]),
+        ])
+        j_ori = -(skew_a @ j_ang)  # (3, 5)
+        j = torch.cat([j_pos, ori_weight * j_ori], dim=0)  # (6, 5)
+        err = torch.cat([error, ori_weight * e_ori], dim=0)  # (6,)
+        eye = torch.eye(6, device=device, dtype=j.dtype)
+    else:
+        j = j_pos
+        err = error
+        eye = torch.eye(3, device=device, dtype=j.dtype)
+
     lhs = j @ j.transpose(0, 1) + (damping * damping) * eye
     rhs = torch.linalg.solve(lhs, err.unsqueeze(-1)).squeeze(-1)
     dq = j.transpose(0, 1) @ rhs
@@ -1227,7 +1311,7 @@ def _ik_action(
     action = torch.zeros((1, 6), device=device, dtype=torch.float32)
     action[0, :ARM_DOF] = q_target
     action[0, 5] = float(gripper_target)
-    return action, float(torch.linalg.norm(error[0]).item())
+    return action, float(torch.linalg.norm(error).item())
 
 
 def _fk_solve_joint_target(
@@ -1393,12 +1477,16 @@ def _phase(
     refine_steps = 0
     for step in range(actual_steps):
         err = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
-        use_refine = (
-            (args.enable_jacobian_refine or (rmpflow_driver is not None and not args.disable_rmpflow_jacobian_refine))
-            and not args.disable_jacobian_refine
-            and not orientation_active
-            and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
-        )
+        if orientation_active:
+            # top-down 강제: Isaac-frame DLS(위치+접근축) 를 매 스텝 적용해 실제 grasp point 를
+            # 큐브에 맞추고 접근축을 수직으로 정렬한다(ikpy/URDF offset 불일치 회피).
+            use_refine = not args.disable_jacobian_refine
+        else:
+            use_refine = (
+                (args.enable_jacobian_refine or (rmpflow_driver is not None and not args.disable_rmpflow_jacobian_refine))
+                and not args.disable_jacobian_refine
+                and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
+            )
         arm_target = q_goal
         if rmpflow_driver is not None:
             target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
@@ -1412,6 +1500,8 @@ def _phase(
                     damping=args.ik_damping,
                     gain=args.ik_gain,
                     max_joint_delta=args.max_joint_delta,
+                    topdown=orientation_active,
+                    ori_weight=args.ik_ori_weight,
                 )
                 arm_target = refine_action[0, :ARM_DOF]
                 refine_steps += 1
@@ -1549,28 +1639,36 @@ def _target_from_cube(env, cube_name: str, dz: float) -> Callable[[], torch.Tens
     return target
 
 
-def _target_pick_floor(env, cube_name: str) -> Callable[[], torch.Tensor]:
-    """Descend/grasp 목표: 큐브 xy 위, grasp point 가 책상 상판 +grasp_floor_clearance 까지.
+def _target_pick(env, cube_name: str) -> Callable[[], torch.Tensor]:
+    """Descend/grasp 목표: 큐브 xy 위, grasp point 를 큐브 중심에서 grasp_below_center 만큼 아래로.
 
-    surface_z = cube_center_z - CUBE_HALF_Z. grasp point 를 그 바로 위로 내려 그리퍼가
-    바닥을 쓸듯 큐브를 감싸 닫게 한다(사용자 요청 +0~1mm)."""
+    top-down(접근축 수직) DLS 와 함께 쓰면 grasp point 가 큐브 하부(≈바닥)로 수직 강하해
+    그리퍼가 바닥을 쓸듯 큐브를 감싸 닫는다. 절대 floor 좌표(도달 불가)가 아니라 큐브 중심 기준
+    상대 깊이라 reach 안에서 안정적이다."""
 
     def target() -> torch.Tensor:
         cube = env.unwrapped.scene[cube_name]
         pos = cube.data.root_pos_w[0].clone()
-        surface_z = pos[2] - CUBE_HALF_Z
-        pos[2] = surface_z + float(args.grasp_floor_clearance)
+        pos[2] = pos[2] + float(args.grasp_pick_offset)
         return pos
 
     return target
 
 
 def _topdown_R_fn() -> Callable[[], Any] | None:
-    """Pick/carry/drop 단계용 top-down(palm-down) 목표 회전 공급자. disable_topdown 시 None."""
+    """Drop/place 단계용 top-down(palm-down) 목표 회전 공급자. disable_topdown 시 None."""
     if args.disable_topdown:
         return None
     R = np.asarray(TOPDOWN_R_WORLD, dtype=np.float64)
     return lambda: R
+
+
+def _pick_R_fn() -> Callable[[], Any] | None:
+    """Pick 단계 목표 회전. 기본은 None(자연 tilt — top-down 으론 책상 큐브에 reach 불가).
+    --topdown_pick 시에만 strict top-down 을 강제한다."""
+    if args.topdown_pick:
+        return _topdown_R_fn()
+    return None
 
 
 def _target_from_bowl(env, dz: float, xy_offset: torch.Tensor | None = None) -> Callable[[], torch.Tensor]:
@@ -2046,7 +2144,7 @@ def _run_state_machine(
                 expert_recorder,
                 rmpflow_driver,
                 tolerance=args.target_tolerance,
-                target_R_fn=_topdown_R_fn(),
+                target_R_fn=_pick_R_fn(),
             )
             _append_fsm_event(
                 fsm_trace,
@@ -2064,32 +2162,35 @@ def _run_state_machine(
                 next_state=PickCubeFSMState.GRASP,
                 reason="descend_vertical_to_floor",
             )
-            # 강하: 동일 xy, grasp point 를 책상 상판 +clearance(≈바닥) 까지 수직으로 내린다.
+            # 강하 목표를 *진입 시점에 스냅샷*해 고정한다(큐브를 살짝 건드려도 추격 루프에
+            # 빠지지 않게). 큐브는 approach 동안 이미 안정화됐다.
+            grasp_target = _target_pick(env, cube_name)().clone()
+            # 강하: 동일 xy, grasp point 를 큐브 하부(≈바닥) 까지 top-down 으로 수직 강하.
             _phase(
                 env,
                 device,
                 f"{attempt_prefix}.descend",
-                _target_pick_floor(env, cube_name),
-                args.gripper_open,
+                _fixed_target(grasp_target),
+                args.descend_gripper,
                 args.descend_steps,
                 trace,
                 command,
                 recorder,
                 expert_recorder,
                 rmpflow_driver,
-                tolerance=args.target_tolerance,
-                target_R_fn=_topdown_R_fn(),
+                tolerance=args.descend_tolerance,
+                target_R_fn=_pick_R_fn(),
             )
-            grasp_target = _target_pick_floor(env, cube_name)().clone()
             _append_fsm_event(
                 fsm_trace,
                 PickCubeFSMState.GRASP,
                 cube_name=cube_name,
                 attempt=attempt,
                 next_state=PickCubeFSMState.LIFT,
-                reason="close_gripper_on_floor",
+                reason="close_gripper_top_down",
             )
-            # 잡기: 바닥에서 그리퍼를 닫는다. early-exit min_steps = 그리퍼 폐쇄 전이 + settle.
+            # 잡기: 닫는 동안 top-down DLS 를 유지(고정 grasp_target)해 grasp point 를 큐브에 계속
+            # 눌러붙인 채 그리퍼를 닫는다. 검증된 20260605 close 메커니즘(닫는 중 IK 지속)과 동일.
             grasp_min_steps = _gripper_transition_step_count(
                 float(command[5].item()), args.gripper_closed
             ) + max(0, args.grasp_settle_steps)
@@ -2106,7 +2207,7 @@ def _run_state_machine(
                 expert_recorder,
                 rmpflow_driver,
                 tolerance=args.target_tolerance,
-                target_R_fn=_topdown_R_fn(),
+                target_R_fn=_pick_R_fn(),
                 min_steps=grasp_min_steps,
             )
             _append_fsm_event(
@@ -2132,7 +2233,7 @@ def _run_state_machine(
                 expert_recorder,
                 rmpflow_driver,
                 tolerance=args.target_tolerance,
-                target_R_fn=_topdown_R_fn(),
+                target_R_fn=_pick_R_fn(),
             )
             grasped = _cube_lifted(env, cube_name)
             trace.append({
@@ -2184,7 +2285,7 @@ def _run_state_machine(
                 expert_recorder,
                 rmpflow_driver,
                 tolerance=args.target_tolerance,
-                target_R_fn=_topdown_R_fn(),
+                target_R_fn=_pick_R_fn(),
             )
 
         if not grasped:
