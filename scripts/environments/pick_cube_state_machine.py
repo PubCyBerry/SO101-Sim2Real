@@ -79,6 +79,16 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--grasp_lateral_offset",
+    type=float,
+    default=0.0,
+    help=(
+        "Descend/grasp 목표를 그리퍼 개방축(고정 finger→이동 jaw)을 따라 옆으로 미는 거리(m). 양수=이동 jaw "
+        "쪽, 음수=고정 finger 쪽. 큐브(2.5cm)가 두 jaw 사이 gap 에 들어오게 해 고정 finger 가 큐브를 "
+        "위에서 찌르는 것을 막는다. 큐브 half(0.0125) 부근에서 튜닝."
+    ),
+)
+parser.add_argument(
     "--descend_tolerance",
     type=float,
     default=0.014,
@@ -1109,6 +1119,60 @@ def _quat_apply_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return vec + q_w * t + torch.cross(q_xyz, t, dim=-1)
 
 
+# 그리퍼 finger collision 메시 bbox(메시 로컬, m) + URDF collision origin(xyz, rpy).
+# STL 측정값. "gripper"=고정 finger(wrist_roll_follower), "jaw"=모터 jaw(moving_jaw_so101_v1).
+# finger tip 의 world 위치를 측정해 고정 finger 가 큐브 위를 찌르는지/수평 마진을 진단한다.
+_FINGER_GEOM = {
+    "jaw": dict(
+        lo=(-0.0123, -0.082, -0.024),
+        hi=(0.01, 0.01, 0.024),
+        oxyz=(0.0, 0.0, 0.0189),
+        orpy=(0.0, 0.0, 0.0),
+    ),
+    "gripper": dict(
+        lo=(-0.0352, -0.0242, -0.0001),
+        hi=(0.03, 0.0278, 0.1054),
+        oxyz=(0.0, -0.000218214, 0.000949706),
+        orpy=(-3.14159, 0.0, 0.0),
+    ),
+}
+
+
+def _rpy_matrix(rpy: tuple[float, float, float], device, dtype) -> torch.Tensor:
+    r, p, y = rpy
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    rx = torch.tensor([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], device=device, dtype=dtype)
+    ry = torch.tensor([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], device=device, dtype=dtype)
+    rz = torch.tensor([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], device=device, dtype=dtype)
+    return rz @ ry @ rx
+
+
+def _finger_world_aabb(robot, body_name: str) -> dict[str, list[float]]:
+    """finger collision 메시의 8개 bbox 코너를 world 로 변환해 AABB(min/max) 반환."""
+    g = _FINGER_GEOM[body_name]
+    dev = robot.data.joint_pos.device
+    dtype = torch.float32
+    R_coll = _rpy_matrix(g["orpy"], dev, dtype)
+    oxyz = torch.tensor(g["oxyz"], device=dev, dtype=dtype)
+    lo = g["lo"]
+    hi = g["hi"]
+    corners = []
+    for cx in (lo[0], hi[0]):
+        for cy in (lo[1], hi[1]):
+            for cz in (lo[2], hi[2]):
+                corners.append([cx, cy, cz])
+    p_mesh = torch.tensor(corners, device=dev, dtype=dtype)  # (8,3)
+    p_link = (R_coll @ p_mesh.T).T + oxyz  # (8,3)
+    body_pos = _body_pos(robot, body_name)  # (1,3)
+    body_quat = _body_quat(robot, body_name)  # (1,4)
+    p_world = body_pos + _quat_apply_wxyz(body_quat.expand(8, 4), p_link)  # (8,3)
+    wmin = p_world.min(dim=0).values
+    wmax = p_world.max(dim=0).values
+    return {"min": _round_list(wmin), "max": _round_list(wmax)}
+
+
 def _jacobian_row(robot, body_name: str) -> torch.Tensor:
     """Return body Jacobian row, shape (1, 6, ARM_DOF).
 
@@ -1153,6 +1217,8 @@ def _diagnostic_pose(env) -> dict[str, Any]:
         "gripper_jaw_midpoint_w": _round_list(0.5 * (gripper + jaw)),
         "jaw_approach_axis_w": _round_list(approach_w),
         "jaw_approach_down_dot": round(down_dot, 4),
+        "finger_moving_aabb_w": _finger_world_aabb(robot, "jaw"),
+        "finger_fixed_aabb_w": _finger_world_aabb(robot, "gripper"),
         "cube_w": {
             name: _round_list(scene[name].data.root_pos_w[0])
             for name in CUBE_NAMES[: args.active_objects]
@@ -1639,16 +1705,35 @@ def _target_from_cube(env, cube_name: str, dz: float) -> Callable[[], torch.Tens
     return target
 
 
-def _target_pick(env, cube_name: str) -> Callable[[], torch.Tensor]:
-    """Descend/grasp 목표: 큐브 xy 위, grasp point 를 큐브 중심에서 grasp_below_center 만큼 아래로.
+def _gripper_open_axis_h(robot) -> torch.Tensor:
+    """그리퍼 개방/폐쇄 축의 *수평* 단위벡터(world). 고정 finger(gripper) → 이동 jaw 방향.
 
-    top-down(접근축 수직) DLS 와 함께 쓰면 grasp point 가 큐브 하부(≈바닥)로 수직 강하해
-    그리퍼가 바닥을 쓸듯 큐브를 감싸 닫는다. 절대 floor 좌표(도달 불가)가 아니라 큐브 중심 기준
-    상대 깊이라 reach 안에서 안정적이다."""
+    SO-101 그리퍼는 한쪽 고정 + 한쪽 모터 jaw 구조라, 큐브 중심에 수직으로 내리꽂으면 고정
+    finger 가 큐브를 위에서 찌른다. 이 축을 따라 grasp 목표를 옆으로 밀어 큐브가 두 jaw 사이
+    gap 에 오게 한다."""
+    d = (_body_pos(robot, "jaw")[0] - _body_pos(robot, "gripper")[0]).clone()
+    d[2] = 0.0
+    n = torch.linalg.norm(d)
+    if float(n) < 1e-6:
+        return torch.tensor([1.0, 0.0, 0.0], device=d.device, dtype=d.dtype)
+    return d / n
+
+
+def _target_pick(env, cube_name: str) -> Callable[[], torch.Tensor]:
+    """Descend/grasp 목표: 큐브 xy 위, z = 큐브 중심 + grasp_pick_offset, 그리고 그리퍼 개방축을
+    따라 grasp_lateral_offset 만큼 옆으로 민 위치.
+
+    고정 finger 가 큐브를 찌르지 않고 큐브가 두 jaw 의 gap 에 들어오도록 한다(사용자 지적). 큐브
+    중심 기준 상대값이라 reach 안에서 안정적이다."""
 
     def target() -> torch.Tensor:
+        robot = env.unwrapped.scene["robot"]
         cube = env.unwrapped.scene[cube_name]
         pos = cube.data.root_pos_w[0].clone()
+        lateral = float(args.grasp_lateral_offset)
+        if abs(lateral) > 1e-6:
+            axis = _gripper_open_axis_h(robot).to(device=pos.device, dtype=pos.dtype)
+            pos[:2] = pos[:2] + lateral * axis[:2]
         pos[2] = pos[2] + float(args.grasp_pick_offset)
         return pos
 

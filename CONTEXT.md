@@ -12,6 +12,23 @@
 
 ---
 
+## 작업 인계 (2026-06-06 — teleop-grade pickcube FSM 고도화: 신뢰성 grasp 돌파)
+
+- **브랜치**: `feat/sm-teleop-grade-pickcube` (main `02bdc71` 기준). 편집은 Windows, GPU 실행은 konan147 에 scp 동기화 후 `/DISK1/so101-sim2real/venvs/isaac` 로 실행.
+- **목표(사용자)**: 20260605 4-cube 2cam 성공본(`pick_cube_state_machine_explicit_fsm_stackheight_4cube_2cam_20260605`, 9000f/300s)을 teleop 수준으로 고도화. 신뢰성 8~9/10(4큐브 전부), 시간 ≤120s, full-DR(teleop 동일 조건), LeRobot v3 기록.
+- **확인된 사실**: 20260605 이 최신·최고. 단 `object_radius_scale=0.0`·`container_angle_scale=0.0` → **DR 완전 비활성 fixed-spawn(curriculum hacking)**. 이제 SM 기본을 full-DR(1.0)로.
+- **구현 완료**(`pick_cube_state_machine.py`, 커밋 `c93bef9`·`934b4c9`): full-DR 기본화 / `--object_order raster`(top카메라 좌상단→우하단) 기본 / `DESK_TOP_Z=0.76`(펜값) 제거→live bowl z·`CUBE_DESK_TOP_Z=0.705` / env `SO101_JOINT_TARGET_MAX_VELOCITY` 1.0→5.0 / SM 팔 slew 5 rad/s / 대기 최소화+`_phase` early-exit / 직선 transport(높이 0.18→0.12, idle_home 성공경로 제거) / 수직 retry / Isaac-frame DLS 에 top-down 접근축 task(`_ik_action(topdown,ori_weight)`) + ikpy orientation_mode.
+- **🔑 핵심 돌파(grasp)**:
+  1. **그리퍼를 5 rad/s 로 빠르게 닫으면 큐브를 못 쥠**. 천천히(`--max_gripper_step_delta 0.005`≈0.15 rad/s) 쥐어야 안착·마찰. 팔은 5 rad/s 유지(env 한계 5 내). 이게 grasp 반복 실패의 진짜 원인.
+  2. **strict 수직 top-down pick 불가**(5-DOF reach: jaw 가 큐브 ~3cm 위 정지). → pick=자연 tilt, drop=palm-down(level). `--topdown_pick`(기본 off).
+  3. **그리퍼=고정 finger+모터 jaw**(URDF: `gripper_link` 고정 + `moving_jaw_so101_v1_link` revolute). 수직 강하 시 고정 finger 가 큐브를 위에서 찌름 → 개방축 따라 옆 오프셋 필요(`--grasp_lateral_offset`, `_gripper_open_axis_h`).
+- **검증된 동작 config**: ikpy + tilt(pick R=None) + slow gripper 0.005 + grasp_pick_offset 0.005 + cycles 2 → **1-cube full-DR PASS**(sm14). 현재 기본값에 반영.
+- **현재 상태(미완)**: 4-cube full-DR = **2/4**(Cube1·2 inside; 일부 pose grasp 실패, 일부 placed 후 이탈). 총 ~7684 step(~256s).
+- **진행 중**: `--grasp_lateral_offset` sweep(-0.02,-0.012,0.012,0.02, 4-cube seed7) → 고정-finger 찌름 해결 방향/크기 탐색. 결과: `/DISK1/so101-sim2real/outputs/pickcube_lat_*_20260606.json`.
+- **남은 일**: ① lateral offset 확정 → grasp 4/4 ② 10 seed × 4-cube 신뢰성 8~9/10 ③ placed 큐브 이탈 방지 ④ ≤120s ⑤ 성공 seed 로 v3 dataset(`--dataset_dir`)+`validate_lerobot_schema.py` ⑥ docs/TROUBLESHOOTING.md·TASKS.md 갱신.
+
+---
+
 ## 작업 인계 (2026-06-06 — controller_mode 에 lula_ik(경로2)/ikpy(경로3) 백엔드 포팅)
 
 - **브랜치**: `feat/cube-ik-backends` (main `d33f61d` 기준). 별도 worktree `cube-ik-port`.
