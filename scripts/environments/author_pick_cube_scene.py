@@ -483,50 +483,76 @@ def author_cube_usda(name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _bowl_panel(
+def _bowl_wall_mesh(
     lines: list[str],
     level: int,
-    index: int,
     *,
-    center: tuple[float, float, float],
-    tangent_deg: float,
-    tilt_deg: float,
-    size: tuple[float, float, float],
+    r_bottom: float,
+    r_top: float,
+    z_base: float,
+    depth: float,
+    lats: int,
+    lons: int,
     material_path: str,
     physics_material_path: str,
 ) -> None:
-    """곡면 bowl 벽 세그먼트 하나 — 바깥 Xform(원주 배치)에 경사 Cube 를 담는다.
+    """단일 회전체 Mesh prim — 시각 + convexDecomposition 충돌 겸용.
 
-    바깥 Xform 의 rotateZ 가 panel 을 원주 접선 방향으로 정렬하고, 그 local
-    frame 에서 안쪽 Cube 의 rotateX(tilt) 가 길이축(local +z)을 바깥·위로 눕혀
-    bowl 곡면을 만든다. 중첩 Xform 으로 회전 순서를 명확히 한다(바깥 rotateZ
-    먼저 → 안쪽 rotateX 는 회전된 local x=접선 축 기준).
+    기존 480개 Cube prim 루프(20밴드×24패널)를 lats×lons 격자 Mesh 1개로 대체.
+    profile: r(t) = r_bottom + (r_top - r_bottom) * t^0.2 (U자 곡선).
+    face winding: 바깥쪽 법선 기준 CCW (doubleSided=1 로 내부도 렌더링).
+    동적 rigid body 에서 비볼록 mesh 충돌 = convexDecomposition 필수.
     """
-    _block(lines, level, f'def Xform "Wall{index:03d}"')
+    def _profile_r(t: float) -> float:
+        return r_bottom + (r_top - r_bottom) * (t ** 0.2)
+
+    pts: list[tuple[float, float, float]] = []
+    for lat in range(lats + 1):
+        t = lat / lats
+        r = _profile_r(t)
+        z = z_base + depth * t
+        for lon in range(lons):
+            angle = lon * math.tau / lons
+            pts.append((r * math.cos(angle), r * math.sin(angle), z))
+
+    # quad face winding (바깥 법선 CCW): bottom-lon, bottom-lon+1, top-lon+1, top-lon
+    faces: list[list[int]] = []
+    for lat in range(lats):
+        for lon in range(lons):
+            v0 = lat * lons + lon
+            v1 = lat * lons + (lon + 1) % lons
+            v2 = (lat + 1) * lons + (lon + 1) % lons
+            v3 = (lat + 1) * lons + lon
+            faces.append([v0, v1, v2, v3])
+
+    indices = [i for f in faces for i in f]
+    pts_str = ", ".join(f"({_num(x)}, {_num(y)}, {_num(z)})" for x, y, z in pts)
+
+    schemas = '"PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxCollisionAPI"'
+    _block(lines, level, f'def Mesh "Wall" (')
+    _block(lines, level + 1, f"prepend apiSchemas = [{schemas}]")
+    _block(lines, level, ")")
     _block(lines, level, "{")
-    _xform_ops(lines, level + 1, translate=center, rotate_z=tangent_deg)
-    _cube(
-        lines,
-        level + 1,
-        "Seg",
-        translate=(0.0, 0.0, 0.0),
-        scale=size,
-        material_path=material_path,
-        rotate_x=tilt_deg,
-        collision=True,
-        visible=True,
-        physics_material_path=physics_material_path,
-        contact_tuning=True,
-    )
+    _block(lines, level + 1, "uniform int doubleSided = 1")
+    _block(lines, level + 1, f"int[] faceVertexCounts = [{', '.join('4' for _ in faces)}]")
+    _block(lines, level + 1, f"int[] faceVertexIndices = [{', '.join(str(i) for i in indices)}]")
+    _block(lines, level + 1, f"point3f[] points = [{pts_str}]")
+    _block(lines, level + 1, 'uniform token subdivisionScheme = "none"')
+    _block(lines, level + 1, "bool physics:collisionEnabled = 1")
+    _block(lines, level + 1, 'uniform token physics:approximation = "convexDecomposition"')
+    _block(lines, level + 1, f"float physxCollision:contactOffset = {_num(CONTACT_OFFSET_DEFAULT)}")
+    _block(lines, level + 1, "float physxCollision:restOffset = 0")
+    _material_binding(lines, level + 1, material_path)
+    _physics_material_binding(lines, level + 1, physics_material_path)
     _block(lines, level, "}")
 
 
 def author_bowl_usda() -> str:
     """Author the Bowl USDA at origin with self-contained materials.
 
-    Bowl은 동적 rigid body. 밑바닥(Cylinder) + 반구형 곡면 벽(여러 밴드의 경사
-    panel 로 근사). 각 panel 은 visible + collision 을 겸하며, 위로 갈수록
-    바깥으로 벌어져 사진의 곡면 그릇 형상을 만든다.
+    Bowl은 동적 rigid body. 밑바닥(Cylinder) + 단일 회전체 Mesh 벽.
+    기존 480개 Cube prim(20밴드×24패널) 대신 lats×lons 격자 Mesh 1개를 사용해
+    씬 그래프를 경량화하고 벽 법선 연속성을 확보한다.
     """
     lines = _object_header("Bowl")
     _block(lines, 0, 'def Xform "Bowl" (')
@@ -582,50 +608,20 @@ def author_bowl_usda() -> str:
         contact_tuning=True,
     )
 
-    # Walls: 반구형 곡면을 8개 밴드 × 24 panel 로 근사.
-    #   r(t) = r_bottom + (r_top - r_bottom) * t^0.6  (바닥은 좁고 위로 벌어짐)
-    #   각 밴드는 아래/위 레벨을 잇는 경사 panel 24개. tilt = 수직→바깥 경사각.
-    #   panel 길이를 1.25배로 늘려 인접 밴드와 겹쳐 이음매를 없앤다.
-    panel_count = 24
-    bands = 20           # 밴드 수 증가 → 곡면 더 부드러움
-    r_bottom = 0.0325  # 바닥 쪽 반경 32.5mm (바닥 지름 65mm)
-    r_top = 0.075      # 상단 반경 75mm (위 지름 150mm)
-    depth = 0.058      # 벽 높이 = 총높이(0.070) - 바닥 두께(0.012)
-    z_base = 0.012  # Bottom disk 윗면
-
-    def _profile_r(t: float) -> float:
-        # t^0.2: 바닥 근처 넓게 유지 U자 곡면
-        return r_bottom + (r_top - r_bottom) * (t ** 0.2)
-
-    wall_index = 0
-    for band in range(bands):
-        t0 = band / bands
-        t1 = (band + 1) / bands
-        z0 = z_base + depth * t0
-        z1 = z_base + depth * t1
-        r0 = _profile_r(t0)
-        r1 = _profile_r(t1)
-        z_mid = 0.5 * (z0 + z1)
-        r_mid = 0.5 * (r0 + r1)
-        dr = r1 - r0
-        dz = z1 - z0
-        wall_len = math.hypot(dr, dz) * 1.25
-        tilt_deg = math.degrees(math.atan2(dr, dz))  # 수직(0)→바깥 위로 벌어짐(+)
-        width = (2.0 * math.pi * r_mid / panel_count) * 1.15
-        for j in range(panel_count):
-            angle = j * math.tau / panel_count
-            _bowl_panel(
-                lines,
-                1,
-                wall_index,
-                center=(r_mid * math.cos(angle), r_mid * math.sin(angle), z_mid),
-                tangent_deg=math.degrees(angle) + 90.0,
-                tilt_deg=tilt_deg,
-                size=(width, 0.003, wall_len),
-                material_path=bowl_blue_path,
-                physics_material_path=bowl_friction_path,
-            )
-            wall_index += 1
+    # Wall: 기존 480 Cube prim 루프(20밴드×24패널) → 단일 회전체 Mesh.
+    # lats/lons 해상도는 기존과 동일하게 유지. convexDecomposition 충돌 겸용.
+    _bowl_wall_mesh(
+        lines,
+        1,
+        r_bottom=0.0325,
+        r_top=0.075,
+        z_base=0.012,
+        depth=0.058,
+        lats=20,
+        lons=24,
+        material_path=bowl_blue_path,
+        physics_material_path=bowl_friction_path,
+    )
 
     _block(lines, 0, "}")
     return "\n".join(lines) + "\n"
