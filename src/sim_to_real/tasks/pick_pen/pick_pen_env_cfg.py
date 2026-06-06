@@ -43,8 +43,13 @@ SO101_JOINT_ORDER: list[str] = [
     "wrist_roll",
     "gripper",
 ]
-SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 1.00 for joint in SO101_JOINT_ORDER}
-"""Processed joint-position target speed cap in rad/s (sim time)."""
+SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 5.00 for joint in SO101_JOINT_ORDER}
+"""Processed joint-position target speed cap in rad/s (sim time).
+
+teleop·RL·state-machine 공용 env action slew cap. 사용자 요청으로 1.0→5.0 rad/s 로 상향
+(모든 경로 동일). actuator ``velocity_limit_sim`` 은 ≥5 rad/s 헤드룸을 유지해야 명령 속도를
+실제로 추종한다. 주의: 1.0 rad/s 로 학습된 RL checkpoint 는 이 변경으로 dynamics 가 바뀌어
+재학습이 필요하다."""
 
 # Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).
 #
