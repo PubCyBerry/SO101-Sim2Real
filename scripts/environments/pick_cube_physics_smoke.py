@@ -47,7 +47,9 @@ from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_USD_PATH  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import BOWL_NAME, BOWL_SUCCESS_RADIUS, CUBE_NAMES  # noqa: E402
 
-_DESK_TOP_Z = 0.76
+# mat translate.z = SCENE_OFFSET.z(0.705) + 0.002 = 0.707.
+# mat top = 0.707 + half(0.004) = 0.709.  settle 체크: min_cube_bottom_z >= 0.709 - 0.006.
+_DESK_TOP_Z = 0.709
 _CUBE_HALF = 0.0125
 _CUBE_BOTTOM_TOL = 0.006
 _LIN_VEL_THRESH = 0.45
@@ -116,7 +118,7 @@ def _static_usd_checks() -> dict[str, Any]:
             and int(_attr(root, "physxRigidBody:solverPositionIterationCount", 0)) >= 16
             and bool(_attr(box, "physics:collisionEnabled", False))
             and 0.002 <= contact_offset <= 0.01
-            and all(abs(v - 0.025) < 1e-6 for v in scale)
+            and all(0.03 <= v <= 0.06 for v in scale)  # Cube1/2=40mm, Cube3/4=50mm
             and _rel_targets(box, "material:binding:physics"),
             mass=mass,
             contact_offset=contact_offset,
@@ -131,15 +133,22 @@ def _static_usd_checks() -> dict[str, Any]:
     else:
         root = bowl_stage.GetPrimAtPath("/Bowl")
         bottom = bowl_stage.GetPrimAtPath("/Bowl/Bottom")
-        wall_count = sum(1 for prim in bowl_stage.Traverse() if prim.GetName().startswith("Wall"))
+        wall = bowl_stage.GetPrimAtPath("/Bowl/Wall")
+        # 단일 Mesh 벽: convexDecomposition 충돌 + collisionEnabled 확인
+        wall_ok = (
+            wall.IsValid()
+            and _attr(wall, "physics:approximation") == "convexDecomposition"
+            and bool(_attr(wall, "physics:collisionEnabled", False))
+        )
         add_check(
             "Bowl.physics",
             float(_attr(root, "physics:mass", -1.0)) >= 0.05
             and bool(_attr(root, "physics:rigidBodyEnabled", False))
             and bool(_attr(bottom, "physics:collisionEnabled", False))
-            and wall_count >= 100,
+            and wall_ok,
             mass=float(_attr(root, "physics:mass", -1.0)),
-            wall_count=wall_count,
+            wall_mesh=wall_ok,
+            wall_approximation=str(_attr(wall, "physics:approximation")) if wall.IsValid() else "missing",
             bottom_contact_offset=float(_attr(bottom, "physxCollision:contactOffset", -1.0)),
         )
 
