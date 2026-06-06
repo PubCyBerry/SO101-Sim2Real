@@ -1623,9 +1623,10 @@ def _phase(
     _prev_arm_override = _ARM_STEP_OVERRIDE
     if is_grasp_phase and args.grasp_arm_step_delta > 0.0:
         _ARM_STEP_OVERRIDE = abs(args.grasp_arm_step_delta)
-    # tilt 는 descend 에서 완성해야 한다(arm 이 tilted q_goal 에 도달할 때까지 완주). grasp(닫기)
-    # 단계까지 settle 을 강제하면 닫는 동안 arm 이 재계산된 자세로 움직여 큐브를 밀어내 grip 이 풀린다.
-    require_arm_settled = (".descend" in name) and rmpflow_driver is None
+    # tilt 사용 시에만 descend 를 완주(arm 이 tilted q_goal 도달까지)시킨다. tilt 가 없으면 descend 는
+    # 제어점 도달 즉시 early-exit 해야 한다(완주 시 descend_steps=160 을 다 써 에피소드가 길어짐 → ≤120s 초과).
+    # grasp(닫기) 단계까지 settle 을 강제하면 닫는 동안 arm 이 움직여 큐브를 밀어내 grip 이 풀린다(descend 만).
+    require_arm_settled = (".descend" in name) and rmpflow_driver is None and args.grasp_tilt_weight > 0.0
     if rmpflow_driver is None:
         q_goal, plan = _fk_solve_joint_target(
             env,
@@ -2774,18 +2775,30 @@ def main() -> None:
                     env.reset()
                     for _ in range(max(0, args.warmup_steps)):
                         _step_env(env, zero_action)
+                # 에피소드 시작 시 초기 큐브/그릇 위치 로깅(reset 이 매번 재배치하는지 검증).
+                _scene = env.unwrapped.scene
+                _init_cubes = {nm: _round_list(_scene[nm].data.root_pos_w[0]) for nm in active_names}
+                _init_bowl = _round_list(_scene[BOWL_NAME].data.root_pos_w[0])
+                _bowl_r = BOWL_SUCCESS_RADIUS * max(0.1, args.container_radius_scale)
+                _n_start_inside = sum(
+                    1 for nm in active_names if _cube_inside_bowl(env, nm, _bowl_r)
+                )
+                print(f"[sweep-init] ep {ep}: start_inside={_n_start_inside} bowl={_init_bowl} cubes={_init_cubes}", flush=True)
                 ep_result = _run_state_machine(env, device, active_names, None, None)
                 inside = ep_result.get("final_inside", {})
                 n_inside = int(sum(1 for v in inside.values() if v))
+                ep_steps = int(sum(e.get("steps", 0) for e in ep_result.get("trace", []) if isinstance(e.get("steps"), int)))
                 episodes.append({
                     "episode": ep,
                     "final_inside": inside,
                     "n_inside": n_inside,
                     "all_placed": bool(ep_result.get("placed_and_released", False)),
+                    "total_steps": ep_steps,
+                    "sim_seconds": round(ep_steps / 30.0, 1),
                     "bowl_w": ep_result.get("bowl_w"),
                     "cube_w": ep_result.get("cube_w"),
                 })
-                print(f"[sweep] ep {ep}: n_inside={n_inside} inside={inside}", flush=True)
+                print(f"[sweep] ep {ep}: n_inside={n_inside} steps={ep_steps} ({round(ep_steps/30.0,1)}s) inside={inside}", flush=True)
             n_eps = len(episodes)
             all4 = int(sum(1 for e in episodes if e["n_inside"] >= args.active_objects))
             per_cube = {

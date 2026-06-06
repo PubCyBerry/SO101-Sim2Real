@@ -42,12 +42,17 @@
   - combo(tilt_weight 0.15 + grasp_arm_step 0.05 + continuity 0.04 + descend-only settle): seed7 0/4. **positioning 은 개선**(모터 jaw mvz 0.69~0.71 로 내려옴, grip 2개 유지) 됐으나 **bowl 이 z=0.794 로 변위**(tilted 자세의 transport/place 가 그릇 들이받음) → place 회귀. baseline sweep 은 bowl 0.71 정상.
 - **결론**: 정직한 full-DR 4-cube 신뢰성은 grip 한계로 낮음(평균 1.4/4). tilt 점수화로 positioning 은 고쳤으나 후속(transport/place/bowl-knock) 회귀. **추가 튜닝(>3회) 으로 미해결 — 블로커 성격.**
 - **추가 코드(기본 OFF, 무해)**: `--grasp_tilt_weight`(FK tilt 점수), `--grasp_arm_step_delta`(grasp 단계 팔 속도), `--num_episodes`(sweep), `_finger_min_z`, descend `require_arm_settled`. py_compile OK, scp 완료.
-- **🔑🔑 4차 — 진짜 돌파(continuity)**: 0.7 reach sweep(`pickcube_sweep_dr07_20260606.json`)에서 ep1·ep3 가 **0/4 + 큐브가 x=3.58·z=0.02 로 테이블 밖 폭력적 사출** 발견 → reach 아니라 **5 rad/s 팔이 random-FK 의 global 자세 점프를 통과하며 큐브를 배트로 치듯 날림**이 지배적 실패. `--continuity_weight` 0.015→**0.05**(시간-중립, grip·속도 불변) 한 줄로:
-  - **full-DR: 평균 1.4→3.0/4, all-4 0%→40%(5중 2개 4/4), flinging 거의 소멸**(`pickcube_sweep_cont05_20260606.json`). per-cube C1 1.0·C2 0.6·C3 0.8·C4 0.6.
-  - 교훈: 낮은 continuity(0.015)는 1 rad 점프가 0.015 밖에 안 들어 FK 가 global 샘플로 마구 점프 → 폭력 sweep. 0.05 면 도달 유지+가까운 자세 선호로 매끄러운 궤적.
-- **남은 실패=grip**(이제 날아가는 게 아니라 책상 제자리). 진행 중: `continuity 0.07 + descend tilt 0.15 + settle(descend전용) + slow arm 없음` 5-ep → `pickcube_sweep_cont07tilt_20260606.json` (tilt positioning 으로 grip↑ 시도. 회귀 시 순수 continuity 0.05=3.0 으로 복귀).
-- **deliverable 기준선**: **joint_fk + full-DR + raster + cycles2 + grasp_pick_offset 0.005 + continuity_weight 0.05** = 평균 3.0/4, all-4 40%. (기존 experimental 인자는 OFF.)
-- **남은 일**: ① continuity/tilt 미세조정으로 all-4↑(목표 8~9/10) ② 안정 config 8~10ep 재확인 ③ ≤120s 시간 확인 ④ 4/4 seed 로 v3 dataset+validate ⑤ docs/TROUBLESHOOTING(continuity 교훈)·TASKS 갱신.
+- **4차 — continuity(부분 효과)**: 0.7 reach sweep 에서 ep 가 **큐브를 x=3.58·z=0.02 로 테이블 밖 사출** → 5 rad/s 팔이 random-FK 의 global 자세 점프를 통과하며 큐브를 쳐냄. `--continuity_weight` 0.015→**0.05**(기본값化) 로 **flinging 정성적으로 크게 감소**(매끄러운 궤적). 이건 견고한 개선.
+- **🔴🔴 5차 — 측정 함정 발견(중요)**: continuity 0.05 가 seed7 sweep 에서 평균 3.0/4(all-4 40%) 로 보였으나, **재현 안 됨**:
+  - 신선한 단일 seed 11~16 = **1,1,1,1,1,0 (평균 0.83, all-4 0/6)**.
+  - 같은 seed7 단일 ep0 를 여러 번 → 2/4 지만 **성공 큐브·step 수가 매번 다름**(Cube1,4 ↔ Cube1,2; 7684↔9853 steps). 같은 초기 레이아웃인데 결과가 다름.
+  - **결론: GPU PhysX 가 non-deterministic + grasp 가 marginal → 같은 시나리오도 물리 노이즈만으로 1/4↔3/4 뒤집힘.** 5-ep sweep 은 분산이 커 신뢰 불가. carryover 는 아님(매 reset `start_inside=0` 확인).
+  - **정직한 종합 평균 ≈ 1.5/4, all-4 ≈ 10%, 분산 큼.** continuity 의 실제 이득은 baseline(1.4) 대비 작음(노이즈에 묻힘). 과거 "3.0 돌파" 는 lucky sweep artifact.
+- **🚧 블로커(근본)**: **open-loop SM + marginal 2.5cm 큐브 grasp + sim non-determinism → 8~9/10 all-4 도달 불가.** 20260605 의 4/4 는 DR-OFF(고정 유리 위치)라 재현됐던 것. full-DR 의 위치 변동이 marginal zone 을 자주 만남.
+- **실패한 개선 시도(모두 노이즈/회귀)**: tilt_weight, slow-arm, descend-settle+tilt, place 튜닝(offset/height), 깊은 descend. 거의 전부 cont05 대비 회귀 또는 무차이.
+- **deliverable 현실**: joint_fk + full-DR + raster + cycles2 + continuity 0.05 = **정직하게 평균 ~1.5/4, all-4 ~10%**. flinging 은 줄었으나 grip 신뢰성이 근본 한계.
+- **권고(8~9/10 위해선 튜닝 너머 필요)**: ① closed-loop grasp 검증(잡았는지 확인 후 진행, AABB 기반 측면정렬 보정) ② 그리퍼/큐브 물리 재튜닝(squeeze effort, 큐브 크기/마찰, contact offset) ③ 정직한 reachable DR 엔벨로프 특성화(teleop 도 못 미치는 가장자리 제외) ④ teleop 데이터 기반 학습 정책(BC/RL) — 원래 마스터플랜 방향. **사용자 판단 필요한 전략 분기.**
+- **남은 일**: ① determinism 최종 확인(seed7 단일 2회, `determ_A/B.json`) ② 위 권고 중 방향 결정(사용자) ③ 방향 정해지면 그에 맞춰 진행.
 
 ---
 
