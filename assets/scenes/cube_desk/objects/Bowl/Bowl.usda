@@ -94,11 +94,11 @@ def Xform "Bowl" (
     )
     {
         uniform token axis = "Z"
-        float3[] extent = [(-0.0325, -0.0325, -0.006), (0.0325, 0.0325, 0.006)]
-        double height = 0.012
+        float3[] extent = [(-0.052, -0.052, -0.009), (0.052, 0.052, 0.009)]
+        double height = 0.018000000000000002
         rel material:binding = </Bowl/Looks/BowlBlue>
-        double radius = 0.0325
-        double3 xformOp:translate = (0, 0, 0.006)
+        double radius = 0.052000000000000005
+        double3 xformOp:translate = (0, 0, 0.009000000000000001)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 }

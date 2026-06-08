@@ -51,30 +51,31 @@ MATERIALS = {
 }
 
 # 큐브 4개 scene-local 배치 (이름, translate, yaw°). 매트 앞쪽에 흩뿌림.
+# z = 매트 윗면(scene-local 0.004) + 큐브 반높이 + slack(0.001).
+#   30mm: 0.004 + 0.015 + 0.001 = 0.020,  40mm: 0.004 + 0.020 + 0.001 = 0.025
 CUBES = (
-    ("Cube1", (-0.50, 0.08, 0.025), 20.0),   # 작은 큐브 40mm
-    ("Cube2", (-0.22, 0.06, 0.025), -35.0),  # 작은 큐브 40mm
-    ("Cube3", (-0.46, 0.17, 0.030), 50.0),   # 큰  큐브 50mm
-    ("Cube4", (-0.27, 0.14, 0.030), -20.0),  # 큰  큐브 50mm
+    ("Cube1", (-0.50, 0.08, 0.020), 20.0),   # 작은 큐브 30mm
+    ("Cube2", (-0.22, 0.06, 0.020), -35.0),  # 작은 큐브 30mm
+    ("Cube3", (-0.46, 0.17, 0.025), 50.0),   # 큰  큐브 40mm
+    ("Cube4", (-0.27, 0.14, 0.025), -20.0),  # 큰  큐브 40mm
 )
 
 # 그릇 scene-local (바닥 중심).
 BOWL_LOCAL: tuple[float, float, float] = (-0.58, 0.26, 0.010)
 
 CUBE_SCALES: dict[str, tuple[float, float, float]] = {
-    "Cube1": (0.04, 0.04, 0.04),
-    "Cube2": (0.04, 0.04, 0.04),
-    "Cube3": (0.05, 0.05, 0.05),
-    "Cube4": (0.05, 0.05, 0.05),
+    "Cube1": (0.03, 0.03, 0.03),
+    "Cube2": (0.03, 0.03, 0.03),
+    "Cube3": (0.04, 0.04, 0.04),
+    "Cube4": (0.04, 0.04, 0.04),
 }
 
 # ── 물리 상수 (docs/GRASP_PHYSICS.md 근거 — 임의 변경 금지) ──────────────────
-# 큐브 질량 — 크기별 차등. 의자다리 커버 폼은 속이 약간 비어 있어 부피 완전비례
-#   (50mm 큐브면 ~68 g)보다 가볍게, 쉘(표면적)비례에 가깝게 잡는다.
-#   40mm(Cube1/2): 35 g, 50mm(Cube3/4): 55 g.
+# 큐브 질량 — 크기별 차등. 의자다리 커버 폼은 속이 약간 비어 부피 완전비례보다
+#   가볍게, 쉘(표면적 ∝ 변²)비례로 잡는다. 30mm(Cube1/2): 20 g, 40mm(Cube3/4): 35 g.
 CUBE_MASSES: dict[str, float] = {
-    "Cube1": 0.035, "Cube2": 0.035,
-    "Cube3": 0.055, "Cube4": 0.055,
+    "Cube1": 0.020, "Cube2": 0.020,
+    "Cube3": 0.035, "Cube4": 0.035,
 }
 CONTACT_OFFSET_DEFAULT = 0.004      # 정적·두꺼운 면(책상/매트/그릇)
 CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용
@@ -513,15 +514,20 @@ def author_bowl() -> "Usd.Stage":
     _bind_visual(wall.GetPrim(), bowl_blue)
 
     # 시각 바닥 disk — 벽 mesh 는 바닥이 뚫려 있으므로 Cylinder 로 막는다(충돌 없음).
+    #   벽이 z_base 바로 위에서 곡면으로 벌어져 r_bottom 짜리 disk 로는 그 안쪽 띠가
+    #   안 덮여 테두리 틈이 보인다. 반경을 키우고(BOWL_R_BOTTOM*1.6) top 을 캐비티
+    #   바닥(z_base+floor)까지 올려 벽 안쪽과 겹쳐 틈을 가린다(double-sided 벽이 가림).
+    bottom_r = BOWL_R_BOTTOM * 1.6
+    bottom_h = BOWL_Z_BASE + BOWL_FLOOR_THICKNESS
     bottom = UsdGeom.Cylinder.Define(stage, "/Bowl/Bottom")
     bottom.CreateAxisAttr(UsdGeom.Tokens.z)
-    bottom.CreateRadiusAttr(BOWL_R_BOTTOM)
-    bottom.CreateHeightAttr(BOWL_Z_BASE)
+    bottom.CreateRadiusAttr(bottom_r)
+    bottom.CreateHeightAttr(bottom_h)
     bottom.CreateExtentAttr(
-        [Gf.Vec3f(-BOWL_R_BOTTOM, -BOWL_R_BOTTOM, -BOWL_Z_BASE * 0.5),
-         Gf.Vec3f(BOWL_R_BOTTOM, BOWL_R_BOTTOM, BOWL_Z_BASE * 0.5)]
+        [Gf.Vec3f(-bottom_r, -bottom_r, -bottom_h * 0.5),
+         Gf.Vec3f(bottom_r, bottom_r, bottom_h * 0.5)]
     )
-    _set_xform(bottom, translate=(0.0, 0.0, BOWL_Z_BASE * 0.5))
+    _set_xform(bottom, translate=(0.0, 0.0, bottom_h * 0.5))
     _bind_visual(bottom.GetPrim(), bowl_blue)
 
     # 충돌: watertight shell + convexDecomposition (num_envs>1 안정; SDF 는 멀티 env

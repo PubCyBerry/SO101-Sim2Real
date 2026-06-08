@@ -191,7 +191,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 20
-        double3 xformOp:translate = (1.7000000000000002, -0.44, 0.73)
+        double3 xformOp:translate = (1.7000000000000002, -0.44, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
 
@@ -200,7 +200,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -35
-        double3 xformOp:translate = (1.9800000000000002, -0.46, 0.73)
+        double3 xformOp:translate = (1.9800000000000002, -0.46, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
 
@@ -209,7 +209,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 50
-        double3 xformOp:translate = (1.7400000000000002, -0.35, 0.735)
+        double3 xformOp:translate = (1.7400000000000002, -0.35, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
 
@@ -218,7 +218,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -20
-        double3 xformOp:translate = (1.9300000000000002, -0.38, 0.735)
+        double3 xformOp:translate = (1.9300000000000002, -0.38, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
     }
 }
