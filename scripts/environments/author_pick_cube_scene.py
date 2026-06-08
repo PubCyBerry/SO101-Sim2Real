@@ -82,17 +82,18 @@ CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용
 CUBE_BEVEL: float = 0.003           # 큐브 모서리 챔퍼 3mm (시각 전용)
 BOWL_MASS: float = 0.25             # kg, 약 250 g 플라스틱 그릇
 
-# 그릇 곡면 프로파일 — r(t) = r_bottom + (r_top - r_bottom) * t^0.2, z(t) = z_base + depth * t.
+# 그릇 곡면 프로파일 — spherical cap(_profile_r). z(t) = z_base + depth * t.
+#   외형 높이(바닥 외면~윗면) = z_base + depth = 0.070 = 7cm.
 BOWL_R_BOTTOM: float = 0.0325       # 바닥 반경 (바닥 지름 65mm)
 BOWL_R_TOP: float = 0.075           # 상단 반경 (위 지름 150mm)
-BOWL_Z_BASE: float = 0.012          # 바닥 두께
-BOWL_DEPTH: float = 0.058           # 벽 높이
+BOWL_Z_BASE: float = 0.005          # 바닥(외면) 두께 5mm — 실물처럼 얇게
+BOWL_DEPTH: float = 0.065           # 벽 높이 (z_base+depth=0.070=7cm 유지)
 BOWL_LATS: int = 20                 # 시각 mesh 위도 밴드 수
 BOWL_LONS: int = 24                 # 시각/충돌 mesh 경도 분할 수
 
 # watertight 충돌 mesh 파라미터.
 BOWL_WALL_THICKNESS: float = 0.004  # 벽 두께 4mm (외벽-내벽 간격)
-BOWL_FLOOR_THICKNESS: float = 0.006 # 캐비티 바닥이 z_base 위로 올라오는 높이 6mm
+BOWL_FLOOR_THICKNESS: float = 0.003 # 캐비티 바닥이 z_base 위로 올라오는 높이 3mm
 # 그릇 충돌 = convexDecomposition. SDF triangle mesh 는 num_envs>1 에서 per-instance
 #   cooking 비용·불안정(crash)으로 부적합(Isaac Lab RL 표준은 convex 계열). watertight
 #   두께 shell 을 여러 convex hull 로 분해하되, shrinkWrap + 충분한 maxConvexHulls/
@@ -119,9 +120,16 @@ def _shift(pos: tuple[float, float, float]) -> tuple[float, float, float]:
     return (pos[0] + SCENE_OFFSET[0], pos[1] + SCENE_OFFSET[1], pos[2] + SCENE_OFFSET[2])
 
 
-def _profile_r(t: float, r_bottom: float, r_top: float) -> float:
-    """그릇 자오선 반경 프로파일 (U자 곡선)."""
-    return r_bottom + (r_top - r_bottom) * (t ** 0.2)
+def _profile_r(t: float, r_bottom: float, r_top: float, depth: float) -> float:
+    """그릇 자오선 반경 프로파일 — spherical cap(반구형 사발 곡면).
+
+    바닥(t=0)에서 r_bottom, 위(t=1)에서 r_top 을 지나는 원호. 바닥 근처는
+    완만하고 위로 갈수록 가팔라져 실제 반구 사발 곡면을 재현한다(t^0.2 의
+    '중화냄비형 급벽'을 대체). 구 중심 z_c·반지름 R 은 두 끝점으로 결정.
+    """
+    z_c = (r_top ** 2 + depth ** 2 - r_bottom ** 2) / (2.0 * depth)
+    rr = (r_bottom ** 2 + z_c ** 2) - (depth * t - z_c) ** 2
+    return math.sqrt(max(0.0, rr))
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +363,7 @@ def _bowl_wall_geometry(
     pts: list[tuple[float, float, float]] = []
     for lat in range(lats + 1):
         t = lat / lats
-        r = _profile_r(t, r_bottom, r_top)
+        r = _profile_r(t, r_bottom, r_top, depth)
         z = z_base + depth * t
         for lon in range(lons):
             a = lon * math.tau / lons
@@ -393,7 +401,7 @@ def _bowl_collision_geometry(
     outer_base = 0
     for lat in range(lats + 1):
         t = lat / lats
-        r = _profile_r(t, r_bottom, r_top)
+        r = _profile_r(t, r_bottom, r_top, depth)
         z = z_base + depth * t
         for lon in range(lons):
             a = lon * math.tau / lons
@@ -405,7 +413,7 @@ def _bowl_collision_geometry(
     cavity_depth = depth - floor_thickness  # 캐비티 top = z_base + depth (외벽 top 과 동일)
     for lat in range(lats + 1):
         t = lat / lats
-        r = max(0.0005, _profile_r(t, r_bottom, r_top) - wall_thickness)
+        r = max(0.0005, _profile_r(t, r_bottom, r_top, depth) - wall_thickness)
         z = cavity_z0 + cavity_depth * t
         for lon in range(lons):
             a = lon * math.tau / lons
