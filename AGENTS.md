@@ -118,7 +118,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | 스크립트 | 내용 |
 |---|---|
 | `environments/list_envs.py` | leisaac 등록 환경 일람 |
-| `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author (pxr.Sdf, isaac 불필요) |
+| `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. **펜**=pxr.Sdf 문자열 조립(isaac 불필요). **큐브**=공식 pxr/PhysxSchema 스키마 API. PhysxSchema 가 isaacsim 번들 플러그인이라 `isaaclab.app.AppLauncher` headless 부팅이 필요 → `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/author_pick_cube_scene.py`. 큐브 조명은 scene.usd 가 직접 author(`/Scene/DomeLight`+`/Scene/KeyLight`), 그릇 충돌은 watertight mesh + SDF(`approximation="sdf"`, PhysxSDFMeshCollisionAPI) |
 | `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(2×2 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
@@ -131,7 +131,7 @@ USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성
 ## Python 패키지 / 의존성
 
 - **패키지 이름** `sim_to_real` (`pyproject.toml`). `[build-system] requires=["setuptools<82"]`, `[tool.setuptools.packages.find] where=["src"]` 로 `src/sim_to_real/` editable 설치.
-- **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, `usd-core>=26.5` (순수 Python — isaac 그룹 없이도 씬 author/검증 가능하도록 공용).
+- **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, `usd-core>=26.5` (순수 Python USD 작성·검증용 공용. 펜 author·USD 구조 검증은 usd-core 만으로 가능. 단 `author_pick_cube_scene.py` 는 PhysxSchema 정식 API 를 써 isaac 그룹(`uv run --group isaac`) 필요).
 - **`leisaac`** 는 `[tool.uv.sources]` 의 git tag `v0.4.0` 에서 설치 (vendored 사본 없음).
 
 | 의존성 그룹 | 내용 |

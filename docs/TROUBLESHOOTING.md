@@ -2279,3 +2279,35 @@ SO101-Leader connected.
 - `Chain.from_urdf_file(..., base_elements=["base_link"], active_links_mask=[False]+[True]*5+[False])` 가 `gripper`(revolute) 가지 대신 `gripper_frame_joint`(fixed) 가지를 자동 선택 → EE = `gripper_frame_link` 로 Lula 와 일치.
 
 > 한계(공통): 5-DOF position-only IK 는 큐브별 grasp 자세 편차가 커서 **4-cube 신뢰성은 검증된 `joint_fk` direct FSM 이 우위**다. lula_ik/ikpy 는 단일 큐브 검증·대안 백엔드 용도.
+
+## Isaac Sim headless 씬 author/검증 스크립트가 부팅 후 hang (단일 GPU 경합 / app.close 좀비)
+
+**현상**: `author_pick_cube_scene.py`(PhysxSchema 정식 API 라 `AppLauncher` headless 부팅 필요) 또는 `gym.make` 검증 스크립트를 headless 로 띄우면, GPU 배너·CUDA P2P 검증까지 로그가 찍힌 뒤 더 진행하지 않고 멈춘다. 프로세스는 살아 있고 GPU 메모리(수백 MB~수 GB)를 점유하지만 CPU 0~3% 로 idle. USD export 나 결과 파일은 멈추기 전에 기록되기도 한다.
+
+```
+... Running CUDA peer-to-peer bandwidth and latency validation.
+   CPU     0
+     0   1.65
+(이후 진전 없음 — MAKE_OK/Authored 미출력)
+Exception ignored in: <function ManagerBasedEnv.__del__ ...>
+AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 부산물(2차)
+```
+
+### 원인
+
+1. **첫 부팅 EULA**: NVIDIA Omniverse Kit 첫 실행은 EULA 동의 프롬프트에서 비대화형 입력을 기다려 멈춘다.
+2. **단일 GPU 동시 isaacsim 경합**: 이 서버는 GPU 1장(RTX PRO 5000). worktree 병렬 작업 등으로 **두 isaacsim 세션이 동시에 떠 있으면** 늦게 뜬 쪽의 `gym.make`(USD 로드+물리 씬 생성)가 GPU 자원 경합으로 hang 한다. (`nvidia-smi --query-compute-apps` 에 isaacsim python 이 2개 보이면 이 경우.)
+3. **app.close() 좀비**: 이 환경에서 isaacsim `simulation_app.close()` 가 자주 hang → `timeout` 으로 죽여도 좀비가 GPU lock 을 안 놓아 **다음 부팅을 막는다**(첫 부팅만 성공하고 이후 hang 하는 패턴).
+4. **SDF 베이킹**: 그릇 `PhysxSDFMeshCollisionAPI` `sdfResolution=256` 은 `gym.make` 시 SDF voxel 베이킹이 분 단위라 hang 으로 오인된다.
+
+### 해결 방법
+
+1. `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python ...` (EULA 자동 동의).
+2. 실행 전 `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv` 로 **다른 isaacsim 세션이 GPU 를 안 쓰는지 확인** 후 단독 실행. 떠 있으면 끝나길 대기.
+3. 좀비 정리는 **PID 직접** `kill -KILL <pid>` (`pkill -f author_pick_cube` 는 grep 자기 명령줄까지 매치해 셸이 죽으니 금지). author/검증 결과는 `app.close()` 전에 파일로 남기므로 timeout kill 해도 결과 파일은 유효.
+4. `sdfResolution` 은 150mm 단순 곡면 그릇 기준 `128` 로 충분(256→128 로 베이킹 단축).
+5. **USD 속성만 바꿀 때는 author 재실행(부팅) 불필요** — `usd-core` 의 `Usd.Stage.Open(path)` → `attr.Set(...)` → `GetRootLayer().Save()` 로 .usda/.usd 직접 패치(예: `physics:mass`, `physxSDFMeshCollision:sdfResolution`).
+
+### 확인 방법
+
+`nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.

@@ -9,23 +9,25 @@ def Xform "Cube4" (
     prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysxRigidBodyAPI"]
 )
 {
-    float physics:mass = 0.035
     bool physics:kinematicEnabled = 0
+    float physics:mass = 0.035
     bool physics:rigidBodyEnabled = 1
+    float physxRigidBody:angularDamping = 1.5
     bool physxRigidBody:disableGravity = 0
     bool physxRigidBody:enableCCD = 1
-    float physxRigidBody:angularDamping = 1.5
     float physxRigidBody:linearDamping = 1.5
+    float physxRigidBody:maxDepenetrationVelocity = 1
     float physxRigidBody:sleepThreshold = 0.0005
-    float physxRigidBody:stabilizationThreshold = 0.0005
-    float physxRigidBody:maxDepenetrationVelocity = 1.0
     int physxRigidBody:solverPositionIterationCount = 32
     int physxRigidBody:solverVelocityIterationCount = 8
+    float physxRigidBody:stabilizationThreshold = 0.0005
+
     def Scope "Looks"
     {
         def Material "GrayFoam"
         {
             token outputs:surface.connect = </Cube4/Looks/GrayFoam/Preview.outputs:surface>
+
             def Shader "Preview"
             {
                 uniform token info:id = "UsdPreviewSurface"
@@ -35,40 +37,49 @@ def Xform "Cube4" (
                 token outputs:surface
             }
         }
+
         def Material "CubeFriction" (
             prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
         )
         {
-            float physics:staticFriction = 1.8
             float physics:dynamicFriction = 1.5
             float physics:restitution = 0
-            uniform token physxMaterial:frictionCombineMode = "max"
+            float physics:staticFriction = 1.8
+            uniform token physxMaterial:frictionCombineMode = "average"
             uniform token physxMaterial:restitutionCombineMode = "min"
         }
     }
-    def Mesh "Visual"
-    {
-        uniform int doubleSided = 1
-        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3]
-        int[] faceVertexIndices = [0, 3, 9, 6, 12, 18, 21, 15, 1, 13, 16, 4, 7, 10, 22, 19, 2, 8, 20, 14, 5, 17, 23, 11, 0, 3, 4, 1, 6, 7, 10, 9, 12, 13, 16, 15, 18, 21, 22, 19, 0, 2, 8, 6, 3, 9, 11, 5, 12, 18, 20, 14, 15, 17, 23, 21, 1, 13, 14, 2, 4, 5, 17, 16, 7, 8, 20, 19, 10, 22, 23, 11, 0, 1, 2, 3, 5, 4, 6, 8, 7, 9, 10, 11, 12, 14, 13, 15, 16, 17, 18, 19, 20, 21, 23, 22]
-        point3f[] points = [(0.025, 0.022, 0.022), (0.022, 0.025, 0.022), (0.022, 0.022, 0.025), (0.025, 0.022, -0.022), (0.022, 0.025, -0.022), (0.022, 0.022, -0.025), (0.025, -0.022, 0.022), (0.022, -0.025, 0.022), (0.022, -0.022, 0.025), (0.025, -0.022, -0.022), (0.022, -0.025, -0.022), (0.022, -0.022, -0.025), (-0.025, 0.022, 0.022), (-0.022, 0.025, 0.022), (-0.022, 0.022, 0.025), (-0.025, 0.022, -0.022), (-0.022, 0.025, -0.022), (-0.022, 0.022, -0.025), (-0.025, -0.022, 0.022), (-0.022, -0.025, 0.022), (-0.022, -0.022, 0.025), (-0.025, -0.022, -0.022), (-0.022, -0.025, -0.022), (-0.022, -0.022, -0.025)]
-        uniform token subdivisionScheme = "none"
-        rel material:binding = </Cube4/Looks/GrayFoam>
-    }
-    def Cube "Box" (
-        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
+
+    def Mesh "Visual" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
-        token visibility = "invisible"
+        uniform bool doubleSided = 1
+        float3[] extent = [(-0.02, -0.02, -0.02), (0.02, 0.02, 0.02)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [0, 3, 9, 6, 12, 18, 21, 15, 1, 13, 16, 4, 7, 10, 22, 19, 2, 8, 20, 14, 5, 17, 23, 11, 0, 3, 4, 1, 6, 7, 10, 9, 12, 13, 16, 15, 18, 21, 22, 19, 0, 2, 8, 6, 3, 9, 11, 5, 12, 18, 20, 14, 15, 17, 23, 21, 1, 13, 14, 2, 4, 5, 17, 16, 7, 8, 20, 19, 10, 22, 23, 11, 0, 1, 2, 3, 5, 4, 6, 8, 7, 9, 10, 11, 12, 14, 13, 15, 16, 17, 18, 19, 20, 21, 23, 22]
+        rel material:binding = </Cube4/Looks/GrayFoam>
+        point3f[] points = [(0.02, 0.017, 0.017), (0.017, 0.02, 0.017), (0.017, 0.017, 0.02), (0.02, 0.017, -0.017), (0.017, 0.02, -0.017), (0.017, 0.017, -0.02), (0.02, -0.017, 0.017), (0.017, -0.02, 0.017), (0.017, -0.017, 0.02), (0.02, -0.017, -0.017), (0.017, -0.02, -0.017), (0.017, -0.017, -0.02), (-0.02, 0.017, 0.017), (-0.017, 0.02, 0.017), (-0.017, 0.017, 0.02), (-0.02, 0.017, -0.017), (-0.017, 0.02, -0.017), (-0.017, 0.017, -0.02), (-0.02, -0.017, 0.017), (-0.017, -0.02, 0.017), (-0.017, -0.017, 0.02), (-0.02, -0.017, -0.017), (-0.017, -0.02, -0.017), (-0.017, -0.017, -0.02)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Cube "Box" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI", "MaterialBindingAPI"]
+    )
+    {
+        float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+        rel material:binding:physics = </Cube4/Looks/CubeFriction> (
+            bindMaterialAs = "weakerThanDescendants"
+        )
         bool physics:collisionEnabled = 1
         float physxCollision:contactOffset = 0.002
+        float physxCollision:minTorsionalPatchRadius = 0.001
         float physxCollision:restOffset = 0
         float physxCollision:torsionalPatchRadius = 0.004
-        float physxCollision:minTorsionalPatchRadius = 0.001
         double size = 1
-        rel material:binding:physics = </Cube4/Looks/CubeFriction>
-        double3 xformOp:translate = (0, 0, 0)
-        float3 xformOp:scale = (0.05, 0.05, 0.05)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        token visibility = "invisible"
+        float3 xformOp:scale = (0.04, 0.04, 0.04)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
     }
 }
+
