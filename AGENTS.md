@@ -10,6 +10,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/PATH_A_NATIVE.md` | Windows 네이티브 실행 |
 | `docs/PATH_B_DOCKER.md` | Docker 실기기 경로 |
 | `docs/PATH_C_ISAAC_SIM.md` | Isaac Sim 시뮬 경로 |
+| `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 

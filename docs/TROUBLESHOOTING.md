@@ -34,6 +34,12 @@
 - [Sim-to-Real 그리퍼·펜이 매트/책상을 관통하거나 reset 시 튀어오름 (정적 객체 contactOffset 디폴트)](#sim-to-real-그리퍼펜이-매트책상을-관통하거나-reset-시-튀어오름-정적-객체-contactoffset-디폴트)
 - [Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)](#sim-to-real-펜이-펜통-안에서-spawn-되어-겹침-펜펜통-sampling-영역-분리-누락)
 - [Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)](#sim-to-real-펜통-호-sampling-이-매트책상-밖으로-나감-radius-와-default-좌표-불일치)
+- [ROS 2 (WSL2) 노드 간 토픽 통신 불가 — lo 에 MULTICAST 없어 DDS discovery 실패](#ros-2-wsl2-노드-간-토픽-통신-불가--lo-에-multicast-없어-dds-discovery-실패)
+- [ROS 2 colcon 빌드가 `catkin_pkg` 못 찾음 (dotfiles 의 ~/.local python 이 ament 가로챔)](#ros-2-colcon-빌드가-catkin_pkg-못-찾음-dotfiles-의-local-python-이-ament-가로챔)
+- [ROS 2 빌드 스크립트 `set -u` 가 setup.bash 와 충돌 (AMENT_TRACE_SETUP_FILES unbound)](#ros-2-빌드-스크립트-set--u-가-setupbash-와-충돌-ament_trace_setup_files-unbound)
+- [ROS 2 (WSL2) feetech read timeout 1회로 hardware deactivate (USB-IP 레이턴시)](#ros-2-wsl2-feetech-read-timeout-1회로-hardware-deactivate-usb-ip-레이턴시)
+- [ROS 2 `libfeetech_ros2_driver.so: file too short` (빌드 캐시 손상)](#ros-2-libfeetech_ros2_driverso-file-too-short-빌드-캐시-손상)
+- [ROS 2 (WSL2) `ros2 topic/node list` 가 빈 결과 (stale daemon)](#ros-2-wsl2-ros2-topicnode-list-가-빈-결과-stale-daemon)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2203,6 +2209,219 @@ uv run scripts\environments\teleoperation\teleop_se3_agent.py `
 
 `B`/`R` reset 을 20 회 반복하며 펜통이 매번 매트 검은 영역 안에 떨어지고,
 정면 0° 부근부터 좌우 30° 가장자리까지 골고루 sampling 되면 정상.
+
+---
+
+## ROS 2 (WSL2) 노드 간 토픽 통신 불가 — lo 에 MULTICAST 없어 DDS discovery 실패
+
+**현상**: WSL2 Ubuntu 에서 ROS 2 launch 는 뜨는데 `controller_manager` 가 `robot_description` 토픽을 영영 못 받아 컨트롤러가 안 올라온다. `ros2 node list` / `ros2 topic echo` 도 빈 결과. `move_group` 은 정상(파라미터로 robot_description 을 받기 때문).
+
+**오류 메시지**:
+
+```
+[ros2_control_node] [WARN] [follower.controller_manager]: Waiting for data on 'robot_description' topic to finish initialization
+[spawner] [WARN] [...]: Could not contact service /follower/controller_manager/list_controllers
+```
+
+(talker/listener 로 격리 테스트하면 talker 는 Publishing 하는데 listener 가 `I heard` 0 회)
+
+### 원인
+
+WSL2 의 loopback 인터페이스 `lo` 에 **MULTICAST 플래그가 없다**.
+
+```
+$ ip link show lo
+1: lo: <LOOPBACK,UP,LOWER_UP> ...   # MULTICAST 없음
+```
+
+ROS 2 기본 DDS(FastDDS/CycloneDDS)는 multicast 로 participant discovery 를 하는데, `lo` 가 multicast 를 못 하므로 같은 호스트 내 노드끼리도 서로를 발견하지 못한다. `ROS_LOCALHOST_ONLY=1`, `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`, FastDDS UDP-only(`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`) 모두 multicast 의존이라 실패. RMW 종류(FastDDS↔CycloneDDS)와 무관하다.
+
+### 해결 방법
+
+CycloneDDS 를 multicast 없이 **unicast localhost peer** 로 설정한다. `ros2_ws/setup/cyclonedds_localhost.xml`:
+
+```xml
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces><NetworkInterface name="lo" multicast="false"/></Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <Peers><Peer address="localhost"/></Peers>
+      <ParticipantIndex>auto</ParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
+```
+
+```bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://<repo>/ros2_ws/setup/cyclonedds_localhost.xml
+```
+
+`ros2_ws/setup/env.sh` 가 이 두 변수를 자동 export 하며, `04_setup_bashrc.sh` 가 bashrc 에 등록한다.
+
+### 확인 방법
+
+```bash
+source <repo>/ros2_ws/setup/env.sh
+ros2 run demo_nodes_cpp talker & ros2 run demo_nodes_py listener &
+# listener 에 'I heard' 가 찍히면 OK
+```
+
+mock launch 에서 컨트롤러 3개가 "Configured and activated" 되면 해결.
+
+---
+
+## ROS 2 colcon 빌드가 `catkin_pkg` 못 찾음 (dotfiles 의 ~/.local python 이 ament 가로챔)
+
+**현상**: `colcon build` 가 `ament_cmake` 패키지(예: `so101_moveit_config`)에서 실패.
+
+**오류 메시지**:
+
+```
+ModuleNotFoundError: No module named 'catkin_pkg'
+CMake Error at .../ament_package_xml.cmake:95 (message):
+  execute_process(/home/<user>/.local/bin/python3.11
+  .../package_xml_2_cmake.py ...) returned error code 1
+```
+
+### 원인
+
+사용자 dotfiles 가 PATH 앞쪽에 `~/.local/bin/python3.11`(또는 Windows interop 경로의 python)을 둬서, ament/cmake 의 `FindPython3` 가 시스템 python(`/usr/bin/python3`, Ubuntu 24.04=3.12, `catkin_pkg` 보유) 대신 그 python 을 고른다. 그 python 에는 ROS 의존 모듈이 없다.
+
+### 해결 방법
+
+colcon 빌드 시 시스템 python 을 명시한다.
+
+```bash
+colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+`ros2_ws/setup/03_build_workspace.sh` 에 반영됨.
+
+### 확인 방법
+
+`/usr/bin/python3 -c "import catkin_pkg; print(catkin_pkg.__file__)"` 가 `/usr/lib/python3/dist-packages/...` 를 출력하고, 빌드가 통과하면 정상.
+
+---
+
+## ROS 2 빌드 스크립트 `set -u` 가 setup.bash 와 충돌 (AMENT_TRACE_SETUP_FILES unbound)
+
+**현상**: `set -euo pipefail` 을 쓴 빌드 스크립트가 `source /opt/ros/jazzy/setup.bash` 첫 줄에서 즉시 죽는다.
+
+**오류 메시지**:
+
+```
+/opt/ros/jazzy/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable
+```
+
+### 원인
+
+ROS 의 `setup.bash` 계열은 미설정 변수를 참조하는 구간이 있어 `set -u`(nounset)와 호환되지 않는다.
+
+### 해결 방법
+
+빌드 스크립트에서 nounset 을 빼고 `set -eo pipefail` 만 쓴다. (또는 source 전후로 `set +u` / `set -u`.)
+
+### 확인 방법
+
+스크립트가 source 단계를 넘어 빌드까지 진행되면 정상.
+
+---
+
+## ROS 2 (WSL2) feetech read timeout 1회로 hardware deactivate (USB-IP 레이턴시)
+
+**현상**: 실기기(`hardware_type:=real`) launch 시 컨트롤러가 잠깐 activate 됐다가, 한 번의 read timeout 으로 hardware 전체가 deactivate 되며 죽는다. 간헐적으로 발생.
+
+**오류 메시지**:
+
+```
+FeetechHardwareInterface::read -> CommunicationProtocol::sync_read [... SerialPort::read_exact [Read timeout]]
+[ERROR] [follower.controller_manager]: Deactivating following hardware components as their read cycle resulted in an error: [ SO101_follower_SYSTEM ]
+```
+
+### 원인
+
+usbipd-win 의 USB/IP 는 polling 기반이라 serial round-trip 레이턴시가 수십 ms 까지 튄다. 드라이버 기본 serial timeout 이 5ms 로 매우 짧고, ros2_control 은 read 가 한 번이라도 ERROR 를 반환하면 hardware 를 deactivate 한다. 또한 `on_activate` 가 EEPROM 쓰기(`configure_joints_`) 직후 곧바로 read 를 때려 첫 read 가 실패하기 쉽다.
+
+> 참고: 모터/배선 자체는 정상이어도 발생한다. pyserial 로 1Mbps PING(`FF FF 01 02 01 FB`)을 보내 `ffff010200fc` 응답이 오면 통신 자체는 정상.
+
+### 해결 방법
+
+`feetech_ros2_driver` 와 컨트롤러 설정을 WSL2 레이턴시에 맞게 조정(이 레포에 반영):
+
+- `feetech_driver/include/feetech_driver/serial_port.hpp`: serial `timeout_` 5ms → **50ms**
+- `feetech_ros2_driver/src/feetech_ros2_driver.cpp` `on_activate`: 초기 read 전 안정화 `sleep_for(150ms)` 추가
+- `so101_bringup/config/ros2_control/follower_split_controllers.yaml`: `update_rate` 100 → **50Hz**
+
+```bash
+colcon build --symlink-install --packages-select feetech_ros2_driver so101_bringup \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+네이티브 Linux(직결 USB)에서는 레이턴시가 작아 원래 값(5ms/100Hz) 복원 가능.
+
+### 확인 방법
+
+`hardware_type:=real` launch 후 `grep -c "Read timeout" <log>` 가 0, 컨트롤러 3개가 "Configured and activated", `ros2 topic echo /follower/joint_states --no-daemon --once` 가 실제 모터 각도를 출력하면 정상.
+
+---
+
+## ROS 2 `libfeetech_ros2_driver.so: file too short` (빌드 캐시 손상)
+
+**현상**: real launch 시 hardware 플러그인 로드 실패로 controller_manager 가 예외.
+
+**오류 메시지**:
+
+```
+Failed to load library .../libfeetech_ros2_driver.so ... 
+Could not load library dlopen error: .../libfeetech_ros2_driver.so: file too short
+```
+
+### 원인
+
+빌드가 중간에 중단되거나 incremental 빌드가 꼬여 `.so` 가 0~부분 바이트로 남았다(`ls -lh` 로 보면 비정상적으로 작음). usbipd attach 가 풀린 채 빌드/실행이 얽히면서 발생하기도 한다.
+
+### 해결 방법
+
+해당 패키지의 build/install 산출물을 지우고 클린 재빌드.
+
+```bash
+rm -rf ~/so101_ros2_ws/build/feetech_ros2_driver ~/so101_ros2_ws/install/feetech_ros2_driver
+colcon build --symlink-install --packages-select feetech_ros2_driver \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+### 확인 방법
+
+`ls -lh ~/so101_ros2_ws/install/feetech_ros2_driver/lib/libfeetech_ros2_driver.so` 가 수 MB(정상 ≈2.4MB) 면 OK.
+
+---
+
+## ROS 2 (WSL2) `ros2 topic/node list` 가 빈 결과 (stale daemon)
+
+**현상**: launch 노드는 살아있고 RViz↔MoveIt 제어도 되는데, 별도 터미널의 `ros2 topic list` / `ros2 node list` / `ros2 topic echo` 가 빈 결과.
+
+### 원인
+
+`ros2` cli 의 데몬이 과거(잘못된 RMW/CYCLONEDDS_URI 환경, 디버깅 중)에 한 번 떠서 캐시된 상태로 남아, 현재 cyclonedds-localhost 환경의 노드를 보지 못한다.
+
+### 해결 방법
+
+데몬을 우회한다.
+
+```bash
+ros2 topic list --no-daemon
+ros2 topic echo /follower/joint_states --no-daemon --once
+```
+
+또는 `ros2 daemon stop` 후 env.sh 가 적용된 셸에서 재시작. RViz↔MoveIt 의 제어 통신은 데몬과 무관하므로 영향 없다.
+
+### 확인 방법
+
+`ros2 topic list --no-daemon` 에 `/follower/joint_states`, `/follower/robot_description` 등이 보이면 통신 자체는 정상.
 
 ---
 

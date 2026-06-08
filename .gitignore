@@ -222,3 +222,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 참조용 외부 레포 클론 (PATH D 등에서 활용, nested git repos — 커밋 대상 아님)
+ref_repos/
