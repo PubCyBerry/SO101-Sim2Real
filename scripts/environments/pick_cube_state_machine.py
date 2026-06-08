@@ -98,7 +98,7 @@ parser.add_argument(
         "자세를 선택해 큐브를 감싸게 한다. 0=위치만(tilt 자유). CONTEXT 검증: 모터 jaw 바닥 z<큐브 바닥."
     ),
 )
-parser.add_argument("--grasp_floor_z", type=float, default=0.705, help="모터 jaw가 내려갈 책상 상판 z (tilt penalty 기준)")
+parser.add_argument("--grasp_floor_z", type=float, default=0.709, help="모터 jaw가 내려갈 매트 윗면 z (tilt penalty 기준)")
 
 # IK / 허용 오차
 parser.add_argument("--ik_lambda", type=float, default=0.1, help="DLS damping (클수록 안정/느림)")
@@ -177,8 +177,10 @@ from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 
 ARM_DOF = 5
-CUBE_DESK_TOP_Z = 0.705
-CUBE_HALF_Z = 0.0125
+# 매트 윗면 world z (scene 16ff404). 놓인 큐브 바닥 = 이 값(큐브 크기 무관). grasp 판별 기준.
+CUBE_DESK_TOP_Z = 0.709
+# 큐브 크기: Cube1/2=30mm(half 0.015), Cube3/4=40mm(half 0.020). 단일 상수 대신 lift는
+# settle 초기 중심 대비 상승으로 판정(크기 무관). grasp 바닥 판별은 CUBE_DESK_TOP_Z 사용.
 
 EE_BODY_NAME = "jaw"
 # jaw body 원점 → grasp point(두 손가락 사이) 오프셋 (jaw local frame).
@@ -297,11 +299,14 @@ class SO101DiffIK:
         jac[:, 3:, :] = torch.bmm(matrix_from_quat(self._offset_rot), jac[:, 3:, :])
         return jac
 
-    def solve(self, target_pos_w: torch.Tensor, target_quat_w: torch.Tensor) -> tuple[torch.Tensor, float, float]:
+    def solve(
+        self, target_pos_w: torch.Tensor, target_quat_w: torch.Tensor, rot_weight: float | None = None
+    ) -> tuple[torch.Tensor, float, float]:
         """world target pose → arm joint target (absolute, [5]).
 
-        Weighted DLS: error 와 jacobian 의 orientation 행에 w(--rot_weight)를 곱해,
+        Weighted DLS: error 와 jacobian 의 orientation 행에 w(rot_weight)를 곱해,
         position 을 우선 만족시키고 orientation 은 약하게 유도한다.
+        rot_weight=None 이면 args.rot_weight. transport/place 는 낮게(위치 우선) 준다.
 
         Returns (q_arm_des[5], pos_err_m, rot_err_rad).
         """
@@ -321,7 +326,7 @@ class SO101DiffIK:
             ee_pos_b, ee_quat_b, tgt_pos_b, tgt_quat_b, rot_error_type="axis_angle"
         )  # (1,3), (1,3)
 
-        w = float(args.rot_weight)
+        w = float(args.rot_weight if rot_weight is None else rot_weight)
         lam = float(args.ik_lambda)
         # orientation 행/오차에 가중치 적용 (weighted DLS)
         jac_w = jac.clone()
@@ -379,9 +384,10 @@ def _step_env(env, action: torch.Tensor, *, min_gripper_effort: float | None = N
 
 # ── state 판정 ────────────────────────────────────────────────────────────────
 
-def _cube_lifted(env, cube_name: str) -> bool:
+def _cube_lifted(env, cube_name: str, rest_z: float) -> bool:
+    # 큐브 크기 무관: settle 직후 중심(rest_z) 대비 lift_min_height 이상 상승하면 들림.
     cube_z = float(env.unwrapped.scene[cube_name].data.root_pos_w[0, 2].item())
-    return cube_z > CUBE_DESK_TOP_Z + CUBE_HALF_Z + args.lift_min_height
+    return cube_z > rest_z + args.lift_min_height
 
 
 def _cube_inside_bowl(env, cube_name: str) -> bool:
@@ -614,6 +620,7 @@ def execute_joint_phase(
             break
     jaw_mz = _finger_min_z(robot, "jaw", device)
     down_dot = _approach_down_dot(robot, device)
+    ee = ik.ee_pos_w()[0]
     return {
         "phase": name,
         "steps": step + 1,
@@ -621,6 +628,7 @@ def execute_joint_phase(
         "final_joint_err_rad": round(jerr, 4),
         "down_dot": round(down_dot, 3),
         "jaw_minz": round(jaw_mz, 4),
+        "ee_w": [round(float(v), 4) for v in ee.tolist()],
         "success": reached is not None,
     }
 
@@ -639,8 +647,13 @@ def execute_phase(
     *,
     min_gripper_effort: float | None = None,
     require_pos: bool = True,
+    rot_weight: float | None = None,
 ) -> dict[str, Any]:
-    """target pose 로 DifferentialIK 이동. position 오차 ≤ tolerance 면 early-exit."""
+    """target pose 로 DifferentialIK 이동(매 step 점진, grip 유지). position 오차 ≤ tolerance 면 early-exit.
+
+    rot_weight=None 이면 args.rot_weight. transport/place 는 낮게 줘서 위치 우선 + 자세 자유.
+    target_fn 이 live(매 step 큐브-grasp point offset 보정)면 큐브를 그릇에 정렬한다.
+    """
     robot = env.unwrapped.scene["robot"]
     min_pos_err = float("inf")
     last_pos_err = float("inf")
@@ -651,7 +664,7 @@ def execute_phase(
     tgt_pos = torch.zeros(3, device=device)
     for step in range(max(1, int(max_steps))):
         tgt_pos, tgt_quat = target_fn()
-        q_arm_des, pos_err, rot_err = ik.solve(tgt_pos, tgt_quat)
+        q_arm_des, pos_err, rot_err = ik.solve(tgt_pos, tgt_quat, rot_weight=rot_weight)
         action = _build_action(robot, ik, q_arm_des, gripper_target, device)
         _step_env(env, action, min_gripper_effort=min_gripper_effort)
 
@@ -748,6 +761,9 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
         probe = _probe_orientation(env, ik, device)
         return {"success": False, "probe": probe, "cube_results": {}, "trace": []}
 
+    # settle 직후 각 큐브 중심 z (lift 판정 기준, 큐브 크기 무관)
+    rest_cube_z = {n: float(env.unwrapped.scene[n].data.root_pos_w[0, 2].item()) for n in active_names}
+
     ordered = _ordered_cubes(env, active_names)
     placed_count = 0
 
@@ -776,11 +792,11 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
             )
             d_stat.update(fk_info)
             trace.append(d_stat)
-            # grasp 성공 판별식: 모터 jaw 바닥 z < 큐브 바닥 z 면 감쌈(CONTEXT.md)
+            # grasp 성공 판별식: 모터 jaw 바닥 z < 큐브 바닥 z(=매트 윗면 CUBE_DESK_TOP_Z) 면 감쌈
             if args.phase_log:
                 jaw_mz = _finger_min_z(robot, "jaw", device)
                 fix_mz = _finger_min_z(robot, "gripper", device)
-                cube_btm = float(env.unwrapped.scene[cube_name].data.root_pos_w[0, 2].item()) - CUBE_HALF_Z
+                cube_btm = CUBE_DESK_TOP_Z
                 wrap = jaw_mz < cube_btm
                 print(
                     f"    >> {cube_name} descend: jaw_minz={jaw_mz:.4f} fix_minz={fix_mz:.4f} "
@@ -792,7 +808,7 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
             # CLOSE 후 grasp 성공 판별식: 모터 jaw 바닥 z < 큐브 바닥 z 면 감쌈
             jaw_mz = _finger_min_z(robot, "jaw", device)
             fix_mz = _finger_min_z(robot, "gripper", device)
-            cube_btm = float(env.unwrapped.scene[cube_name].data.root_pos_w[0, 2].item()) - CUBE_HALF_Z
+            cube_btm = CUBE_DESK_TOP_Z  # 놓인 큐브 바닥 = 매트 윗면 (크기 무관)
             trace.append({
                 "phase": f"{cube_name}.after_close[{attempt}]",
                 "jaw_minz": round(jaw_mz, 4),
@@ -811,7 +827,7 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
                 min_gripper_effort=args.carry_min_gripper_effort,
             ))
 
-            if _cube_lifted(env, cube_name):
+            if _cube_lifted(env, cube_name, rest_cube_z[cube_name]):
                 grasped = True
                 break
             if attempt < args.max_grasp_attempts:
@@ -821,30 +837,71 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
             cube_results[cube_name] = {"grasped": False, "placed": False}
             continue
 
+        # grip 품질: 큐브가 grasp point(손가락 사이) 중심에 물렸는가. 작을수록 place 정렬 정확.
+        gp0 = ik.ee_pos_w()[0]
+        cube0 = env.unwrapped.scene[cube_name].data.root_pos_w[0]
+        trace.append({
+            "phase": f"{cube_name}.grip_check",
+            "cube_gp_dist": round(float(torch.linalg.norm(cube0 - gp0).item()), 4),
+            "cube_gp_xy": round(float(torch.linalg.norm((cube0 - gp0)[:2]).item()), 4),
+        })
+
         xy_off = _bowl_xy_offset(device, placed_count)
-        # TRANSPORT
+
+        def _bowl_cube_target(dz: float) -> Callable[[], tuple[torch.Tensor, torch.Tensor]]:
+            # live: 매 step 큐브-grasp point xy offset 을 보정해 grasp point 목표를 정한다.
+            # → 큐브 자체가 (그릇 중심 + 배치 offset) 에 오도록. z 는 그릇 위 dz (release→낙하).
+            quat = _grasp_quat_w(device, 0.0)  # level(top-down 근사)
+
+            def fn() -> tuple[torch.Tensor, torch.Tensor]:
+                bowl = env.unwrapped.scene[BOWL_NAME].data.root_pos_w[0].clone().to(device=device)
+                bowl[:2] = bowl[:2] + xy_off
+                gp = ik.ee_pos_w()[0]
+                cube = env.unwrapped.scene[cube_name].data.root_pos_w[0]
+                off_xy = (cube[:2] - gp[:2])
+                pos = bowl.clone()
+                pos[:2] = pos[:2] - off_xy
+                pos[2] = bowl[2] + dz
+                return pos, quat
+
+            return fn
+
+        # TRANSPORT/PLACE: weighted-DLS 매 step 점진 이동(grip 유지) + 위치 우선(rot_weight 낮춤)
+        # + live 큐브 정렬. random-FK 1회 점프는 자세 급변으로 큐브를 놓쳐서 안 쓴다.
         trace.append(execute_phase(
             env, ik, device, f"{cube_name}.transport",
-            _bowl_target(env, args.transport_height, device, xy_off),
+            _bowl_cube_target(args.transport_height),
             args.gripper_closed, args.transport_steps, args.pos_tolerance,
-            min_gripper_effort=args.carry_min_gripper_effort,
+            min_gripper_effort=args.carry_min_gripper_effort, rot_weight=0.1,
         ))
-        # PLACE
         ph = args.place_height + placed_count * args.stack_place_height_increment
         trace.append(execute_phase(
             env, ik, device, f"{cube_name}.place",
-            _bowl_target(env, ph, device, xy_off),
+            _bowl_cube_target(ph),
             args.gripper_closed, args.place_steps, args.pos_tolerance,
-            min_gripper_effort=args.carry_min_gripper_effort,
+            min_gripper_effort=args.carry_min_gripper_effort, rot_weight=0.1,
         ))
+        # 큐브 상태 추적 (언제 놓치는지)
+        def _cstate(tag: str) -> None:
+            cube = env.unwrapped.scene[cube_name].data.root_pos_w[0]
+            bowl = env.unwrapped.scene[BOWL_NAME].data.root_pos_w[0]
+            trace.append({
+                "phase": f"{cube_name}.{tag}",
+                "cube_z": round(float(cube[2].item()), 4),
+                "bowl_z": round(float(bowl[2].item()), 4),
+                "xy_to_bowl": round(float(torch.linalg.norm(cube[:2] - bowl[:2]).item()), 4),
+            })
+        _cstate("at_place")
         # RELEASE (ee 고정, 그리퍼 개방)
         hold_pose(env, ik, device, args.gripper_open, args.open_steps)
+        _cstate("after_release")
         # RETREAT
         trace.append(execute_phase(
             env, ik, device, f"{cube_name}.retreat",
             _bowl_target(env, args.transport_height, device),
             args.gripper_open, args.retreat_steps, args.pos_tolerance,
         ))
+        _cstate("after_retreat")
 
         placed = _cube_inside_bowl(env, cube_name)
         if placed:
