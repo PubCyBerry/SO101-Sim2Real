@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
-CAMERAS = ("top", "wrist")
+CAMERAS = ("top", "wrist", "front")
 DEFAULT_SIM_DIR = Path("outputs/ta3_camera_renders/opus_fix5")
 DEFAULT_REAL_DIR = Path("outputs/ta3_camera_refs")
 DEFAULT_OUTPUT_DIR = Path("outputs/tc3_segmentation_overlay_preview")
@@ -33,10 +33,12 @@ MIN_FOREGROUND_BY_CAMERA = {
     # The wrist camera often sees a black cup on a black mat. Color-only
     # masking collapses there, so require a larger ratio before trusting it.
     "wrist": 0.12,
+    "front": 0.10,
 }
 ROI_PRESETS = {
     "top": (0.52, 0.55, 0.43, 0.42),
     "wrist": (0.50, 0.54, 0.45, 0.42),
+    "front": (0.50, 0.54, 0.45, 0.42),
 }
 
 

@@ -33,7 +33,8 @@ EXPECTED_JOINT_NAMES = [
     "wrist_roll.pos",
     "gripper.pos",
 ]
-EXPECTED_CAMERAS = ["top", "wrist"]
+REQUIRED_CAMERAS = ["top", "wrist"]
+OPTIONAL_CAMERAS = ["front"]
 EXPECTED_TASK = "pick up the cube and place it in the bowl"
 
 EXPECTED_CAMERA_INFO = {
@@ -58,7 +59,7 @@ REQUIRED_DATA_COLS = {
 # ---------- 검증 함수 ----------
 
 
-def validate_info(dataset_root: str, errors: list[str]) -> None:
+def validate_info(dataset_root: str, errors: list[str], warnings: list[str] | None = None) -> None:
     """meta/info.json 검증."""
     path = os.path.join(dataset_root, "meta", "info.json")
     if not os.path.exists(path):
@@ -96,23 +97,32 @@ def validate_info(dataset_root: str, errors: list[str]) -> None:
         if feat.get("names") != EXPECTED_JOINT_NAMES:
             errors.append(f"info.json features[{key}].names 불일치: {feat.get('names')!r}")
 
-    # 카메라 검증
-    for cam in EXPECTED_CAMERAS:
+    # 카메라 검증 — REQUIRED_CAMERAS(에러), OPTIONAL_CAMERAS(경고)
+    def _check_camera(cam: str) -> list[str]:
+        issues: list[str] = []
         key = f"observation.images.{cam}"
         feat = features.get(key)
         if feat is None:
-            errors.append(f"info.json features에 {key!r} 없음")
-            continue
+            issues.append(f"info.json features에 {key!r} 없음")
+            return issues
         if feat.get("dtype") != "video":
-            errors.append(f"info.json features[{key}].dtype = {feat.get('dtype')!r}, 기대: 'video'")
+            issues.append(f"info.json features[{key}].dtype = {feat.get('dtype')!r}, 기대: 'video'")
         if feat.get("shape") != [480, 640, 3]:
-            errors.append(f"info.json features[{key}].shape = {feat.get('shape')!r}, 기대: [480,640,3]")
+            issues.append(f"info.json features[{key}].shape = {feat.get('shape')!r}, 기대: [480,640,3]")
         info_block = feat.get("info", {})
         for k, v in EXPECTED_CAMERA_INFO.items():
             if info_block.get(k) != v:
-                errors.append(
+                issues.append(
                     f"info.json features[{key}].info[{k!r}] = {info_block.get(k)!r}, 기대: {v!r}"
                 )
+        return issues
+
+    for cam in REQUIRED_CAMERAS:
+        errors.extend(_check_camera(cam))
+    for cam in OPTIONAL_CAMERAS:
+        issues = _check_camera(cam)
+        if issues and warnings is not None:
+            warnings.extend(f"[선택 카메라 {cam}] {msg}" for msg in issues)
 
 
 def validate_tasks(dataset_root: str, errors: list[str], expected_task: str = EXPECTED_TASK) -> None:
@@ -238,7 +248,7 @@ def run_self_test() -> None:
                             "video.width": 640,
                         },
                     }
-                    for cam in EXPECTED_CAMERAS
+                    for cam in REQUIRED_CAMERAS + OPTIONAL_CAMERAS
                 },
             },
         }
@@ -383,16 +393,19 @@ def main() -> None:
         sys.exit(1)
 
     errors: list[str] = []
-    validate_info(root, errors)
+    warnings: list[str] = []
+    validate_info(root, errors, warnings)
     validate_tasks(root, errors, expected_task=args.expected_task)
     validate_data_parquet(root, errors)
 
+    for w in warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"PASS: {os.path.abspath(root)} - 스키마 검증 완료 (오류 0건)")
+    print(f"PASS: {os.path.abspath(root)} - 스키마 검증 완료 (오류 0건, 경고 {len(warnings)}건)")
 
 
 if __name__ == "__main__":

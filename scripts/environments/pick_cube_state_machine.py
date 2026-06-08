@@ -355,10 +355,11 @@ FPS = 30
 IMAGE_HEIGHT = 480
 IMAGE_WIDTH = 640
 IMAGE_CHANNELS = 3
-CAMERA_KEYS = ("top", "wrist")
+CAMERA_KEYS = ("top", "wrist", "front")
 CAMERA_SCENE_NAMES = {
     "top": "top_camera",
     "wrist": "wrist_camera",
+    "front": "front_camera",
 }
 BOWL_PLACE_OFFSET_DIRECTIONS = (
     (-1.0, -1.0),

@@ -5,10 +5,24 @@
 ## 🧭 North Star (불변 — 매 사이클·compaction 후 재확인)
 
 - **마스터플랜**: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) · **현황**: [`TASKS.md`](TASKS.md)
-- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist}` 480×640×3 h264 **fps 30** · task `"pick up the cube and place it in the bowl"`.
+- **불변 계약**(모든 sim 데이터·정책 I/O가 일치해야 함): `v3.0` · robot_type `so_follower` · action/state 각 **6-dim joint position** (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) · `observation.images.{top,wrist,front}` 480×640×3 h264 **fps 30** · task `"pick up the cube and place it in the bowl"`.
+  (2026-06-08 North Star 변경: 2cam → 3cam. front 카메라 추가. 기존 2cam 데이터셋은 front 없이 수집된 것으로 front 채널 없음 — 신규 수집 시 3cam 기준.)
 - **자율 계약**: Codex `/goal` 시작 후 **A~E 무인 자율**(묻지 않음). 멈추는 경우는 둘뿐 — F~G 실기기 경계 / 복구불가 블로커(동일 task 3회 재시도 후 우회·기록). 게이트 미통과 task는 done 금지.
 - **복구 프로토콜**: 세션/compaction 직후 ① 마스터플랜 §0·§1·§7 → ② TASKS.md(현재 phase·in_progress·blocked) → ③ 아래 최근 인계 1~2개 순서로 재로드. 추측 금지 — 상태 파일에 없으면 새 task로.
 - **머신**: GPU 중량(Isaac·RL·롤아웃·GR00T) = 서버 konan147(48GB), 산출물 `/DISK1/so101-sim2real`. 경량·실기기·오케스트레이터 = Windows. sync 허브 = `origin`(github PubCyBerry/SO101-Sim2Real).
+
+---
+
+## 작업 인계 (2026-06-08 — 3cam 전환: top/wrist → top/wrist/front)
+
+- **목표(사용자)**: 레포지토리 전체를 3개 카메라(top/wrist/front) 기준으로 통일.
+- **변경 완료**: 환경변수(`.env`, `.env.example`), SmolVLA rename_map(`env/smolvla.env` → camera3=front), GR00T 설명(`env/groot.env`), sim env cfg 2종(`pick_pen_env_cfg.py`, `pick_cube_env_cfg.py` — `_FRONT_CAMERA_*` 상수 + make/add 함수 확장), 스크립트 5종(`rollout_to_lerobot.py`, `pick_cube_state_machine.py`, `camera_shape_smoke.py`, `segmentation_overlay_preview.py`, `validate_lerobot_schema.py`), teleop 스크립트(`teleop_se3_agent.py` — CLI 인자·viewport·tuner·주입 함수), 문서 4종(`PATH_A_NATIVE.md`, `TROUBLESHOOTING.md`, `AGENTS.md`, `CONTEXT.md`/`TASKS.md`).
+- **front 카메라 시뮬 기본 좌표(미튜닝)**: PickPen `pos=(2.14, 0.65, 1.10)`, `target=(2.14, -0.15, 0.80)`, `focal=18.0`; PickCube `pos=(1.87, 0.65, 1.10)` (동일 target/focal). `--tune_cameras`로 GUI에서 조정 후 `_FRONT_CAMERA_*` 상수에 붙여넣기.
+- **검증 필요(GPU/GUI)**:  
+  1. `docker compose ... run --rm lerobot find-cameras` → 3개 카메라 탐지 확인  
+  2. `uv run ... teleop_se3_agent.py --task SimToReal-SO101-PickCube-v0 --enable_cameras --tune_cameras` → Front viewport 확인 + 좌표 튜닝  
+  3. front 카메라로 데이터 수집 후 `validate_lerobot_schema.py` 통과 확인
+- **주의**: 기존 2cam 데이터셋은 `observation.images.front` 채널이 없어 `validate_lerobot_schema.py`가 WARNING만 출력(에러 아님). SmolVLA fine-tune 시 3cam 데이터셋 기준으로 학습해야 `camera3` 키가 모델에 등록된다.
 
 ---
 

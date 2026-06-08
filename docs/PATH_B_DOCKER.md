@@ -198,8 +198,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot ca
 
 | 이름 | 설명 |
 |-----|------|
-| ENABLED_CAMERAS | 활성 카메라 부분집합. 기본 `top,wrist`. front 추가 시 `top,wrist,front` |
-| TOP_CAM_PORT / WRIST_CAM_PORT | 카메라 포트 (`/dev/video*`). front 추가 시 FRONT_CAM_PORT 도 설정. |
+| ENABLED_CAMERAS | 활성 카메라 부분집합. 기본 `top,wrist,front`. 2개만 쓰려면 `top,wrist` |
+| TOP_CAM_PORT / WRIST_CAM_PORT / FRONT_CAM_PORT | 카메라 포트 (`/dev/video*`). |
 | CAM_WIDTH / CAM_HEIGHT / CAM_FPS / CAM_FOURCC | 카메라 해상도·FPS·fourcc |
 | DISPLAY_DATA | 데이터 시각화 여부 |
 | DISPLAY_IP / DISPLAY_PORT | Docker 송출 시 `host.docker.internal:9876` |

@@ -1360,12 +1360,13 @@ ERROR y_server.py:266 Error in StreamActions: 'observation.images.camera1'
 
 ### 해결 방법
 
-1. 추론 클라의 `--robot.cameras` **키를 모델 `input_features` 와 일치**시킨다. SmolVLA fine-tune 이면 `camera1/camera2`, 물리 매핑은 `rename_map` 대로 `camera1=top, camera2=wrist`:
+1. 추론 클라의 `--robot.cameras` **키를 모델 `input_features` 와 일치**시킨다. SmolVLA fine-tune 이면 `camera1/camera2/camera3`, 물리 매핑은 `rename_map` 대로 `camera1=top, camera2=wrist, camera3=front`:
 
 ```bash
 --robot.cameras="{
     camera1: {type: opencv, index_or_path: ${TOP_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
     camera2: {type: opencv, index_or_path: ${WRIST_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
+    camera3: {type: opencv, index_or_path: ${FRONT_CAM_PORT}, width: ${CAM_WIDTH}, height: ${CAM_HEIGHT}, fps: ${CAM_FPS}, fourcc: ${CAM_FOURCC}},
 }"
 ```
 
@@ -1377,7 +1378,7 @@ ERROR y_server.py:266 Error in StreamActions: 'observation.images.camera1'
 
 ```bash
 uv run python -c "from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy; p=SmolVLAPolicy.from_pretrained('<hf_user>/<model>'); print(list(p.config.image_features))"
-# → ['observation.images.camera1', 'observation.images.camera2']
+# → ['observation.images.camera1', 'observation.images.camera2', 'observation.images.camera3']
 ```
 
 정상 동작 시 policy server 로그에 `Action chunk #N generated` 가 찍히고 follower 가 움직인다.

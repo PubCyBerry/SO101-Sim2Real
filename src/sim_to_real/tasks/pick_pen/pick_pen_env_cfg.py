@@ -175,7 +175,7 @@ _PEN_INIT_STATES = {
 _PEN_CUP_INIT_STATE = ((2.2, -0.17, 0.766), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist}
+# 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist,front}
 #   · 모두 640×480 (W×H) RGB, update_period=1/30
 #   · 포즈/FOV 는 실제 데이터셋 프레임을 기준으로 튜닝.
 #   · top 은 world frame 절대 좌표, wrist 는 gripper 링크 자식 prim 의 local offset.
@@ -195,6 +195,12 @@ _WRIST_CAM_LOCAL_POS = (0.035, 0.035, -0.075)
 # 기준 mat/cup 방향 world target≈(2.10,-0.13,0.77)을 바라보도록 한 local rot.
 _WRIST_CAM_LOCAL_ROT = (0.2280, 0.0630, 0.9365, 0.2588)
 _WRIST_CAMERA_FOCAL = 10.0
+
+# front: 책상 정면에서 작업공간을 바라보는 카메라.
+# 기본값은 --tune_cameras 로 튜닝 후 이 상수에 업데이트할 것.
+_FRONT_CAMERA_POS = (2.14, 0.65, 1.10)
+_FRONT_CAMERA_TARGET = (2.14, -0.15, 0.80)
+_FRONT_CAMERA_FOCAL = 18.0
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +319,7 @@ class PickPenSceneCfg(InteractiveSceneCfg):
 
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 (선택 주입) — observation.images.{top,wrist}
+# 카메라 리그 (선택 주입) — observation.images.{top,wrist,front}
 # ---------------------------------------------------------------------------
 
 
@@ -353,8 +359,11 @@ def make_pick_pen_camera_cfgs(
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
+    front_pos: tuple[float, float, float] | None = None,
+    front_target: tuple[float, float, float] | None = None,
+    front_focal: float | None = None,
 ) -> dict[str, TiledCameraCfg]:
-    """top/wrist 카메라 cfg 2개를 반환.
+    """top/wrist/front 카메라 cfg 3개를 반환.
 
     기본 PickPenSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
     gym.make() 전에 add_pick_pen_cameras() 로 scene cfg 에 주입해서 쓴다.
@@ -367,6 +376,9 @@ def make_pick_pen_camera_cfgs(
     wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
     wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
     wrist_focal = _WRIST_CAMERA_FOCAL if wrist_focal is None else wrist_focal
+    front_pos = _FRONT_CAMERA_POS if front_pos is None else front_pos
+    front_target = _FRONT_CAMERA_TARGET if front_target is None else front_target
+    front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
 
     top = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/TopCamera",
@@ -386,7 +398,15 @@ def make_pick_pen_camera_cfgs(
         focus_distance=0.2,
         clipping_range=(0.02, 3.0),
     )
-    return {"top_camera": top, "wrist_camera": wrist}
+    front = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/FrontCamera",
+        front_pos,
+        _look_at_quat_world(front_pos, front_target),
+        front_focal,
+        focus_distance=1.0,
+        clipping_range=(0.1, 6.0),
+    )
+    return {"top_camera": top, "wrist_camera": wrist, "front_camera": front}
 
 
 def add_pick_pen_cameras(
@@ -398,8 +418,11 @@ def add_pick_pen_cameras(
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
+    front_pos: tuple[float, float, float] | None = None,
+    front_target: tuple[float, float, float] | None = None,
+    front_focal: float | None = None,
 ) -> PickPenSceneCfg:
-    """top/wrist 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
+    """top/wrist/front 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
 
     InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
     gym.make() 시 센서로 등록된다.
@@ -412,6 +435,9 @@ def add_pick_pen_cameras(
         wrist_local_pos=wrist_local_pos,
         wrist_local_rot=wrist_local_rot,
         wrist_focal=wrist_focal,
+        front_pos=front_pos,
+        front_target=front_target,
+        front_focal=front_focal,
     ).items():
         setattr(scene_cfg, name, cam_cfg)
     return scene_cfg

@@ -1,7 +1,7 @@
-"""TA.3 camera shape/FOV smoke: top/wrist RGB frame shape + intrinsics 점검.
+"""TA.3 camera shape/FOV smoke: top/wrist/front RGB frame shape + intrinsics 점검.
 
 검증 목표:
-  - top_camera, wrist_camera 각각 RGB 렌더 프레임 shape (num_envs, 480, 640, 3|4)
+  - top_camera, wrist_camera, front_camera 각각 RGB 렌더 프레임 shape (num_envs, 480, 640, 3|4)
   - 각 카메라의 intrinsic matrix, world-frame 포즈를 JSON으로 출력
 
 Usage:
@@ -26,7 +26,7 @@ from isaaclab.app import AppLauncher
 _EXPECTED_H = 480
 _EXPECTED_W = 640
 _EXPECTED_C = 3  # rgb (alpha 제외)
-_CAMERA_NAMES = ["top_camera", "wrist_camera"]
+_CAMERA_NAMES = ["top_camera", "wrist_camera", "front_camera"]
 _WARM_UP_STEPS = 5  # 렌더 파이프라인 안정화용
 
 parser = argparse.ArgumentParser(description="TA.3 camera shape/FOV smoke")
@@ -171,7 +171,7 @@ def main() -> None:
                 "카메라는 add_pick_pen_cameras() 로 주입 — 기본 씬은 카메라 없이 --enable_cameras 불필요",
                 "wrist_camera는 gripper 링크 자식 prim 으로 부착되어 gripper 움직임을 따라감(prim_path=.../Robot/gripper/WristCamera)",
                 "top_camera는 world 절대 포즈로 고정",
-                "포즈/FOV는 observation.images.{top,wrist} 데이터셋 프레임과 docs/pics 물리 배치 사진을 기준으로 1차 정합",
+                "포즈/FOV는 observation.images.{top,wrist,front} 데이터셋 프레임과 docs/pics 물리 배치 사진을 기준으로 1차 정합",
             ],
         }
         print(json.dumps(result, indent=2))

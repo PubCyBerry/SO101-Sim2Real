@@ -52,7 +52,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 ### compose 설정
 
-- **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${TOP_CAM_PORT}` `${TOP_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` (UVC 캡처/메타 노드 쌍; front 추가 시 `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` 도 동일 패턴).
+- **디바이스 마운트**: `${TELEOP_PORT}` `${ROBOT_PORT}` (직렬 암), `${TOP_CAM_PORT}` `${TOP_CAM_META_PORT}` `${WRIST_CAM_PORT}` `${WRIST_CAM_META_PORT}` `${FRONT_CAM_PORT}` `${FRONT_CAM_META_PORT}` (UVC 캡처/메타 노드 쌍, top/wrist/front 3개 기본 활성; `/-/dev/null` 폴백으로 미사용 시 안전 처리).
 - **권한·네트워크**: `privileged: true` (udev/USB), `network_mode: host` (rerun 뷰어·ROS 브릿지), `ipc: host`. GPU 1장 예약.
 - **호스트 볼륨**:
   - `./datasets`, `./logs`, `./outputs` → `/workspace/*` (두 서비스)
@@ -119,7 +119,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 |---|---|
 | `environments/list_envs.py` | leisaac 등록 환경 일람 |
 | `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. **펜**=pxr.Sdf 문자열 조립(isaac 불필요). **큐브**=공식 pxr/PhysxSchema 스키마 API. PhysxSchema 가 isaacsim 번들 플러그인이라 `isaaclab.app.AppLauncher` headless 부팅이 필요 → `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/author_pick_cube_scene.py`. 큐브 조명은 scene.usd 가 직접 author(`/Scene/DomeLight`+`/Scene/KeyLight`), 그릇 충돌은 watertight mesh + SDF(`approximation="sdf"`, PhysxSDFMeshCollisionAPI) |
-| `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(2×2 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
+| `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(top/wrist/front 3단 수직 분할 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |

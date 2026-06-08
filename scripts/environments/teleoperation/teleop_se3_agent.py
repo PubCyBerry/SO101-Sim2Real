@@ -27,10 +27,11 @@ if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
 
 
-CAMERA_NAMES = ("top_camera", "wrist_camera")
+CAMERA_NAMES = ("top_camera", "wrist_camera", "front_camera")
 CAMERA_PRIM_PATHS = {
     "top_camera": "/World/envs/env_0/TopCamera",
     "wrist_camera": "/World/envs/env_0/Robot/gripper/WristCamera",
+    "front_camera": "/World/envs/env_0/FrontCamera",
 }
 KEY_BINDINGS = {
     "Q": (0, 1.0, "shoulder_pan +"),
@@ -102,7 +103,7 @@ parser.add_argument("--quality", action="store_true", help="Enable quality rende
 parser.add_argument(
     "--tune_cameras",
     action="store_true",
-    help="카메라 보정 모드: top/wrist viewport 분할 docking + 실시간 튜너 위젯을 띄운다. "
+    help="카메라 보정 모드: top/wrist/front viewport 3단 수직 분할 docking + 실시간 튜너 위젯을 띄운다. "
     "미지정 시 메인 viewport 만 렌더해 실시간 제어 성능을 확보한다(카메라 sensor 는 30fps 유지).",
 )
 parser.add_argument("--use_lerobot_recorder", action="store_true", help="Accepted for CLI compatibility; ignored.")
@@ -159,6 +160,9 @@ parser.add_argument("--top_focal", type=float, default=None, help="top focal len
 parser.add_argument("--wrist_pos", type=_vec3, default=None, help="x,y,z gripper-local position")
 parser.add_argument("--wrist_rot", type=_quat, default=None, help="w,x,y,z gripper-local quaternion")
 parser.add_argument("--wrist_focal", type=float, default=None, help="wrist focal length in mm")
+parser.add_argument("--front_pos", type=_vec3, default=None, help="x,y,z world position for front camera")
+parser.add_argument("--front_target", type=_vec3, default=None, help="x,y,z world look-at target for front camera")
+parser.add_argument("--front_focal", type=float, default=None, help="front focal length in mm")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -622,6 +626,9 @@ def capture_camera_views(env, capture_dir: Path) -> None:
             "wrist_pos": args_cli.wrist_pos,
             "wrist_rot": args_cli.wrist_rot,
             "wrist_focal": args_cli.wrist_focal,
+            "front_pos": args_cli.front_pos,
+            "front_target": args_cli.front_target,
+            "front_focal": args_cli.front_focal,
         },
     }
     meta_path = capture_dir / f"{stamp}_camera_metadata.json"
@@ -632,7 +639,7 @@ def capture_camera_views(env, capture_dir: Path) -> None:
 
 
 def create_camera_viewports() -> list[object]:
-    """2개 센서 카메라 viewport 를 메인 Perspective 뷰포트와 함께 수직 분할로 docking.
+    """3개 센서 카메라 viewport 를 메인 Perspective 뷰포트와 함께 수직 분할로 docking.
 
     레이아웃::
 
@@ -640,6 +647,8 @@ def create_camera_viewports() -> list[object]:
         │ Perspective │ Top Cam     │
         │             ├─────────────┤
         │             │ Wrist Cam   │
+        │             ├─────────────┤
+        │             │ Front Cam   │
         └─────────────┴─────────────┘
     """
 
@@ -664,13 +673,14 @@ def create_camera_viewports() -> list[object]:
         print(f"[viewport] camera viewport windows unavailable: {exc}")
         return []
 
-    # 카메라 viewport window 2개 생성. 위치/크기는 아래 docking 으로 덮어쓰므로
+    # 카메라 viewport window 3개 생성. 위치/크기는 아래 docking 으로 덮어쓰므로
     # floating 좌표를 지정하지 않는다.
     created: dict[str, object] = {}
     windows: list[object] = []
     for title, camera_name in (
         ("Top Camera", "top_camera"),
         ("Wrist Camera", "wrist_camera"),
+        ("Front Camera", "front_camera"),
     ):
         prim_path = CAMERA_PRIM_PATHS[camera_name]
         try:
@@ -684,9 +694,10 @@ def create_camera_viewports() -> list[object]:
         except Exception as exc:
             print(f"[viewport] failed to open {title} ({prim_path}): {exc}")
 
-    # 메인 Perspective viewport + 카메라 2개를 수직 분할로 docking.
-    #   top   → 메인 오른쪽 절반  (좌:메인,   우:top)
-    #   wrist → top 아래 절반     (우상:top, 우하:wrist)
+    # 메인 Perspective viewport + 카메라 3개를 수직 분할로 docking.
+    #   top   → 메인 오른쪽 절반  (좌:메인, 우:top)
+    #   wrist → top 아래 절반     (우:top → 우상:top, 우하:wrist)
+    #   front → wrist 아래 절반   (우하:wrist → 우중:wrist, 우하:front)
     try:
         app = omni.kit.app.get_app()
         for _ in range(3):
@@ -694,13 +705,16 @@ def create_camera_viewports() -> list[object]:
         main_vp = ui.Workspace.get_window("Viewport")
         top = created.get("top_camera")
         wrist = created.get("wrist_camera")
+        front = created.get("front_camera")
         if main_vp is not None and top is not None:
             top.dock_in(main_vp, ui.DockPosition.RIGHT, 0.5)
         if top is not None and wrist is not None:
             wrist.dock_in(top, ui.DockPosition.BOTTOM, 0.5)
+        if wrist is not None and front is not None:
+            front.dock_in(wrist, ui.DockPosition.BOTTOM, 0.5)
         for _ in range(3):
             app.update()
-        print("[viewport] docked cameras (L=Perspective, RT=Top, RB=Wrist)")
+        print("[viewport] docked cameras (L=Perspective, R-top=Top, R-mid=Wrist, R-bot=Front)")
     except Exception as exc:
         print(f"[viewport] docking failed (windows remain floating): {exc}")
 
@@ -779,6 +793,7 @@ def create_camera_tuner(env) -> object | None:
     specs = [
         ("Top Camera", "top_camera", CAMERA_PRIM_PATHS["top_camera"], "world"),
         ("Wrist Camera", "wrist_camera", CAMERA_PRIM_PATHS["wrist_camera"], "gripper-local"),
+        ("Front Camera", "front_camera", CAMERA_PRIM_PATHS["front_camera"], "world"),
     ]
     state: dict[str, dict] = {}
     window = ui.Window("SO101 Camera Tuner", width=430, height=640)
@@ -901,6 +916,9 @@ def main() -> None:  # noqa: C901
             wrist_local_pos=args_cli.wrist_pos,
             wrist_local_rot=args_cli.wrist_rot,
             wrist_focal=args_cli.wrist_focal,
+            front_pos=args_cli.front_pos,
+            front_target=args_cli.front_target,
+            front_focal=args_cli.front_focal,
         )
         # 카메라 sensor update_period 는 task cfg 기본값(1/30s)을 쓴다.
         # 이는 North Star observation.images.* fps 30 계약과 leisaac 템플릿 설정에 맞춘 값이다.
@@ -940,7 +958,7 @@ def main() -> None:  # noqa: C901
         _set_initial_view()
         camera_tuner = None  # keep ref alive (GC 방지)
         if args_cli.enable_cameras and args_cli.tune_cameras:
-            # 카메라 보정 모드에서만 2x2 docking viewport + 실시간 튜너 위젯을 띄운다.
+            # 카메라 보정 모드에서만 3단 수직 분할 docking viewport + 실시간 튜너 위젯을 띄운다.
             # (평상시엔 메인 viewport 만 렌더해 실시간 제어 성능을 확보)
             camera_viewports = create_camera_viewports()
             camera_tuner = create_camera_tuner(env)  # noqa: F841
