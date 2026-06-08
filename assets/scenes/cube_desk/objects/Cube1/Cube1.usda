@@ -15,10 +15,10 @@ def Xform "Cube1" (
     bool physxRigidBody:disableGravity = 0
     bool physxRigidBody:enableCCD = 1
     float physxRigidBody:angularDamping = 1.5
-    float physxRigidBody:linearDamping = 0.2
+    float physxRigidBody:linearDamping = 1.5
     float physxRigidBody:sleepThreshold = 0.0005
     float physxRigidBody:stabilizationThreshold = 0.0005
-    float physxRigidBody:maxDepenetrationVelocity = 1.0
+    float physxRigidBody:maxDepenetrationVelocity = 0.3
     int physxRigidBody:solverPositionIterationCount = 32
     int physxRigidBody:solverVelocityIterationCount = 8
     def Scope "Looks"

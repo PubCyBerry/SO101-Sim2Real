@@ -97,7 +97,7 @@ CUBE_BEVEL: float = 0.003
 # 150 mm plastic bowl on a rubber desk mat. In early 4-cube scripted runs the
 # bowl slid 10+ cm from light robot/cube contacts, so model it as a heavier
 # high-friction container rather than a toy-light shell.
-BOWL_MASS: float = 0.80  # kg, dynamic but hard to push on the desk mat
+BOWL_MASS: float = 0.25  # kg, 약 250 g 플라스틱 그릇
 
 
 # ---------------------------------------------------------------------------
@@ -424,11 +424,11 @@ def author_cube_usda(name: str) -> str:
     _block(lines, 1, "bool physxRigidBody:enableCCD = 1")
     # grasp 시 흔들림/회전 억제는 적당히 — 5.0 처럼 과한 damping 은 부자연스럽다.
     _block(lines, 1, "float physxRigidBody:angularDamping = 1.5")
-    _block(lines, 1, "float physxRigidBody:linearDamping = 0.2")
+    _block(lines, 1, "float physxRigidBody:linearDamping = 1.5")
     _block(lines, 1, "float physxRigidBody:sleepThreshold = 0.0005")
     _block(lines, 1, "float physxRigidBody:stabilizationThreshold = 0.0005")
     # 관통이 생겨도 분리 속도를 1 m/s 로 제한해 큐브가 튕겨 날아가지 않게 한다.
-    _block(lines, 1, "float physxRigidBody:maxDepenetrationVelocity = 1.0")
+    _block(lines, 1, "float physxRigidBody:maxDepenetrationVelocity = 0.3")
     # grasp contact 안정: position iteration 을 높여 미끄러짐/관통을 줄인다.
     _block(lines, 1, "int physxRigidBody:solverPositionIterationCount = 32")
     _block(lines, 1, "int physxRigidBody:solverVelocityIterationCount = 8")
@@ -584,7 +584,7 @@ def author_bowl_usda() -> str:
     _block(lines, 2, "{")
     _block(lines, 3, "float physics:staticFriction = 1.8")
     _block(lines, 3, "float physics:dynamicFriction = 1.5")
-    _block(lines, 3, "float physics:restitution = 0")
+    _block(lines, 3, "float physics:restitution = 0.3")
     _block(lines, 3, 'uniform token physxMaterial:frictionCombineMode = "max"')
     _block(lines, 3, 'uniform token physxMaterial:restitutionCombineMode = "min"')
     _block(lines, 2, "}")
