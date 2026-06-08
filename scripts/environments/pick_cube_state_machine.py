@@ -128,6 +128,10 @@ parser.add_argument("--carry_min_gripper_effort", type=float, default=0.5)
 parser.add_argument("--probe", action="store_true", help="settle 후 자세 진단만 출력하고 종료")
 parser.add_argument("--phase_log", action="store_true", help="매 phase 진단 출력 (--verbose는 AppLauncher 예약)")
 
+# arm 속도 (env SlewLimited max_velocity 덮어쓰기). 검증본은 0.18rad/s 로 매우 느림(grip 안정).
+# 빠르면 transport/grasp 중 큐브가 grip 에서 미끄러진다. 0=env 기본(5rad/s) 유지.
+parser.add_argument("--arm_max_velocity", type=float, default=1.5, help="arm joint 최대 속도(rad/s). gripper는 유지.")
+
 # backward compat (무시)
 parser.add_argument("--continuity_weight", type=float, default=0.05)
 parser.add_argument("--max_arm_step_delta", type=float, default=0.0)
@@ -929,6 +933,11 @@ def main() -> None:
         container_angle_scale=args.container_angle_scale,
         container_radius_scale=args.container_radius_scale,
     )
+    # arm 속도 낮추기(grip 안정). gripper 속도는 유지(이미 1.0).
+    if args.arm_max_velocity > 0:
+        mv = {j: float(args.arm_max_velocity) for j in SO101_JOINT_ORDER[:ARM_DOF]}
+        mv[SO101_JOINT_ORDER[ARM_DOF]] = 1.0  # gripper
+        env_cfg.actions.arm.max_velocity = mv
 
     env = gym.make(args.task, cfg=env_cfg)
     device = str(env.unwrapped.device)
