@@ -52,12 +52,13 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 
 # 큐브 world 좌표 = SCENE_OFFSET(2.2, -0.52, 0.705) + scene-local 위치.
-# 로봇팔 아래 매트 앞쪽 흩뿌림. 작은(Cube1/2): z=0.730, 큰(Cube3/4): z=0.735.
+# 매트 윗면 world z=0.709. z중심 = 0.709 + 반높이 + slack(0.001).
+#   작은(Cube1/2, 30mm): 0.709+0.015+0.001=0.725, 큰(Cube3/4, 40mm): 0.709+0.020+0.001=0.730.
 _CUBE_INIT_STATES = {
-    "Cube1": ((1.70, -0.44, 0.730), _yaw_quat(20.0)),
-    "Cube2": ((1.98, -0.46, 0.730), _yaw_quat(-35.0)),
-    "Cube3": ((1.74, -0.35, 0.735), _yaw_quat(50.0)),
-    "Cube4": ((1.93, -0.38, 0.735), _yaw_quat(-20.0)),
+    "Cube1": ((1.70, -0.44, 0.725), _yaw_quat(20.0)),
+    "Cube2": ((1.98, -0.46, 0.725), _yaw_quat(-35.0)),
+    "Cube3": ((1.74, -0.35, 0.730), _yaw_quat(50.0)),
+    "Cube4": ((1.93, -0.38, 0.730), _yaw_quat(-20.0)),
 }
 # BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(2.2, -0.52, 0.705) = (1.62, -0.26, 0.715)
 _BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
@@ -118,12 +119,12 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         prim_path="/World/GroundPlane",
         spawn=sim_utils.GroundPlaneCfg(),
     )
-    dome_light = AssetBaseCfg(
-        prim_path="/World/DomeLight",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
-    )
+    # 조명은 cube_desk scene.usd 가 직접 author 한다(/Scene/DomeLight + /Scene/KeyLight).
+    # usdview 단독 검증이 가능하도록 씬 self-contained 로 옮겼다. 멀티 env 학습에서
+    # per-env 조명 복제로 과노출이 보이면 scene.usd 조명 intensity 를 낮추거나 여기서
+    # /World 공용 dome_light 로 되돌린다.
 
-    # cube desk USD (contains desk, mat, and all rigid objects)
+    # cube desk USD (contains desk, lighting, mat, and all rigid objects)
     scene: AssetBaseCfg = CUBE_DESK_CFG.replace(prim_path="{ENV_REGEX_NS}/Scene")
 
     # SO-101 follower articulation
