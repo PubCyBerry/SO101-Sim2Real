@@ -135,9 +135,11 @@ parser.add_argument(
     type=float,
     default=0.0,
     help=(
-        "Descend/grasp 단계 전용 팔 per-step 한계(rad). 0=비활성(--max_arm_step_delta 사용). >0 이면 grasp "
-        "단계에서만 팔을 더 천천히 움직여(예: 0.05≈1.5 rad/s) 큐브를 쳐내지 않고 정밀 접근한다. 접근/이송은 "
-        "여전히 --max_arm_step_delta(5 rad/s)로 빠르게. (5 rad/s 는 상한 cap 이라 더 느리게 움직여도 무방.)"
+        "오브젝트 근접 단계(move_to_pre_pick·descend·grasp·lift·retry_lift·place_descend·release) 전용 팔 "
+        "per-step 한계(rad). 0=비활성(--max_arm_step_delta 사용). >0 이면 근접 시 팔을 천천히 움직여"
+        "(예: 0.05≈1.5 rad/s, 0.08≈2.4 rad/s) 큐브/그릇을 쳐내지 않고 정밀 접근한다. 자유공간 이송"
+        "(move_to_pre_place)·복귀(release_lift)는 --max_arm_step_delta(5 rad/s)로 빠르게 유지(시간 절약). "
+        "(5 rad/s 는 상한 cap 이라 더 느리게 움직여도 규약상 무방.)"
     ),
 )
 parser.add_argument("--fk_samples", type=int, default=5000)
@@ -1616,17 +1618,22 @@ def _phase(
         return None if target_R_fn is None else np.asarray(target_R_fn(), dtype=np.float64)
 
     target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
-    # descend/grasp 단계에서만 grasp tilt 점수항을 켜고(이동 jaw 를 큐브 바닥까지 내리는 pose 선호),
-    # 팔 속도를 늦추며(큐브 쳐냄 방지), arm 이 tilted q_goal 에 도달할 때까지 완주(early-exit 로 tilt 잘림 방지).
-    is_grasp_phase = (".descend" in name) or (".grasp" in name)
+    _phase_name = name.split(".")[-1]
+    # descend/grasp 에서만 grasp tilt 점수항을 켠다(이동 jaw 를 큐브 바닥까지 내리는 pose 선호).
+    is_grasp_phase = _phase_name in ("descend", "grasp")
+    # 오브젝트 *근접* 단계는 팔을 느리게(큐브/그릇 쳐냄 방지). 자유공간 이송(move_to_pre_place)·복귀
+    # (release_lift)·home 은 빠르게(5 rad/s) 유지해 시간 손해를 줄인다. "max 5 rad/s" 는 상한이라 무방.
+    is_near_object = _phase_name in (
+        "move_to_pre_pick", "descend", "grasp", "lift", "retry_lift", "place_descend", "release"
+    )
     global _ARM_STEP_OVERRIDE
     _prev_arm_override = _ARM_STEP_OVERRIDE
-    if is_grasp_phase and args.grasp_arm_step_delta > 0.0:
+    if is_near_object and args.grasp_arm_step_delta > 0.0:
         _ARM_STEP_OVERRIDE = abs(args.grasp_arm_step_delta)
     # tilt 사용 시에만 descend 를 완주(arm 이 tilted q_goal 도달까지)시킨다. tilt 가 없으면 descend 는
     # 제어점 도달 즉시 early-exit 해야 한다(완주 시 descend_steps=160 을 다 써 에피소드가 길어짐 → ≤120s 초과).
     # grasp(닫기) 단계까지 settle 을 강제하면 닫는 동안 arm 이 움직여 큐브를 밀어내 grip 이 풀린다(descend 만).
-    require_arm_settled = (".descend" in name) and rmpflow_driver is None and args.grasp_tilt_weight > 0.0
+    require_arm_settled = is_grasp_phase and (".descend" in name) and rmpflow_driver is None and args.grasp_tilt_weight > 0.0
     if rmpflow_driver is None:
         q_goal, plan = _fk_solve_joint_target(
             env,

@@ -43,12 +43,22 @@ SO101_JOINT_ORDER: list[str] = [
     "wrist_roll",
     "gripper",
 ]
-SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {joint: 5.00 for joint in SO101_JOINT_ORDER}
+SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {
+    "shoulder_pan": 5.00,
+    "shoulder_lift": 5.00,
+    "elbow_flex": 5.00,
+    "wrist_flex": 5.00,
+    "wrist_roll": 5.00,
+    # 그리퍼는 1.0 rad/s 로 유지(부드러운 grasp). 5.0 으로 올리면 큐브에 닿을 때 세게 snap 해
+    # 튕겨내 grasp 가 실패한다(원본 SM 이 cap 5.0 에서 DR-OFF 0/4 로 회귀한 원인). teleop 실물은
+    # 더 빠른 그리퍼도 잡지만 sim 접촉 동역학은 민감하다.
+    "gripper": 1.00,
+}
 """Processed joint-position target speed cap in rad/s (sim time).
 
-teleop·RL·state-machine 공용 env action slew cap. 사용자 요청으로 1.0→5.0 rad/s 로 상향
-(모든 경로 동일). actuator ``velocity_limit_sim`` 은 ≥5 rad/s 헤드룸을 유지해야 명령 속도를
-실제로 추종한다. 주의: 1.0 rad/s 로 학습된 RL checkpoint 는 이 변경으로 dynamics 가 바뀌어
+팔 joint = 5.0 rad/s 상한(사용자 요청, teleop·RL·state-machine 공용). 그리퍼 = 1.0 rad/s
+(grasp 접촉 안정). actuator ``velocity_limit_sim`` 은 ≥5 rad/s 헤드룸을 유지해야 명령 속도를
+실제로 추종한다. 주의: 1.0 rad/s 로 학습된 RL checkpoint 는 팔 변경으로 dynamics 가 바뀌어
 재학습이 필요하다."""
 
 # Robot base position: SCENE_OFFSET(2.2, -0.57) + scene-local robot offset(0, -0.04).

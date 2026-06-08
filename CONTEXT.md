@@ -62,11 +62,10 @@
   - 같은 seed7 단일 ep0 를 여러 번 → 2/4 지만 **성공 큐브·step 수가 매번 다름**(Cube1,4 ↔ Cube1,2; 7684↔9853 steps). 같은 초기 레이아웃인데 결과가 다름.
   - **결론: GPU PhysX 가 non-deterministic + grasp 가 marginal → 같은 시나리오도 물리 노이즈만으로 1/4↔3/4 뒤집힘.** 5-ep sweep 은 분산이 커 신뢰 불가. carryover 는 아님(매 reset `start_inside=0` 확인).
   - **정직한 종합 평균 ≈ 1.5/4, all-4 ≈ 10%, 분산 큼.** continuity 의 실제 이득은 baseline(1.4) 대비 작음(노이즈에 묻힘). 과거 "3.0 돌파" 는 lucky sweep artifact.
-- **🚧 블로커(근본)**: **open-loop SM + marginal 2.5cm 큐브 grasp + sim non-determinism → 8~9/10 all-4 도달 불가.** 20260605 의 4/4 는 DR-OFF(고정 유리 위치)라 재현됐던 것. full-DR 의 위치 변동이 marginal zone 을 자주 만남.
-- **실패한 개선 시도(모두 노이즈/회귀)**: tilt_weight, slow-arm, descend-settle+tilt, place 튜닝(offset/height), 깊은 descend. 거의 전부 cont05 대비 회귀 또는 무차이.
-- **deliverable 현실**: joint_fk + full-DR + raster + cycles2 + continuity 0.05 = **정직하게 평균 ~1.5/4, all-4 ~10%**. flinging 은 줄었으나 grip 신뢰성이 근본 한계.
-- **권고(8~9/10 위해선 튜닝 너머 필요)**: ① closed-loop grasp 검증(잡았는지 확인 후 진행, AABB 기반 측면정렬 보정) ② 그리퍼/큐브 물리 재튜닝(squeeze effort, 큐브 크기/마찰, contact offset) ③ 정직한 reachable DR 엔벨로프 특성화(teleop 도 못 미치는 가장자리 제외) ④ teleop 데이터 기반 학습 정책(BC/RL) — 원래 마스터플랜 방향. **사용자 판단 필요한 전략 분기.**
-- **남은 일**: ① determinism 최종 확인(seed7 단일 2회, `determ_A/B.json`) ② 위 권고 중 방향 결정(사용자) ③ 방향 정해지면 그에 맞춰 진행.
+- **(이전 가설 폐기)** "open-loop SM + sim non-determinism = 근본 블로커" 라 적었으나 **틀림** — 진짜 원인은 위 6차의 env 그리퍼 cap 이었다. determinism 도 정상(determ A==B). 아래 7차로 재측정 진행.
+- **🎯 7차 — env 수정 후 재측정(진행 중)**: 그리퍼 cap 1.0 + 팔 2 rad/s + continuity 0.05 로 현재 SM 을 full-DR(seeds 7,11,12) 재측정 → `fixenv_fulldr_{7,11,12}.json`. (이전 ~1.5/4 는 망가진 env 결과라 무효.)
+- **권고/다음(env 수정 후)**: ① full-DR 신뢰성 재측정 결과로 deliverable 확정 ② teleop(31s,2rad/s) 기준 효율화(phase floor 축소·재시도↓) 로 ≤60~120s ③ 4/4 seed v3 dataset 재기록(이전 fixedpos 기록은 망가진 env 라 1/4, 폐기) ④ docs/TROUBLESHOOTING 에 "env 그리퍼 cap 5.0 → grasp 실패" 항목 추가.
+- **임시 진단 파일(konan147)**: `orig_sm_20260605.py`(원본 추출본), `orig_dropoff_s7.json`(cap5→0/4), `orig_dropoff_gripper1_s7.json`(grip1→4/4). 정리 대상.
 
 ---
 
