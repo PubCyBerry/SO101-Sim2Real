@@ -12,6 +12,20 @@
 
 ---
 
+## 작업 인계 (2026-06-08 — 그릇 충돌 형상 수정: convexDecomposition → 명시적 패널)
+
+- **목표(사용자)**: 큐브를 그릇에 place 하면 바닥까지 안 가라앉고 높게 쌓여 넘칠 듯 담기는 현상 진단·수정. 실제 그릇처럼 곡면 타고 바닥으로 정착해야.
+- **진단(확정)**: `Bowl.usda` Wall mesh 의 `physics:approximation = "convexDecomposition"` 이 오목한 그릇 안쪽 캐비티를 convex hull 로 **메워** 충돌 바닥을 실제(z≈0.012)보다 높임 → 큐브가 가짜 바닥에 얹힘. Wall 이 두께 0 열린 회전면(504 pts)이라 분해가 더 부정확. 유입 = commit `e0eeae3`(기존 480 명시 패널 → 단일 mesh+convexDecomp 경량화). 문서 근거: PhysX/Omni Physics — convexDecomposition 은 hollow 형상을 채워 동적 컨테이너엔 SDF/명시적 충돌 권장.
+- **수정(완료, 사용자 승인 = 명시적 패널 안)**: `scripts/environments/author_pick_cube_scene.py`
+  - Wall mesh → **시각 전용**(`_bowl_wall_mesh(..., collision=False)`: collision API·approximation 제거).
+  - 신규 `_bowl_collision_walls()` — 자오선 경사각(alpha)만큼 기울인 invisible box 패널 링(6 band×24 = **144개**)으로 안쪽 충돌 구성. 연직 패널이면 band 경계 ledge 에 큐브가 얹히므로 tilt 필수. Bottom cylinder(r=0.0325) 유지.
+  - 배치 = `_oriented_box()` 가 `pxr.Gf` 로 `Scale·Ry(alpha)·Rz(phi)·Translate` 합성한 baked `matrix4d xformOp:transform`(Euler op-order 모호성 회피). 프로파일 상수(`BOWL_R_BOTTOM/R_TOP/Z_BASE/DEPTH/LATS/LONS`, `BOWL_COLLISION_LATS/LONS/THICKNESS`)로 시각·충돌 공유.
+- **검증(완료, 자산 수준)**: `uv run scripts/environments/author_pick_cube_scene.py` 재생성 성공. Wall=collision 없음·approximation 없음, CollisionWalls invisible·패널 144개·collision 있음, 패널 z `0.0168~0.0652`·r `0.0478~0.0757`(그릇 안쪽 연속), scene 합성 OK(196 prim). 첫 패널 매트릭스 손계산 일치.
+- **남은 일(물리 거동 = GPU/GUI 필요, 사용자 실행 권장)**: `uv run scripts/environments/pick_cube_state_machine.py --num_envs 1 --active_objects 4` (또는 teleop)로 큐브가 바닥까지 미끄러져 정착하는지 육안 확인. 통과 시 → ① `docs/TROUBLESHOOTING.md` 항목 추가(현상→원인→해결) ② `docs/GRASP_PHYSICS.md` 그릇 물성 절 갱신 ③ place_height/stack 증분 하향 재튜닝 여지.
+- **주의**: `pick_cube_state_machine.py` 의 diff 23줄은 **이번 작업과 무관한 기존 WIP**(건드리지 않음).
+
+---
+
 ## 작업 인계 (2026-06-06 — teleop-grade pickcube FSM 고도화: 신뢰성 grasp 돌파)
 
 - **브랜치**: `feat/sm-teleop-grade-pickcube` (main `02bdc71` 기준). 편집은 Windows, GPU 실행은 konan147 에 scp 동기화 후 `/DISK1/so101-sim2real/venvs/isaac` 로 실행.

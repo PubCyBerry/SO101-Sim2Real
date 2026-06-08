@@ -26,7 +26,7 @@ import math
 from pathlib import Path
 from typing import Iterable
 
-from pxr import Sdf
+from pxr import Gf, Sdf
 
 
 SCENE_DIR = Path(__file__).resolve().parents[2] / "assets" / "scenes" / "cube_desk"
@@ -98,6 +98,22 @@ CUBE_BEVEL: float = 0.003
 # bowl slid 10+ cm from light robot/cube contacts, so model it as a heavier
 # high-friction container rather than a toy-light shell.
 BOWL_MASS: float = 0.25  # kg, 약 250 g 플라스틱 그릇
+
+# 그릇 곡면 프로파일 — 시각 Wall mesh 와 명시적 충돌 패널이 공유한다(드리프트 방지).
+#   r(t) = r_bottom + (r_top - r_bottom) * t^0.2, z(t) = z_base + depth * t
+# 그릇 위 지름 150mm(r_top=0.075), 바닥 지름 65mm(r_bottom=0.0325), 벽 높이 58mm.
+BOWL_R_BOTTOM: float = 0.0325
+BOWL_R_TOP: float = 0.075
+BOWL_Z_BASE: float = 0.012
+BOWL_DEPTH: float = 0.058
+BOWL_LATS: int = 20   # 시각 mesh 위도 밴드 수
+BOWL_LONS: int = 24   # 시각 mesh 경도 패널 수
+
+# 충돌 패널 해상도. 패널을 자오선 경사만큼 기울여(아래 _bowl_collision_walls) ledge 를
+#   없애므로 시각 mesh 보다 성겨도 containment 가 안정적이다(구 480 패널 → 144).
+BOWL_COLLISION_LATS: int = 6
+BOWL_COLLISION_LONS: int = 24
+BOWL_COLLISION_THICKNESS: float = 0.003  # 패널 반경 방향 두께 3mm
 
 
 # ---------------------------------------------------------------------------
@@ -427,8 +443,10 @@ def author_cube_usda(name: str) -> str:
     _block(lines, 1, "float physxRigidBody:linearDamping = 1.5")
     _block(lines, 1, "float physxRigidBody:sleepThreshold = 0.0005")
     _block(lines, 1, "float physxRigidBody:stabilizationThreshold = 0.0005")
-    # 관통이 생겨도 분리 속도를 1 m/s 로 제한해 큐브가 튕겨 날아가지 않게 한다.
-    _block(lines, 1, "float physxRigidBody:maxDepenetrationVelocity = 0.3")
+    # 분리 속도 상한 1.0 m/s (Isaac Lab 표준 기본값). 0.3 은 튕김 억제엔 좋았으나
+    # 그리퍼 손가락(convexDecomposition)이 큐브를 관통했을 때 분리가 너무 느려
+    # "꽂힌 채 유지"되는 원인이었다. 1.0 은 관통을 빠르게 풀면서도 과한 사출은 막는다.
+    _block(lines, 1, "float physxRigidBody:maxDepenetrationVelocity = 1.0")
     # grasp contact 안정: position iteration 을 높여 미끄러짐/관통을 줄인다.
     _block(lines, 1, "int physxRigidBody:solverPositionIterationCount = 32")
     _block(lines, 1, "int physxRigidBody:solverVelocityIterationCount = 8")
@@ -494,14 +512,20 @@ def _bowl_wall_mesh(
     lats: int,
     lons: int,
     material_path: str,
-    physics_material_path: str,
+    physics_material_path: str | None = None,
+    collision: bool = False,
 ) -> None:
-    """단일 회전체 Mesh prim — 시각 + convexDecomposition 충돌 겸용.
+    """단일 회전체 Mesh prim — 기본은 시각 전용.
 
-    기존 480개 Cube prim 루프(20밴드×24패널)를 lats×lons 격자 Mesh 1개로 대체.
+    lats×lons 격자 Mesh 1개로 그릇 벽을 렌더링한다.
     profile: r(t) = r_bottom + (r_top - r_bottom) * t^0.2 (U자 곡선).
     face winding: 바깥쪽 법선 기준 CCW (doubleSided=1 로 내부도 렌더링).
-    동적 rigid body 에서 비볼록 mesh 충돌 = convexDecomposition 필수.
+
+    충돌(collision)은 기본 False. 두께 0 열린 회전면에 convexDecomposition 을
+    부여하면 PhysX 가 오목한 안쪽 캐비티를 convex hull 로 메워 충돌 바닥을
+    실제보다 높이는 문제가 있어, 충돌은 _bowl_collision_walls() 의 명시적 box
+    패널로 따로 만들고 이 Mesh 는 렌더링만 담당한다. collision=True 는 정적
+    씬에서 convexDecomposition 겸용이 필요한 경우를 위해 남겨 둔다.
     """
     def _profile_r(t: float) -> float:
         return r_bottom + (r_top - r_bottom) * (t ** 0.2)
@@ -528,31 +552,133 @@ def _bowl_wall_mesh(
     indices = [i for f in faces for i in f]
     pts_str = ", ".join(f"({_num(x)}, {_num(y)}, {_num(z)})" for x, y, z in pts)
 
-    schemas = '"PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxCollisionAPI"'
-    _block(lines, level, f'def Mesh "Wall" (')
-    _block(lines, level + 1, f"prepend apiSchemas = [{schemas}]")
-    _block(lines, level, ")")
+    if collision:
+        schemas = '"PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxCollisionAPI"'
+        _block(lines, level, 'def Mesh "Wall" (')
+        _block(lines, level + 1, f"prepend apiSchemas = [{schemas}]")
+        _block(lines, level, ")")
+    else:
+        _block(lines, level, 'def Mesh "Wall"')
     _block(lines, level, "{")
     _block(lines, level + 1, "uniform int doubleSided = 1")
     _block(lines, level + 1, f"int[] faceVertexCounts = [{', '.join('4' for _ in faces)}]")
     _block(lines, level + 1, f"int[] faceVertexIndices = [{', '.join(str(i) for i in indices)}]")
     _block(lines, level + 1, f"point3f[] points = [{pts_str}]")
     _block(lines, level + 1, 'uniform token subdivisionScheme = "none"')
-    _block(lines, level + 1, "bool physics:collisionEnabled = 1")
-    _block(lines, level + 1, 'uniform token physics:approximation = "convexDecomposition"')
-    _block(lines, level + 1, f"float physxCollision:contactOffset = {_num(CONTACT_OFFSET_DEFAULT)}")
-    _block(lines, level + 1, "float physxCollision:restOffset = 0")
+    if collision:
+        _block(lines, level + 1, "bool physics:collisionEnabled = 1")
+        _block(lines, level + 1, 'uniform token physics:approximation = "convexDecomposition"')
+        _block(lines, level + 1, f"float physxCollision:contactOffset = {_num(CONTACT_OFFSET_DEFAULT)}")
+        _block(lines, level + 1, "float physxCollision:restOffset = 0")
     _material_binding(lines, level + 1, material_path)
-    _physics_material_binding(lines, level + 1, physics_material_path)
+    if collision and physics_material_path is not None:
+        _physics_material_binding(lines, level + 1, physics_material_path)
+    _block(lines, level, "}")
+
+
+def _oriented_box(
+    lines: list[str],
+    level: int,
+    name: str,
+    *,
+    matrix: Gf.Matrix4d,
+    physics_material_path: str | None = None,
+    contact_offset: float = CONTACT_OFFSET_DEFAULT,
+) -> None:
+    """단위 Cube(size=1)에 baked 4×4 transform 을 부여한 invisible 충돌 전용 box.
+
+    Euler op-order/행벡터 관례 모호성을 피하려고 회전·스케일·이동을 Gf.Matrix4d 로
+    합성해 matrix4d xformOp:transform 하나로 출력한다.
+    """
+    _block(lines, level, f'def Cube "{name}"{_collision_api(level, contact_tuning=True)}')
+    _block(lines, level, "{")
+    _block(lines, level + 1, 'token visibility = "invisible"')
+    _collision_attrs(lines, level + 1, contact_tuning=True, enabled=True, contact_offset=contact_offset)
+    _block(lines, level + 1, "double size = 1")
+    if physics_material_path is not None:
+        _physics_material_binding(lines, level + 1, physics_material_path)
+    rows = ", ".join(
+        "(" + ", ".join(_num(matrix.GetRow(i)[j]) for j in range(4)) + ")"
+        for i in range(4)
+    )
+    _block(lines, level + 1, f"matrix4d xformOp:transform = ({rows})")
+    _block(lines, level + 1, 'uniform token[] xformOpOrder = ["xformOp:transform"]')
+    _block(lines, level, "}")
+
+
+def _bowl_collision_walls(
+    lines: list[str],
+    level: int,
+    *,
+    r_bottom: float,
+    r_top: float,
+    z_base: float,
+    depth: float,
+    c_lats: int,
+    c_lons: int,
+    physics_material_path: str,
+    thickness: float = BOWL_COLLISION_THICKNESS,
+) -> None:
+    """그릇 안쪽 충돌을 명시적 box 패널 링으로 구성 (시각 Wall 과 동일 프로파일).
+
+    convexDecomposition 이 오목 캐비티를 메워 충돌 바닥을 높이는 문제를 피한다.
+    각 latitude band 를 자오선 경사각(alpha)만큼 기울인 invisible box 패널로 근사해
+    안쪽 면이 연속 램프가 되도록 한다(연직 패널이면 band 경계마다 ledge 가 생겨
+    큐브가 거기 얹힘). 패널은 baked 4×4 transform 으로 배치한다.
+    """
+    def _profile_r(t: float) -> float:
+        return r_bottom + (r_top - r_bottom) * (t ** 0.2)
+
+    _block(lines, level, 'def Xform "CollisionWalls"')
+    _block(lines, level, "{")
+    _block(lines, level + 1, 'token visibility = "invisible"')
+
+    panel_index = 0
+    for band in range(c_lats):
+        t_lo = band / c_lats
+        t_hi = (band + 1) / c_lats
+        r_lo, r_hi = _profile_r(t_lo), _profile_r(t_hi)
+        z_lo = z_base + depth * t_lo
+        z_hi = z_base + depth * t_hi
+        seg_len = math.hypot(r_hi - r_lo, z_hi - z_lo)
+        # 연직(+Z)에서 바깥(+r)으로 기운 각. 바닥 band 는 거의 수평(넓은 플레어).
+        alpha = math.atan2(r_hi - r_lo, z_hi - z_lo)
+        r_mid = 0.5 * (r_lo + r_hi)
+        z_mid = 0.5 * (z_lo + z_hi)
+        # 충돌 안쪽 면이 시각 프로파일에 닿도록 중심을 법선 바깥으로 thickness/2 이동.
+        r_ctr = r_mid + 0.5 * thickness * math.cos(alpha)
+        chord = 2.0 * r_ctr * math.sin(math.pi / c_lons) * 1.10  # 인접 패널 틈 제거
+        height = seg_len * 1.05  # 인접 band 와 살짝 겹쳐 자오선 틈 제거
+        for lon in range(c_lons):
+            phi = lon * math.tau / c_lons
+            center = (r_ctr * math.cos(phi), r_ctr * math.sin(phi), z_mid)
+            # row-vector 관례: p' = p · (S · Ry · Rz · T) → Scale 먼저, 그다음 Ry, Rz, Translate.
+            scale = Gf.Matrix4d().SetScale(Gf.Vec3d(thickness, chord, height))
+            rot_y = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), math.degrees(alpha)))
+            rot_z = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), math.degrees(phi)))
+            trans = Gf.Matrix4d().SetTranslate(Gf.Vec3d(*center))
+            matrix = scale * rot_y * rot_z * trans
+            _oriented_box(
+                lines,
+                level + 1,
+                f"Wall{panel_index:03d}",
+                matrix=matrix,
+                physics_material_path=physics_material_path,
+            )
+            panel_index += 1
+
     _block(lines, level, "}")
 
 
 def author_bowl_usda() -> str:
     """Author the Bowl USDA at origin with self-contained materials.
 
-    Bowl은 동적 rigid body. 밑바닥(Cylinder) + 단일 회전체 Mesh 벽.
-    기존 480개 Cube prim(20밴드×24패널) 대신 lats×lons 격자 Mesh 1개를 사용해
-    씬 그래프를 경량화하고 벽 법선 연속성을 확보한다.
+    Bowl은 동적 rigid body. 구성:
+      - Bottom: 평평한 바닥 disk (Cylinder 충돌).
+      - Wall: 시각 전용 단일 회전체 Mesh (충돌 없음).
+      - CollisionWalls: 자오선 경사를 따라 기울인 명시적 box 패널 링(안쪽 충돌).
+    벽 충돌을 명시적 프리미티브로 두는 이유는 convexDecomposition 이 오목한
+    그릇 안쪽을 메워 큐브가 바닥까지 가라앉지 못하게 하기 때문이다.
     """
     lines = _object_header("Bowl")
     _block(lines, 0, 'def Xform "Bowl" (')
@@ -594,32 +720,45 @@ def author_bowl_usda() -> str:
     bowl_friction_path = f"{looks_parent}/BowlFriction"
 
     # Bottom: 곡면 벽 최하단 반경과 이어지는 평평한 바닥 disk.
-    # 그릇 위 지름 150mm(r_top=0.075), 바닥 지름 65mm(r_bottom=0.0325), 높이 70mm.
+    # 그릇 위 지름 150mm(r_top=0.075), 바닥 지름 65mm(r_bottom=0.0325).
+    # 높이 = BOWL_Z_BASE 라 윗면(z=0.012)이 벽 최하단과 정확히 이어진다.
     _cylinder(
         lines,
         1,
         "Bottom",
-        radius=0.0325,
-        height=0.012,
+        radius=BOWL_R_BOTTOM,
+        height=BOWL_Z_BASE,
         material_path=bowl_blue_path,
-        translate=(0, 0, 0.006),
+        translate=(0, 0, 0.5 * BOWL_Z_BASE),
         collision=True,
         physics_material_path=bowl_friction_path,
         contact_tuning=True,
     )
 
-    # Wall: 기존 480 Cube prim 루프(20밴드×24패널) → 단일 회전체 Mesh.
-    # lats/lons 해상도는 기존과 동일하게 유지. convexDecomposition 충돌 겸용.
+    # Wall: 시각 전용 단일 회전체 Mesh (충돌 없음).
     _bowl_wall_mesh(
         lines,
         1,
-        r_bottom=0.0325,
-        r_top=0.075,
-        z_base=0.012,
-        depth=0.058,
-        lats=20,
-        lons=24,
+        r_bottom=BOWL_R_BOTTOM,
+        r_top=BOWL_R_TOP,
+        z_base=BOWL_Z_BASE,
+        depth=BOWL_DEPTH,
+        lats=BOWL_LATS,
+        lons=BOWL_LONS,
         material_path=bowl_blue_path,
+        collision=False,
+    )
+
+    # CollisionWalls: 안쪽 충돌은 경사 따라 기울인 명시적 box 패널 링으로 구성.
+    _bowl_collision_walls(
+        lines,
+        1,
+        r_bottom=BOWL_R_BOTTOM,
+        r_top=BOWL_R_TOP,
+        z_base=BOWL_Z_BASE,
+        depth=BOWL_DEPTH,
+        c_lats=BOWL_COLLISION_LATS,
+        c_lons=BOWL_COLLISION_LONS,
         physics_material_path=bowl_friction_path,
     )
 
