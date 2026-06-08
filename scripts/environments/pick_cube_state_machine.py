@@ -73,7 +73,7 @@ parser.add_argument("--ik_lambda", type=float, default=0.1, help="DLS damping (�
 parser.add_argument(
     "--rot_weight",
     type=float,
-    default=0.4,
+    default=0.2,
     help=(
         "orientation 오차 가중치(0~1). 낮을수록 position 우선. SO-101은 5-DOF라 임의 top-down "
         "자세+위치를 동시에 못 맞춘다. 0=position-only(자세 자유), 1=position·자세 동일 가중."
@@ -437,6 +437,7 @@ def execute_phase(
     reached: int | None = None
     step = 0
 
+    tgt_pos = torch.zeros(3, device=device)
     for step in range(max(1, int(max_steps))):
         tgt_pos, tgt_quat = target_fn()
         q_arm_des, pos_err, rot_err = ik.solve(tgt_pos, tgt_quat)
@@ -451,6 +452,8 @@ def execute_phase(
             if require_pos:
                 break
 
+    ee = ik.ee_pos_w()[0]
+    tgt = tgt_pos.reshape(3)
     stat = {
         "phase": name,
         "steps": step + 1,
@@ -458,13 +461,16 @@ def execute_phase(
         "min_pos_err_m": round(min_pos_err, 5),
         "final_pos_err_m": round(last_pos_err, 5),
         "final_rot_err_rad": round(last_rot_err, 4),
+        "target_w": [round(float(v), 4) for v in tgt.tolist()],
+        "ee_w": [round(float(v), 4) for v in ee.tolist()],
         "success": reached is not None,
     }
     if args.phase_log:
-        ee = ik.ee_pos_w()[0]
         print(
             f"    [{name}] steps={stat['steps']} pos_err={stat['final_pos_err_m']:.4f} "
-            f"rot_err={stat['final_rot_err_rad']:.3f} ee_w=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f})"
+            f"rot_err={stat['final_rot_err_rad']:.3f} "
+            f"tgt=({tgt[0]:.3f},{tgt[1]:.3f},{tgt[2]:.3f}) "
+            f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f})"
         )
     return stat
 
