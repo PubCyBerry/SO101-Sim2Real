@@ -1,14 +1,16 @@
-"""PickCube rule-based state machine (Isaac Lab DifferentialIKController).
+"""PickCube rule-based state machine (weighted differential IK).
 
 Isaac Sim/Lab 표준 pick-and-place 패턴을 따른다:
-  - end-effector "pose"(위치 + 자세)를 명령한다. 자세를 top-down 으로 고정해
+  - end-effector "pose"(위치 + 자세)를 명령한다. 자세를 top-down 으로 유도해
     SO-101 의 고정 finger 가 큐브 윗면을 찌르는 일을 막는다.
-  - IK 는 Isaac Lab `DifferentialIKController`(damped least-squares). 현재 pose 에서
-    점진적으로 푸므로 ikpy 처럼 해가 튀지 않는다.
+  - IK 는 weighted damped-least-squares. Isaac Lab 의 frame 변환 로직을 재현하되,
+    orientation 에 가중치(--rot_weight)를 두어 푼다. SO-101 은 5-DOF 라 임의 top-down
+    자세+위치를 동시 만족 못 하므로, position 을 우선 도달시키고 자세는 약하게 유도한다.
+    현재 pose 에서 점진적으로 푸므로 ikpy 처럼 해가 튀지 않는다.
   - 속도 균일화는 환경의 `SlewLimitedJointPositionAction`(max_velocity)이 담당한다.
     state machine 은 매 step 목표 joint position 만 보내면 된다.
 
-진단(diagnostic) 출력을 풍부히 넣어 grasp 자세를 GUI 로 보며 튜닝한다.
+진단(diagnostic) 출력을 풍부히 넣어 grasp 자세를 headless trace 로 보며 튜닝한다.
 """
 
 from __future__ import annotations
@@ -68,6 +70,15 @@ parser.add_argument("--grasp_tilt_deg", type=float, default=0.0, help="수직(-Z
 
 # IK / 허용 오차
 parser.add_argument("--ik_lambda", type=float, default=0.1, help="DLS damping (클수록 안정/느림)")
+parser.add_argument(
+    "--rot_weight",
+    type=float,
+    default=0.4,
+    help=(
+        "orientation 오차 가중치(0~1). 낮을수록 position 우선. SO-101은 5-DOF라 임의 top-down "
+        "자세+위치를 동시에 못 맞춘다. 0=position-only(자세 자유), 1=position·자세 동일 가중."
+    ),
+)
 parser.add_argument("--pos_tolerance", type=float, default=0.012, help="position early-exit 허용오차(m)")
 parser.add_argument("--descend_tolerance", type=float, default=0.010)
 
@@ -107,12 +118,11 @@ import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg  # noqa: E402
 from isaaclab.utils.math import (  # noqa: E402
     combine_frame_transforms,
+    compute_pose_error,
     matrix_from_quat,
     quat_apply,
-    quat_error_magnitude,
     quat_from_matrix,
     quat_inv,
     skew_symmetric_matrix,
@@ -189,10 +199,14 @@ def _grasp_R_world() -> np.ndarray:
 # ── IK solver ─────────────────────────────────────────────────────────────────
 
 class SO101DiffIK:
-    """Isaac Lab DifferentialIKController(pose, dls) wrapper.
+    """Weighted damped-least-squares IK for the SO-101 grasp point.
 
-    Isaac Lab DifferentialInverseKinematicsAction 의 frame 변환 로직을 그대로 재현해,
-    grasp point(=jaw body + JAW_GRASP_OFFSET)의 base-frame pose/jacobian 으로 IK 를 푼다.
+    Isaac Lab DifferentialInverseKinematicsAction 의 frame 변환 로직(base-frame pose/jacobian,
+    offset 보정)을 재현하되, position 과 orientation 에 가중치를 두어 푼다. SO-101 은 5-DOF 라
+    임의 top-down 자세+위치를 동시에 만족 못 하므로, orientation 에 작은 가중치(--rot_weight)를
+    주어 position 을 우선 도달시키고 자세는 "되도록" top-down 으로 유도한다.
+
+    grasp point = jaw body + JAW_GRASP_OFFSET.
     """
 
     def __init__(self, env, device: str) -> None:
@@ -208,14 +222,6 @@ class SO101DiffIK:
 
         self._offset_pos = torch.tensor(JAW_GRASP_OFFSET, device=device, dtype=torch.float32).reshape(1, 3)
         self._offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device, dtype=torch.float32).reshape(1, 4)
-
-        cfg = DifferentialIKControllerCfg(
-            command_type="pose",
-            use_relative_mode=False,
-            ik_method="dls",
-            ik_params={"lambda_val": float(args.ik_lambda)},
-        )
-        self.controller = DifferentialIKController(cfg, num_envs=1, device=device)
 
     # -- frame helpers (Isaac Lab task_space_actions 재현) --
 
@@ -253,6 +259,9 @@ class SO101DiffIK:
     def solve(self, target_pos_w: torch.Tensor, target_quat_w: torch.Tensor) -> tuple[torch.Tensor, float, float]:
         """world target pose → arm joint target (absolute, [5]).
 
+        Weighted DLS: error 와 jacobian 의 orientation 행에 w(--rot_weight)를 곱해,
+        position 을 우선 만족시키고 orientation 은 약하게 유도한다.
+
         Returns (q_arm_des[5], pos_err_m, rot_err_rad).
         """
         root_pos_w = self.robot.data.root_pos_w
@@ -261,18 +270,31 @@ class SO101DiffIK:
         tgt_pos_b, tgt_quat_b = subtract_frame_transforms(
             root_pos_w, root_quat_w, target_pos_w.reshape(1, 3), target_quat_w.reshape(1, 4)
         )
-        command = torch.cat([tgt_pos_b, tgt_quat_b], dim=-1)  # (1,7)
 
         ee_pos_b, ee_quat_b = self.ee_pose_b()
-        jac = self._jacobian_b()
+        jac = self._jacobian_b()  # (1, 6, 5)
         joint_pos = self.robot.data.joint_pos[:, self._arm_joint_ids]
 
-        self.controller.set_command(command, ee_pos_b, ee_quat_b)
-        q_des = self.controller.compute(ee_pos_b, ee_quat_b, jac, joint_pos)[0]  # (5,)
+        # base-frame pose error (position + axis-angle orientation)
+        pos_err_b, rot_err_b = compute_pose_error(
+            ee_pos_b, ee_quat_b, tgt_pos_b, tgt_quat_b, rot_error_type="axis_angle"
+        )  # (1,3), (1,3)
 
-        # 진단용 오차 (world frame)
+        w = float(args.rot_weight)
+        lam = float(args.ik_lambda)
+        # orientation 행/오차에 가중치 적용 (weighted DLS)
+        jac_w = jac.clone()
+        jac_w[:, 3:, :] = w * jac_w[:, 3:, :]
+        err6 = torch.cat([pos_err_b, w * rot_err_b], dim=1).unsqueeze(-1)  # (1,6,1)
+
+        jt = jac_w.transpose(1, 2)  # (1,5,6)
+        lam_m = (lam ** 2) * torch.eye(6, device=self.device)
+        dq = (jt @ torch.inverse(jac_w @ jt + lam_m) @ err6).squeeze(-1)  # (1,5)
+        q_des = (joint_pos + dq)[0]  # (5,)
+
+        # 진단용 오차 (world frame position, base-frame rot magnitude)
         pos_err = float(torch.linalg.norm(self.ee_pos_w()[0] - target_pos_w.reshape(3)).item())
-        rot_err = float(quat_error_magnitude(self.ee_quat_w(), target_quat_w.reshape(1, 4))[0].item())
+        rot_err = float(torch.linalg.norm(rot_err_b[0]).item())
         return q_des, pos_err, rot_err
 
     @property
