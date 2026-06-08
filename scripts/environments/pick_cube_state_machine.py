@@ -83,7 +83,7 @@ parser.add_argument("--carry_min_gripper_effort", type=float, default=0.5)
 
 # 진단
 parser.add_argument("--probe", action="store_true", help="settle 후 자세 진단만 출력하고 종료")
-parser.add_argument("--verbose", action="store_true", help="매 phase 진단 출력")
+parser.add_argument("--phase_log", action="store_true", help="매 phase 진단 출력 (--verbose는 AppLauncher 예약)")
 
 # backward compat (무시)
 parser.add_argument("--continuity_weight", type=float, default=0.05)
@@ -438,7 +438,7 @@ def execute_phase(
         "final_rot_err_rad": round(last_rot_err, 4),
         "success": reached is not None,
     }
-    if args.verbose:
+    if args.phase_log:
         ee = ik.ee_pos_w()[0]
         print(
             f"    [{name}] steps={stat['steps']} pos_err={stat['final_pos_err_m']:.4f} "
