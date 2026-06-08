@@ -101,9 +101,12 @@ BOWL_HULL_VERTEX_LIMIT: int = 64
 BOWL_VOXEL_RESOLUTION: int = 500000    # 분해 정밀도(기본 500k)
 
 # 물리 머티리얼 (static_friction, dynamic_friction, restitution).
-FRICTION_CUBE = (1.8, 1.5, 0.0)
-FRICTION_BOWL = (1.8, 1.5, 0.3)
-FRICTION_DESK = (0.9, 0.8, 0.0)
+# (static, dynamic, restitution). combineMode 는 _physics_material 인자로 지정.
+#   큐브=average, 그릇=min, 매트/책상=max 조합으로 그릇 내부만 미끌게 하고
+#   그릇-매트·큐브-매트 접촉(max 우세)은 마찰을 유지한다(밀림 방지 + 큐브 안정).
+FRICTION_CUBE = (1.8, 1.5, 0.0)     # combine=average → 그릇(min)과 접촉 시 낮은 쪽
+FRICTION_BOWL = (0.12, 0.10, 0.3)   # 미끌 — 매끈한 플라스틱 내부. combine=min
+FRICTION_DESK = (0.9, 0.8, 0.0)     # combine=max (그릇·큐브 안착)
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +195,15 @@ def _physics_material(
     parent_path: str,
     name: str,
     friction: tuple[float, float, float],
+    *,
+    friction_combine: str = "max",
 ) -> str:
-    """PhysicsMaterialAPI + PhysxMaterialAPI 머티리얼 생성, prim path 반환."""
+    """PhysicsMaterialAPI + PhysxMaterialAPI 머티리얼 생성, prim path 반환.
+
+    friction_combine: PhysX 마찰 결합 모드(우선순위 max>multiply>min>average).
+      그릇 내부를 미끌게 하려면 그릇=min·큐브=average 로 두어, 매트(max)와의
+      접촉은 max 가 이겨 밀림/큐브 안정이 보존되도록 한다.
+    """
     static_friction, dynamic_friction, restitution = friction
     mat_path = f"{parent_path}/{name}"
     material = UsdShade.Material.Define(stage, mat_path)
@@ -203,7 +213,7 @@ def _physics_material(
     phys.CreateDynamicFrictionAttr().Set(dynamic_friction)
     phys.CreateRestitutionAttr().Set(restitution)
     physx = PhysxSchema.PhysxMaterialAPI.Apply(prim)
-    physx.CreateFrictionCombineModeAttr().Set("max")
+    physx.CreateFrictionCombineModeAttr().Set(friction_combine)
     physx.CreateRestitutionCombineModeAttr().Set("min")
     return mat_path
 
@@ -453,7 +463,7 @@ def author_cube(name: str) -> "Usd.Stage":
     UsdGeom.Scope.Define(stage, looks)
     color, roughness, metallic = MATERIALS["GrayFoam"]
     gray_foam = _visual_material(stage, looks, "GrayFoam", color, roughness, metallic)
-    cube_friction = _physics_material(stage, looks, "CubeFriction", FRICTION_CUBE)
+    cube_friction = _physics_material(stage, looks, "CubeFriction", FRICTION_CUBE, friction_combine="average")
 
     # 시각 메시: 3mm 챔퍼 bevel (충돌 없음).
     sx, sy, sz = CUBE_SCALES[name]
@@ -492,7 +502,7 @@ def author_bowl() -> "Usd.Stage":
     UsdGeom.Scope.Define(stage, looks)
     color, roughness, metallic = MATERIALS["BowlBlue"]
     bowl_blue = _visual_material(stage, looks, "BowlBlue", color, roughness, metallic)
-    bowl_friction = _physics_material(stage, looks, "BowlFriction", FRICTION_BOWL)
+    bowl_friction = _physics_material(stage, looks, "BowlFriction", FRICTION_BOWL, friction_combine="min")
 
     # 시각: 단일 회전체 표면 (얇은 벽 룩, 충돌 없음).
     wall = UsdGeom.Mesh.Define(stage, "/Bowl/Wall")
@@ -502,7 +512,21 @@ def author_bowl() -> "Usd.Stage":
     _set_mesh(wall, pts, faces, double_sided=True)
     _bind_visual(wall.GetPrim(), bowl_blue)
 
-    # 충돌: watertight shell + SDF (오목 캐비티 정확). invisible.
+    # 시각 바닥 disk — 벽 mesh 는 바닥이 뚫려 있으므로 Cylinder 로 막는다(충돌 없음).
+    bottom = UsdGeom.Cylinder.Define(stage, "/Bowl/Bottom")
+    bottom.CreateAxisAttr(UsdGeom.Tokens.z)
+    bottom.CreateRadiusAttr(BOWL_R_BOTTOM)
+    bottom.CreateHeightAttr(BOWL_Z_BASE)
+    bottom.CreateExtentAttr(
+        [Gf.Vec3f(-BOWL_R_BOTTOM, -BOWL_R_BOTTOM, -BOWL_Z_BASE * 0.5),
+         Gf.Vec3f(BOWL_R_BOTTOM, BOWL_R_BOTTOM, BOWL_Z_BASE * 0.5)]
+    )
+    _set_xform(bottom, translate=(0.0, 0.0, BOWL_Z_BASE * 0.5))
+    _bind_visual(bottom.GetPrim(), bowl_blue)
+
+    # 충돌: watertight shell + convexDecomposition (num_envs>1 안정; SDF 는 멀티 env
+    #   cooking 비용·crash 로 부적합). PhysX 전용 속성은 검증된 속성명을 직접 author
+    #   한다(schema Create*Attr 메서드명 의존 회피). invisible.
     col = UsdGeom.Mesh.Define(stage, "/Bowl/Collision")
     cpts, cfaces = _bowl_collision_geometry(
         BOWL_R_BOTTOM, BOWL_R_TOP, BOWL_Z_BASE, BOWL_DEPTH,
@@ -512,13 +536,12 @@ def author_bowl() -> "Usd.Stage":
     col.MakeInvisible()
     col_prim = col.GetPrim()
     _apply_collision(col_prim, contact_tuning=True, contact_offset=CONTACT_OFFSET_DEFAULT)
-    mesh_col = UsdPhysics.MeshCollisionAPI.Apply(col_prim)
-    mesh_col.CreateApproximationAttr().Set("convexDecomposition")
-    cvx = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(col_prim)
-    cvx.CreateMaxConvexHullsAttr().Set(BOWL_MAX_CONVEX_HULLS)
-    cvx.CreateHullVertexLimitAttr().Set(BOWL_HULL_VERTEX_LIMIT)
-    cvx.CreateVoxelResolutionAttr().Set(BOWL_VOXEL_RESOLUTION)
-    cvx.CreateShrinkWrapAttr().Set(True)  # 표면 밀착 분해 → 캐비티 보존
+    UsdPhysics.MeshCollisionAPI.Apply(col_prim).CreateApproximationAttr().Set("convexDecomposition")
+    col_prim.AddAppliedSchema("PhysxConvexDecompositionCollisionAPI")
+    col_prim.CreateAttribute("physxConvexDecompositionCollision:maxConvexHulls", Sdf.ValueTypeNames.Int).Set(BOWL_MAX_CONVEX_HULLS)
+    col_prim.CreateAttribute("physxConvexDecompositionCollision:hullVertexLimit", Sdf.ValueTypeNames.Int).Set(BOWL_HULL_VERTEX_LIMIT)
+    col_prim.CreateAttribute("physxConvexDecompositionCollision:voxelResolution", Sdf.ValueTypeNames.Int).Set(BOWL_VOXEL_RESOLUTION)
+    col_prim.CreateAttribute("physxConvexDecompositionCollision:shrinkWrap", Sdf.ValueTypeNames.Bool).Set(True)
     _bind_physics(col_prim, bowl_friction)
 
     return stage

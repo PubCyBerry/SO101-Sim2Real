@@ -49,10 +49,11 @@ SO101_JOINT_TARGET_MAX_VELOCITY: dict[str, float] = {
     "elbow_flex": 5.00,
     "wrist_flex": 5.00,
     "wrist_roll": 5.00,
-    # 그리퍼는 1.0 rad/s 로 유지(부드러운 grasp). 5.0 으로 올리면 큐브에 닿을 때 세게 snap 해
-    # 튕겨내 grasp 가 실패한다(원본 SM 이 cap 5.0 에서 DR-OFF 0/4 로 회귀한 원인). teleop 실물은
-    # 더 빠른 그리퍼도 잡지만 sim 접촉 동역학은 민감하다.
-    "gripper": 1.00,
+    # 그리퍼도 5.0 rad/s 상한(사용자 지시). 이건 *상한*이지 항상 이 속도로 닫는 게
+    # 아니다 — teleop 은 leader 입력 속도를, RL/SM 은 명령 속도를 따른다. (과거 SM 이
+    # cap 5.0 에서 큐브를 snap-튕긴 건 명령 속도를 너무 키운 탓이라, 접촉 시 명령 속도
+    # 자체를 줄이는 쪽으로 푼다.)
+    "gripper": 5.00,
 }
 """Processed joint-position target speed cap in rad/s (sim time).
 

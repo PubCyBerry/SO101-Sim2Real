@@ -45,7 +45,7 @@ def Xform "Cube2" (
             float physics:dynamicFriction = 1.5
             float physics:restitution = 0
             float physics:staticFriction = 1.8
-            uniform token physxMaterial:frictionCombineMode = "max"
+            uniform token physxMaterial:frictionCombineMode = "average"
             uniform token physxMaterial:restitutionCombineMode = "min"
         }
     }
