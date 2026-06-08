@@ -149,6 +149,35 @@ State machine도 release 후 바로 다음 큐브로 가는 대신 bowl 위 `tra
 후퇴하는 `retreat` phase를 추가해, 이미 넣은 큐브/그릇을 낮은 자세로 긁고 지나가는
 경로를 줄였다.
 
+### 5.5 씬 author pxr/PhysxSchema 재작성 + 그릇 SDF 충돌 + 큐브 질량 차등 (2026-06-08)
+
+`author_pick_cube_scene.py` 를 문자열 USDA 조립에서 공식 pxr/PhysxSchema 스키마 API
+(`UsdGeom`/`UsdPhysics`/`UsdLux`/`UsdShade`/`PhysxSchema`)로 전면 재작성. 출력 USD 의
+물리 거동은 보존하되 다음을 개선·정정했다.
+
+- **그릇 충돌**: 명시적 box 패널 다발(`_bowl_collision_walls`, 144개) → 단일 watertight
+  mesh + SDF(`UsdPhysics.MeshCollisionAPI` `approximation="sdf"` +
+  `PhysxSchema.PhysxSDFMeshCollisionAPI`). 외벽+내벽+상단 림+바닥을 닫은 두께 있는 shell
+  이라 SDF 가 오목 캐비티를 정확히 표현(box ledge 에 큐브가 얹히던 문제 근절). 시각은
+  기존 single-surface `Wall` mesh 유지(얇은 벽 룩).
+  - `sdfResolution = 128`: 256 은 `gym.make` 시 SDF 베이킹이 분 단위로 길어져 부팅이
+    hang 처럼 보인다. 150mm 단순 곡면 그릇엔 128 로 충분(큐브가 통과하면 상향).
+- **그릇 질량**: `BOWL_MASS` 0.80 → 0.25 kg (≈250 g 두께 있는 플라스틱 그릇 현실화).
+  마찰 1.8/1.5 는 매끄러운 플라스틱 현실값(0.3~0.5)보다 높지만, 데스크매트 위 큐브 투입
+  충격에 그릇이 밀리지 않도록 의도적으로 유지(§5.4).
+- **큐브 질량 크기별 차등**: 단일 35 g → `CUBE_MASSES` 로 40mm(Cube1/2) 35 g,
+  50mm(Cube3/4) 55 g. 의자다리 커버 폼이 속이 약간 비어 쉘(표면적)비례에 가깝게 잡음
+  (부피 완전비례 68 g 보다 보수적 — 50mm grasp 안정 고려).
+- **조명**: scene.usd 에 `UsdLux.DomeLight`+`DistantLight(KeyLight)` 를 직접 author 해
+  usdview 단독 검증이 가능해졌다. `pick_cube_env_cfg.py` 의 `/World/DomeLight` 는 제거
+  (조명 소스 단일화). 멀티 env 학습에서 per-env 조명 복제로 과노출이 보이면 scene.usd
+  intensity 하향 또는 `/World` 공용 dome 으로 복귀.
+
+검증 상태: USD 구조 유효성(Stage.Open — 조명·mesh 정상)·물리값 보존(큐브 mass/CCD/
+damping/solver/friction/contactOffset 가 origin/main 과 동등)은 확인. Isaac Lab 런타임
+로드/teleop 는 단일 GPU 환경에서 다른 isaacsim 세션과 경합 시 `gym.make` 가 hang 하므로
+GPU 여유 시 또는 GUI 로 별도 검증해야 한다(아래 TROUBLESHOOTING 참고).
+
 ## 6. 검증 방법
 
 ```powershell

@@ -118,12 +118,12 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         prim_path="/World/GroundPlane",
         spawn=sim_utils.GroundPlaneCfg(),
     )
-    dome_light = AssetBaseCfg(
-        prim_path="/World/DomeLight",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
-    )
+    # 조명은 cube_desk scene.usd 가 직접 author 한다(/Scene/DomeLight + /Scene/KeyLight).
+    # usdview 단독 검증이 가능하도록 씬 self-contained 로 옮겼다. 멀티 env 학습에서
+    # per-env 조명 복제로 과노출이 보이면 scene.usd 조명 intensity 를 낮추거나 여기서
+    # /World 공용 dome_light 로 되돌린다.
 
-    # cube desk USD (contains desk, mat, and all rigid objects)
+    # cube desk USD (contains desk, lighting, mat, and all rigid objects)
     scene: AssetBaseCfg = CUBE_DESK_CFG.replace(prim_path="{ENV_REGEX_NS}/Scene")
 
     # SO-101 follower articulation
