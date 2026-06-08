@@ -34,6 +34,9 @@
 - [Sim-to-Real 그리퍼·펜이 매트/책상을 관통하거나 reset 시 튀어오름 (정적 객체 contactOffset 디폴트)](#sim-to-real-그리퍼펜이-매트책상을-관통하거나-reset-시-튀어오름-정적-객체-contactoffset-디폴트)
 - [Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)](#sim-to-real-펜이-펜통-안에서-spawn-되어-겹침-펜펜통-sampling-영역-분리-누락)
 - [Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)](#sim-to-real-펜통-호-sampling-이-매트책상-밖으로-나감-radius-와-default-좌표-불일치)
+- [Isaac Lab ManagerBasedRLEnvCfg 에 `rewards` 누락 시 `gym.make` 실패](#isaac-lab-managerbasedrlenvcfg-에-rewards-누락-시-gymmake-실패)
+- [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
+- [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2203,6 +2206,120 @@ uv run scripts\environments\teleoperation\teleop_se3_agent.py `
 
 `B`/`R` reset 을 20 회 반복하며 펜통이 매번 매트 검은 영역 안에 떨어지고,
 정면 0° 부근부터 좌우 30° 가장자리까지 골고루 sampling 되면 정상.
+
+---
+
+## Isaac Lab ManagerBasedRLEnvCfg 에 `rewards` 누락 시 `gym.make` 실패
+
+새 task 의 env_cfg 를 `ManagerBasedRLEnvCfg` 상속으로 작성하고 `gym.make()` 하면 환경 생성 직후 죽는다. scripted state machine 데모처럼 보상이 필요 없어 `rewards` 를 정의하지 않은 경우 발생.
+
+```text
+TypeError: Missing values detected in object PickCubeFrankaEnvCfg for the following fields:
+  - rewards
+```
+
+### 원인
+
+`ManagerBasedRLEnvCfg` 는 `rewards`·`terminations` 를 `MISSING` 기본값의 필수 필드로 둔다. `gym.make` → `ManagerBasedRLEnv.__init__` → `cfg.validate()` 가 채워지지 않은 필드를 검출해 `TypeError` 를 던진다(`observations`/`actions`/`events` 만 정의하면 통과하지 못함).
+
+### 해결 방법
+
+보상을 안 쓰더라도 **빈 보상 매니저**를 제공한다. `RewardManager` 는 term 이 0 개여도 정상 동작(reward=0)한다.
+
+```python
+@configclass
+class PickCubeFrankaRewardsCfg:
+    pass
+
+@configclass
+class PickCubeFrankaEnvCfg(ManagerBasedRLEnvCfg):
+    rewards: PickCubeFrankaRewardsCfg = PickCubeFrankaRewardsCfg()
+    terminations: PickCubeFrankaTerminationsCfg = PickCubeFrankaTerminationsCfg()
+    ...
+```
+
+`commands`·`curriculum` 은 `None` 허용이라 생략 가능하지만 `rewards`·`terminations` 는 반드시 채운다.
+
+### 확인 방법
+
+`gym.make(task, cfg=env_cfg)` 가 예외 없이 env 를 반환하면 정상.
+
+---
+
+## Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)
+
+`AppLauncher` 부팅 직후의 `print` 는 보이는데, `gym.make()`(또는 `SimulationContext` 생성) 이후의 `print` 가 — 특히 출력을 파일로 리다이렉트한 headless 실행에서 — 로그에 전혀 남지 않는다. 스크립트가 멀쩡히 동작해도 진행 상황·결과를 콘솔에서 확인할 수 없어 "조용히 죽은 것"처럼 보인다.
+
+```text
+# stdout 을 파일로 받으면 부팅 로그 45줄(P2P validation)에서 끊기고,
+# 그 뒤 스크립트의 print("[SM] ...") 가 한 줄도 안 보인다. exit code 는 0.
+```
+
+### 원인
+
+Isaac Sim/omni.kit 은 `SimulationContext` 를 만들 때 `sys.stdout`/`sys.stderr` 를 carb logger 로 재바인딩한다. 출력 대상이 tty 가 아니면(파일 리다이렉트) carb 로그 자체도 대부분 억제되어, 부팅 이후 Python `print` 가 묻힌다.
+
+### 해결 방법
+
+진행/결과 로그를 **파일에 직접 기록**하거나, 인터프리터 원본 fd(`sys.__stderr__`) 로 쓴다. 둘 다 carb 재바인딩을 우회한다.
+
+```python
+_LOG_PATH = "/tmp/franka_sm_progress.txt"
+open(_LOG_PATH, "w").close()           # 실행마다 초기화
+
+def log(msg: str) -> None:
+    with open(_LOG_PATH, "a") as f:    # 파일 IO 는 carb 재바인딩과 무관
+        f.write(msg + "\n")
+    print(msg, file=sys.__stderr__, flush=True)  # GUI 콘솔용 원본 fd
+```
+
+디버깅 시 예외도 `traceback.format_exc()` 를 `log()` 로 남기면 silent 종료의 실제 원인(예: 위 `rewards` 누락)을 잡을 수 있다.
+
+### 확인 방법
+
+`gym.make` 이후 `log("...")` 한 줄이 진행 로그 파일에 남으면 정상.
+
+---
+
+## Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음
+
+> 사례: cube_desk 씬의 **Franka Emika Panda**(`isaaclab_assets.FRANKA_PANDA_HIGH_PD_CFG`,
+> 7DOF arm + parallel gripper, reach ≈0.855 m)로 큐브 4개를 그릇에 옮기는 scripted
+> state machine(`scripts/environments/pick_cube_franka_state_machine.py`). SO-101 이 아닌
+> Franka 를 쓴 이유는 SO-101 의 5DOF arm 으로는 full 6DOF pose IK 가 불가능하기 때문이다.
+
+DifferentialIK + scripted state machine 으로 여러 물체를 집을 때, 일부 물체만 잡히고
+나머지는 ee 가 목표에 도달하지 못한다. 멀리 있는 물체는 손이 안 닿고(`ee.x` 가 특정 값에
+갇힘), 너무 가까운 물체는 ee 의 z 가 위로 솟아(예: 큐브 z≈0.73 인데 ee z≈1.07) 하강을 못 한다.
+
+```text
+# 큐브 분산축과 base yaw 가 어긋난 경우 — ee.x 가 base 부근(1.89)에 갇혀 멀리 못 감
+Cube4 descend reached=False ee=(1.889,-0.327,0.746) cube=(2.064,-0.357,0.729)
+# base 가 물체에 너무 가까운 경우 — ee 가 위로 솟음
+Cube4 descend reached=False ee=(1.576,-0.421,1.069) cube=(1.617,-0.457,0.729)
+```
+
+### 원인
+
+- **yaw 어긋남**: base yaw 가 물체 분산 주축과 어긋나면 그 분산이 robot 의 side(좌우)
+  방향이 된다. manipulator 는 forward reach 는 길지만 down-facing 자세로 side 로 뻗기는
+  어려워, 분산 양끝 물체에 손이 안 닿는다.
+- **거리 부정합**: 물체 영역 폭이 manipulator 의 이상적 forward reach 환형(annulus,
+  대략 0.3~0.75 m)보다 넓으면, base 에 너무 가까운 물체는 팔이 접히는 영역에 들어가
+  IK 가 ee 를 위로 솟구치는 해로 풀고, 먼 물체는 reach 경계에 걸린다.
+
+### 해결 방법
+
+- base **yaw 를 물체 분산 주축과 forward 가 일치**하도록 둔다(예: 큐브가 world +X 로
+  넓게 퍼지면 base forward 도 +X = yaw 0°).
+- base **거리**를 가까운 물체도 forward ≥0.3 m, 먼 물체도 reach(예 Franka 0.855 m) 안에
+  들도록 조정한다. cube_desk Franka 는 `_FRANKA_POS=(1.30, -0.40, 0.71)`, yaw 0° 로
+  큐브 x∈[1.60,2.08] 전부를 forward 0.30~0.78 m 안에 두어 4/4 안정 grasp 를 얻었다.
+
+### 확인 방법
+
+각 물체 접근 단계에서 ee xyz 와 물체 xyz 를 로깅해 추종 여부를 본다. 모든 물체가
+`reached=True` 로 잡히면 정상.
 
 ---
 
