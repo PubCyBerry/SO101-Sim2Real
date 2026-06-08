@@ -39,7 +39,12 @@ parser.add_argument("--container_angle_scale", type=float, default=1.0)
 parser.add_argument("--container_radius_scale", type=float, default=1.0)
 
 # 처리 순서
-parser.add_argument("--object_order", choices=["raster", "name", "near_bowl_first", "far_bowl_first"], default="raster")
+parser.add_argument(
+    "--object_order",
+    choices=["near_robot", "far_robot", "raster", "name", "near_bowl_first", "far_bowl_first"],
+    default="near_robot",
+    help="집는 순서. near_robot=로봇팔에서 가까운 큐브부터(기본).",
+)
 parser.add_argument("--object_cycles", type=int, default=1)
 parser.add_argument("--raster_row_band", type=float, default=0.06)
 
@@ -57,26 +62,53 @@ parser.add_argument("--max_grasp_attempts", type=int, default=3)
 
 # 높이/오프셋 (m)
 parser.add_argument("--approach_height", type=float, default=0.12, help="큐브 중심 위 pre-pick 높이")
-parser.add_argument("--grasp_z_offset", type=float, default=0.0, help="grasp 목표 z = 큐브 중심 + 이 값")
+parser.add_argument(
+    "--grasp_z_offset",
+    type=float,
+    default=0.005,
+    help=(
+        "grasp 목표 z = 큐브 중심 + 이 값. z 과주입(음수 깊이)은 비추 — unreachable 목표라 "
+        "early-exit 안 걸려 시간↑. tilt를 z가 아니라 자세로 해결(검증 기록)."
+    ),
+)
 parser.add_argument("--lift_height", type=float, default=0.12)
 parser.add_argument("--transport_height", type=float, default=0.12, help="그릇 위 수송 높이")
 parser.add_argument("--place_height", type=float, default=0.05, help="그릇 안 release 높이")
 parser.add_argument("--stack_place_height_increment", type=float, default=0.02)
 parser.add_argument("--bowl_place_offset_radius", type=float, default=0.022)
 
-# Grasp 자세 (world top-down 기준에서 보정). 진단 보고 튜닝.
-parser.add_argument("--grasp_yaw_deg", type=float, default=0.0, help="top-down 자세에 world Z축 yaw 추가(도)")
-parser.add_argument("--grasp_tilt_deg", type=float, default=0.0, help="수직(-Z)에서 앞으로 기울이는 각도(도)")
+# Grasp 자세 (강tilt — 검증된 성공 공식). SO-101 5-DOF는 top-down 불가, 강tilt로
+# 모터 jaw를 큐브 바닥 아래까지 내려 감싼다(CONTEXT.md: down_dot≈0.34, ~70°).
+parser.add_argument("--grasp_yaw_deg", type=float, default=0.0, help="grasp 자세에 world Z축 yaw 추가(도)")
+parser.add_argument(
+    "--grasp_tilt_deg",
+    type=float,
+    default=60.0,
+    help="수직(-Z)에서 앞으로 기울이는 각도(도). 강tilt가 모터 jaw를 큐브 옆/아래로 내림. trace의 jaw_minz로 튜닝.",
+)
+
+# descend grasp: 결정론적 random-FK 전역탐색 (모터 jaw를 큐브 아래로 감싸는 자세 선택)
+parser.add_argument("--fk_samples", type=int, default=3000, help="random-FK 후보 수 (1/3 local, 2/3 global)")
+parser.add_argument(
+    "--grasp_tilt_weight",
+    type=float,
+    default=0.5,
+    help=(
+        "random-FK 점수에 tilt penalty 가중. 모터 jaw가 floor·고정finger 아래로 내려가는 강tilt "
+        "자세를 선택해 큐브를 감싸게 한다. 0=위치만(tilt 자유). CONTEXT 검증: 모터 jaw 바닥 z<큐브 바닥."
+    ),
+)
+parser.add_argument("--grasp_floor_z", type=float, default=0.705, help="모터 jaw가 내려갈 책상 상판 z (tilt penalty 기준)")
 
 # IK / 허용 오차
 parser.add_argument("--ik_lambda", type=float, default=0.1, help="DLS damping (클수록 안정/느림)")
 parser.add_argument(
     "--rot_weight",
     type=float,
-    default=0.2,
+    default=0.6,
     help=(
-        "orientation 오차 가중치(0~1). 낮을수록 position 우선. SO-101은 5-DOF라 임의 top-down "
-        "자세+위치를 동시에 못 맞춘다. 0=position-only(자세 자유), 1=position·자세 동일 가중."
+        "orientation 오차 가중치(0~1). 강tilt 자세는 5-DOF로 도달 가능하므로(top-down과 달리) "
+        "자세를 확실히 추종하도록 높게 둔다. 너무 낮으면 자세 안 잡혀 tilt 실패."
     ),
 )
 parser.add_argument("--pos_tolerance", type=float, default=0.012, help="position early-exit 허용오차(m)")
@@ -85,7 +117,7 @@ parser.add_argument("--descend_tolerance", type=float, default=0.010)
 # 그리퍼 (joint target, rad 또는 normalized)
 parser.add_argument("--gripper_open", type=float, default=1.0)
 parser.add_argument("--gripper_closed", type=float, default=0.0)
-parser.add_argument("--lift_min_height", type=float, default=0.06, help="lift 성공 판정 최소 상승(m)")
+parser.add_argument("--lift_min_height", type=float, default=0.08, help="lift 성공 판정 최소 상승(m)")
 
 # 그리퍼 effort
 parser.add_argument("--disable_dynamic_gripper_effort", action="store_true")
@@ -154,6 +186,14 @@ JAW_GRASP_OFFSET = (-0.021, -0.070, 0.020)
 
 BOWL_PLACE_OFFSET_DIRECTIONS = ((-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0))
 
+# 그리퍼 finger collision 메시 bbox(메시 로컬, m) + URDF collision origin(xyz, rpy).
+# STL 측정값(검증 SM). "jaw"=모터 jaw(moving_jaw_so101_v1), "gripper"=고정 finger.
+# grasp 성공 판별식(CONTEXT.md): 모터 jaw 바닥 world z < 큐브 바닥 z 면 감쌈.
+_FINGER_GEOM = {
+    "jaw": dict(lo=(-0.0123, -0.082, -0.024), hi=(0.01, 0.01, 0.024), oxyz=(0.0, 0.0, 0.0189), orpy=(0.0, 0.0, 0.0)),
+    "gripper": dict(lo=(-0.0352, -0.0242, -0.0001), hi=(0.03, 0.0278, 0.1054), oxyz=(0.0, -0.000218214, 0.000949706), orpy=(-3.14159, 0.0, 0.0)),
+}
+
 
 class FSMState(str, Enum):
     SETTLE = "SETTLE"
@@ -169,13 +209,14 @@ class FSMState(str, Enum):
     DONE = "DONE"
 
 
-def _grasp_R_world() -> np.ndarray:
-    """Top-down grasp 자세의 world 회전행렬 (jaw body 가 가질 자세).
+def _grasp_R_world(tilt_deg: float) -> np.ndarray:
+    """jaw body 가 가질 world 회전행렬. tilt_deg=0 이면 top-down(level), >0 이면 tilt.
 
-    1차 추정: JAW_GRASP_OFFSET(주로 -Y)가 world -Z(아래)를 향하도록.
+    base(top-down): JAW_GRASP_OFFSET(주로 -Y)가 world -Z(아래)를 향하도록.
       jaw local +Y → world +Z, +X → world +X, +Z → world -Y.
-    --grasp_yaw_deg(world Z 회전), --grasp_tilt_deg(앞으로 기울임)로 보정.
-    진단 출력을 보고 조정한다.
+    tilt_deg: world X축 회전으로 수직에서 앞(+Y world, 큐브 쪽)으로 기울임.
+      강tilt 면 모터 jaw 가 큐브 옆/아래로 내려가 감싼다(검증 공식).
+    grasp 단계는 강tilt, transport/place 는 level(0) 사용.
     """
     R = np.array(
         [
@@ -190,7 +231,7 @@ def _grasp_R_world() -> np.ndarray:
     cz, sz = math.cos(yaw), math.sin(yaw)
     Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
     # world X축 tilt (수직에서 앞으로)
-    tilt = math.radians(args.grasp_tilt_deg)
+    tilt = math.radians(tilt_deg)
     cx, sx = math.cos(tilt), math.sin(tilt)
     Rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
     return Rz @ Rx @ R
@@ -353,13 +394,14 @@ def _cube_inside_bowl(env, cube_name: str) -> bool:
 
 # ── target suppliers (world frame pos + quat) ─────────────────────────────────
 
-def _grasp_quat_w(device: str) -> torch.Tensor:
-    R = torch.tensor(_grasp_R_world(), device=device, dtype=torch.float32).reshape(1, 3, 3)
+def _grasp_quat_w(device: str, tilt_deg: float) -> torch.Tensor:
+    R = torch.tensor(_grasp_R_world(tilt_deg), device=device, dtype=torch.float32).reshape(1, 3, 3)
     return quat_from_matrix(R)  # (1,4)
 
 
 def _cube_target(env, cube_name: str, dz: float, device: str) -> Callable[[], tuple[torch.Tensor, torch.Tensor]]:
-    quat = _grasp_quat_w(device)
+    # 큐브 grasp 단계: 강tilt (모터 jaw 가 큐브 옆/아래로 내려가 감싸도록).
+    quat = _grasp_quat_w(device, args.grasp_tilt_deg)
 
     def fn() -> tuple[torch.Tensor, torch.Tensor]:
         pos = env.unwrapped.scene[cube_name].data.root_pos_w[0].clone()
@@ -371,7 +413,8 @@ def _cube_target(env, cube_name: str, dz: float, device: str) -> Callable[[], tu
 
 
 def _bowl_target(env, dz: float, device: str, xy_offset: torch.Tensor | None = None) -> Callable[[], tuple[torch.Tensor, torch.Tensor]]:
-    quat = _grasp_quat_w(device)
+    # 운반/배치 단계: level(top-down, tilt=0). tilt 자세로 운반하면 그릇 들이받아 회귀(CONTEXT.md).
+    quat = _grasp_quat_w(device, 0.0)
 
     def fn() -> tuple[torch.Tensor, torch.Tensor]:
         pos = env.unwrapped.scene[BOWL_NAME].data.root_pos_w[0].clone().to(device=device)
@@ -396,12 +439,70 @@ def _bowl_xy_offset(device: str, idx: int) -> torch.Tensor:
     return torch.tensor([d[0] * s, d[1] * s], device=device, dtype=torch.float32)
 
 
+# ── 진단: finger 바닥 z, tilt 강도 (grasp 성공 판별식) ──────────────────────────
+
+def _rpy_matrix(rpy: tuple[float, float, float], device: str) -> torch.Tensor:
+    r, p, y = rpy
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    rx = torch.tensor([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], device=device, dtype=torch.float32)
+    ry = torch.tensor([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], device=device, dtype=torch.float32)
+    rz = torch.tensor([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], device=device, dtype=torch.float32)
+    return rz @ ry @ rx
+
+
+def _finger_min_z(robot, body_name: str, device: str) -> float:
+    """finger collision 메시 AABB 의 world z 최저점. grasp 성공 판별식용.
+
+    "jaw"=모터 jaw 바닥 z 가 큐브 바닥(<0.717) 아래면 감쌈 = grasp 성공(CONTEXT.md).
+    """
+    g = _FINGER_GEOM[body_name]
+    R = _rpy_matrix(g["orpy"], device)
+    oxyz = torch.tensor(g["oxyz"], device=device, dtype=torch.float32)
+    lo, hi = g["lo"], g["hi"]
+    corners = torch.tensor(
+        [[cx, cy, cz] for cx in (lo[0], hi[0]) for cy in (lo[1], hi[1]) for cz in (lo[2], hi[2])],
+        device=device,
+        dtype=torch.float32,
+    )  # (8,3)
+    p_link = (R @ corners.T).T + oxyz  # (8,3)
+    bid = robot.data.body_names.index(body_name)
+    bpos = robot.data.body_pos_w[0, bid]  # (3,)
+    bquat = robot.data.body_quat_w[0, bid]  # (4,)
+    pw = bpos + quat_apply(bquat.unsqueeze(0).expand(8, 4), p_link)  # (8,3)
+    return float(pw[:, 2].min().item())
+
+
+def _approach_down_dot(robot, device: str) -> float:
+    """jaw 접근축(원점→grasp point, JAW_GRASP_OFFSET 방향)이 world -Z 와 이루는 dot.
+
+    1.0=완전 수직 top-down, 0.34≈70° tilt(검증 성공값), 0=수평.
+    """
+    off = torch.tensor(JAW_GRASP_OFFSET, device=device, dtype=torch.float32)
+    off = off / torch.linalg.norm(off)
+    bid = robot.data.body_names.index(EE_BODY_NAME)
+    bquat = robot.data.body_quat_w[0, bid]
+    aw = quat_apply(bquat.unsqueeze(0), off.unsqueeze(0))[0]
+    aw = aw / torch.linalg.norm(aw)
+    return float(-aw[2].item())  # · (0,0,-1)
+
+
 # ── 큐브 순서 ─────────────────────────────────────────────────────────────────
 
 def _ordered_cubes(env, names: list[str]) -> list[str]:
     scene = env.unwrapped.scene
     names = list(names)
     if args.object_order == "name":
+        return names
+    if args.object_order in ("near_robot", "far_robot"):
+        # 로봇 base 와의 xy 거리 순. near_robot=가까운 큐브부터(사용자 요청 기본).
+        base_xy = scene["robot"].data.root_pos_w[0, :2]
+        rev = args.object_order == "far_robot"
+        names.sort(
+            key=lambda n: float(torch.linalg.norm(scene[n].data.root_pos_w[0, :2] - base_xy).item()),
+            reverse=rev,
+        )
         return names
     if args.object_order in ("near_bowl_first", "far_bowl_first"):
         rev = args.object_order == "far_bowl_first"
@@ -412,6 +513,116 @@ def _ordered_cubes(env, names: list[str]) -> list[str]:
     band = max(1e-4, float(args.raster_row_band))
     names.sort(key=lambda n: (int((y_top - float(xy[n][1])) // band), float(xy[n][0])))
     return names
+
+
+# ── 결정론적 random-FK 솔버 (descend grasp 자세) ──────────────────────────────
+
+def _fk_solve_joint_target(
+    env,
+    ik: SO101DiffIK,
+    target_pos_w: torch.Tensor,
+    gripper_target: float,
+    device: str,
+    *,
+    samples: int,
+    tilt_weight: float,
+    seed_offset: int,
+    continuity_weight: float = 0.015,
+    floor_z: float = 0.705,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """random-FK waypoint 솔버 (검증 알고리즘, 결정론화).
+
+    robot joint state 를 잠깐 써서(write_joint_state_to_sim + scene.update) 후보 자세의
+    grasp point·모터 jaw 바닥 z 를 kinematic FK 로 평가한 뒤 원복한다. 물리 step 없음.
+    score = dist(grasp_point, target) + continuity·|Δq| + tilt_weight·(모터 jaw 가 floor·
+    고정 finger 위에 남는 penalty). 강tilt(모터 jaw 가 큐브 아래) 자세를 결정론적으로 선택.
+    RNG seed 고정(args.seed + seed_offset) → 같은 입력에 같은 출력(stochastic 제거).
+    """
+    scene = env.unwrapped.scene
+    robot = scene["robot"]
+    env_ids = torch.tensor([0], device=device, dtype=torch.long)
+    saved_q = robot.data.joint_pos[:, :6].clone()
+    saved_v = robot.data.joint_vel[:, :6].clone()
+    current = saved_q[0, :ARM_DOF].clone()
+    lo = robot.data.soft_joint_pos_limits[0, :ARM_DOF, 0].to(device)
+    hi = robot.data.soft_joint_pos_limits[0, :ARM_DOF, 1].to(device)
+    lo = torch.where(torch.isfinite(lo), lo, torch.full_like(lo, -3.14))
+    hi = torch.where(torch.isfinite(hi), hi, torch.full_like(hi, 3.14))
+    target = target_pos_w.to(device=device, dtype=torch.float32).reshape(3)
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(args.seed + seed_offset))
+    zero_vel = torch.zeros((1, 6), device=device)
+
+    best = {"score": float("inf"), "q": current.clone(), "dist": float("inf"), "jaw_minz": 999.0}
+
+    def evaluate(q_arm: torch.Tensor) -> None:
+        q = torch.zeros((1, 6), device=device)
+        q[0, :ARM_DOF] = q_arm
+        q[0, 5] = float(gripper_target)
+        robot.write_joint_state_to_sim(q, zero_vel, env_ids=env_ids)
+        scene.update(0.0)
+        gp = ik.ee_pos_w()[0]
+        dist = float(torch.linalg.norm(gp - target).item())
+        cont = float(torch.linalg.norm(q_arm - current).item())
+        score = dist + continuity_weight * cont
+        jaw_z = _finger_min_z(robot, "jaw", device)
+        if tilt_weight > 0.0:
+            fix_z = _finger_min_z(robot, "gripper", device)
+            score = score + tilt_weight * (max(0.0, jaw_z - floor_z) + max(0.0, jaw_z - fix_z))
+        if score < best["score"]:
+            best.update(score=score, q=q_arm.clone(), dist=dist, jaw_minz=jaw_z)
+
+    evaluate(current)
+    local_count = min(max(samples // 3, 1), samples)
+    global_count = max(samples - local_count, 1)
+    for _ in range(local_count):
+        noise = torch.randn((ARM_DOF,), generator=gen, device=device) * 0.35
+        evaluate(torch.minimum(torch.maximum(current + noise, lo), hi))
+    for _ in range(global_count):
+        evaluate(lo + (hi - lo) * torch.rand((ARM_DOF,), generator=gen, device=device))
+
+    robot.write_joint_state_to_sim(saved_q, saved_v, env_ids=env_ids)
+    scene.update(0.0)
+    return best["q"], {"planned_dist": round(best["dist"], 5), "planned_jaw_minz": round(best["jaw_minz"], 4)}
+
+
+def execute_joint_phase(
+    env,
+    ik: SO101DiffIK,
+    device: str,
+    name: str,
+    q_arm_target: torch.Tensor,
+    gripper_target: float,
+    max_steps: int,
+    joint_tol: float,
+    *,
+    min_gripper_effort: float | None = None,
+) -> dict[str, Any]:
+    """고정 arm joint target 으로 slew 이동(env SlewLimited 가 속도 제한). joint 오차로 early-exit."""
+    robot = env.unwrapped.scene["robot"]
+    q_arm_target = q_arm_target.to(device=device, dtype=torch.float32)
+    reached: int | None = None
+    step = 0
+    for step in range(max(1, int(max_steps))):
+        action = _build_action(robot, ik, q_arm_target, gripper_target, device)
+        _step_env(env, action, min_gripper_effort=min_gripper_effort)
+        cur = robot.data.joint_pos[0, ik.arm_joint_ids]
+        jerr = float(torch.max(torch.abs(cur - q_arm_target)).item())
+        if jerr <= joint_tol:
+            reached = step + 1
+            break
+    jaw_mz = _finger_min_z(robot, "jaw", device)
+    down_dot = _approach_down_dot(robot, device)
+    return {
+        "phase": name,
+        "steps": step + 1,
+        "reached_step": reached,
+        "final_joint_err_rad": round(jerr, 4),
+        "down_dot": round(down_dot, 3),
+        "jaw_minz": round(jaw_mz, 4),
+        "success": reached is not None,
+    }
 
 
 # ── phase 실행 ────────────────────────────────────────────────────────────────
@@ -465,10 +676,14 @@ def execute_phase(
         "ee_w": [round(float(v), 4) for v in ee.tolist()],
         "success": reached is not None,
     }
+    jaw_mz = _finger_min_z(robot, "jaw", device)
+    down_dot = _approach_down_dot(robot, device)
+    stat["jaw_minz"] = round(jaw_mz, 4)
+    stat["down_dot"] = round(down_dot, 3)
     if args.phase_log:
         print(
             f"    [{name}] steps={stat['steps']} pos_err={stat['final_pos_err_m']:.4f} "
-            f"rot_err={stat['final_rot_err_rad']:.3f} "
+            f"rot_err={stat['final_rot_err_rad']:.3f} down_dot={down_dot:.2f} jaw_minz={jaw_mz:.4f} "
             f"tgt=({tgt[0]:.3f},{tgt[1]:.3f},{tgt[2]:.3f}) "
             f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f})"
         )
@@ -495,7 +710,7 @@ def _probe_orientation(env, ik: SO101DiffIK, device: str) -> dict[str, Any]:
     quat_w = ik.ee_quat_w()  # (1,4)
     R = matrix_from_quat(quat_w)[0].detach().cpu().numpy()  # columns = local axes in world
     ee = ik.ee_pos_w()[0].detach().cpu().numpy()
-    grasp_R = _grasp_R_world()
+    grasp_R = _grasp_R_world(args.grasp_tilt_deg)
     info = {
         "jaw_quat_w": [round(float(v), 4) for v in quat_w[0].tolist()],
         "jaw_x_axis_world": [round(float(v), 3) for v in R[:, 0].tolist()],
@@ -548,15 +763,46 @@ def run_episode(env, ik: SO101DiffIK, device: str, active_names: list[str]) -> d
                 _cube_target(env, cube_name, args.approach_height, device),
                 args.gripper_open, args.approach_steps, args.pos_tolerance,
             ))
-            # DESCEND
-            trace.append(execute_phase(
+            # DESCEND: 결정론적 random-FK로 강tilt grasp 자세(모터 jaw가 큐브 감쌈) 탐색 후 이동.
+            desc_target = _cube_target(env, cube_name, args.grasp_z_offset, device)()[0]
+            q_desc, fk_info = _fk_solve_joint_target(
+                env, ik, desc_target, args.gripper_open, device,
+                samples=args.fk_samples, tilt_weight=args.grasp_tilt_weight,
+                seed_offset=0, floor_z=args.grasp_floor_z,
+            )
+            d_stat = execute_joint_phase(
                 env, ik, device, f"{cube_name}.descend[{attempt}]",
-                _cube_target(env, cube_name, args.grasp_z_offset, device),
-                args.gripper_open, args.descend_steps, args.descend_tolerance,
-            ))
-            # CLOSE (ee pose 고정)
+                q_desc, args.gripper_open, args.descend_steps, joint_tol=0.03,
+            )
+            d_stat.update(fk_info)
+            trace.append(d_stat)
+            # grasp 성공 판별식: 모터 jaw 바닥 z < 큐브 바닥 z 면 감쌈(CONTEXT.md)
+            if args.phase_log:
+                jaw_mz = _finger_min_z(robot, "jaw", device)
+                fix_mz = _finger_min_z(robot, "gripper", device)
+                cube_btm = float(env.unwrapped.scene[cube_name].data.root_pos_w[0, 2].item()) - CUBE_HALF_Z
+                wrap = jaw_mz < cube_btm
+                print(
+                    f"    >> {cube_name} descend: jaw_minz={jaw_mz:.4f} fix_minz={fix_mz:.4f} "
+                    f"cube_bottom={cube_btm:.4f} → {'WRAP(감쌈)' if wrap else 'ABOVE(위에 남음)'}"
+                )
+            # CLOSE (ee pose 고정). 그리퍼 닫기가 모터 jaw를 큐브 아래로 쓸어담음(검증 메커니즘).
             hold_pose(env, ik, device, args.gripper_closed, args.close_steps,
                       min_gripper_effort=args.carry_min_gripper_effort)
+            # CLOSE 후 grasp 성공 판별식: 모터 jaw 바닥 z < 큐브 바닥 z 면 감쌈
+            jaw_mz = _finger_min_z(robot, "jaw", device)
+            fix_mz = _finger_min_z(robot, "gripper", device)
+            cube_btm = float(env.unwrapped.scene[cube_name].data.root_pos_w[0, 2].item()) - CUBE_HALF_Z
+            trace.append({
+                "phase": f"{cube_name}.after_close[{attempt}]",
+                "jaw_minz": round(jaw_mz, 4),
+                "fix_minz": round(fix_mz, 4),
+                "cube_bottom": round(cube_btm, 4),
+                "wrap": jaw_mz < cube_btm,
+            })
+            if args.phase_log:
+                print(f"    >> after CLOSE: jaw_minz={jaw_mz:.4f} cube_bottom={cube_btm:.4f} "
+                      f"{'WRAP(감쌈)' if jaw_mz < cube_btm else 'ABOVE(위)'}")
             # LIFT
             trace.append(execute_phase(
                 env, ik, device, f"{cube_name}.lift[{attempt}]",
