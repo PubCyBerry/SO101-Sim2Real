@@ -764,6 +764,12 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         # 4096 env PPO에서 aggregate pair가 134k 근처까지 올라간다. 256k로 여유 확보.
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 256 * 1024
+        # 대규모 env(4096+) contact patch 버퍼. 기본(~82k)은 4096 env에서 overflow
+        # ("Patch buffer overflow ... at least ~166k"). 4096 ≈ 41 patch/env 기준
+        # 넉넉히 5*2^16=327680 (≈8000 env) 로 설정. 메모리 비용은 작다.
+        self.sim.physx.gpu_max_rigid_patch_count = 5 * 2**16
+        # contact stack 도 대규모 env 대비 상향 (기본 2^26).
+        self.sim.physx.gpu_collision_stack_size = 2**28
 
 
 # ---------------------------------------------------------------------------
