@@ -2663,6 +2663,57 @@ SO101-Leader connected.
 
 > 한계(공통): 5-DOF position-only IK 는 큐브별 grasp 자세 편차가 커서 **4-cube 신뢰성은 검증된 `joint_fk` direct FSM 이 우위**다. lula_ik/ikpy 는 단일 큐브 검증·대안 백엔드 용도.
 
+## Core API follow-target: EE frame(`gripper_frame_link`) 이 USD prim 으로 안 보임
+
+**현상**: Core API standalone(`follow_target_so101.py`, `World`+`SingleArticulation`+`ArticulationKinematicsSolver`)에서 EE world pose 를 읽으려고 스테이지를 `Stage.Traverse()` 로 순회해 `gripper_frame_link` prim 을 찾으면 못 찾는다. `simulation_app.close()` 가 종료 코드를 덮어써 **exit code 는 0 으로 나와 성공처럼 보이지만** 실제로는 예외로 중단된다(진행 로그도 carb 재바인딩에 묻힘).
+
+```
+RuntimeError: 'gripper_frame_link' prim 을 스테이지에서 찾지 못했다.
+```
+
+### 원인
+
+`gripper_frame_link` 는 **URDF/Lula 전용 TCP 프레임**이라 SO-101 USD 에는 같은 이름의 prim 이 없다(USD body 는 `jaw`·`gripper` 등 다른 이름). Lula 솔버는 URDF 를 읽으므로 이 프레임을 알아 IK/`ArticulationKinematicsSolver` 생성은 정상이지만, USD 스테이지 순회로는 잡히지 않는다.
+
+### 해결 방법
+
+- EE world pose 는 prim 검색 대신 **`ArticulationKinematicsSolver.compute_end_effector_pose()`** 로 얻는다(현재 관절 상태 FK + `set_robot_base_pose` 반영, world frame). `[0]` 이 position.
+- 굳이 USD body 로 읽어야 하면 `gripper_frame_link` 가 아니라 실제 USD body 이름(`jaw`/`gripper`)을 쓴다(`pick_cube_state_machine.py` 의 grasp midpoint 패턴).
+- 부팅 후 스크립트는 예외가 `close()` 에 묻히지 않도록 `main()` 을 try/except 로 감싸 traceback 을 파일(`/tmp/...`)에 남긴다(carb stdout 재바인딩 회피).
+
+### 확인 방법
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac \
+  python scripts/environments/follow_target_so101.py --headless --selftest
+```
+→ `/tmp/so101_follow_target.txt` 에 `[selftest] #0..#3 ... pass=True`, `OK — 4/4` (EE 추종 오차 ~0.005–0.008 m). 5-DOF position-only IK 는 grasp 와 달리 접촉 정밀도 부담이 없어 follow-target 은 sub-cm 로 수렴한다.
+
+## Core API standalone 로봇이 실행 직후 넘어져 날아감 (floating base — fix_root_link 누락)
+
+**현상**: Core API `World` + `add_reference_to_stage(robot.usd)` + `SingleArticulation` 로 SO-101 을 띄우면, Play 직후 IK 가 팔을 움직이는 순간 **로봇 전체가 반력으로 넘어져 책상 위로 날아간다**. Isaac Lab env(`gym.make`)에서는 멀쩡하던 로봇이 standalone 에서만 무너진다.
+
+### 원인
+
+`add_reference_to_stage` 는 USD 를 그대로 참조만 한다 → 베이스가 world 에 고정되지 않은 **floating base** 다. Isaac Lab env 는 `ArticulationCfg.spawn` 의 `ArticulationRootPropertiesCfg(fix_root_link=True)` 로 베이스를 고정하는데, raw 참조는 이 단계를 건너뛴다. 또 raw USD 드라이브 게인이 env 의 soft-PD(stiffness 17.8/damping 0.6)와 달라 IK target 으로 급스냅하며 물체를 쳐낸다.
+
+`compute_end_effector_pose()` 기반 self-test 가 통과하는데도 무너지는 이유: 그 FK 는 **고정 가정 base**(set_robot_base_pose) 기준이라, 실제 root 가 넘어져도 joint 각도만 맞으면 EE 거리는 통과로 보인다(false pass).
+
+### 해결 방법
+
+- 로봇은 `add_reference_to_stage` 대신 **Isaac Lab spawn** 으로 띄워 env 와 동일하게 `fix_root_link=True` (+ `enabled_self_collisions`, solver iter 4/4) 적용:
+  ```python
+  import isaaclab.sim as sim_utils
+  spawn = sim_utils.UsdFileCfg(usd_path=..., articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=True, ...))
+  spawn.func("/World/Robot", spawn, translation=ROBOT_POS, orientation=ROBOT_QUAT)
+  ```
+- reset 후 `robot.get_articulation_controller().set_gains(kps=17.8, kds=0.6)` (+ `set_max_efforts(10)`) 로 env soft-PD 이식.
+- self-test 는 EE 거리 외에 **root world pose 이탈**(`robot.get_world_pose()` ↔ ROBOT_POS, ≤0.02 m)도 검사해 floating base 를 잡는다.
+
+### 확인 방법
+
+`--headless --selftest` 로그에 `base_drift=0.0000m base_fixed=True` 가 찍히고 `OK — 4/4` 통과. GUI 에서 Play 해도 팔이 베이스에 붙은 채 target 을 추종한다.
+
 ## Isaac Sim headless 씬 author/검증 스크립트가 부팅 후 hang (단일 GPU 경합 / app.close 좀비)
 
 **현상**: `author_pick_cube_scene.py`(PhysxSchema 정식 API 라 `AppLauncher` headless 부팅 필요) 또는 `gym.make` 검증 스크립트를 headless 로 띄우면, GPU 배너·CUDA P2P 검증까지 로그가 찍힌 뒤 더 진행하지 않고 멈춘다. 프로세스는 살아 있고 GPU 메모리(수백 MB~수 GB)를 점유하지만 CPU 0~3% 로 idle. USD export 나 결과 파일은 멈추기 전에 기록되기도 한다.
