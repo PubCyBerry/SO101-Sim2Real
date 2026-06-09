@@ -114,35 +114,25 @@ class PickPlaceSM:
             return True
         return False
 
-    def _ik_solve(self, x: float, y: float, z: float, *, tilt_candidates: list[float]) -> RobotState | None:
-        """여러 tilt 후보로 set_from_ik 시도 → 첫 성공 RobotState. 5DOF 미도달 회피."""
-        model = self.robot.get_robot_model()
-        with self.robot.get_planning_scene_monitor().read_only() as scene:
-            cur = scene.current_state.get_joint_group_positions(PLANNING_GROUP)
-        yaw = self._yaw_to(x, y)
-        for tilt in tilt_candidates:
-            rs = RobotState(model)
-            rs.set_joint_group_positions(PLANNING_GROUP, cur)
-            rs.update()
-            pose = self._pose(x, y, z, yaw, tilt)
-            if rs.set_from_ik(PLANNING_GROUP, pose.pose, EE_FRAME, float(self.p["ik_timeout"])):
-                rs.update()
-                return rs
-        return None
-
     def _move_to(self, x: float, y: float, z: float, *, tilt_candidates: list[float]) -> bool:
-        rs = self._ik_solve(x, y, z, tilt_candidates=tilt_candidates)
-        if rs is None:
-            self.logger.error(f"IK 실패 ({x:.3f},{y:.3f},{z:.3f}) tilts={tilt_candidates}")
-            return False
-        self.arm.set_start_state_to_current_state()
-        self.arm.set_goal_state(robot_state=rs)
-        if self._plan_exec(self.cumotion_params):
-            return True
-        self.logger.warning("cuMotion 계획 실패 → OMPL fallback")
-        self.arm.set_start_state_to_current_state()
-        self.arm.set_goal_state(robot_state=rs)
-        return self._plan_exec(self.ompl_params)
+        """cuMotion pose-goal 직접 계획. tilt 후보를 차례로 goal pose 로 주고 첫 성공 plan 실행.
+
+        기존 set_from_ik(pick_ik) → joint goal 경로는 5-DOF 에서 IK 가 모든 tilt 에 실패했다.
+        cuMotion 은 자체 IK + collision-free 궤적 최적화를 하므로 pose goal 을 직접 받아 5-DOF
+        여유/limit 안에서 도달 가능한 해를 찾는다(MoveItPy set_goal_state(pose_stamped_msg, pose_link)).
+        cuMotion 우선, 모든 tilt 실패 시 OMPL fallback.
+        """
+        yaw = self._yaw_to(x, y)
+        for params, label in ((self.cumotion_params, "cuMotion"), (self.ompl_params, "OMPL")):
+            for tilt in tilt_candidates:
+                ps = self._pose(x, y, z, yaw, tilt)
+                self.arm.set_start_state_to_current_state()
+                self.arm.set_goal_state(pose_stamped_msg=ps, pose_link=EE_FRAME)
+                if self._plan_exec(params):
+                    return True
+            self.logger.warning(f"{label} pose-goal 계획 실패(tilts={tilt_candidates}) at ({x:.3f},{y:.3f},{z:.3f})")
+        self.logger.error(f"plan 실패 ({x:.3f},{y:.3f},{z:.3f}) tilts={tilt_candidates}")
+        return False
 
     def _set_gripper(self, position: float) -> None:
         if not self.gripper.wait_for_server(timeout_sec=5.0):

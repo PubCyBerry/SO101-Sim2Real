@@ -13,6 +13,12 @@ modifiers:
   - set_base_frame: "base_link"
 
 # cuMotion 이 계획하는 5축(그리퍼 제외 — group "gripper" 는 별도 action 제어).
+# ⚠ cuMotion 은 cspace 를 tool_frame(gripper_frame_link) 으로 가는 kinematic chain 위의 관절로
+#   구조적으로 제한한다. gripper 관절(gripper_link→moving_jaw)은 그 chain 밖이라 cspace 에 넣어도
+#   무시된다(cspace=5 고정). 그런데 cuMotion MoveIt 플러그인은 MoveIt request 의 6관절 start_state
+#   (arm5+gripper)를 필터 없이 전달해 INVALID_INITIAL_CSPACE_POSITION(6 vs 5)으로 계획이 실패한다.
+#   → 해결은 플러그인이 start_state 를 planning group(manipulator,5) 으로 필터링하도록 패치하거나,
+#     MoveIt 계획용 robot_description 에서 gripper 를 fixed 로 분리해야 한다(docs/PATH_E §6).
 default_joint_positions:
   shoulder_pan: 0.0
   shoulder_lift: 0.0
