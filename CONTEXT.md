@@ -13,6 +13,50 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E 5-DOF planning 블로커 해결: joint-goal FK 샘플링 ✅, 남은 건 grasp 물리)
+
+직전 인계의 "5-DOF grasp IK" 블로커를 **근본 진단 후 해결**했다. 다중 세션 블로커의 진짜 원인은
+cuMotion/IK 가 아니라 **MoveIt/cuMotion 의 goal 샘플러가 5-DOF 를 못 다루는 것**이었고, SM 을
+**joint-space goal(FK 샘플링)** 로 바꿔 approach→grasp→lift 가 전부 planning OK 가 됐다. 남은 건
+grasp 물리(grip 이 큐브를 못 쥠) — in-process SM 의 known-hard 영역.
+
+- **🔑 근본 진단(서버 konan147, GPU idle, 라이브)**:
+  - OMPL `Unable to sample valid states for goal tree` + cuMotion `INVERSE_KINEMATICS_FAILURE` 이
+    **orientation 제약/완화/position-only 전부에서** 발생. `/compute_ik` 는 5-DOF 에서 exact 6-DOF
+    pose 라 거의 -31(NO_IK_SOLUTION). **`/compute_fk` 랜덤 FK 샘플링**(`scripts/sim/probe_ik.py` 신규)
+    으로 워크스페이스 매핑: 큐브 위치는 도달 가능하나 achievable orientation manifold 가 thin(예 grasp
+    z≈0.05 에서 tilt 4~52°) → planner 의 "랜덤 orientation+IK" 샘플러가 thin manifold 를 못 찾음.
+  - 즉 **pose/position goal 자체가 5-DOF 에 비가능**(과거 in-process SM 이 joint_fk 쓴 이유와 동일).
+  - 워크스페이스 기하: **world↔base_link = Z 180° 회전**(`base_link=(1.84-wx, -0.565-wy, wz-0.6749)`).
+    Cube2/4 authored 위치는 base_link 음의 x(팔 reach 뒤, shoulder_pan ±110° 밖)=도달 불가.
+- **✅ 해결(커밋 예정)**: `pick_place_sm.py` `_move_to` 를 **joint-goal** 로 전환 —
+  `RobotState.set_to_random_positions()` in-process FK 샘플링으로 target(x,y,z) 에 down-ish(tool z
+  tilt≤max) tip 을 두는 manipulator config 를 찾고 `set_from_ik` 정밀화 → `set_goal_state(robot_state=)`.
+  planner(cuMotion/OMPL)는 joint→joint collision-free 만 푼다. `_fk_sample_goal`/`_tool_tilt` 신규,
+  pose-goal 기계(`_pose`/`_yaw_to`/`_grasp_constraints`) 제거. param: `fk_samples`(15000)/`fk_pos_gate`(0.04)
+  추가, pose-goal tolerance 제거, height LOW band(approach_height 0.12→0.06, lift 0.12→0.07, transport
+  0.15→0.12, grasp_tilt 60→30). yaml top-key `pick_place_object_store:`→`/**:`(store 노드명≠launch
+  타겟 노드명 문제로 param 미로딩이던 것 해결). kinematics.yaml pick_ik timeout 0.2→1.0/attempts 10→50.
+- **검증(서버, /build/sm_run5.log)**: `OMPL OK → (0.140,-0.125,0.109/0.044/0.119)` approach/grasp/lift 전부 plan+exec.
+  단 `grasp 실패(안 들림)`.
+- **🔴 남은 블로커(grasp 물리, planning 무관)**: ① grasp config 의 moving_jaw 가 큐브 위(z 0.089 vs
+  cube 0.049) — TCP(gripper_frame_link)만 큐브 근처, jaw 가 안 감쌈 ② 그리퍼 완전히 안 닫힘(0.086 vs
+  -0.16 목표). **다음 후보**: FK 샘플링 목적함수에 jaw-z 점수(`_finger_min_z` 식, 강tilt 로 moving_jaw 를
+  큐브 옆/아래로) / 그리퍼 close dwell·force / 위치 gate(fk_pos_gate) 강화 / set_from_ik 정밀도. in-process
+  SM 이 ~1.4/4 로 marginal 했던 동일 난제 — grasp 물리는 별도 phase.
+- **사용자 결정(미적용)**: "scatter 범위 축소" — `pick_cube_env_cfg.py::_CUBE_SCATTER_X/Y_RANGE` 를
+  도달 가능 world 영역(x[1.60,1.76], y[-0.465,-0.365] 권장)으로. Cube2/4 authored 위치도 reachable 로
+  재배치(author_pick_cube_scene.py) 시 4큐브 가능. planning 해결과 별개라 grasp 물리 후 적용 권장.
+- **실행 환경(재현)**: 이미지 재빌드 완료(overlay baked — `/tmp/*_ws` 수동 불요). 영속 컨테이너 `so101_ros`
+  살아있음(정리 필요), bridge(host) PID 살아있음. colcon 증분: 컨테이너서 `cd /build && colcon build
+  --symlink-install --base-paths /workspace/ros2_ws/src --packages-select <pkg>`. install=`/build/install`
+  (worktree `/workspace/ros2_ws/install` 아님). launch: `source /opt/ros/jazzy + /opt/tbc_overlay +
+  /opt/cumotion_overlay + /build/install`, `SO101_REPO=/workspace`. 로그 `/build/sm_run*.log`.
+- **주의**: SM 노드 재실행은 launch 통째로(move_group orphan 은 `kill -9 <pid>`). probe_ik.py 는 move_group
+  떠 있을 때만(서비스 `/compute_fk`). bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E cuMotion pose-goal 전환 + c-space 6vs5 블로커 플러그인 패치로 해결)
 
 §5 통합(아래 인계) 후 사용자 지시로 **cuMotion pose-goal 방식** 진행. set_from_ik(pick_ik) IK 실패를

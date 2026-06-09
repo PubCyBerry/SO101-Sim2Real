@@ -1,25 +1,30 @@
 # SO-101 cuMotion pick-and-place SM 파라미터 (PATH E).
 # 기존 in-process SM(pick_cube_state_machine.py) 기본값을 ROS 노드로 이식.
 # 거리 단위 m, 각도 deg. 좌표는 base_link frame(/cube_poses, /bowl_pose).
-pick_place_object_store:
+# top-key `/**` = 프로세스 내 모든 노드에 적용. SM 의 store 노드 이름(pick_place_object_store)이
+# launch 가 타겟하는 MoveItPy 노드명(pick_place_moveit)과 달라 명시 키가 store 노드에 안 먹던 문제를
+# 회피한다(launch 가 yaml 을 sm 노드에 전달 → store 노드는 같은 프로세스라 /** 로 override 수신).
+"/**":
   ros__parameters:
     num_cubes: 4
-    # grasp 기하
-    approach_height: 0.12        # 큐브 위 접근 높이
+    # grasp 기하 — FK 워크스페이스 스윕 기반(scripts/sim/probe_ik.py). 큐브(0.14,-0.125) 컬럼은
+    # 모든 z 도달 가능하나 manifold 가 thin → height 를 도달 가능 LOW band 로 낮춰 sampler 부담↓.
+    approach_height: 0.06        # 큐브 위 접근(z≈0.11, achievable tilt 27~36°)
     grasp_z_offset: -0.005       # 큐브 중심 기준 grasp tip z(음수=더 깊이)
-    grasp_tilt_deg: 60.0         # grasp 자세 forward tilt(5DOF: 완전 top-down 불가)
-    grasped_dz: 0.03             # 들림 판정(큐브 z 상승량)
-    # 운반/배치
-    lift_height: 0.12            # 큐브 기준 들어올림
-    transport_height: 0.15       # 그릇 위 운반 높이
-    place_height: 0.06           # 그릇 기준 release 높이
+    grasp_tilt_deg: 30.0         # grasp 자세 forward tilt. grasp z(≈0.05) achievable tilt 11°,
+                                 # approach z(≈0.11)는 27~36° — 후보 [30,15,45,0] 로 양쪽 커버.
+    grasped_dz: 0.025            # 들림 판정(큐브 z 상승량). lift 가 작아 threshold 도 하향.
+    # 운반/배치 — bowl(0.22,-0.305)은 z 0.08~0.16 에서 도달 가능(낮은 z 는 거의 horizontal).
+    lift_height: 0.07            # 큐브 기준 들어올림(z≈0.12, 도달 가능)
+    transport_height: 0.12       # 그릇 위 운반(bowl z≈0.04 + 0.12 = 0.16, 도달 가능)
+    place_height: 0.08           # 그릇 기준 release(z≈0.12, bowl 컬럼 hits 최다)
     stack_increment: 0.022       # 담긴 큐브당 release 높이 증가
-    # goal 제약 tolerance (5-DOF: tool z 회전 자유로 cuMotion IK 도달성 확보)
-    pos_tol: 0.01                # 목표 위치 허용 반경(m)
-    ori_tol: 0.5                 # approach 방향(x/y axis) 허용(rad)
-    yaw_free_tol: 3.14159        # tool z(approach 축) 회전 자유(rad) — redundant DOF 해방
-    # 계획/그리퍼
-    ik_timeout: 0.2              # (구) set_from_ik timeout — 현재 미사용
+    # JOINT-goal FK 샘플링(5-DOF: pose/position goal 은 planner IK 샘플러가 못 풂 → FK 로 도달 config
+    # 직접 탐색). pick_place_sm.py::_fk_sample_goal 참조.
+    fk_samples: 15000            # random FK 샘플 수(in-process RobotState FK, 수십 ms~수백 ms)
+    fk_pos_gate: 0.04            # 샘플 채택 거리 gate(m). 이 안의 최근접을 골라 set_from_ik 로 정밀화
+    ik_timeout: 0.2              # set_from_ik(정밀화) timeout(s)
+    # 계획 라우팅(코드 상수): grasp=OMPL 우선(grasp_order), transport=cuMotion 우선(transport_order).
     gripper_dwell_s: 1.5         # 그리퍼 open/close 정착 대기(s)
     # 성공 판정(그릇 기준, env_cfg 와 동기화 — BOWL_SUCCESS_RADIUS/HEIGHT_RANGE)
     bowl_success_radius: 0.06

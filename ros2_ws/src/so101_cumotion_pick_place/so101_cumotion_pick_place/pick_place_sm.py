@@ -21,21 +21,19 @@ import math
 import threading
 import time
 
+import numpy as np
 import rclpy
 import rclpy.logging
 from control_msgs.action import ParallelGripperCommand
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose
 from moveit.core.robot_state import RobotState
 from moveit.planning import MoveItPy, MultiPipelinePlanRequestParameters
-from moveit_msgs.msg import BoundingVolume, Constraints, OrientationConstraint, PositionConstraint
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from shape_msgs.msg import SolidPrimitive
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
-from tf_transformations import quaternion_from_euler
 
 EE_FRAME = "gripper_frame_link"
 PLANNING_GROUP = "manipulator"
@@ -88,27 +86,21 @@ class PickPlaceSM:
         self.store = store
         self.p = params
         self.logger = rclpy.logging.get_logger("pick_place_sm")
-        # cuMotion 우선, 실패 시 OMPL fallback.
         self.cumotion_params = MultiPipelinePlanRequestParameters(robot, ["cumotion"])
         self.ompl_params = MultiPipelinePlanRequestParameters(robot, ["ompl_rrtc"])
+        # ⚠ 5-DOF 핵심: MoveIt/cuMotion 의 goal 샘플러는 pose/position goal 을 IK("랜덤 orientation
+        # +IK")로 풀어 5-DOF 에선 거의 모든 랜덤 orientation 이 도달 불가 → thin achievable manifold
+        # 를 못 찾고 "Unable to sample valid states for goal tree"/INVERSE_KINEMATICS_FAILURE 로
+        # 실패한다(position-only 도 동일). → goal 을 JOINT config 로 준다: FK 랜덤 샘플링(5-DOF-aware,
+        # in-process joint_fk SM 과 동일 원리)으로 target 에 도달하는 config 를 찾고 set_from_ik 로
+        # 정밀화한 뒤, planner 는 joint→joint collision-free 모션만 푼다(이건 cuMotion/OMPL 잘 함).
+        # 라우팅: grasp 는 OMPL 우선(XRDF-sphere start-validity 거부 회피), transport 는 cuMotion 우선.
+        self.grasp_order = ((self.ompl_params, "OMPL"), (self.cumotion_params, "cuMotion"))
+        self.transport_order = ((self.cumotion_params, "cuMotion"), (self.ompl_params, "OMPL"))
+        self.sample_rs = RobotState(robot.get_robot_model())  # FK 샘플링용 재사용 RobotState
         self.gripper = ActionClient(store, ParallelGripperCommand, GRIPPER_ACTION)
 
     # ── 저수준 ────────────────────────────────────────────────────────
-    def _pose(self, x: float, y: float, z: float, yaw: float, tilt_deg: float) -> PoseStamped:
-        """tool 을 아래로 향하고 yaw 정렬 + 앞으로 tilt 한 grasp pose (base_link frame)."""
-        # 기준 down = rpy(0, π, 0) (so101_moveit_test 의 DOWN). tilt 는 pitch 를 줄여 앞으로 기울임.
-        q = quaternion_from_euler(0.0, math.pi - math.radians(tilt_deg), yaw)
-        ps = PoseStamped()
-        ps.header.frame_id = BASE_FRAME
-        ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = x, y, z
-        ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = (
-            q[0], q[1], q[2], q[3],
-        )
-        return ps
-
-    def _yaw_to(self, x: float, y: float) -> float:
-        return math.atan2(y, x)  # base_link 원점 기준(로봇 base)
-
     def _plan_exec(self, plan_params) -> bool:
         result = self.arm.plan(multi_plan_parameters=plan_params)
         if result:
@@ -116,59 +108,83 @@ class PickPlaceSM:
             return True
         return False
 
-    def _grasp_constraints(self, ps: PoseStamped) -> Constraints:
-        """position(tight) + orientation(approach 축=tool z 회전 자유) 제약.
+    @staticmethod
+    def _tool_tilt(q) -> float:
+        """tool z 축이 수직 아래(-z_base)에서 기운 각(deg). q=geometry_msgs Quaternion. 0=완전 down."""
+        zz = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)  # R[2,2] = tool z 의 base-z 성분
+        return math.degrees(math.acos(max(-1.0, min(1.0, -zz))))
 
-        SO-101 은 5-DOF 라 6-DOF pose 전체를 만족 못 해 cuMotion IK 가 INVERSE_KINEMATICS_FAILURE
-        를 낸다. tool z 축(approach 방향) 회전을 z_tol 로 크게 풀어 redundant DOF 를 해방하면 cuMotion
-        이 도달 가능한 자세를 찾는다. x/y(approach 방향 자체)는 ori_tol 로 좁게 유지해 down+tilt 보존.
+    def _fk_sample_goal(self, x: float, y: float, z: float, *, tilt_max_deg: float):
+        """random FK 샘플링으로 (x,y,z) 근처에 down-ish(tool z tilt≤tilt_max) tip 을 두는 manipulator
+        joint config 를 찾고 set_from_ik 로 위치를 정밀화한다(5-DOF-aware). 실패 시 None.
+
+        5-DOF 라 pose/position goal 을 planner IK 샘플러가 못 푼다(랜덤 orientation 이 거의 도달
+        불가) → 도달 가능 config 자체를 FK 로 찾는다(in-process joint_fk SM 과 동일 원리). set_to_random
+        _positions 는 joint bounds 내에서만 샘플 → 한계 자동 준수. 거리 gate 안에서 최근접을 고른다.
         """
-        c = Constraints()
-        c.name = "grasp_relaxed"
-        pc = PositionConstraint()
-        pc.header = ps.header
-        pc.link_name = EE_FRAME
-        prim = SolidPrimitive()
-        prim.type = SolidPrimitive.SPHERE
-        prim.dimensions = [float(self.p["pos_tol"])]
-        bv = BoundingVolume()
-        bv.primitives.append(prim)
-        bv.primitive_poses.append(ps.pose)
-        pc.constraint_region = bv
-        pc.weight = 1.0
-        c.position_constraints.append(pc)
-        # 진단: orient_mode=0 이면 position-only goal(자세 제약 없음) — IK 실패 원인 분리용.
-        if int(self.p.get("orient_mode", 1)) == 0:
-            return c
-        oc = OrientationConstraint()
-        oc.header = ps.header
-        oc.link_name = EE_FRAME
-        oc.orientation = ps.pose.orientation
-        oc.absolute_x_axis_tolerance = float(self.p["ori_tol"])
-        oc.absolute_y_axis_tolerance = float(self.p["ori_tol"])
-        oc.absolute_z_axis_tolerance = float(self.p["yaw_free_tol"])
-        oc.weight = 1.0
-        c.orientation_constraints.append(oc)
-        return c
+        target = np.array([x, y, z])
+        rs = self.sample_rs
+        n = int(self.p.get("fk_samples", 12000))
+        gate = float(self.p.get("fk_pos_gate", 0.05))
+        best_q = None
+        best_pose = None
+        best_d = 1e9
+        for _ in range(n):
+            rs.set_to_random_positions()
+            rs.update()
+            p = rs.get_pose(EE_FRAME)
+            d = math.dist((p.position.x, p.position.y, p.position.z), (x, y, z))
+            if d > gate:
+                continue
+            if self._tool_tilt(p.orientation) > tilt_max_deg:
+                continue
+            if d < best_d:
+                best_d = d
+                best_q = np.array(rs.get_joint_group_positions(PLANNING_GROUP))
+                best_pose = p
+        if best_q is None:
+            return None
+        # 정밀화: best config 의 (도달 가능) orientation + 목표 위치로 set_from_ik(seed=best config).
+        rs.set_joint_group_positions(PLANNING_GROUP, best_q)
+        rs.update()
+        refine = Pose()
+        refine.position.x, refine.position.y, refine.position.z = x, y, z
+        refine.orientation = best_pose.orientation
+        if rs.set_from_ik(PLANNING_GROUP, refine, EE_FRAME, float(self.p.get("ik_timeout", 0.2))):
+            rq = np.array(rs.get_joint_group_positions(PLANNING_GROUP))
+            rp = rs.get_pose(EE_FRAME)
+            if math.dist((rp.position.x, rp.position.y, rp.position.z), (x, y, z)) <= best_d + 1e-3:
+                return rq
+        return best_q  # 정밀화 실패/악화 시 coarse config
 
-    def _move_to(self, x: float, y: float, z: float, *, tilt_candidates: list[float]) -> bool:
-        """cuMotion pose-goal 직접 계획(relaxed orientation). tilt 후보 순차 시도, 첫 성공 plan 실행.
+    def _move_to(
+        self, x: float, y: float, z: float, *, tilt_candidates: list[float], planner_order=None
+    ) -> bool:
+        """JOINT-space goal 계획. FK 샘플링으로 (x,y,z) 도달 config 를 찾아 joint goal 로 주고,
+        planner 는 joint→joint collision-free 모션만 푼다(5-DOF 에서 pose-goal 비가능 회피).
 
-        기존 set_from_ik(pick_ik) → joint goal 경로는 5-DOF 에서 IK 가 모든 tilt 에 실패했다.
-        cuMotion 은 자체 IK + collision-free 궤적 최적화를 하므로 task-space goal 을 직접 받는다.
-        단 5-DOF 라 6-DOF pose 를 그대로 주면 IK 가 실패하므로, tool z 회전 자유(_grasp_constraints)로
-        도달 가능 자세를 찾게 한다. cuMotion 우선, 모든 tilt 실패 시 OMPL fallback.
+        tilt_candidates 는 허용 tool z tilt 상한 결정에 쓴다(grasp 는 더 큰 tilt 허용, transport 는
+        가능한 수직). planner_order 로 grasp(OMPL 우선)/transport(cuMotion 우선)를 분리한다.
         """
-        yaw = self._yaw_to(x, y)
-        for params, label in ((self.cumotion_params, "cuMotion"), (self.ompl_params, "OMPL")):
-            for tilt in tilt_candidates:
-                ps = self._pose(x, y, z, yaw, tilt)
-                self.arm.set_start_state_to_current_state()
-                self.arm.set_goal_state(motion_plan_constraints=[self._grasp_constraints(ps)])
-                if self._plan_exec(params):
-                    return True
-            self.logger.warning(f"{label} 계획 실패(tilts={tilt_candidates}) at ({x:.3f},{y:.3f},{z:.3f})")
-        self.logger.error(f"plan 실패 ({x:.3f},{y:.3f},{z:.3f}) tilts={tilt_candidates}")
+        if planner_order is None:
+            planner_order = self.transport_order
+        tilt_max = max(tilt_candidates) + 20.0
+        goal_q = self._fk_sample_goal(x, y, z, tilt_max_deg=tilt_max)
+        if goal_q is None:
+            self.logger.error(f"FK-sample 도달 config 없음 ({x:.3f},{y:.3f},{z:.3f}) tilt≤{tilt_max:.0f}°")
+            return False
+        goal_rs = RobotState(self.robot.get_robot_model())
+        goal_rs.set_joint_group_positions(PLANNING_GROUP, goal_q)
+        goal_rs.update()
+        for params, label in planner_order:
+            self.arm.set_start_state_to_current_state()
+            self.arm.set_goal_state(robot_state=goal_rs)
+            if self._plan_exec(params):
+                self.logger.info(
+                    f"{label} OK → ({x:.3f},{y:.3f},{z:.3f}) q={[round(float(v), 3) for v in goal_q]}"
+                )
+                return True
+        self.logger.error(f"joint-goal plan 실패 ({x:.3f},{y:.3f},{z:.3f})")
         return False
 
     def _set_gripper(self, position: float) -> None:
@@ -192,28 +208,36 @@ class PickPlaceSM:
         approach += [self.p["grasp_tilt_deg"] - 15.0, self.p["grasp_tilt_deg"] + 15.0, 0.0]
         vert = [0.0, 15.0, 30.0]                          # 운반/배치는 가능한 수직
 
+        # grasp 접근/하강/들림 = OMPL+pick_ik 우선(self.grasp_order).
         self._set_gripper(GRIPPER_OPEN)
-        if not self._move_to(cx, cy, cz + self.p["approach_height"], tilt_candidates=approach):
+        if not self._move_to(
+            cx, cy, cz + self.p["approach_height"], tilt_candidates=approach, planner_order=self.grasp_order
+        ):
             return False
-        if not self._move_to(cx, cy, cz + self.p["grasp_z_offset"], tilt_candidates=approach):
+        if not self._move_to(
+            cx, cy, cz + self.p["grasp_z_offset"], tilt_candidates=approach, planner_order=self.grasp_order
+        ):
             return False
         pre_z = self.store.cubes[idx][2]
         self._set_gripper(GRIPPER_CLOSED)
 
         lift_z = cz + self.p["lift_height"]
-        self._move_to(cx, cy, lift_z, tilt_candidates=approach)
+        self._move_to(cx, cy, lift_z, tilt_candidates=approach, planner_order=self.grasp_order)
         if self.store.cubes[idx][2] - pre_z < self.p["grasped_dz"]:
             self.logger.warning(f"cube{idx}: grasp 실패(안 들림) — 건너뜀")
             self._set_gripper(GRIPPER_OPEN)
             return False
 
+        # 운반/배치 = cuMotion 우선(self.transport_order, collision-free).
         bx, by, bz = self.store.bowl
-        if not self._move_to(bx, by, bz + self.p["transport_height"], tilt_candidates=vert):
+        if not self._move_to(
+            bx, by, bz + self.p["transport_height"], tilt_candidates=vert, planner_order=self.transport_order
+        ):
             return False
         place_z = bz + self.p["place_height"] + n_placed * self.p["stack_increment"]
-        self._move_to(bx, by, place_z, tilt_candidates=vert)
+        self._move_to(bx, by, place_z, tilt_candidates=vert, planner_order=self.transport_order)
         self._set_gripper(GRIPPER_OPEN)
-        self._move_to(bx, by, bz + self.p["transport_height"], tilt_candidates=vert)
+        self._move_to(bx, by, bz + self.p["transport_height"], tilt_candidates=vert, planner_order=self.transport_order)
         return True
 
     def _placed(self, idx: int) -> bool:
@@ -247,18 +271,21 @@ def main() -> None:
     )
     store = ObjectPoseStore()
 
-    # 파라미터(launch 의 pick_place_params.yaml). store 노드에서 declare/get.
+    # 파라미터(launch 의 pick_place_params.yaml, top-key `/**`). store 노드에서 declare/get.
     defaults = {
-        "num_cubes": 4, "approach_height": 0.12, "grasp_z_offset": -0.005,
-        "grasp_tilt_deg": 60.0, "lift_height": 0.12, "transport_height": 0.15,
-        "place_height": 0.06, "stack_increment": 0.022, "grasped_dz": 0.03,
-        "ik_timeout": 0.2, "gripper_dwell_s": 1.5, "bowl_success_radius": 0.06,
+        "num_cubes": 4, "approach_height": 0.06, "grasp_z_offset": -0.005,
+        "grasp_tilt_deg": 30.0, "lift_height": 0.07, "transport_height": 0.12,
+        "place_height": 0.08, "stack_increment": 0.022, "grasped_dz": 0.025,
+        "gripper_dwell_s": 1.5, "bowl_success_radius": 0.06,
         "bowl_z_lo": 0.005, "bowl_z_hi": 0.22,
-        # goal 제약 tolerance(5-DOF): pos_tol=위치 반경(m), ori_tol=approach 방향 허용(rad),
-        # yaw_free_tol=tool z 회전 자유(rad, ~π). cuMotion IK 가 도달 가능 자세를 찾게 한다.
-        "pos_tol": 0.01, "ori_tol": 0.5, "yaw_free_tol": 3.14159, "orient_mode": 1,
+        # JOINT-goal FK 샘플링(5-DOF): pose/position goal 비가능 → FK 로 도달 config 직접 탐색.
+        "fk_samples": 15000, "fk_pos_gate": 0.04, "ik_timeout": 0.2,
     }
     params = {k: store.declare_parameter(k, v).value for k, v in defaults.items()}
+    rclpy.logging.get_logger("pick_place_sm").info(
+        f"loaded params: grasp_tilt={params['grasp_tilt_deg']} approach_h={params['approach_height']} "
+        f"fk_samples={params['fk_samples']} fk_pos_gate={params['fk_pos_gate']}"
+    )
 
     # 구독 spin 은 별도 스레드(MoveItPy 호출은 메인에서 블로킹).
     executor = MultiThreadedExecutor()

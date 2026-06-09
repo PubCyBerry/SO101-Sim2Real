@@ -2983,3 +2983,46 @@ action 으로 별개 제어 — 정합.)
 clean run 에서 `INVALID_INITIAL_CSPACE_POSITION` 0건, cuMotion 로그의 `initial_cspace_position` 이 5개 값.
 ※ stale cumotion 프로세스(과거 cspace=6 실험본)가 남으면 `[5] vs robot[6]` 역방향 에러가 섞이니 pkill 로 정리.
 ※ 남은 과제(별개): cspace count 해결 후에도 5-DOF IK 미도달(`INVERSE_KINEMATICS_FAILURE`)은 grasp 자세 튜닝 영역(§PATH_E 6).
+
+## (PATH E) 5-DOF 팔에서 cuMotion/OMPL 이 grasp pose-goal 을 못 푼다 — joint-goal 로 전환
+
+### 현상
+
+cuMotion + ROS 로 SO-101(5축) pick-and-place 시, c-space 6vs5 패치 후에도 grasp 접근 pose 계획이
+모든 시도에서 실패. orientation 제약을 풀어도(`yaw_free_tol=π`), tolerance 를 키워도, **orientation 을
+완전히 제거(position-only)해도** 실패. 팔이 큐브 근처로 전혀 안 간다.
+
+### 오류 메시지
+
+```
+[ompl] manipulator[RRTConnect]: Unable to sample any valid states for goal tree
+[cumotion_planner] Trajectory optimization to pose failed (trajopt: INVERSE_KINEMATICS_FAILURE)
+# /compute_ik 직접 호출 시: error_code.val = -31 (NO_IK_SOLUTION) — 거의 모든 pose 에서
+```
+
+### 원인
+
+**MoveIt(OMPL constraint sampler)·cuMotion 의 goal 샘플러는 task-space(pose/position) goal 을
+"orientation 을 정하고 IK 로 config 를 찾는" 방식으로 푼다.** 5-DOF 팔은 임의의 6-DOF orientation 을
+정확히 만들 수 없어(achievable orientation 이 위치마다 thin 한 2-manifold), 샘플러가 고르는 거의 모든
+orientation 에서 IK 가 실패 → goal state 를 못 만든다. position-only 도 내부적으로 랜덤 orientation+IK
+라 동일하게 실패. 즉 **pose/position goal 방식 자체가 5-DOF 에 비가능**(planner/tolerance 문제 아님).
+`/compute_ik` 는 exact 6-DOF pose 를 요구해 5-DOF 에선 거의 `-31` — 이걸로 reachability 판단하면 오해.
+
+### 해결 방법
+
+goal 을 **JOINT config** 로 준다(5-DOF-aware). `scripts/sim/probe_ik.py`(`/compute_fk` 랜덤 FK 샘플링)
+로 워크스페이스를 매핑해 위치 도달성·achievable tilt 를 확인하고, SM `pick_place_sm.py::_move_to` 를
+다음으로 전환:
+1. `RobotState.set_to_random_positions()` 로 in-process FK 랜덤 샘플링(joint bounds 자동 준수) →
+   target(x,y,z) 근처(`fk_pos_gate`)에 down-ish(tool z tilt≤max) tip 을 두는 manipulator config 탐색.
+2. 그 config 의 (도달 가능) orientation + 목표 위치로 `set_from_ik` 정밀화(seed=coarse config).
+3. `arm.set_goal_state(robot_state=goal_rs)` → planner(cuMotion/OMPL)는 joint→joint collision-free 만 푼다.
+
+(과거 in-process SM 이 `joint_fk` 를 쓴 것과 동일 원리. `/compute_ik` 의존을 버리는 게 핵심.)
+
+### 확인 방법
+
+`OMPL OK → (x,y,z) q=[...]` 로 approach→grasp→lift 가 전부 plan+exec. `Unable to sample`/
+`INVERSE_KINEMATICS_FAILURE` 0건. ※ grasp 가 큐브를 실제로 쥐는지(grip 물리)는 별개 과제 —
+moving_jaw 가 큐브를 감싸도록 강tilt·그리퍼 close·위치정확도 튜닝 필요(§PATH_E 6).

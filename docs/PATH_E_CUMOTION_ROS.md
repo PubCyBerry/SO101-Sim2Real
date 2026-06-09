@@ -50,6 +50,7 @@ Isaac Sim (run_cube_desk_ros_bridge.py)               ROS 2 그래프
 | `assets/robots/so101.xrdf` | **(신규)** cuMotion 용 collision sphere + c-space 5축 (tool_frame=gripper_frame_link) |
 | `docker/patches/cumotion_moveit_filter_start_state.patch` | **(신규)** cuMotion MoveIt 플러그인 `updateGoal` 패치 — start_state 를 planning group 관절로 필터링(c-space 6vs5 해결). Dockerfile 이 적용·빌드 |
 | `scripts/sim/gen_so101_xrdf.py` | **(신규)** XRDF↔URDF 정합·FK/IK 검증 하니스 (curobo) |
+| `scripts/sim/probe_ik.py` | **(신규)** grasp reachability 프로브 — 실행 중 move_group `/compute_fk` 랜덤 FK 샘플링으로 워크스페이스·achievable tilt 매핑(5-DOF planning 진단). curobo 불요 |
 | `ros2_ws/src/so101_cumotion_moveit_config/` | **(신규)** cuMotion MoveIt config 패키지 (planner plugin yaml, MoveItPy config, launch) |
 | `ros2_ws/src/so101_cumotion_pick_place/` | **(신규)** SM 노드 패키지 (pick_place_sm.py, params, launch) |
 | `so101_ros2_control.xacro` | **(수정)** `hardware_type:=isaac` 분기 (TopicBasedSystem) |
@@ -126,16 +127,16 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 | 1 | XRDF/URDF 유효성 (`gen_so101_xrdf.py` 는 Python curobo 필요 — 미설치) | cuMotion 이 XRDF/URDF 로 로봇 로드 | ✅ 통과(2026-06-09, cuMotion C++ planner 가 로드 — `gen_so101_xrdf.py` 대체 검증) |
 | 2 | 터미널1 실행 후 `ros2 topic echo /isaac_joint_states` | 6관절 name/position/velocity/effort 값 흐름 | ✅ 통과(2026-06-09) |
 | 3 | `ros2 topic echo /tf --once` (또는 `/clock`) | `base_link→Cube1/Bowl` transform·sim-time clock | ✅ 통과(2026-06-09) |
-| 4 | `pick_place.launch.py` → cuMotion plan/execute | cuMotion plan 성공, Isaac Sim 팔 동기 | 🟡 인프라 완료(스택 end-to-end 기동·SM 진행), grasp IK 미통과 |
-| 5 | gripper action `ParallelGripperCommand` | 그리퍼 닫힘 | 🟡 controller active, SM grasp 단계 미도달 |
-| 6 | bridge `--num_cubes 1` + 전체 launch | 3/3 bowl, 이후 `--num_cubes 4` | ⬜ 5-DOF grasp IK 튜닝 후(§6) |
+| 4 | `pick_place.launch.py` → plan/execute | plan 성공, Isaac Sim 팔 동기 | ✅ 통과(2026-06-09, joint-goal — approach→grasp→lift OMPL OK) |
+| 5 | gripper action `ParallelGripperCommand` | 그리퍼 닫힘 | 🟡 controller active·명령 전달, grip 물리 미완(§6) |
+| 6 | bridge `--num_cubes 1` + 전체 launch | 1/1 bowl, 이후 `--num_cubes 4` | ⬜ grasp 물리(jaw·grip) 튜닝 후(§6) |
 
 > **2026-06-09 통합 검증 결과**: `pick_place.launch.py`(bridge + controllers + move_group + cuMotion + SM)가
-> 서버에서 처음으로 end-to-end 기동. cuMotion `CumotionPlanner` 플러그인 로드 + XRDF/URDF 로 로봇 로드 성공,
-> 컨트롤러 3종 active, `/follower/joint_states` 흐름, SM 이 큐브 포즈 수신→`pick-and-place cube[0]` 까지 진행.
-> bringup 4대 함정(topic_based ABI·pick_ik 미설치·launch 빈리스트 튜플·SM PoseStamped import)을 해소
-> (`docs/TROUBLESHOOTING.md`). **남은 블로커**: grasp 접근 pose 의 5-DOF IK 실패 — §6 "5DOF grasp" 튜닝 영역
-> (cuMotion pose-goal 직접 사용 또는 grasp 자세/tilt 재설계). 헤드리스 서버라 RViz 대신 SM 자동 실행으로 검증.
+> 서버에서 end-to-end 기동. bringup 4대 함정·c-space 6vs5 해소 후, **5-DOF planning 블로커를 근본 해결**:
+> MoveIt/cuMotion 의 goal 샘플러가 5-DOF 의 task-space(pose/position) goal 을 못 푼다(랜덤 orientation+IK
+> 방식 → 거의 모든 orientation 도달 불가). SM `_move_to` 를 **joint-goal(FK 샘플링+set_from_ik)** 로 전환해
+> approach→grasp→lift 가 전부 `OMPL OK`(plan+exec). **남은 블로커**: grasp 물리(grip 이 큐브를 못 쥠 —
+> moving_jaw 가 큐브 위·그리퍼 미완전 닫힘) — §6 "grasp 물리". 헤드리스 서버라 RViz 대신 SM 자동 실행으로 검증.
 
 검증 결과는 `CONTEXT.md` 작업 인계에 기록한다.
 
@@ -147,7 +148,8 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 |---|---|
 | **XRDF sphere** | `assets/robots/so101.xrdf` 의 sphere 반경/중심은 **근사 초기값**. Isaac Sim cuMotion *Robot Description Editor* 로 메시에 맞춰 튜닝 후 갱신. self-collision 오류 시 `ignore` 쌍·반경 조정 |
 | **cuMotion c-space 6vs5 (해결)** | MoveIt start_state 6관절(arm5+gripper) ≠ cuMotion cspace 5축 → `INVALID_INITIAL_CSPACE_POSITION`. upstream 버그(issue #10). `docker/patches/cumotion_moveit_filter_start_state.patch` 가 `updateGoal` 에서 start_state 를 planning group(5)으로 필터링. Dockerfile 이 `/opt/cumotion_overlay` 빌드. (TROUBLESHOOTING 참조) |
-| **5DOF grasp (남은 블로커)** | 완전 top-down 불가. SM `_move_to` = cuMotion **pose-goal + relaxed orientation**(`_grasp_constraints`: position tight + tool z 회전 자유, redundant DOF 해방). tilt 후보(60°→±15°→0°) 순차. **단 cspace 해결 후에도 cuMotion 5-DOF IK 미도달**(`INVERSE_KINEMATICS_FAILURE`) / position-only 시 start config invalid — grasp 자세·tolerance 추가 튜닝 또는 cuMotion native task-space tolerance 필요(미완, 이월). `pos_tol/ori_tol/yaw_free_tol`·`orient_mode`(진단) 로 조정 |
+| **5DOF planning (해결)** | MoveIt/cuMotion goal 샘플러는 task-space goal 을 "랜덤 orientation+IK"로 풀어 5-DOF 비가능(orientation 제거해도 실패). SM `_move_to` 를 **joint-goal** 로 전환: `RobotState.set_to_random_positions()` in-process FK 샘플링으로 target 도달 config 탐색(`_fk_sample_goal`) + `set_from_ik` 정밀화 → `set_goal_state(robot_state=)`, planner 는 joint→joint 만. `scripts/sim/probe_ik.py`(`/compute_fk` 워크스페이스 프로브)로 진단. param: `fk_samples`/`fk_pos_gate`. (TROUBLESHOOTING 참조) |
+| **grasp 물리 (남은 블로커)** | 팔이 큐브 도달은 하나 grip 이 큐브를 못 쥠 — moving_jaw 가 큐브 위(TCP만 근처)·그리퍼 미완전 닫힘(0.086 vs -0.16). 완전 top-down 불가라 강tilt 로 moving_jaw 를 큐브 옆/아래로 내려야(in-process SM 의 known-hard, ~1.4/4). 다음: FK 샘플 목적함수에 jaw-z 점수(`_finger_min_z`式)·그리퍼 close dwell/force·`fk_pos_gate` 강화·`set_from_ik` 정밀도. `grasp_tilt_deg`/height(LOW band)·`grasped_dz` 로 조정 |
 | **cuMotion 실패 fallback** | SM 이 OMPL(`ompl_rrtc`)로 자동 재시도. cuMotion plugin = `isaac_ros_cumotion_moveit/CumotionPlanner`(검증됨), action server 정상 로드 |
 | **그리퍼 5-DOF 무관** | cuMotion 은 5축 팔만 계획(패치도 manipulator group 필터), 그리퍼 open/close 는 `gripper_controller`(ParallelGripperCommand action)로 별개 제어. tool z 회전 자유는 대칭 큐브엔 무해 |
 | **sim-time** | bridge `/clock` + 모든 ROS 노드 `use_sim_time:=true`. MoveIt 실행 timeout 여유 필요 |

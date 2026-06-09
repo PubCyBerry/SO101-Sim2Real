@@ -1,8 +1,9 @@
 manipulator:
   kinematics_solver: pick_ik/PickIkPlugin
-  kinematics_solver_timeout: 0.2
-  kinematics_solver_attempts: 10
+  # OMPL grasp(Candidate C)가 goal constraint 를 IK 로 샘플링하므로 신뢰성을 위해 상향.
+  kinematics_solver_timeout: 1.0     # 0.2 → 1.0 (5-DOF relaxed-orientation goal 탐색 여유)
+  kinematics_solver_attempts: 50     # 10 → 50 (random-restart 횟수↑)
   position_scale: 1.0
-  rotation_scale: 0.5
+  rotation_scale: 0.5         # approach 방향 유지하되 5-DOF redundant DOF 는 풀리도록 약하게
   approximate: true           # return best-effort solution, don't fail
   mode: global                # global search (like DLS with random restarts)
