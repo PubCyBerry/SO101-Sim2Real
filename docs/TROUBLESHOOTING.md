@@ -2741,3 +2741,52 @@ headless kit(`isaaclab.python.headless.kit`)은 그래픽 인터페이스를 **D
 Linux 서버에서 동일 `scripts/ros2/cube_desk_ros2_sim.py` 실행 시
 `[cube_desk_ros2_sim] 브릿지 실행...` 까지 도달하고 `ros2 topic echo /isaac_joint_states`
 가 수신되면 정상.
+
+## MoveIt gripper action 이 `wait_for_server` 타임아웃 (GripperCommand ↔ ParallelGripperCommand 타입 불일치)
+
+### 현상
+
+pick&place orchestrator(`so101_pick_place_orchestrator.py`)가 그리퍼를 명령할 때마다
+실패하고, 그리퍼가 RViz/실기기에서 전혀 움직이지 않는다. arm trajectory 는 정상 실행.
+매 그리퍼 호출마다 5초씩 지연(`wait_for_server` 타임아웃)되어 사이클이 길어진다.
+
+### 오류 메시지
+
+```
+[ERROR] [so101_pick_place]: gripper action server 없음
+```
+
+### 원인
+
+action **이름**(`/follower/gripper_controller/gripper_cmd`)은 맞지만 **타입**이 다르다.
+`follower_split_controllers.yaml`(및 isaac variant)의 gripper_controller 는
+`parallel_gripper_action_controller/GripperActionController` 라서 action 타입이
+`control_msgs/action/ParallelGripperCommand` 인데, orchestrator 의 ActionClient 는
+구형 `control_msgs/action/GripperCommand` 로 생성돼 있었다. ROS 2 action 은 이름이 같아도
+타입이 다르면 매칭되지 않아 `wait_for_server` 가 영영 False 를 반환한다.
+
+`GripperCommand.Goal` = `command.position`(스칼라) + `command.max_effort` 인 반면,
+`ParallelGripperCommand.Goal` = `command`(`sensor_msgs/JointState`, `name[]`/`position[]`) 로
+goal 구조도 다르다.
+
+### 해결 방법
+
+orchestrator 의 그리퍼 클라이언트를 컨트롤러 타입에 맞춘다:
+
+```python
+from control_msgs.action import ParallelGripperCommand
+# ...
+self._client = ActionClient(node, ParallelGripperCommand,
+                            "/follower/gripper_controller/gripper_cmd")
+# ...
+goal = ParallelGripperCommand.Goal()
+goal.command.name = ["gripper"]        # 컨트롤러 joint 이름
+goal.command.position = [float(position)]
+```
+
+### 확인 방법
+
+재실행 시 `gripper action server 없음` 로그가 사라지고, 컨트롤러 측 demo.log 에
+`[follower.gripper_controller]: Received & accepted new action goal` 이 그리퍼 명령마다
+찍힌다. RViz 에서 그리퍼 jaw 가 open/close 한다. 그리퍼 호출당 5초 타임아웃이 없어져
+pick&place 사이클도 빨라진다(예: 큐브당 ~16s → ~5s).

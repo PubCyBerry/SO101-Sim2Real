@@ -97,13 +97,12 @@ wsl -d Ubuntu-24.04 bash ros2_ws/setup/record_mock_pickplace_demo.sh [out.mp4]
 ```
 
 - 동작: HOME→큐브별 approach/descend/close+attach/lift/transport/place/release+detach/retreat→DONE,
-  로그 `완료: 4/4 planned`. arm 은 `FollowJointTrajectory` 로 mock 컨트롤러가 실시간 실행(RViz 추종).
+  로그 `완료: 4/4 planned`. arm 은 `FollowJointTrajectory`, gripper 는 `ParallelGripperCommand`
+  (`parallel_gripper_action_controller`) 로 mock 컨트롤러가 실시간 실행(RViz 추종).
 - 녹화본: [`so101_rviz_mock_pickplace.mp4`](so101_rviz_mock_pickplace.mp4) — 1280×720, 4/4 planned.
-  좌측 MotionPlanning 패널 + 3D 뷰에서 SO-101 팔이 4-cube pick&place 모션 수행.
-- 한계: kinematic(충돌객체·물리 생략, arm plan 성공으로 `planned` 판정). gripper 개폐는 RViz 에
-  안 나타남 — orchestrator 가 `control_msgs/GripperCommand` action client 인데 컨트롤러는
-  `ParallelGripperCommand` 타입이라 action 불일치(`gripper action server 없음` 로그). 실 grasp·물리
-  검증은 Isaac/실기기.
+  좌측 MotionPlanning 패널 + 3D 뷰에서 SO-101 팔이 4-cube pick&place 모션 수행, 그리퍼 개폐 포함.
+- 한계: kinematic(물리 생략). mock 은 큐브/그릇 collision object 를 생략(잡은 큐브만 attach 로 표시)
+  하고 arm plan 성공으로 `planned` 판정한다. 실 grasp·물리·정식 충돌회피 검증은 Isaac/실기기.
 - 헤드리스 녹화: WSLg 는 rootless 라 `:0` 직접 grab 이 검게 잡힘 → Xvfb 가상 프레임버퍼 + llvmpipe
   소프트웨어 OpenGL + ffmpeg x11grab. `moveit.rviz` 카메라는 SO-101 워크스페이스 측면뷰로 설정.
 

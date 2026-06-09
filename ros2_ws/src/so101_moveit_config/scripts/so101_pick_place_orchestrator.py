@@ -11,7 +11,7 @@ Isaac Sim(Windows)이 cube_desk 장면을 띄우고 ROS 2 브릿지로:
 planner 분담:
   - free-space (APPROACH/TRANSPORT/RETREAT) : cuMotion (실패 시 OMPL 폴백)
   - cartesian 직선 (DESCEND/LIFT/PLACE)      : Pilz LIN
-  - gripper                                   : gripper_controller GripperCommand action
+  - gripper                                   : gripper_controller ParallelGripperCommand action
 
 PlanningScene: 미처리 큐브 + 그릇을 collision object 로 등록, 잡은 큐브는 gripper 에 attach.
 SO-101 은 5-DOF 라 임의 6-DOF pose 도달 불가 → grasp 자세는 top-down tilt + pick_ik approximate.
@@ -32,7 +32,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 
 from geometry_msgs.msg import Pose, PoseStamped
-from control_msgs.action import GripperCommand
+from control_msgs.action import ParallelGripperCommand
 from moveit_msgs.msg import CollisionObject, AttachedCollisionObject
 from shape_msgs.msg import SolidPrimitive
 from tf2_ros import Buffer, TransformListener
@@ -70,6 +70,7 @@ RETREAT_HEIGHT = 0.08
 GRASP_RPY = (0.0, math.pi, 0.0)
 GRASP_TILT_RAD = math.radians(0.0)
 
+GRIPPER_JOINT = "gripper"        # parallel_gripper_action_controller joint 이름
 GRIPPER_OPEN = 1.4               # SRDF open=1.5
 GRIPPER_CLOSED = -0.1            # SRDF closed=-0.16
 GRIPPER_MAX_EFFORT = 5.0
@@ -151,7 +152,7 @@ class Gripper:
     def __init__(self, node: Node):
         self._node = node
         self._client = ActionClient(
-            node, GripperCommand, "/follower/gripper_controller/gripper_cmd"
+            node, ParallelGripperCommand, "/follower/gripper_controller/gripper_cmd"
         )
 
     @staticmethod
@@ -166,9 +167,11 @@ class Gripper:
         if not self._client.wait_for_server(timeout_sec=5.0):
             logger.error("gripper action server 없음")
             return False
-        goal = GripperCommand.Goal()
-        goal.command.position = float(position)
-        goal.command.max_effort = GRIPPER_MAX_EFFORT
+        # parallel_gripper_action_controller/GripperActionController 는
+        # control_msgs/ParallelGripperCommand — goal.command 가 sensor_msgs/JointState.
+        goal = ParallelGripperCommand.Goal()
+        goal.command.name = [GRIPPER_JOINT]
+        goal.command.position = [float(position)]
         handle = self._wait(self._client.send_goal_async(goal))
         if handle is None or not handle.accepted:
             logger.error("gripper goal 거부")
