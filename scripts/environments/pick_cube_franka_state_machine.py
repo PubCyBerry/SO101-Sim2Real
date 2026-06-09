@@ -303,6 +303,15 @@ class FrankaPickPlaceSM:
                 log(f"[SM] env{e}: pick order = {self.ordered_cubes[e]}")
             return self._home_pos_w(e), True
 
+        # ----- HOME_FINAL: 홈 자세로 복귀 후 완료 -----
+        # cube_idx 가 ordered_cubes 범위를 벗어난 상태이므로 cube 접근 전에 처리해야 한다.
+        if ph == Phase.HOME_FINAL:
+            self.dwell_count[e] += 1
+            if self.dwell_count[e] >= args.settle_steps:
+                self.phase[e] = Phase.DONE
+                self._report(e)
+            return self._home_pos_w(e), True
+
         cube = self.ordered_cubes[e][self.cube_idx[e]]
 
         # 이동 단계 step 카운터 증가 (dwell 단계는 별도 dwell_count 사용)
@@ -391,14 +400,6 @@ class FrankaPickPlaceSM:
             if self._reached(target, e, args.coarse_tol) or timeout:
                 self._advance_cube(e)
             return target, True
-
-        # ----- HOME_FINAL: 홈 자세로 복귀 후 완료 -----
-        if ph == Phase.HOME_FINAL:
-            self.dwell_count[e] += 1
-            if self.dwell_count[e] >= args.settle_steps:
-                self.phase[e] = Phase.DONE
-                self._report(e)
-            return self._home_pos_w(e), True
 
         return self._home_pos_w(e), True
 
