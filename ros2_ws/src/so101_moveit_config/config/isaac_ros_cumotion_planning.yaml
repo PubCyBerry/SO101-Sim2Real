@@ -1,0 +1,12 @@
+# cuMotion MoveIt planning pipeline (PATH E).
+# MoveItConfigsBuilder.planning_pipelines(pipelines=["isaac_ros_cumotion", ...]) 가
+# package_name(so101_moveit_config) 의 config/ 에서 이 파일(<pipeline>_planning.yaml)을 찾는다.
+# 실제 계획은 cuMotion action server(isaac_ros_cumotion)가 XRDF/URDF 로 수행하고,
+# 이 plugin 이 move_group ↔ action server 를 잇는다.
+planning_plugins:
+  - isaac_ros_cumotion_moveit/CumotionPlanner
+
+request_adapters: []
+response_adapters:
+  - default_planning_response_adapters/ValidateSolution
+  - default_planning_response_adapters/DisplayMotionPath

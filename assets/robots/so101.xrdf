@@ -1,0 +1,105 @@
+# SO-101 follower XRDF — cuMotion(curobo) robot config (PATH E, cuMotion+ROS).
+#
+# XRDF = URDF 보충 파일: collision sphere 근사 + c-space(계획 관절) + tool frame.
+# URDF 원본: ros2_ws/src/so101_description (variant=follower) / assets/robots/urdf/so_arm101.urdf.
+#
+# ⚠ collision sphere 는 근사 초기값이다. 실제 메시 기준 반경/중심은 Isaac Sim 의
+#   cuMotion "Robot Description Editor"(또는 curobo sphere fit)로 튜닝하고 여기 갱신할 것.
+#   c-space 한계는 URDF joint limit 과 일치(검증됨). frame 은 모두 link-local, 단위 m.
+format: xrdf
+format_version: 1.0
+
+modifiers:
+  - set_base_frame: "base_link"
+
+# cuMotion 이 계획하는 5축(그리퍼 제외 — group "gripper" 는 별도 action 제어).
+default_joint_positions:
+  shoulder_pan: 0.0
+  shoulder_lift: 0.0
+  elbow_flex: 0.0
+  wrist_flex: 0.0
+  wrist_roll: 0.0
+
+cspace:
+  joint_names:
+    - shoulder_pan
+    - shoulder_lift
+    - elbow_flex
+    - wrist_flex
+    - wrist_roll
+  # position/velocity limit 은 URDF 에서 읽는다. accel/jerk 은 STS3215 소형 서보 기준 보수값.
+  acceleration_limits: [8.0, 8.0, 8.0, 8.0, 8.0]
+  jerk_limits: [200.0, 200.0, 200.0, 200.0, 200.0]
+
+# IK/계획 목표 프레임. SRDF tip_link 과 일치(grasp 접점은 gripper_frame_link 기준 오프셋).
+tool_frames: ["gripper_frame_link"]
+
+collision:
+  geometry: "so101_spheres"
+  buffer_distance:
+    base_link: 0.005
+    shoulder_link: 0.005
+    upper_arm_link: 0.005
+    lower_arm_link: 0.005
+    wrist_link: 0.005
+    gripper_link: 0.004
+    moving_jaw_so101_v1_link: 0.004
+
+self_collision:
+  geometry: "so101_spheres"
+  buffer_distance:
+    base_link: 0.005
+    shoulder_link: 0.005
+    upper_arm_link: 0.005
+    lower_arm_link: 0.005
+    wrist_link: 0.005
+    gripper_link: 0.004
+    moving_jaw_so101_v1_link: 0.004
+  # SRDF disable_collisions 와 동일한 인접/불가능 쌍을 무시.
+  ignore:
+    base_link: ["shoulder_link", "upper_arm_link"]
+    shoulder_link: ["upper_arm_link"]
+    upper_arm_link: ["lower_arm_link"]
+    lower_arm_link: ["wrist_link", "gripper_link", "moving_jaw_so101_v1_link"]
+    wrist_link: ["gripper_link", "moving_jaw_so101_v1_link"]
+    gripper_link: ["moving_jaw_so101_v1_link"]
+
+# link-local sphere 근사(중심 m, 반경 m). 소형 팔이라 링크당 2~3개로 시작.
+geometry:
+  so101_spheres:
+    spheres:
+      base_link:
+        - center: [0.0, 0.0, 0.02]
+          radius: 0.045
+      shoulder_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.04
+        - center: [0.0, -0.03, 0.03]
+          radius: 0.035
+      upper_arm_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.035
+        - center: [0.0, -0.06, 0.0]
+          radius: 0.03
+        - center: [0.0, -0.11, 0.0]
+          radius: 0.03
+      lower_arm_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.03
+        - center: [0.0, -0.05, 0.0]
+          radius: 0.028
+        - center: [0.0, -0.10, 0.0]
+          radius: 0.028
+      wrist_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.028
+        - center: [0.0, -0.03, 0.0]
+          radius: 0.025
+      gripper_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.025
+        - center: [0.0, -0.03, 0.0]
+          radius: 0.022
+      moving_jaw_so101_v1_link:
+        - center: [0.0, -0.02, 0.0]
+          radius: 0.015

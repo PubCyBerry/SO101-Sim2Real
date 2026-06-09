@@ -1,0 +1,63 @@
+# PATH E — ROS 2 Jazzy + MoveIt 2 + NVIDIA cuMotion 개발 이미지 (Isaac ROS 4.4 / Ubuntu 24.04).
+#
+# isaac-ros-cli 래퍼 대신 동일한 공식 apt repo(Isaac ROS / CUDA / Jetson-x86 / ROS 2)를 직접
+# 구성해 cuMotion·MoveIt·ros2_control·topic_based_ros2_control 을 설치한다. 호스트 ROS 미설치.
+# 워크스페이스(ros2_ws)·에셋은 런타임에 마운트한다(이미지에 COPY 안 함).
+#
+# 빌드:  docker build -f docker/Dockerfile.cumotion_ros -t so101-cumotion:jazzy <small-context>
+# 실행:  docker run --rm -it --gpus all --network host \
+#           -v <repo>:/workspace -w /workspace so101-cumotion:jazzy bash
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=jazzy
+ENV LANG=en_US.UTF-8
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg lsb-release sudo locales build-essential git \
+    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+# ROS 2 apt source (ros-infrastructure 공식 deb)
+RUN curl -L -o /tmp/ros2-apt-source.deb \
+      "https://github.com/ros-infrastructure/ros-apt-source/releases/download/1.1.0/ros2-apt-source_1.1.0.noble_all.deb" \
+    && dpkg -i /tmp/ros2-apt-source.deb && rm /tmp/ros2-apt-source.deb
+
+# CUDA apt repo (cuMotion/curobo 의 CUDA 런타임 의존)
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
+
+# Jetson x86_64 apt repo (Isaac ROS 일부 NVIDIA 라이브러리 의존)
+RUN apt-key adv --fetch-key https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
+    && echo 'deb http://repo.download.nvidia.com/jetson/x86_64/noble r38.4 main' \
+       > /etc/apt/sources.list.d/nvidia-jetson-apt-source.list
+
+# Isaac ROS apt repo (release-4.4, Jazzy/Noble)
+RUN k=/usr/share/keyrings/nvidia-isaac-ros.gpg \
+    && curl -fsSL https://isaac.download.nvidia.com/isaac-ros/repos.key | gpg --dearmor | tee -a "$k" > /dev/null \
+    && echo "deb [signed-by=$k] https://isaac.download.nvidia.com/isaac-ros/release-4.4 $(lsb_release -cs) main external-main" \
+       > /etc/apt/sources.list.d/nvidia-isaac-ros.list
+
+# ROS 2 Jazzy + MoveIt + ros2_control + topic_based + cuMotion + 빌드 도구
+RUN apt-get update && apt-get install -y \
+        ros-jazzy-ros-base \
+        ros-jazzy-moveit \
+        ros-jazzy-moveit-py \
+        ros-jazzy-ros2-control \
+        ros-jazzy-ros2-controllers \
+        ros-jazzy-joint-trajectory-controller \
+        ros-jazzy-parallel-gripper-controller \
+        ros-jazzy-topic-based-ros2-control \
+        ros-jazzy-tf-transformations \
+        ros-jazzy-xacro \
+        ros-jazzy-rmw-fastrtps-cpp \
+        ros-jazzy-isaac-ros-cumotion \
+        ros-jazzy-isaac-ros-cumotion-moveit \
+        python3-colcon-common-extensions python3-rosdep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc \
+    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /etc/bash.bashrc \
+    && echo '[ -f /workspace/ros2_ws/install/setup.bash ] && source /workspace/ros2_ws/install/setup.bash' >> /etc/bash.bashrc
+
+WORKDIR /workspace

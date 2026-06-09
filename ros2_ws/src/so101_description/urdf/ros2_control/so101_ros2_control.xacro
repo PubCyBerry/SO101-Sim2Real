@@ -44,6 +44,18 @@
                     <param name="usb_port">${usb_port}</param>
                     <param name="joint_config_file">${joint_config_file}</param>
                 </xacro:if>
+
+                <!-- isaac: Isaac Sim ROS 2 bridge 와 topic 으로 연결(PATH E, cuMotion+ROS).
+                     controller_manager 의 state_interface 는 /isaac_joint_states 에서,
+                     command_interface 는 /isaac_joint_commands 로 흐른다. 이 두 토픽은
+                     joint_state_broadcaster 가 publish 하는 /follower/joint_states 와
+                     분리해 피드백 루프를 막는다(run_cube_desk_ros_bridge.py 와 짝). -->
+                <xacro:if value="${hardware_type == 'isaac'}">
+                    <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+                    <param name="joint_commands_topic">/isaac_joint_commands</param>
+                    <param name="joint_states_topic">/isaac_joint_states</param>
+                    <param name="sum_wrapped_joint_states">true</param>
+                </xacro:if>
             </hardware>
             
             <!-- arm joints -->

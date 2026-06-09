@@ -13,6 +13,68 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E B안 완료: bridge device -1 블로커 해소, joint_states publish ✅)
+
+직전 인계의 마지막 블로커(Isaac Lab InteractiveScene bridge 의 `device 0 vs -1`)를 **B안으로 해소**. bridge 를 순수 `isaacsim.core` 로 재작성해 `/isaac_joint_states`·`/clock`·`/tf` 가 모두 정상 publish 됨(서버 konan147, GPU idle, `--num_cubes 1` 실측). PATH_E §5 검증 **1~3 통과**.
+
+- **변경 파일**:
+  - `scripts/sim/run_cube_desk_ros_bridge.py` — **전면 재작성(B안)**. `SimulationContext+InteractiveScene` → `World(physics_dt=1/120, rendering_dt=1/30)` CPU 백엔드 + `SingleArticulation`. `add_reference_to_stage` 로 `cube_desk/scene.usd`(+`so101_follower.usd`) 직접 로드. base 고정 = `isaaclab.sim.schemas.modify_articulation_root_properties(fix_root_link=True)` 재사용(→ articulation root 가 `/World/Robot` 로 올라옴). 로봇 pose = `PickCubeEnvCfg._ROBOT_POS/_ROBOT_ROT`. drive gain = `set_gains(kps=17.8, kds=0.6)`(leisaac). OmniGraph 는 `OnPlaybackTick`(수동 evaluate_sync 제거), 루프 = `world.step(render=True)`. TF parent = `/World/Robot/base/base_link` Xform 신설(USD base 링크명이 `base` 라 동명 Xform 으로 frame "base_link" 생성).
+  - `scripts/sim/run_cube_desk_ros_bridge.sh` — **(신규)** 런처. `LD_LIBRARY_PATH`(번들 ROS 2 lib)·`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`·`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`·`OMNI_KIT_ACCEPT_EULA` export 후 uv run.
+  - docs: TROUBLESHOOTING.md(device -1 → 해결 + 신규 2건), PATH_E_CUMOTION_ROS.md(§검증 상태·실행·파일맵·§5 표), 이 인계.
+- **🔑 해결한 환경 함정 3건(전부 TROUBLESHOOTING 기록)**:
+  1. **device -1**: Isaac Lab GPU fabric view ↔ OmniGraph 노드 view 충돌. 순수 `World`(CPU 백엔드)는 OmniGraph 가 sim view 단독 소유 → 양쪽 device 일치, 충돌 소멸. 단일 로봇+소수 큐브라 CPU 물리로 충분.
+  2. **`librmw_implementation.so` 로드 실패**(`libament_index_cpp.so cannot open`): 호스트 ROS 2 없음 → isaacsim 번들 jazzy/lib 의 `$ORIGIN` RPATH 부재. 동적 링커가 프로세스 시작 시 LD_LIBRARY_PATH 읽으므로 **launch 전 export 필수**(python os.environ 무효). 래퍼가 처리.
+  3. **host↔container DDS discovery 실패**: bridge=일반유저·컨테이너=root 의 cross-UID `/dev/shm` fastrtps SHM lock 충돌. **양쪽 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`**(UDP 강제)로 우회. isaacsim 번들은 fastrtps 만 → 컨테이너도 fastrtps(env.sh 의 cyclonedds 는 WSL2 PATH D 전용, PATH E 에서 source 금지).
+- **검증 명령(재현)**: 터미널1 `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready`, 로그에 `expected device` 0건. 터미널2 `docker run --rm --network host --ipc host -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 so101-cumotion:jazzy bash -c 'source /opt/ros/jazzy/setup.bash && ros2 topic echo /isaac_joint_states --once'` → 6관절 값. `/tf` 도 `base_link→Cube1/Bowl`(좌표 검산 일치: world offset 을 `_ROBOT_ROT` z-180° 회전한 값).
+- **➡ 다음(PATH_E §5 4~6, 컨테이너 ROS 스택 필요)**: ① `gen_so101_xrdf.py` IK>90% + sphere 튜닝(§5 1) ② `pick_place.launch.py use_rviz:=true`(컨테이너, fastrtps/UDPv4 env) → RViz 수동 plan/execute, 팔 동기 ③ 그리퍼 action ④ 단일→4큐브 SM 성공률. cuMotion plugin 클래스명/노드 파라미터는 설치 버전 문서로 재확인. ROS 스택 launch 시 bridge 와 RMW/transport 일치 필수.
+- **주의**: bridge 종료는 PID 직접 kill(`pkill -f` 금지=자기 매칭). 래퍼는 `/World/Robot` 단일 env(env-NS 없음) prim 레이아웃. drive gain 미적용 시 cuMotion 위치명령 미추종.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E 라이브 검증: 빌드·인프라 OK, bridge joint_states 가 마지막 블로커)
+
+서버 konan147 에서 빌드~실행 검증 진행. **인프라·빌드는 전부 성공**, Isaac Sim bridge 의 joint_states publish 한 지점이 미해결로 남아 **순수 isaacsim 재작성(B안)으로 이월**.
+
+- **성공(재현됨)**:
+  - Docker 이미지 `so101-cumotion:jazzy`(18.8GB) 빌드 — `docker/Dockerfile.cumotion_ros`. Isaac ROS 4.4 apt repo(release-4.4 noble main external-main) + CUDA/Jetson-x86/ROS2 repo. 설치: ros-jazzy-moveit(+moveit-py)·ros2-controllers·joint-trajectory-controller·parallel-gripper-controller·**topic-based-ros2-control**·tf-transformations·**isaac-ros-cumotion(+moveit)**·curobo는 C++ `libcumotion_planner_lib.so`(libcudart.so.13 링크, 의존성 전부 해소, Python curobo 불요).
+  - **cuMotion MoveIt plugin 클래스 = `isaac_ros_cumotion_moveit/CumotionPlanner`**(추정 CumotionPlannerManager 아님 — yaml 수정함). cuMotion action server 파라미터 = `cumotion_action_server.{urdf_file_path,xrdf_file_path,read_esdf_world,...}`(상류 isaac_ros_cumotion.launch.py include, move_group_cumotion.launch.py 반영).
+  - colcon 빌드 5패키지 OK(`/DISK1/so101-sim2real/work/ros2_build`). xacro `hardware_type:=isaac`→TopicBasedSystem OK. MoveItPy/ParallelGripperCommand/tf_transformations import OK. 양쪽 launch `--show-args` OK.
+  - cuMotion pipeline yaml 은 **so101_moveit_config/config/isaac_ros_cumotion_planning.yaml** 에 둬야 MoveItConfigsBuilder 가 찾음(so101_cumotion_moveit_config 에서 옮김).
+  - Isaac Sim uv 동기(`uv sync --group isaac`, 캐시 `/DISK1/so101-sim2real/cache/uv`). bridge **부팅·OmniGraph 생성·토픽 4개 광고·host↔container DDS discovery 전부 OK**(FastRTPS, --network host).
+- **해결한 환경 함정**(TROUBLESHOOTING 기록):
+  - Isaac Sim 헤드리스에서 OmniGraph 생성 실패("Unable to create prim")→**rendering experience 필요**(`args.enable_cameras=True`→isaaclab.python.headless.rendering.kit). 기본 headless.kit 는 OmniGraph USD authoring strip.
+  - inotify watch 고갈(errno=28)→`sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=1048576`(세션 적용함, 영구는 /etc/sysctl.d).
+  - `sleep`/loop 가 셸 dotfiles(`rtk`)에 깨짐→백그라운드 명령에 sleep 금지(Monitor/직접 Read 사용). `pkill -f run_cube_desk_ros_bridge` 는 자기 명령줄 매칭→자살하므로 금지.
+  - bridge launch GPU OOM 은 동시 학습(policy-server 34GB) 탓 — 학습 중단하면 48GB 확보.
+- **🔴 미해결 블로커**: bridge 루프에서 OmniGraph JointState/ArticulationController 노드가 `omni.physx.tensors: expected device 0, received device -1` → joint_states 값 미publish(토픽은 광고됨). **Isaac Lab InteractiveScene + OmniGraph 물리노드의 device 바인딩 불일치**. 시도해 실패: graph를 reset 전/후 생성, OnPlaybackTick→OnTick+`evaluate_sync` 강제평가, `PickCubeEnvCfg().sim`(GPU 파이프라인) 사용 — 전부 device -1 지속.
+- **➡ 다음(B안, 권장)**: bridge 를 **순수 `isaacsim.core`(World+Articulation)** 로 재작성 — Isaac Lab InteractiveScene 대신 cube_desk `scene.usd`+SO-101 `so101_follower.usd` 직접 stage 로드. NVIDIA 공식 ROS2 예제(create_ros_action_graph)와 동일 경로라 device 0 정합됨. 나머지(컨테이너 ros 스택·SM·cuMotion)는 그대로 재사용. 그 후 PATH_E §5 검증 4~6.
+- **현재 bridge 스크립트 상태**: Isaac Lab 버전(rendering exp + OnTick+evaluate_sync + env_cfg.sim + graph-before-reset). joint_states 직전까지 동작. B안에서 scene 로드부만 교체.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E: cuMotion + ROS 2 cube_desk pick-and-place scaffold)
+
+- **목표(사용자)**: Isaac Sim MCP·NVIDIA Isaac ROS pick-and-place 튜토리얼을 조사해 **cuMotion + ROS** 로 SO-101 cube_desk SM 작성 + 재현 문서.
+- **배경/근거**: 기존 in-process Lula IK SM(`pick_cube_state_machine.py`)은 Lula↔USD 정합 잔차(~0.1m)로 grasp 미완. cuMotion 은 articulation frame 에서 직접 collision-free 계획 → 좌표 정합 문제 구조적 제거. `isaac_ros_cumotion` 이 ROS 2 Jazzy/x86_64 공식 지원이라 기존 `ros2_ws`(so101_moveit_config) 재사용 가능.
+- **확정 결정(사용자)**: ① 플랫폼 = Linux 서버 네이티브(Jazzy+cuMotion+Isaac Sim 한 머신) ② 인지 = 시뮬 ground-truth 포즈 ③ SM = 커스텀 ROS 2 Python 노드(MoveItPy+cuMotion).
+- **구현 완료(코드/설정/문서, 빌드·실행 검증 미실시 — GPU+ROS 서버 필요)**:
+  - `scripts/sim/run_cube_desk_ros_bridge.py` — Isaac Sim standalone(InteractiveScene + PickCubeSceneCfg 재사용) + `isaacsim.ros2.bridge` OmniGraph(JointState pub/sub, Clock, ArticulationController) + 물체 포즈 publish(`/cube_poses`,`/bowl_pose`, **base_link frame**).
+  - `assets/robots/so101.xrdf`(collision sphere 근사·튜닝 필요) + `scripts/sim/gen_so101_xrdf.py`(curobo 검증 하니스).
+  - `ros2_ws/src/so101_cumotion_moveit_config/`(cuMotion planner plugin yaml·moveit_py_cumotion.yaml·move_group_cumotion.launch.py) — so101_moveit_config SRDF/kinematics 재사용.
+  - `ros2_ws/src/so101_cumotion_pick_place/`(pick_place_sm.py = MoveItPy manipulator+cuMotion 8단계, params, pick_place.launch.py).
+  - `so101_ros2_control.xacro` `hardware_type:=isaac`(TopicBasedSystem, state `/isaac_joint_states`/cmd `/isaac_joint_commands`) + `follower_isaac_controllers.yaml`(100Hz).
+  - 문서 `docs/PATH_E_CUMOTION_ROS.md`(셋업/실행/검증 6단계/튜닝), `AGENTS.md` 경로표·스크립트표 갱신.
+- **핵심 설계 결정**:
+  - 토픽 분리: `/isaac_joint_states`(bridge↔TopicBasedSystem) ≠ `/follower/joint_states`(broadcaster→MoveIt) — 피드백 루프 방지.
+  - 프레임: SRDF virtual_joint(world→base_link)=identity → 모든 포즈 base_link frame 통일(bridge 가 robot base 빼서 publish). robot-base-offset static TF **불필요**.
+  - 5DOF grasp: `set_from_ik` 에 tilt 후보(60°→±15°→0°) 순차 시도 → 첫 성공 자세로 cuMotion joint-space 계획. cuMotion 실패 시 OMPL fallback.
+  - MoveItPy 파라미터 매칭: SM Node `name="pick_place_moveit"` 로 moveit config+named set 전달, store 노드는 params yaml(node key) 로.
+- **검증(로컬)**: 작성 Python 6종 `py_compile` OK, yaml/xml/xacro 파싱 OK. (ROS/Isaac/curobo import·빌드·실행은 서버에서 미실시.)
+- **남은 일(서버 GPU+ROS 필요)**: ① `gen_so101_xrdf.py` IK>90% 확인 + sphere 튜닝(cuMotion Robot Description Editor) ② `colcon build` 5패키지 ③ bridge↔topic 토픽 흐름 확인(PATH_E §5) ④ RViz dry-run plan/execute ⑤ 단일→4큐브 SM 성공률 ⑥ `isaac_ros_cumotion` plugin 클래스명/노드 파라미터를 설치 버전 문서로 재확인(`move_group_cumotion.launch.py` 주석). 성공 시 TROUBLESHOOTING 기록.
+- **주의**: XRDF sphere·cuMotion plugin 파라미터명은 버전 의존이라 서버에서 실측 보정 필요. `SO101_REPO` env 로 XRDF/URDF 절대경로 해결.
+
+---
+
 ## 작업 인계 (2026-06-08 — 3cam 전환: top/wrist → top/wrist/front)
 
 - **목표(사용자)**: 레포지토리 전체를 3개 카메라(top/wrist/front) 기준으로 통일.

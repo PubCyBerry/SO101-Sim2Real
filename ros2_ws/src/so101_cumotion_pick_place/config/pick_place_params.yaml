@@ -1,0 +1,23 @@
+# SO-101 cuMotion pick-and-place SM 파라미터 (PATH E).
+# 기존 in-process SM(pick_cube_state_machine.py) 기본값을 ROS 노드로 이식.
+# 거리 단위 m, 각도 deg. 좌표는 base_link frame(/cube_poses, /bowl_pose).
+pick_place_object_store:
+  ros__parameters:
+    num_cubes: 4
+    # grasp 기하
+    approach_height: 0.12        # 큐브 위 접근 높이
+    grasp_z_offset: -0.005       # 큐브 중심 기준 grasp tip z(음수=더 깊이)
+    grasp_tilt_deg: 60.0         # grasp 자세 forward tilt(5DOF: 완전 top-down 불가)
+    grasped_dz: 0.03             # 들림 판정(큐브 z 상승량)
+    # 운반/배치
+    lift_height: 0.12            # 큐브 기준 들어올림
+    transport_height: 0.15       # 그릇 위 운반 높이
+    place_height: 0.06           # 그릇 기준 release 높이
+    stack_increment: 0.022       # 담긴 큐브당 release 높이 증가
+    # 계획/그리퍼
+    ik_timeout: 0.2              # set_from_ik timeout(s)
+    gripper_dwell_s: 1.5         # 그리퍼 open/close 정착 대기(s)
+    # 성공 판정(그릇 기준, env_cfg 와 동기화 — BOWL_SUCCESS_RADIUS/HEIGHT_RANGE)
+    bowl_success_radius: 0.06
+    bowl_z_lo: 0.005
+    bowl_z_hi: 0.22

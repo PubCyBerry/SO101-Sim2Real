@@ -44,6 +44,11 @@
 - [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
+- [(PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`](#path-e-isaac-sim-헤드리스에서-omnigraph-생성-실패--unable-to-create-prim-for-graph)
+- [(PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` — inotify watch 고갈](#path-e-isaac-sim-부팅-중-errno28-no-space-left-on-device-가-수천-줄--inotify-watch-고갈)
+- [(PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1`](#path-e-해결-isaac-lab-bridge-의-omnigraph-jointstate-가-device-0-vs--1-로-joint_states-미publish)
+- [(PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패](#path-e-isaac-sim-ros-2-bridge-가-librmw_implementationso-로드-실패--libament_index_cppso-cannot-open)
+- [(PATH E) host(bridge)↔container DDS discovery 실패 — cross-UID fastrtps SHM](#path-e-hostbridgecontainerros-스택-dds-discovery-실패--cross-uid-fastrtps-shm)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2694,3 +2699,172 @@ AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 
 ### 확인 방법
 
 `nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.
+
+---
+
+## (PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`
+
+### 현상
+
+PATH E bridge(`scripts/sim/run_cube_desk_ros_bridge.py`)가 ROS 2 bridge OmniGraph(`og.Controller.edit`)를 만들 때 종료. 빈 스테이지·최소 그래프·모든 evaluator/path 에서도 동일.
+
+### 오류 메시지
+
+```
+[Error] [omni.graph.core.plugin] Unable to create prim for graph at /ROSBridge
+omni.graph.core._impl.errors.OmniGraphError: Failed to wrap graph in node given
+  {'graph_path': '/ROSBridge', 'evaluator_name': 'execution'}
+```
+
+### 원인
+
+Isaac Lab 의 기본 헤드리스 experience(`isaaclab.python.headless.kit`)는 OmniGraph 의 USD authoring/orchestration 을 strip 한다 → 그래프 prim 을 만들 수 없다. 풀 `SimulationApp` 이나 렌더링 experience 에서는 정상(`isaacsim import SimulationApp` 단독 테스트로 확인).
+
+### 해결 방법
+
+AppLauncher 로 부팅하되 **렌더링 experience 를 강제**한다 — `args.enable_cameras = True` 면 `isaaclab.python.headless.rendering.kit`(풀 렌더 + OmniGraph USD authoring 포함)가 로드돼 OmniGraph 와 InteractiveScene 둘 다 동작한다.
+
+```python
+args.enable_cameras = True   # AppLauncher(vars(args)) 전에
+```
+
+### 확인 방법
+
+bridge 가 `[bridge] ready` 까지 진행하고 `ros2 topic list`(컨테이너, --network host)에 `/clock /isaac_joint_states /isaac_joint_commands /tf` 4개가 보이면 그래프 생성·광고 정상.
+
+---
+
+## (PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` 가 수천 줄 — inotify watch 고갈
+
+### 현상
+
+디스크는 충분한데도 Isaac Sim 부팅 로그가 `Failed to create change watch ... errno=28` 로 도배되고, 이어서 OmniGraph `Unable to create prim` 등이 연쇄 발생.
+
+### 오류 메시지
+
+```
+[Error] [carb] Failed to create change watch for `.../isaacsim/exts/...`: errno=28/No space left on device
+```
+
+### 원인
+
+`errno=28`(ENOSPC)은 디스크가 아니라 **inotify watch 한도 초과**다. Isaac Sim 이 확장 hot-reload 용 watch 를 수천 개 만드는데, 동시 실행 프로세스(학습·isaacsim-mcp·다른 세션)와 합쳐 `fs.inotify.max_user_instances`(기본 128)/`max_user_watches`(기본 65536)를 소진. USD 프림 생성까지 실패로 번진다.
+
+### 해결 방법
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=1048576
+# 영구: /etc/sysctl.d/99-inotify.conf 에 같은 두 줄
+```
+
+### 확인 방법
+
+재실행 후 로그에서 `grep -c "No space left on device"` 가 0. (inotify 한도를 올려도 별개 블로커인 device -1 은 남는다 — 아래 항목.)
+
+---
+
+## (PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1` 로 joint_states 미publish
+
+### 현상
+
+bridge 가 `[bridge] ready` 까지 가고 토픽도 광고되지만, 루프에서 JointState/ArticulationController OmniGraph 노드가 articulation 물리 텐서를 못 읽어 `/isaac_joint_states`·`/clock` 에 **값이 안 실린다**(`ros2 topic echo` 무응답, `hz` 가 not published).
+
+### 오류 메시지
+
+```
+[Error] [omni.physx.tensors.plugin] Incompatible device of DOF position tensor in
+  function getDofAttribute: expected device 0, received device -1
+[Ros2JointStateMessage] Failed to get dof positions / velocities / efforts
+```
+
+### 원인
+
+Isaac Lab `InteractiveScene`(Fabric/GPU 파이프라인)가 만든 physx tensor simulation view 와 OmniGraph 물리 노드(`IsaacArticulationController`/`ROS2PublishJointState`)가 만드는 view 가 충돌한다. graph 를 reset 전/후 생성, `OnPlaybackTick`→`OnTick`+`evaluate_sync` 강제평가, `PickCubeEnvCfg().sim`(GPU 파이프라인) 사용 — 설정으로는 미해결.
+
+### 해결 방법 (B안 — 적용·검증 완료, 2026-06-09)
+
+bridge 의 scene 로드/시뮬 파이프라인을 Isaac Lab `InteractiveScene`+`SimulationContext` 대신 **순수 `isaacsim.core.api.World`(CPU numpy 백엔드) + `SingleArticulation`** 으로 교체. `cube_desk/scene.usd`(SCENE_OFFSET baked → 객체 world 좌표 그대로) + `so101_follower.usd` 를 `add_reference_to_stage` 로 직접 stage 에 올린다. NVIDIA 공식 ROS2 standalone 예제와 동일 경로라 OmniGraph 물리노드가 simulation view 를 **단독 소유** → device 정합(CPU 백엔드면 양쪽 모두 -1 로 일치, GPU fabric view 와의 충돌 자체가 사라짐). 단일 로봇+소수 큐브라 CPU 물리로 cuMotion 제어에 충분.
+
+세부:
+- base 고정 = `isaaclab.sim.schemas.modify_articulation_root_properties(fix_root_link=True)` 재사용(순수 USD authoring, 시뮬 파이프라인 무관). fixed joint 생성 + ArticulationRootAPI 를 부모로 이동(PhysX parser 한계) → articulation root 가 `/World/Robot` 로 올라온다.
+- 로봇 pose = `PickCubeEnvCfg._ROBOT_POS/_ROBOT_ROT` 재사용(PATH C 시뮬과 동일 배치). 단 referenced root 의 `xformOp:orient` 가 `quatd` 라 `AddOrientOp(PrecisionFloat)` 는 Tf 에러 — 기존 op precision 에 맞춰 값만 Set.
+- USD drive gain 이 micro(0.05~0.85) 라 `articulation.get_articulation_controller().set_gains(kps=17.8, kds=0.6)` 로 leisaac 검증값 적용(안 하면 cuMotion 위치 명령 미추종).
+- 루프 = `world.step(render=True)` 한 줄(OnPlaybackTick 으로 그래프 자동 평가 — A안의 수동 `evaluate_sync` 불요).
+
+진입점 = `scripts/sim/run_cube_desk_ros_bridge.sh`(LD_LIBRARY_PATH·DDS env export 래퍼, 아래 두 항목 참조).
+
+### 확인 방법
+
+```bash
+ros2 topic echo /isaac_joint_states --once   # 6관절 name/position/velocity/effort 값
+ros2 topic echo /tf --once                   # base_link→Cube1/Bowl transform
+```
+bridge 로그에 `expected device` 에러 0건. 2026-06-09 서버 konan147 에서 `--num_cubes 1` 로 위 3토픽 모두 값 흐름 확인(검증 §5 1~3 통과). 이후 §5 4~6(RViz dry-run → 단일/4큐브 pick-and-place)은 컨테이너 ROS 스택 launch + cuMotion XRDF 검증 후.
+
+---
+
+## (PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패 — `libament_index_cpp.so: cannot open`
+
+### 현상
+
+호스트 uv 환경(ROS 2 미설치)에서 bridge 부팅 중 `isaacsim.ros2.bridge` extension 이 startup 실패. 토픽이 하나도 안 뜬다.
+
+### 오류 메시지
+
+```
+[Error] [isaacsim.ros2.bridge.impl.extension] ROS2 Bridge startup failed
+Could not load the dynamic library from .../isaacsim.ros2.bridge/jazzy/lib/librmw_implementation.so.
+Error: libament_index_cpp.so: cannot open shared object file: No such file or directory
+```
+
+### 원인
+
+호스트에 ROS 2 가 없으면 bridge 는 isaacsim 번들 ROS 2 lib(`exts/isaacsim.ros2.bridge/jazzy/lib`)를 dlopen 한다. 이 .so 들엔 `$ORIGIN` RPATH 가 없어, `librmw_implementation.so` 가 같은 디렉터리의 의존성(`libament_index_cpp.so` 등)을 못 찾는다. 동적 링커는 **프로세스 시작 시** `LD_LIBRARY_PATH` 를 읽으므로 python 안에서 `os.environ` 으로 늦게 넣어도 무효.
+
+### 해결 방법
+
+launch **전에** 번들 lib 경로를 `LD_LIBRARY_PATH` 에 export. `scripts/sim/run_cube_desk_ros_bridge.sh` 래퍼가 수행:
+
+```bash
+export LD_LIBRARY_PATH="<repo>/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH"
+```
+
+### 확인 방법
+
+bridge 로그에 `ROS2 Bridge startup failed` 가 없고 `ros2 topic list` 에 `/isaac_joint_states` 등이 뜬다.
+
+---
+
+## (PATH E) host(bridge)↔container(ROS 스택) DDS discovery 실패 — cross-UID fastrtps SHM
+
+### 현상
+
+bridge 가 `/isaac_joint_states` 등을 정상 publish 하고(`/dev/shm/fastrtps_*` 세그먼트 + UDP 7400/7410/7411 listening 확인), 컨테이너를 `--network host --ipc host` 로 띄워 RMW·DOMAIN 을 맞춰도 `ros2 topic list` 가 **빈 결과**.
+
+### 원인
+
+host bridge 는 일반 유저(uid 1000), 컨테이너 ROS 스택은 root(uid 0)로 실행된다. fastrtps 기본 transport 의 SHM(`/dev/shm/fastrtps_*`)은 서로의 세그먼트 lock/ring-buffer 에 **cross-UID 로 접근**해야 하는데 권한이 안 맞아 same-host 참가자 간 SHM 협상이 실패한다(metatraffic 도 SHM 우선 시 안 보임).
+
+### 해결 방법
+
+양쪽 모두 fastdds 를 **UDP-only** 로 강제해 SHM 협상을 우회한다:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+```
+
+- bridge: 래퍼(`run_cube_desk_ros_bridge.sh`)가 export + `.py` 도 `os.environ.setdefault`(DDS init 은 python 시작 이후라 유효).
+- 컨테이너: `docker run -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 --network host --ipc host …`.
+
+> ROS 2 가 양쪽 다 fastrtps 여야 한다. isaacsim 번들은 **fastrtps 만** 포함(cyclonedds 없음)하므로 컨테이너도 fastrtps 로 맞춘다(`ros2_ws/setup/env.sh` 의 cyclonedds 는 WSL2 PATH D 전용 — PATH E 에서 source 금지).
+
+### 확인 방법
+
+```bash
+docker run --rm --network host --ipc host \
+  -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+  so101-cumotion:jazzy bash -c \
+  'source /opt/ros/jazzy/setup.bash && ros2 topic echo /isaac_joint_states --once'
+```
+6관절 값이 찍히면 해결.
