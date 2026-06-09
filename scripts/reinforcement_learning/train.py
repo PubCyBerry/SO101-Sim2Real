@@ -88,6 +88,19 @@ parser.add_argument("--entropy_coef", type=float, default=0.005,
                     help="PPO entropy coefficient")
 parser.add_argument("--learning_rate", type=float, default=3e-4,
                     help="PPO learning rate")
+# LSTM(recurrent) 정책 옵션 — 설정 시 ActorCriticRecurrent 사용
+parser.add_argument("--recurrent", action="store_true", default=False,
+                    help="ActorCriticRecurrent(LSTM) 정책 사용. 미설정 시 기존 feedforward ActorCritic.")
+parser.add_argument("--rnn_type", default="lstm", choices=["lstm", "gru"],
+                    help="recurrent 정책 RNN 종류 (--recurrent 일 때만)")
+parser.add_argument("--rnn_hidden_dim", type=int, default=256,
+                    help="RNN hidden state 차원 (--recurrent 일 때만)")
+parser.add_argument("--rnn_num_layers", type=int, default=1,
+                    help="RNN 층 수 (--recurrent 일 때만)")
+parser.add_argument("--obs_normalization", action="store_true", default=False,
+                    help="actor/critic 관측 정규화(empirical running stats) 사용. 43-dim rl_state 권장.")
+parser.add_argument("--schedule", default="fixed", choices=["fixed", "adaptive"],
+                    help="PPO learning rate schedule")
 # --device / --headless 는 AppLauncher 가 등록
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -129,6 +142,26 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
     rl_device = args.rl_device if args.rl_device is not None else args.device
     obs_group = args.obs_group
     critic_group = args.critic_obs_group if args.critic_obs_group is not None else obs_group
+
+    # 정책 설정 — --recurrent 시 LSTM/GRU(ActorCriticRecurrent), 아니면 feedforward.
+    # OnPolicyRunner 가 policy["class_name"] 을 eval() 로 rsl_rl.modules 에서 찾는다.
+    policy_cfg = {
+        "class_name": "ActorCritic",
+        "init_noise_std": args.init_noise_std,
+        "actor_hidden_dims": [256, 128] if args.recurrent else [128, 128],
+        "critic_hidden_dims": [256, 128] if args.recurrent else [128, 128],
+        "activation": "elu",
+        "actor_obs_normalization": args.obs_normalization,
+        "critic_obs_normalization": args.obs_normalization,
+    }
+    if args.recurrent:
+        policy_cfg.update({
+            "class_name": "ActorCriticRecurrent",
+            "rnn_type": args.rnn_type,
+            "rnn_hidden_dim": args.rnn_hidden_dim,
+            "rnn_num_layers": args.rnn_num_layers,
+        })
+
     return {
         "seed": args.seed,
         "device": rl_device,
@@ -142,21 +175,13 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "load_checkpoint": "model_.*.pt",
         "logger": "tensorboard",
         "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
-        "policy": {
-            "class_name": "ActorCritic",
-            "init_noise_std": args.init_noise_std,
-            "actor_hidden_dims": [128, 128],
-            "critic_hidden_dims": [128, 128],
-            "activation": "elu",
-            "actor_obs_normalization": False,
-            "critic_obs_normalization": False,
-        },
+        "policy": policy_cfg,
         "algorithm": {
             "class_name": "PPO",
             "num_learning_epochs": args.num_learning_epochs,
             "num_mini_batches": args.num_mini_batches,
             "learning_rate": args.learning_rate,
-            "schedule": "fixed",
+            "schedule": args.schedule,
             "gamma": 0.99,
             "lam": 0.95,
             "entropy_coef": args.entropy_coef,

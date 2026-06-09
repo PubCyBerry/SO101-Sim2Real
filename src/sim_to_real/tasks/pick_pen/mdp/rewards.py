@@ -492,3 +492,75 @@ def task_success_bonus(
         all_placed = all_placed & gripper_open
 
     return all_placed.float()
+
+
+# ---------------------------------------------------------------------------
+# 속도 보상 — 느린 정책에 페널티, 빠른 성공에 보너스
+#   reward hacking 아님: grasp/배치 판정·성공 반경은 손대지 않고 "시간"만 형상화.
+# ---------------------------------------------------------------------------
+
+
+def _all_placed_mask(
+    env: ManagerBasedRLEnv,
+    pen_cfgs: list[SceneEntityCfg] | None,
+    cup_center_xy: tuple[float, float],
+    cup_cfg: SceneEntityCfg | None,
+    cup_radius: float,
+    cup_height_range: tuple[float, float],
+) -> torch.Tensor:
+    """모든 대상 큐브가 그릇 안에 있으면 True, shape (num_envs,) bool.
+
+    task_done / task_success_bonus 와 동일한 _pen_inside_cup_mask 기준을 쓴다
+    (그리퍼 open 조건은 보지 않음 — 시간 형상화는 배치 완료 시점 기준).
+    """
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    all_placed = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    for cfg in cfgs:
+        pen_pos = _pen_pos_w(env, cfg)
+        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
+        all_placed = all_placed & inside
+    return all_placed
+
+
+def time_penalty(
+    env: ManagerBasedRLEnv,
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.18),
+) -> torch.Tensor:
+    """과제 미완료 동안 매 control step 마다 상수 페널티 (-1.0), 완료 시 0.0.
+
+    RewTerm weight 를 음수로 줘 "느릴수록 더 깎이게" 한다. 큐브가 전부 배치되면
+    0 이 되어, 빠르게 성공할수록 누적 페널티가 작아진다. 탐색을 죽이지 않도록
+    weight 절댓값은 작게(예: 0.02) 둔다.
+    """
+    all_placed = _all_placed_mask(env, pen_cfgs, cup_center_xy, cup_cfg, cup_radius, cup_height_range)
+    return torch.where(
+        all_placed,
+        torch.zeros(env.num_envs, device=env.device),
+        -torch.ones(env.num_envs, device=env.device),
+    )
+
+
+def early_finish_bonus(
+    env: ManagerBasedRLEnv,
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.18),
+    scale: float = 1.0,
+) -> torch.Tensor:
+    """전부 배치된 env 에 한해 남은 시간 비율 보너스, 아니면 0.0.
+
+    bonus = scale * (1 - episode_length_buf / max_episode_length), 범위 [0, scale].
+    매 step 적용되므로 일찍 완료해 그 상태를 유지할수록 누적 보너스가 커진다 →
+    빠르고 정확한(배치 유지) 정책이 선택된다. RewTerm weight 로 절대 크기를 조정.
+    """
+    all_placed = _all_placed_mask(env, pen_cfgs, cup_center_xy, cup_cfg, cup_radius, cup_height_range)
+    max_len = float(max(int(env.max_episode_length), 1))
+    remaining = 1.0 - env.episode_length_buf.float() / max_len
+    remaining = torch.clamp(remaining, 0.0, 1.0) * float(scale)
+    return torch.where(all_placed, remaining, torch.zeros(env.num_envs, device=env.device))

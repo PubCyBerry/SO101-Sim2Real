@@ -18,6 +18,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import GaussianNoiseCfg
 
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH, ROBOT_USD_PATH
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (
@@ -30,6 +31,8 @@ from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES
 from sim_to_real.utils.domain_randomization import (
     randomize_cubes_scattered,
+    randomize_object_mass,
+    randomize_object_material,
     randomize_object_on_arc,
 )
 
@@ -436,16 +439,19 @@ class PickCubeObservationsCfg:
         No FrameTransformer dependency — resolves gripper body by name.
         """
 
+        # 센서 노이즈(DR): 43-dim 상태에 보수적 Gaussian(σ=0.005) 주입 → 추정/엔코더
+        # 오차에 대한 robust 화. 단위가 섞여 있어 작은 std 로 시작(필요 시 항목별 분리).
         rl_state_obs = ObsTerm(
             func=task_mdp.rl_state,
             params={
                 "pen_names": CUBE_NAMES,
                 "cup_name": BOWL_NAME,
             },
+            noise=GaussianNoiseCfg(mean=0.0, std=0.005),
         )
 
         def __post_init__(self) -> None:
-            self.enable_corruption = False
+            self.enable_corruption = True  # DR: rl_state 에 노이즈 적용
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
@@ -617,6 +623,36 @@ class PickCubeRewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
+    # 속도 형상화 — 느린 정책 페널티 + 빠른 성공 보너스.
+    # reward hacking 아님: 성공 반경/grasp 물리 불변, "시간"만 형상화한다.
+    # 스케일: 에피소드 ≈900 step. time_penalty 누적 최대 -18(전구간 미완료) →
+    #   insert(80)/success(200) 대비 작아 탐색 억제 X. early_finish 는 매 step
+    #   남은시간비율을 더해 일찍 완료·유지할수록 누적 이득이 커진다.
+    time_penalty = RewTerm(
+        func=task_mdp.time_penalty,
+        weight=-0.02,
+        params={
+            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "cup_radius": BOWL_SUCCESS_RADIUS,
+            "cup_height_range": BOWL_HEIGHT_RANGE,
+        },
+    )
+    # task_done(전부 배치)가 곧 종료라 이 보너스는 완료 step 에 1회 지급되는
+    # 터미널 보너스로 동작한다. 완료 시각에 따라 ~100(즉시)→~17(25s) 차등.
+    early_finish_bonus = RewTerm(
+        func=task_mdp.early_finish_bonus,
+        weight=100.0,
+        params={
+            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "cup_radius": BOWL_SUCCESS_RADIUS,
+            "cup_height_range": BOWL_HEIGHT_RANGE,
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Terminations
@@ -652,12 +688,13 @@ class PickCubeEventCfg:
 
     reset_scene = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
+    # 시작 포즈 jitter (DR): ±0.05 rad(~3°) — 실기 reset 편차 모사. velocity 0 유지.
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "position_range": (0.0, 0.0),
+            "position_range": (-0.05, 0.05),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -686,6 +723,14 @@ class PickCubeEventCfg:
     #   Cube3 최악 위치 (1.79, -0.33) 기준 임계 각도 풀면 9.48°.
     #   → 안전 여유 포함 오른쪽 한계 +8°
     randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
+
+    def __post_init__(self) -> None:
+        # 물리 DR(startup): 큐브별 마찰/질량을 무작위화해 env 간 물리 다양성 확보.
+        # 동적 setattr 한 EventTerm 도 EventManager 가 cfg.__dict__ 에서 수집한다.
+        # grasp weld/유지력 추가가 아니라 표면/질량 분산만 주므로 reward hacking 아님.
+        for name in CUBE_NAMES:
+            setattr(self, f"randomize_{name.lower()}_material", randomize_object_material(name))
+            setattr(self, f"randomize_{name.lower()}_mass", randomize_object_mass(name))
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +782,9 @@ _CUBE_REWARD_TERMS = (
     "insert_cube",
     "release_cube",
     "task_success",
+    # 속도 보상도 활성 큐브 수에 맞춰 pen_cfgs 갱신
+    "time_penalty",
+    "early_finish_bonus",
 )
 _BOWL_RADIUS_REWARD_TERMS = (
     "reach_cube",
@@ -748,6 +796,9 @@ _BOWL_RADIUS_REWARD_TERMS = (
     "insert_cube",
     "release_cube",
     "task_success",
+    # 속도 보상의 cup_radius 도 동기화(반경 스케일 1.0 고정이라 사실상 no-op)
+    "time_penalty",
+    "early_finish_bonus",
 )
 
 

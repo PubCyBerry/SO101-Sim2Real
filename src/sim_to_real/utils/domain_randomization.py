@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.assets import RigidObject
@@ -312,5 +313,63 @@ def randomize_cubes_scattered(
             "min_cube_sep": float(min_cube_sep),
             "min_bowl_sep": float(min_bowl_sep),
             "max_attempts": int(max_attempts),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# 물리 DR — Isaac Lab stock term(ManagerTermBase) 래퍼.
+#   sim2real 일반화를 위해 큐브의 마찰/질량을 env 별로 무작위화한다.
+#   mode="startup": env 초기화 시 1회 샘플 → env 간 물리 다양성(표준 패턴).
+#   grasp weld/유지력 추가가 아니므로 reward hacking 이 아니다.
+# ---------------------------------------------------------------------------
+
+
+def randomize_object_material(
+    name: str,
+    *,
+    static_friction_range: tuple[float, float] = (1.4, 2.0),
+    dynamic_friction_range: tuple[float, float] = (1.2, 1.7),
+    restitution_range: tuple[float, float] = (0.0, 0.0),
+    num_buckets: int = 64,
+) -> EventTerm:
+    """``name`` rigid body 의 마찰/반발 계수를 무작위 material bucket 으로 할당.
+
+    기본 범위는 큐브 authored 값(static 1.8 / dynamic 1.5) 중심의 ±대역.
+    make_consistent=True 로 dynamic ≤ static 을 강제한다.
+    """
+    return EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(name),
+            "static_friction_range": static_friction_range,
+            "dynamic_friction_range": dynamic_friction_range,
+            "restitution_range": restitution_range,
+            "num_buckets": int(num_buckets),
+            "make_consistent": True,
+        },
+    )
+
+
+def randomize_object_mass(
+    name: str,
+    *,
+    mass_range: tuple[float, float] = (0.9, 1.1),
+    operation: str = "scale",
+) -> EventTerm:
+    """``name`` rigid body 의 질량을 무작위화 (기본 ±10% scale).
+
+    grasp 안정 한계(actuator 10Nm) 내로 유지하기 위해 좁은 범위만 쓴다.
+    """
+    return EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(name),
+            "mass_distribution_params": mass_range,
+            "operation": operation,
+            "distribution": "uniform",
+            "recompute_inertia": True,
         },
     )
