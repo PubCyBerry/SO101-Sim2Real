@@ -5,26 +5,25 @@ Domain Randomization 으로 큐브/그릇 위치가 무작위화된 상태에서
 
 설계
 ----
-- ``scan()``                : 모든 큐브·그릇의 현재 world 위치를 한 번에 읽는다.
-- ``reached`` / ``grasped`` / ``placed`` : 단계 전이 판정(조건 체크).
-- ``pick_and_place(cube)``   : 오브젝트 1개에 대한 집기→옮기기→놓기.
-- ``move_to(...)``           : 목표 ee 위치에 **도달하면 즉시** 다음 단계로 넘어간다
-                               (고정 step 대기를 없애 빠르다).
-
-제어는 Isaac Lab task-space DifferentialIK. 목표 ee pose 의 **방향은 robot base
-기준 수직 아래로 고정**하고(위치만 world→base 변환), 그래서 운반 중 손목(panda_joint7)이
-±180° 로 휙 도는 현상을 막는다. 그리퍼는 binary(열림 +1 / 닫힘 -1) action.
+- ``Phase`` enum + per-env 상태 배열로 num_envs 개 SM 을 병렬 관리한다.
+- 매 step 마다 모든 env 의 target/gripper 를 한꺼번에 계산해 ``env.step([N,9])`` 를
+  1회 호출한다. Python 루프 안에서 ``env.step`` 을 반복하지 않는다.
+- ``home_pos`` 는 env 0 의 robot root 기준 상대 오프셋으로 보존하여,
+  각 env 의 robot root world 좌표가 달라도 올바른 world target 을 계산한다.
+- 이동 단계(APPROACH/DESCEND/LIFT/TRANSPORT/LOWER/RETREAT)는 도달 OR
+  max_phase_steps 를 초과하면 다음 단계로 전이한다(IK 미수렴 안전장치).
 
 실행:
-    OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
-        scripts/environments/pick_cube_franka_state_machine.py \
-        --num_envs 1 --active_objects 4 --object_radius_scale 1.0 --container_angle_scale 1.0
+    OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \\
+        scripts/environments/pick_cube_franka_state_machine.py \\
+        --num_envs 4 --active_objects 4
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from enum import IntEnum
 
 from isaaclab.app import AppLauncher
 
@@ -164,91 +163,97 @@ def _apply_dr(env_cfg: PickCubeFrankaEnvCfg) -> None:
 # ---------------------------------------------------------------------------
 
 
+class Phase(IntEnum):
+    SETTLE        = 0
+    APPROACH      = 1
+    DESCEND       = 2
+    GRASP_DWELL   = 3
+    LIFT          = 4
+    TRANSPORT     = 5
+    LOWER         = 6
+    RELEASE_DWELL = 7
+    RETREAT       = 8
+    HOME_FINAL    = 9
+    DONE          = 10
+
+
+# 이동 단계: max_phase_steps timeout 적용 대상
+_MOVE_PHASES = frozenset({
+    Phase.APPROACH, Phase.DESCEND, Phase.LIFT,
+    Phase.TRANSPORT, Phase.LOWER, Phase.RETREAT,
+})
+
+
 class FrankaPickPlaceSM:
-    """단일 env, 도달 조건 기반 pick-and-place 컨트롤러."""
+    """num_envs 병렬 env pick-and-place 컨트롤러.
 
-    def __init__(self, env) -> None:
-        self.env = env  # step 용(RecordVideo wrap 시 wrapper — render 캡처)
-        self.scene = env.unwrapped.scene  # scene 접근(wrap 무관)
-        self.device = env.unwrapped.device
-        self.robot = self.scene["robot"]
-        # IK 가 제어하는 작업점(panda_hand + body_offset)을 그대로 추적하기 위한 값.
+    매 step 마다 모든 env 의 phase 별 target 을 계산하고
+    ``env.step([N, 9])`` 를 1회 호출한다.
+    """
+
+    def __init__(self, env, active_cubes: list[str]) -> None:
+        self.env      = env
+        self.scene    = env.unwrapped.scene
+        self.device   = env.unwrapped.device
+        self.num_envs = env.unwrapped.num_envs
+        self.robot    = self.scene["robot"]
+
         self.ee_body_idx = self.robot.find_bodies("panda_hand")[0][0]
-        self.ee_offset = torch.tensor(FRANKA_EE_OFFSET, device=self.device)
-        # **world frame** 수직 아래 자세. (w,x,y,z)=(0,1,0,0) = world x축 180° 회전.
-        # 이 자세를 robot root frame 으로 변환해 IK 에 넘긴다(IK absolute pose 는 root 기준).
-        # base 기준 고정 quat 을 쓰면 ee 가 작업영역 반대로 향해 도달하지 못한다.
-        self.world_down_quat = torch.tensor([[0.0, 1.0, 0.0, 0.0]], device=self.device)
-        self.home_pos = torch.tensor([1.84, -0.40, DESK_TOP_Z + 0.25], device=self.device)
+        self.ee_offset   = torch.tensor(FRANKA_EE_OFFSET, device=self.device)
 
-    # --- 상태 스캔 -------------------------------------------------------
+        # world-frame 수직 아래 방향 quat [N, 4] — subtract_frame_transforms 에 직접 전달
+        self.world_down_quat = torch.tensor(
+            [[0.0, 1.0, 0.0, 0.0]], device=self.device
+        ).expand(self.num_envs, -1)
 
-    def scan(self) -> dict[str, torch.Tensor]:
-        """모든 큐브·그릇의 현재 world 위치(3,)를 dict 로 반환."""
-        names = list(CUBE_NAMES) + [BOWL_NAME]
-        return {n: self.scene[n].data.root_pos_w[0, :3].clone() for n in names}
+        # home_pos: env 0 의 robot root world 좌표 기준 상대 오프셋으로 보존.
+        # Isaac Lab multi-env 는 robot 을 평행 이동만 하므로 오프셋이 모든 env 에 동일하게 적용된다.
+        _home_w  = torch.tensor([1.84, -0.40, DESK_TOP_Z + 0.25], device=self.device)
+        _root_0  = self.robot.data.root_pos_w[0, :3].clone()
+        self.home_offset = _home_w - _root_0  # [3]
 
-    def obj_pos(self, name: str) -> torch.Tensor:
-        return self.scene[name].data.root_pos_w[0, :3].clone()
+        # per-env 큐브 처리 순서 (robot root 근접 순)
+        self.ordered_cubes: list[list[str]] = [
+            self._order_by_proximity(active_cubes, e)
+            for e in range(self.num_envs)
+        ]
 
-    def ee_pos(self) -> torch.Tensor:
-        """IK 작업점의 현재 world 위치."""
-        bp = self.robot.data.body_pos_w[0, self.ee_body_idx]
-        bq = self.robot.data.body_quat_w[0, self.ee_body_idx]
+        # per-env 상태 벡터
+        self.phase       : list[Phase]                              = [Phase.SETTLE] * self.num_envs
+        self.cube_idx    : list[int]                                = [0]            * self.num_envs
+        self.n_placed    : list[int]                                = [0]            * self.num_envs
+        self.dwell_count : list[int]                                = [0]            * self.num_envs
+        self.phase_steps : list[int]                                = [0]            * self.num_envs
+        self.grasp_cache : list[tuple[torch.Tensor, float] | None] = [None]         * self.num_envs
+
+    # --- 위치 쿼리 -------------------------------------------------------
+
+    def _home_pos_w(self, e: int) -> torch.Tensor:
+        return self.robot.data.root_pos_w[e, :3] + self.home_offset
+
+    def obj_pos(self, name: str, e: int) -> torch.Tensor:
+        return self.scene[name].data.root_pos_w[e, :3].clone()
+
+    def ee_pos(self, e: int) -> torch.Tensor:
+        bp = self.robot.data.body_pos_w[e, self.ee_body_idx]
+        bq = self.robot.data.body_quat_w[e, self.ee_body_idx]
         return bp + quat_apply(bq.unsqueeze(0), self.ee_offset.unsqueeze(0)).squeeze(0)
 
     # --- 조건 체크 -------------------------------------------------------
 
-    def reached(self, target_pos_w: torch.Tensor, tol: float) -> bool:
-        return torch.linalg.norm(self.ee_pos() - target_pos_w).item() < tol
+    def _reached(self, target: torch.Tensor, e: int, tol: float) -> bool:
+        return torch.linalg.norm(self.ee_pos(e) - target).item() < tol
 
-    def grasped(self, cube_name: str) -> bool:
-        """큐브가 책상에서 들렸는지(grasp 성공 추정)."""
-        return self.obj_pos(cube_name)[2].item() > DESK_TOP_Z + 0.03
+    def _grasped(self, cube: str, e: int) -> bool:
+        return self.obj_pos(cube, e)[2].item() > DESK_TOP_Z + 0.03
 
-    def placed(self, cube_name: str) -> bool:
-        """큐브가 그릇 반경·높이 안에 안착했는지."""
-        p = self.obj_pos(cube_name)
-        bowl_xy = self.obj_pos(BOWL_NAME)[:2]
-        in_xy = torch.linalg.norm(p[:2] - bowl_xy).item() < BOWL_SUCCESS_RADIUS
-        z_rel = p[2].item() - DESK_TOP_Z
-        in_z = BOWL_HEIGHT_RANGE[0] <= z_rel <= BOWL_HEIGHT_RANGE[1] + 0.10  # 적층 여유
+    def _placed(self, cube: str, e: int) -> bool:
+        p       = self.obj_pos(cube, e)
+        bowl_xy = self.obj_pos(BOWL_NAME, e)[:2]
+        in_xy   = torch.linalg.norm(p[:2] - bowl_xy).item() < BOWL_SUCCESS_RADIUS
+        z_rel   = p[2].item() - DESK_TOP_Z
+        in_z    = BOWL_HEIGHT_RANGE[0] <= z_rel <= BOWL_HEIGHT_RANGE[1] + 0.10
         return in_xy and in_z
-
-    # --- 저수준 액션 -----------------------------------------------------
-
-    def _act(self, target_pos_w: torch.Tensor, gripper_open: bool) -> None:
-        root_pos = self.robot.data.root_pos_w[:, :3]
-        root_quat = self.robot.data.root_quat_w
-        # world target pose(아래 향함) → robot root frame. 손목 ±180° flip 은 IK scale 을
-        # 낮춰(env_cfg.actions.arm.scale) step 당 변화량을 제한하는 방식으로 억제한다.
-        pos_b, quat_b = subtract_frame_transforms(
-            root_pos, root_quat, target_pos_w.view(1, 3), self.world_down_quat
-        )
-        grip = torch.tensor([[1.0 if gripper_open else -1.0]], device=self.device)
-        action = torch.cat([pos_b, quat_b, grip], dim=-1)
-        self.env.step(action)
-
-    def move_to(self, target_fn, gripper_open: bool, tol: float) -> bool:
-        """목표(매 step 재평가)에 도달하면 즉시 종료. 미수렴 시 max_phase_steps 에서 탈출.
-
-        Returns: 도달했으면 True.
-        """
-        for _ in range(args.max_phase_steps):
-            if not simulation_app.is_running():
-                return False
-            t = target_fn()
-            self._act(t, gripper_open)
-            if self.reached(t, tol):
-                return True
-        return False
-
-    def hold(self, target_pos_w: torch.Tensor, gripper_open: bool, steps: int) -> None:
-        """한 자리에서 그리퍼 상태를 유지하며 정착(닫힘/열림 물리 시간 확보)."""
-        for _ in range(steps):
-            if not simulation_app.is_running():
-                return
-            self._act(target_pos_w, gripper_open)
 
     # --- target 헬퍼 -----------------------------------------------------
 
@@ -261,70 +266,180 @@ class FrankaPickPlaceSM:
     def _xyz(self, xy: torch.Tensor, z: float) -> torch.Tensor:
         return torch.tensor([xy[0].item(), xy[1].item(), z], device=self.device)
 
-    # --- 오브젝트 1개 pick-and-place -------------------------------------
+    # --- 정렬 ------------------------------------------------------------
 
-    def pick_and_place(self, cube_name: str, n_placed: int) -> bool:
-        coarse, fine = args.coarse_tol, args.reach_tol
+    def _order_by_proximity(self, cubes: list[str], e: int) -> list[str]:
+        base_xy = self.robot.data.root_pos_w[e, :2]
+        return sorted(
+            cubes,
+            key=lambda c: torch.linalg.norm(self.obj_pos(c, e)[:2] - base_xy).item(),
+        )
 
-        # 1) 큐브 상공 접근 (그리퍼 열림, 실시간 추종)
-        r1 = self.move_to(lambda: self._above(self.obj_pos(cube_name), args.approach_height), True, coarse)
-        # 2) grasp 높이까지 하강
-        r2 = self.move_to(lambda: self._above(self.obj_pos(cube_name), args.grasp_z_offset), True, fine)
-        ee = self.ee_pos()
-        cp = self.obj_pos(cube_name)
-        log(f"[SM]   {cube_name} descend reached={r2}(app={r1}) "
-            f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f}) cube=({cp[0]:.3f},{cp[1]:.3f},{cp[2]:.3f})")
-        # grasp 시점 위치 캡처(이후 잡힌 큐브가 따라오므로 고정 목표 사용)
-        grasp_xy = self.obj_pos(cube_name)[:2].clone()
-        grasp_z = self.obj_pos(cube_name)[2].item()
-        grasp_target = self._xyz(grasp_xy, grasp_z + args.grasp_z_offset)
-        # 3) 그리퍼 닫고 정착
-        self.hold(grasp_target, False, args.grasp_dwell)
-        # 4) 들어올림
-        self.move_to(lambda: self._xyz(grasp_xy, DESK_TOP_Z + args.lift_height), False, coarse)
-        if not self.grasped(cube_name):
-            log(f"[SM]   {cube_name}: grasp 실패(들리지 않음) — 건너뜀")
-            return False
-        # 5) 그릇 상공으로 운반 (실시간 그릇 추종)
-        self.move_to(lambda: self._above(self.obj_pos(BOWL_NAME), args.transport_height), False, coarse)
-        # 6) 그릇 안으로 하강 (이미 담긴 큐브 수만큼 높이 증가)
-        place_h = args.place_height + n_placed * args.stack_increment
-        self.move_to(lambda: self._above(self.obj_pos(BOWL_NAME), place_h), False, fine)
-        # 7) release
-        release_target = self._above(self.obj_pos(BOWL_NAME), place_h)
-        self.hold(release_target, True, args.release_dwell)
-        # 8) 위로 후퇴(다음 큐브·적층 충돌 회피)
-        self.move_to(lambda: self._above(self.obj_pos(BOWL_NAME), args.transport_height), True, coarse)
-        return True
+    # --- per-env phase 전이 ----------------------------------------------
 
-    # --- 전체 시퀀스 -----------------------------------------------------
+    def _advance_cube(self, e: int) -> None:
+        """현재 큐브 처리 완료 → 다음 큐브로, 없으면 HOME_FINAL."""
+        self.cube_idx[e]    += 1
+        self.phase_steps[e]  = 0
+        if self.cube_idx[e] >= len(self.ordered_cubes[e]):
+            self.dwell_count[e] = 0
+            self.phase[e]       = Phase.HOME_FINAL
+        else:
+            self.phase[e] = Phase.APPROACH
 
-    def order_by_proximity(self, cubes: list[str]) -> list[str]:
-        """robot base 에서 xy 거리가 가까운 큐브부터 처리하도록 정렬."""
-        base_xy = self.robot.data.root_pos_w[0, :2]
-        return sorted(cubes, key=lambda c: torch.linalg.norm(self.obj_pos(c)[:2] - base_xy).item())
+    def _compute_action(self, e: int) -> tuple[torch.Tensor, bool]:
+        """env e 의 현재 phase 에 따라 (target_pos_w [3], gripper_open) 반환 + phase 전이."""
+        ph = self.phase[e]
 
-    def run(self, active_cubes: list[str]) -> None:
-        self.hold(self.home_pos, True, args.settle_steps)
-        ordered = self.order_by_proximity(active_cubes)
-        log(f"[SM] pick order (robot 근접순): {ordered}")
-        for i, cube in enumerate(ordered):
-            log(f"[SM] pick-and-place: {cube} (placed so far={i})")
-            self.pick_and_place(cube, i)
-        self.hold(self.home_pos, True, args.settle_steps)
-        log("[SM] all cubes processed.")
-        self._report(active_cubes)
+        if ph == Phase.DONE:
+            return self._home_pos_w(e), True
 
-    def _report(self, active_cubes: list[str]) -> None:
-        n_ok = 0
-        for cube in active_cubes:
-            p = self.obj_pos(cube)
-            bowl_xy = self.obj_pos(BOWL_NAME)[:2]
-            dist = torch.linalg.norm(p[:2] - bowl_xy).item()
-            ok = self.placed(cube)
-            n_ok += int(ok)
-            log(f"[SM] {cube}: dist_to_bowl_xy={dist:.3f}m z={p[2].item():.3f} placed={ok}")
-        log(f"[SM] RESULT: {n_ok}/{len(active_cubes)} cubes in bowl.")
+        # ----- SETTLE: reset 후 큐브 정착 대기 -----
+        if ph == Phase.SETTLE:
+            self.dwell_count[e] += 1
+            if self.dwell_count[e] >= args.settle_steps:
+                self.dwell_count[e] = 0
+                self.phase[e]       = Phase.APPROACH
+                log(f"[SM] env{e}: pick order = {self.ordered_cubes[e]}")
+            return self._home_pos_w(e), True
+
+        cube = self.ordered_cubes[e][self.cube_idx[e]]
+
+        # 이동 단계 step 카운터 증가 (dwell 단계는 별도 dwell_count 사용)
+        if ph in _MOVE_PHASES:
+            self.phase_steps[e] += 1
+        timeout = self.phase_steps[e] >= args.max_phase_steps
+
+        # ----- APPROACH: 큐브 상공 접근 -----
+        if ph == Phase.APPROACH:
+            target = self._above(self.obj_pos(cube, e), args.approach_height)
+            if self._reached(target, e, args.coarse_tol) or timeout:
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.DESCEND
+            return target, True
+
+        # ----- DESCEND: grasp 높이까지 하강 -----
+        if ph == Phase.DESCEND:
+            target = self._above(self.obj_pos(cube, e), args.grasp_z_offset)
+            if self._reached(target, e, args.reach_tol) or timeout:
+                self.grasp_cache[e] = (
+                    self.obj_pos(cube, e)[:2].clone(),
+                    self.obj_pos(cube, e)[2].item(),
+                )
+                self.dwell_count[e] = 0
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.GRASP_DWELL
+            return target, True
+
+        # ----- GRASP_DWELL: 그리퍼 닫힘 정착 -----
+        if ph == Phase.GRASP_DWELL:
+            gc     = self.grasp_cache[e]
+            target = self._xyz(gc[0], gc[1] + args.grasp_z_offset)
+            self.dwell_count[e] += 1
+            if self.dwell_count[e] >= args.grasp_dwell:
+                self.dwell_count[e] = 0
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.LIFT
+            return target, False
+
+        # ----- LIFT: 책상 위로 들어올림 -----
+        if ph == Phase.LIFT:
+            gc     = self.grasp_cache[e]
+            target = self._xyz(gc[0], DESK_TOP_Z + args.lift_height)
+            if self._reached(target, e, args.coarse_tol) or timeout:
+                if not self._grasped(cube, e):
+                    log(f"[SM] env{e} {cube}: grasp 실패 — 다음 큐브")
+                    self._advance_cube(e)
+                else:
+                    self.phase_steps[e] = 0
+                    self.phase[e]       = Phase.TRANSPORT
+            return target, False
+
+        # ----- TRANSPORT: 그릇 상공으로 운반 -----
+        if ph == Phase.TRANSPORT:
+            target = self._above(self.obj_pos(BOWL_NAME, e), args.transport_height)
+            if self._reached(target, e, args.coarse_tol) or timeout:
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.LOWER
+            return target, False
+
+        # ----- LOWER: 그릇 안으로 하강 -----
+        if ph == Phase.LOWER:
+            place_h = args.place_height + self.n_placed[e] * args.stack_increment
+            target  = self._above(self.obj_pos(BOWL_NAME, e), place_h)
+            if self._reached(target, e, args.reach_tol) or timeout:
+                self.dwell_count[e] = 0
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.RELEASE_DWELL
+            return target, False
+
+        # ----- RELEASE_DWELL: 그리퍼 열림 정착 -----
+        if ph == Phase.RELEASE_DWELL:
+            place_h = args.place_height + self.n_placed[e] * args.stack_increment
+            target  = self._above(self.obj_pos(BOWL_NAME, e), place_h)
+            self.dwell_count[e] += 1
+            if self.dwell_count[e] >= args.release_dwell:
+                self.dwell_count[e] = 0
+                self.n_placed[e]   += 1
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.RETREAT
+            return target, True
+
+        # ----- RETREAT: 그릇 위로 후퇴 -----
+        if ph == Phase.RETREAT:
+            target = self._above(self.obj_pos(BOWL_NAME, e), args.transport_height)
+            if self._reached(target, e, args.coarse_tol) or timeout:
+                self._advance_cube(e)
+            return target, True
+
+        # ----- HOME_FINAL: 홈 자세로 복귀 후 완료 -----
+        if ph == Phase.HOME_FINAL:
+            self.dwell_count[e] += 1
+            if self.dwell_count[e] >= args.settle_steps:
+                self.phase[e] = Phase.DONE
+                self._report(e)
+            return self._home_pos_w(e), True
+
+        return self._home_pos_w(e), True
+
+    # --- 배치 액션 -------------------------------------------------------
+
+    def _act_all(self, targets_w: list[torch.Tensor], gripper_opens: list[bool]) -> None:
+        """모든 env 의 target/gripper 를 배치로 env.step([N, 9]) 에 전달."""
+        tgt       = torch.stack(targets_w, dim=0)          # [N, 3]
+        root_pos  = self.robot.data.root_pos_w[:, :3]      # [N, 3]
+        root_quat = self.robot.data.root_quat_w             # [N, 4]
+        # world target → robot root frame (IK 가 root 기준 절대 pose 를 받음)
+        pos_b, quat_b = subtract_frame_transforms(
+            root_pos, root_quat, tgt, self.world_down_quat
+        )
+        grip   = torch.tensor([[1.0 if g else -1.0] for g in gripper_opens], device=self.device)
+        action = torch.cat([pos_b, quat_b, grip], dim=-1)  # [N, 9]
+        self.env.step(action)
+
+    # --- 메인 루프 -------------------------------------------------------
+
+    def run(self) -> None:
+        while not all(p == Phase.DONE for p in self.phase):
+            if not simulation_app.is_running():
+                break
+            targets, grippers = [], []
+            for e in range(self.num_envs):
+                t, g = self._compute_action(e)
+                targets.append(t)
+                grippers.append(g)
+            self._act_all(targets, grippers)
+
+    # --- 결과 리포트 -----------------------------------------------------
+
+    def _report(self, e: int) -> None:
+        cubes = self.ordered_cubes[e]
+        n_ok  = sum(self._placed(c, e) for c in cubes)
+        for c in cubes:
+            p    = self.obj_pos(c, e)
+            dist = torch.linalg.norm(p[:2] - self.obj_pos(BOWL_NAME, e)[:2]).item()
+            log(f"[SM] env{e} {c}: dist_bowl={dist:.3f}m z={p[2].item():.3f} placed={self._placed(c, e)}")
+        log(f"[SM] env{e} RESULT: {n_ok}/{len(cubes)} cubes in bowl.")
 
 
 # ---------------------------------------------------------------------------
@@ -334,18 +449,16 @@ class FrankaPickPlaceSM:
 
 def main() -> None:
     log("[SM] main entered.")
-    env_cfg = PickCubeFrankaEnvCfg()
-    env_cfg.scene.num_envs = args.num_envs
-    env_cfg.seed = args.seed
+    env_cfg                  = PickCubeFrankaEnvCfg()
+    env_cfg.scene.num_envs   = args.num_envs
+    env_cfg.seed             = args.seed
     env_cfg.actions.arm.scale = args.ik_scale  # 손목 flip 억제
     _apply_dr(env_cfg)
-    # GUI 초기 뷰를 작업영역 사이드뷰로(기본은 하늘 높은 원점 부감).
-    env_cfg.viewer.eye = args.view_eye
+    env_cfg.viewer.eye    = args.view_eye
     env_cfg.viewer.lookat = args.view_lookat
     log("[SM] env_cfg built — calling gym.make.")
 
     if args.video:
-        # viewport(viewer eye/lookat) rgb 를 mp4 로 녹화. RecordVideo 가 step 마다 캡처.
         import os
 
         env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array")
@@ -364,16 +477,16 @@ def main() -> None:
     env.reset()
     log("[SM] reset done — DR applied.")
 
-    sm = FrankaPickPlaceSM(env)
-    active_cubes = CUBE_NAMES[: args.active_objects]
-    sm.run(active_cubes)
+    sm = FrankaPickPlaceSM(env, CUBE_NAMES[: args.active_objects])
+    sm.run()
 
-    # GUI 실행(녹화 아님)이면 창을 닫을 때까지 home 자세 유지. headless/녹화면 바로 종료.
     if not args.headless and not args.video:
         while simulation_app.is_running():
-            sm._act(sm.home_pos, True)
+            targets  = [sm._home_pos_w(e) for e in range(sm.num_envs)]
+            grippers = [True] * sm.num_envs
+            sm._act_all(targets, grippers)
 
-    env.close()  # RecordVideo flush → docs/franka_pick_place-*.mp4
+    env.close()
 
 
 if __name__ == "__main__":
