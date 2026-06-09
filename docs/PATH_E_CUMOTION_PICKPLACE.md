@@ -36,6 +36,8 @@ PATH D(WSL2 ROS2 MoveIt)를 `topic_based_ros2_control` 브릿지로 잇는다.
 | `…/so101_moveit_config/scripts/so101_pick_place_orchestrator.py` | pick&place FSM |
 | `…/so101_moveit_config/launch/pick_place_orchestrator.launch.py` | FSM + moveit_py config |
 | `scripts/ros2/cube_desk_ros2_sim.py` | Isaac Sim 장면 + ROS2 OmniGraph |
+| `ros2_ws/setup/run_mock_pickplace_demo.sh` | RViz mock(OMPL) 데모 — WSLg 대화형 |
+| `ros2_ws/setup/record_mock_pickplace_demo.sh` | RViz mock 데모 Xvfb 헤드리스 녹화(mp4) |
 
 ## 실행 (마일스톤 순서)
 
@@ -80,6 +82,30 @@ ros2 launch so101_bringup isaac_pick_place.launch.py
 # RViz MotionPlanning → 드래그 goal → Plan & Execute → Isaac 로봇 추종 확인.
 # (Linux 서버에서 cuMotion 사용 시 use_cumotion:=true + Planning Library "isaac_ros_cumotion")
 ```
+
+### RViz mock 데모 — Isaac Sim·실기기 불필요 (kinematic, 영상)
+
+Isaac 연동 전에 OMPL planning + FSM 전이를 RViz 에서 검증·시연하는 mock 모드.
+`MOCK_POSES_BASE`(SO-101 도달영역 안 큐브4+그릇1) 로 객체 TF 없이 동작한다.
+
+```bash
+# WSLg 로 RViz 창을 Windows 화면에 띄우는 대화형 실행
+wsl -d Ubuntu-24.04 bash ros2_ws/setup/run_mock_pickplace_demo.sh
+
+# Xvfb 가상 디스플레이(1920x1080→1280x720)에 띄워 화면을 mp4 로 녹화 (창 안 뜸, GPU 불필요)
+wsl -d Ubuntu-24.04 bash ros2_ws/setup/record_mock_pickplace_demo.sh [out.mp4]
+```
+
+- 동작: HOME→큐브별 approach/descend/close+attach/lift/transport/place/release+detach/retreat→DONE,
+  로그 `완료: 4/4 planned`. arm 은 `FollowJointTrajectory` 로 mock 컨트롤러가 실시간 실행(RViz 추종).
+- 녹화본: [`so101_rviz_mock_pickplace.mp4`](so101_rviz_mock_pickplace.mp4) — 1280×720, 4/4 planned.
+  좌측 MotionPlanning 패널 + 3D 뷰에서 SO-101 팔이 4-cube pick&place 모션 수행.
+- 한계: kinematic(충돌객체·물리 생략, arm plan 성공으로 `planned` 판정). gripper 개폐는 RViz 에
+  안 나타남 — orchestrator 가 `control_msgs/GripperCommand` action client 인데 컨트롤러는
+  `ParallelGripperCommand` 타입이라 action 불일치(`gripper action server 없음` 로그). 실 grasp·물리
+  검증은 Isaac/실기기.
+- 헤드리스 녹화: WSLg 는 rootless 라 `:0` 직접 grab 이 검게 잡힘 → Xvfb 가상 프레임버퍼 + llvmpipe
+  소프트웨어 OpenGL + ffmpeg x11grab. `moveit.rviz` 카메라는 SO-101 워크스페이스 측면뷰로 설정.
 
 ### M3 — FSM 풀 사이클
 ```bash
