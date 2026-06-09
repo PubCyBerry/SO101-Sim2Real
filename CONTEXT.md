@@ -13,6 +13,53 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E grasp 물리: planning self-collision 해결 ✅ + grasp 정합 7메커니즘 확립, 남은 건 gripper close 간헐 실패)
+
+직전 인계의 "grasp 물리(jaw 가 큐브 못 감쌈)" 블로커를 11사이클 라이브 디버깅으로 깊이 규명했다.
+in-process SM 의 강tilt 전략을 ROS SM 에 포팅하며 **planning self-collision 블로커를 완전 해결**하고
+grasp 정합을 단계적으로 끌어올렸으나(큐브를 손가락 사이에 정렬·xy 정합·axis 수평 달성), 마지막
+**gripper close 가 grasp 자세 의존적으로 간헐 실패**해 `RESULT 1/1` 미달. **커밋 `853beb8`**(코드 3파일).
+
+- **변경 파일(커밋 `853beb8`)**: `pick_place_sm.py`(대폭) · `pick_place_params.yaml` · `scripts/sim/run_cube_desk_ros_bridge.py`(gripper grip force).
+- **✅ 해결한 것**:
+  1. **planning self-collision(근본 블로커)**: `set_to_random_positions` 가 joint bounds 만 지키고 self-collision
+     무시 → FK 샘플이 shoulder↔lower_arm colliding config 선택 → OMPL "goal tree 샘플 실패"/cuMotion
+     `INVALID_INITIAL_CSPACE_POSITION`. **`PlanningScene.is_state_colliding` 로 FK 샘플 배제**(`_colliding`,
+     best 후보·정밀화 모두 체크) → approach/grasp/lift **전부 OMPL OK**, self-collision 에러 0건.
+  2. **grasp 자세 정합 7메커니즘**(`_fk_sample_goal`): ① grasp 단계는 TCP 대신 **두 손가락 중점**(JAW_LINK·
+     FIX_LINK FK 중점, `_grasp_point`)을 큐브에 맞춤 ② tilt **하한 필터**(grasp_tilt_min 45°, 수직 top-down
+     배제) ③ 통과 config 중 **거리 최소**(xy 정합, gate 0.015 시 d 0.004 달성) ④ **CLOSED 기준 중점**(gripper
+     닫으면 jaw 회전해 중점 z↑3cm → OPEN 정합은 close 후 큐브 위로 뜸) ⑤ **grasp axis 수평**(grasp_axis_vert_max
+     0.4, `_grasp_axis_vert` — 두 손가락 벌어짐이 수직이면 큐브 위아래 눌러 실패) ⑥ transport 는 **gate 분리**
+     (0.04, 좁은 gate 면 lift FK 도달 실패) ⑦ bridge **gripper grip force**(dof[5] kps 17.8→80).
+  - 결과: 큐브를 손가락 사이(y)에 정렬 + xy 0.8cm + axis_vert 0.11(수평) 자세 도달 — **grasp 직전까지 완성**.
+- **🔴 남은 블로커(gripper close 간헐 실패)**: close 명령(-0.16)은 항상 bridge 도달(DIAG `grip_cmd=-0.16` 확인)
+  하나, grasp 자세에 따라 articulation grip 이 **-0.16(닫힘) ↔ 1.5+(미닫힘) 간헐**. jaw 가 책상/큐브 윗면에
+  박히거나 self-collision 반력으로 닫힘 토크(URDF effort 10 한계)를 못 이기는 것으로 추정. grip force 80 으로도
+  못 이김. **다음 후보**: ① bridge `enabled_self_collisions` 가 jaw close 경로 막는지(끄거나 gripper 링크쌍만
+  disable) ② grasp z 를 큐브 윗면(jaw 0.069 vs 윗면 ~0.064) 아래로 더 내리되 도달성 확보(scatter 축소로 큐브를
+  도달 쉬운 위치=base_link x[1.60,1.76]·y[-0.465,-0.365] 권장 — CONTEXT 기존 "사용자 결정 미적용") ③ close 동역학
+  (느린 close + dwell↑) ④ closed-loop grasp servoing.
+- **🔑 진단 도구(코드에 남김)**: `DIAG grasp` 로그(grip·grip_cmd·axis_vert·ee·jaw·fix·gpt·cube) + store 노드의
+  `/isaac_joint_commands` 구독(`last_grip_cmd`). grasp 디버깅 재현 시 그대로 활용.
+- **핵심 파라미터(yaml)**: grasp_tilt_deg 60 / grasp_tilt_min 45 / grasp_axis_vert_max 0.4 / grasp_z_offset 0.012
+  / fk_samples 40000 / fk_pos_gate 0.015 / fk_pos_gate_transport 0.04 / gripper grip force(bridge) 80.
+- **실행 환경(세션 종료 시점)**: 컨테이너 `so101_ros` 살아있음(sleep infinity, GPU 미사용). bridge·launch 전부
+  정리됨(GPU idle, gnome 340MiB 뿐). 호스트 `isaacsim-mcp` 별개 서비스 — 건드리지 말 것. 이미지 재빌드 불요
+  (두 overlay baked, 소스 미변경분 symlink 반영). **코드 변경은 symlink-install 이라 colcon 증분만 하면 launch 반영.**
+- **콜드 스타트(재현, 3터미널)**: ① bridge(host, 워크트리): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1`
+  → `[bridge] ready` + `gripper grip force: dof[5] kps=80.0` 대기. ② (코드 수정 시) `docker exec so101_ros bash -c
+  'source /opt/ros/jazzy/setup.bash && cd /build && colcon build --symlink-install --base-paths /workspace/ros2_ws/src
+  --packages-select so101_cumotion_pick_place'`. ③ launch: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash
+  && source /opt/tbc_overlay/install/setup.bash && source /opt/cumotion_overlay/install/setup.bash && source /build/install/setup.bash
+  && export SO101_REPO=/workspace && ros2 launch so101_cumotion_pick_place pick_place.launch.py num_cubes:=1 2>&1 | tee /build/sm_run.log'`.
+  로그 grep: `FK\[grasp\]|DIAG grasp|RESULT|grasp 실패|도달 config 없음`.
+- **주의**: launch 재실행은 통째로 — 이전 move_group/cumotion/ros2_control orphan 을 정리해야(누적되면 controller_manager
+  경합으로 controller 스폰 실패). 정리는 PID 직접 kill 또는 **브래킷 트릭**(`grep -E '[r]os2_control_node|[m]ove_group|...'`)
+  으로 — `pkill -f`/`kill $(pgrep -f ...)` 는 docker exec 자기 셸 cmdline 을 매칭해 자살(exit 137). bridge 종료도 PID 직접.
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E 5-DOF planning 블로커 해결: joint-goal FK 샘플링 ✅, 남은 건 grasp 물리)
 
 직전 인계의 "5-DOF grasp IK" 블로커를 **근본 진단 후 해결**했다. 다중 세션 블로커의 진짜 원인은
