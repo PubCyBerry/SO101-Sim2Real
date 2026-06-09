@@ -13,6 +13,24 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E: cube_desk MoveIt2/cuMotion Pick&Place 브릿지 스캐폴딩)
+
+- **목표(사용자)**: cube_desk 장면에서 MoveIt2 path planning(조사 결과 **cuMotion 우선 + OMPL/Pilz 폴백**)으로 SO-101 pick&place state machine 구축. 플랫폼 = Windows+WSL2 먼저, 안 되면 Linux 서버. 충돌 = 전체(그릇+타큐브 obstacle + 잡은 큐브 attach). 통합 = Isaac Sim ROS2 bridge(`topic_based_ros2_control`).
+- **아키텍처**: Isaac Sim(Win, cube_desk scene.usd+SO-101) ↔ DDS(7400/7410/9387) ↔ WSL2 ROS2(ros2_control topic_based + move_group cuMotion + cumotion_action_server + moveit_py FSM). 문서 `docs/PATH_E_CUMOTION_PICKPLACE.md`(런북+M0~M4).
+- **작성 완료(코드/설정, colcon 빌드+xacro+py_compile 검증됨)**:
+  - WSL2: `so101_ros2_control.xacro`(hardware_type:=isaac, topic_based), `isaac_controllers.yaml`, `move_group.launch.py`(use_cumotion arg), `isaac_pick_place.launch.py`, `so101_arm.xrdf`(cuMotion sphere — **M2 정밀화 필요**), `moveit_py_config.yaml`(cumotion 세트), `so101_pick_place_orchestrator.py`+`.launch.py`(moveit_py FSM), `05_install_cumotion.sh`, `cyclonedds_bridge.xml`, CMakeLists.
+  - Windows: `scripts/ros2/cube_desk_ros2_sim.py`(AppLauncher + OmniGraph ROS2 브릿지).
+- **M0 결과(2026-06-09)**: WSL2 에 `ros-jazzy-joint-state-topic-hardware-interface`(Jazzy 의 topic_based, plugin `joint_state_topic_hardware_interface/JointStateTopicSystem`) 설치 + Isaac ROS apt repo(release-4.4) 등록. **cuMotion 은 WSL2 불가** — `ros-jazzy-isaac-ros-cumotion` 이 `cuda-toolkit-13-0`+`libnvvpi4`+`gxf-isaac-*` 풀스택 요구(CUDA 13 vs 프로젝트 12.8 핀 충돌). **사용자 결정: cuMotion 은 Linux 서버에서** → WSL2 는 OMPL/Pilz(`use_cumotion:=false`, 기본). 코드 cumotion opt-in 화 완료(moveit_py_config pipeline_names 에서 cumotion 제외, orchestrator `use_cumotion` 파라미터).
+- **M1 시도 결과(2026-06-09, 블로커)**: Windows Isaac Sim 으로 `cube_desk_ros2_sim.py` 3회 실행 모두 크래시. (1) GUI `_prepare_ui` access violation → headless 전환, (2) headless kit 이 OmniGraph 미로드 → `import omni.graph` 실패 → enable_extension 추가, (3) `enable_extension(isaacsim.ros2.bridge/core.nodes)` 가 viewport→RTX Hydra 를 **다른 그래픽 인터페이스(D3D12→Vulkan)로 재init** → `rtx.scenedb` 크래시(`DriverShaderCacheManager ... different graphics interface`, Aftermath 0xbad00009). **scene/OmniGraph 코드는 실행 전** — 내 코드 무관, Windows Isaac Sim 그래픽 init 근본 문제. headless 전환·확장 최소화는 코드에 반영됨(`--gui` opt-in, 최소 ext). TROUBLESHOOTING 기록함.
+- **부팅-시점 로드도 검증·실패(2026-06-09)**: `--kit_args "--enable isaacsim.ros2.bridge ..."` 로 부팅 시점 로드 시 Vulkan 단일이라 재init 은 사라지나, `ROS2 Bridge startup failed` + 부팅 중 `createHydraEngine`→`rtx.scenedb` access violation 여전. GUI/headless·런타임/부팅·최소ext 4가지 모두 RTX/Hydra 에서 크래시 → **이 Windows 박스에서 Isaac Sim ROS2 bridge 불가로 확정**. TROUBLESHOOTING 갱신.
+- **Windows 검증 대안(동작함)**: RViz mock(OMPL) pick&place — `ros2 launch so101_bringup follower_moveit_demo.launch.py hardware_type:=mock use_rviz:=true` + `pick_place_orchestrator.launch.py mock_poses:=true` (또는 `ros2_ws/setup/run_mock_pickplace_demo.sh`). physics 없는 kinematic, FSM **4/4 planned** 검증. 큐브/그릇은 SO-101 도달영역(y=0, x 0.22~0.38)에 맞춘 mock 좌표(`MOCK_POSES_BASE`). orchestrator 에 `_relaxed_ik`(자세 sweep, 5-DOF 도달), mock 모드(world 충돌 생략, attach/detach 후 world 제거) 추가됨.
+- **Isaac Sim 영상·물리 결과·정식 충돌회피·cuMotion**: 전부 **Linux 서버**(네이티브 Ubuntu) 필요. repo git 동기 후 ROS2 Jazzy+MoveIt+ws(+cuMotion) 재구축 → PATH E 실행. `docs/PATH_E_CUMOTION_PICKPLACE.md`.
+- **나머지 검증(플랫폼 확정 후)**: M1 브릿지 smoke → M2 RViz OMPL → M3 FSM 풀 사이클 → M4 튜닝. cuMotion 은 Linux 서버에서만(`docs/PATH_E §cuMotion`).
+- **blind 작성 → 런타임 확인 지점**: OmniGraph 노드 타입명(Isaac Sim 5.1 `isaacsim.*`), base_link prim 경로, topic_based plugin 명, cumotion launch arg 이름(`cumotion_planner.*` vs `cumotion_action_server.*`), moveit_py collision/attach 메서드명, cumotion planner_id. `docs/PATH_E_…` §알려진 검증 포인트 참조.
+- **5-DOF 주의**: SO-101 은 임의 6-DOF pose 도달 불가 → grasp 자세는 top-down tilt(orchestrator `GRASP_RPY`/`GRASP_TILT_RAD`) + pick_ik approximate. 기존 `pick_cube_state_machine.py`(in-process weighted-DLS)는 그대로 유지(폴백/비교용).
+
+---
+
 ## 작업 인계 (2026-06-08 — 3cam 전환: top/wrist → top/wrist/front)
 
 - **목표(사용자)**: 레포지토리 전체를 3개 카메라(top/wrist/front) 기준으로 통일.

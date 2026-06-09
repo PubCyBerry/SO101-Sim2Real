@@ -2694,3 +2694,50 @@ AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 
 ### 확인 방법
 
 `nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.
+
+## Windows Isaac Sim 에서 ROS2/OmniGraph 확장 런타임 enable 시 RTX 그래픽 재초기화 크래시
+
+### 현상
+
+Windows 네이티브 Isaac Sim 5.1(standalone SimulationApp/AppLauncher)에서 부팅 후
+`enable_extension("isaacsim.ros2.bridge")`(또는 `isaacsim.core.nodes`)를 호출하면
+access violation 으로 즉사. GUI 모드는 `_prepare_ui`, headless 모드는 확장 enable 중
+viewport window 생성 단계에서 죽는다. scene/OmniGraph 사용자 코드는 실행되기 전.
+
+### 오류 메시지
+
+```
+[Error] [gpu.foundation.plugin] DriverShaderCacheManager::init() called with a different graphics interface, without a shutdown()!
+[Warning] [carb.graphics-vulkan.plugin] Aftermath Error 0xbad00009
+Windows fatal exception: access violation
+  ... omni/kit/widget/viewport/impl/texture.py ... __enable_hydra_engine
+  ... rtx.scenedb.plugin.dll!carbOnPluginStartup ...
+  ... omni.usd.dll!omni::usd::UsdManager::createHydraEngine ...
+```
+
+### 원인
+
+headless kit(`isaaclab.python.headless.kit`)은 그래픽 인터페이스를 **D3D12** 로 먼저 띄운다.
+런타임에 `isaacsim.ros2.bridge`/`isaacsim.core.nodes` 를 enable 하면 transitive 로
+`omni.kit.viewport.window` 가 끌려와 viewport window + RTX Hydra 엔진을 **Vulkan** 으로
+재생성하려 한다. 이미 D3D12 로 초기화된 위에 다른 그래픽 인터페이스로 재init → `rtx.scenedb`
+크래시. 즉 확장을 **런타임에** enable 하는 게 문제(부팅 시 headless 면 viewport 억제됨).
+
+### 해결 방법
+
+- **부팅-시점 로드도 실패(2026-06-09 검증)**: `--kit_args "--enable isaacsim.ros2.bridge ..."`
+  로 부팅 시점에 로드하면 그래픽이 처음부터 Vulkan 단일이라 D3D12↔Vulkan 재init 은 사라진다.
+  그러나 (1) `[Error] ROS2 Bridge startup failed` — bridge 확장이 Windows 에서 시작 자체 실패,
+  (2) 부팅 중 `omni.usd!createHydraEngine` → `rtx.scenedb.plugin.dll` access violation 여전.
+  GUI/headless·런타임/부팅·최소ext 등 4가지 모두 RTX/Hydra 층에서 크래시. → **이 Windows 박스
+  (RTX A4000 / driver 596.36 / Isaac Sim 5.1)에서 Isaac Sim ROS2 bridge 는 불가로 결론.**
+- **해결(확정)**: Isaac Sim + ROS2 bridge 경로(PATH E)는 **네이티브 Linux 서버**에서 실행.
+  Linux 는 Vulkan 단일 스택·ROS2 Jazzy·cuMotion 네이티브. `docs/PATH_E_CUMOTION_PICKPLACE.md`
+  §cuMotion(Linux 서버) 참조. Windows 에서 동작하는 검증된 대안 = RViz mock(OMPL) pick&place
+  (`ros2_ws/setup/run_mock_pickplace_demo.sh`, physics 없는 kinematic, 4/4 planned).
+
+### 확인 방법
+
+Linux 서버에서 동일 `scripts/ros2/cube_desk_ros2_sim.py` 실행 시
+`[cube_desk_ros2_sim] 브릿지 실행...` 까지 도달하고 `ros2 topic echo /isaac_joint_states`
+가 수신되면 정상.
