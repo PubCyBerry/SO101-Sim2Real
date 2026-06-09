@@ -86,8 +86,15 @@ parser.add_argument("--view_eye", type=_vec3, default=(3.05, -0.78, 1.02),
                     help="GUI 카메라 위치 'x,y,z' (기본: 책상 +X 측면 약간 위)")
 parser.add_argument("--view_lookat", type=_vec3, default=(1.74, -0.38, 0.74),
                     help="GUI 카메라 주시점 'x,y,z' (기본: 큐브·그릇 작업영역 중심)")
+parser.add_argument("--video", action="store_true",
+                    help="현재 사이드뷰(viewer eye/lookat)를 mp4 로 녹화해 docs/ 에 저장")
+parser.add_argument("--video_length", type=int, default=2000, help="녹화 최대 프레임(step) 수")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+
+# 녹화는 viewport rgb 렌더가 필요 → 카메라 활성화.
+if args.video:
+    args.enable_cameras = True
 
 # AppLauncher 부팅 (isaac 모듈 import 전에).
 app_launcher = AppLauncher(vars(args))
@@ -161,9 +168,10 @@ class FrankaPickPlaceSM:
     """단일 env, 도달 조건 기반 pick-and-place 컨트롤러."""
 
     def __init__(self, env) -> None:
-        self.env = env
-        self.device = env.device
-        self.robot = env.scene["robot"]
+        self.env = env  # step 용(RecordVideo wrap 시 wrapper — render 캡처)
+        self.scene = env.unwrapped.scene  # scene 접근(wrap 무관)
+        self.device = env.unwrapped.device
+        self.robot = self.scene["robot"]
         # IK 가 제어하는 작업점(panda_hand + body_offset)을 그대로 추적하기 위한 값.
         self.ee_body_idx = self.robot.find_bodies("panda_hand")[0][0]
         self.ee_offset = torch.tensor(FRANKA_EE_OFFSET, device=self.device)
@@ -178,10 +186,10 @@ class FrankaPickPlaceSM:
     def scan(self) -> dict[str, torch.Tensor]:
         """모든 큐브·그릇의 현재 world 위치(3,)를 dict 로 반환."""
         names = list(CUBE_NAMES) + [BOWL_NAME]
-        return {n: self.env.scene[n].data.root_pos_w[0, :3].clone() for n in names}
+        return {n: self.scene[n].data.root_pos_w[0, :3].clone() for n in names}
 
     def obj_pos(self, name: str) -> torch.Tensor:
-        return self.env.scene[name].data.root_pos_w[0, :3].clone()
+        return self.scene[name].data.root_pos_w[0, :3].clone()
 
     def ee_pos(self) -> torch.Tensor:
         """IK 작업점의 현재 world 위치."""
@@ -336,7 +344,22 @@ def main() -> None:
     env_cfg.viewer.lookat = args.view_lookat
     log("[SM] env_cfg built — calling gym.make.")
 
-    env = gym.make(args.task, cfg=env_cfg).unwrapped
+    if args.video:
+        # viewport(viewer eye/lookat) rgb 를 mp4 로 녹화. RecordVideo 가 step 마다 캡처.
+        import os
+
+        env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array")
+        os.makedirs("docs", exist_ok=True)
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder="docs",
+            name_prefix="franka_pick_place",
+            step_trigger=lambda step: step == 0,
+            video_length=args.video_length,
+            disable_logger=True,
+        )
+    else:
+        env = gym.make(args.task, cfg=env_cfg).unwrapped
     log("[SM] env created.")
     env.reset()
     log("[SM] reset done — DR applied.")
@@ -345,12 +368,12 @@ def main() -> None:
     active_cubes = CUBE_NAMES[: args.active_objects]
     sm.run(active_cubes)
 
-    # GUI 실행이면 창을 닫을 때까지 home 자세 유지(데모 관찰용). headless 면 바로 종료.
-    if not args.headless:
+    # GUI 실행(녹화 아님)이면 창을 닫을 때까지 home 자세 유지. headless/녹화면 바로 종료.
+    if not args.headless and not args.video:
         while simulation_app.is_running():
             sm._act(sm.home_pos, True)
 
-    env.close()
+    env.close()  # RecordVideo flush → docs/franka_pick_place-*.mp4
 
 
 if __name__ == "__main__":
