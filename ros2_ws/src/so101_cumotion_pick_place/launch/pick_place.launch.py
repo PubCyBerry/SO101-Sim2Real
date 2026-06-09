@@ -68,6 +68,8 @@ def generate_launch_description():
                 bringup_share, "config", "ros2_control", "follower_isaac_controllers.yaml"
             ),
             "use_rviz": "false",
+            # Isaac Sim bridge /clock 에 맞춰 CM·rsp 도 sim time(move_group 과 정합).
+            "use_sim_time": "true",
         }.items(),
     )
 

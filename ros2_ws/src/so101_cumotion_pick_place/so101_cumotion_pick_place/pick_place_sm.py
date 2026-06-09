@@ -24,6 +24,7 @@ import time
 import rclpy
 import rclpy.logging
 from control_msgs.action import ParallelGripperCommand
+from geometry_msgs.msg import PoseStamped
 from moveit.core.robot_state import RobotState
 from moveit.planning import MoveItPy, MultiPipelinePlanRequestParameters
 from rclpy.action import ActionClient
