@@ -14,8 +14,12 @@ pick_place_object_store:
     transport_height: 0.15       # 그릇 위 운반 높이
     place_height: 0.06           # 그릇 기준 release 높이
     stack_increment: 0.022       # 담긴 큐브당 release 높이 증가
+    # goal 제약 tolerance (5-DOF: tool z 회전 자유로 cuMotion IK 도달성 확보)
+    pos_tol: 0.01                # 목표 위치 허용 반경(m)
+    ori_tol: 0.5                 # approach 방향(x/y axis) 허용(rad)
+    yaw_free_tol: 3.14159        # tool z(approach 축) 회전 자유(rad) — redundant DOF 해방
     # 계획/그리퍼
-    ik_timeout: 0.2              # set_from_ik timeout(s)
+    ik_timeout: 0.2              # (구) set_from_ik timeout — 현재 미사용
     gripper_dwell_s: 1.5         # 그리퍼 open/close 정착 대기(s)
     # 성공 판정(그릇 기준, env_cfg 와 동기화 — BOWL_SUCCESS_RADIUS/HEIGHT_RANGE)
     bowl_success_radius: 0.06

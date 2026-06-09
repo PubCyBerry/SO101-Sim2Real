@@ -27,10 +27,12 @@ from control_msgs.action import ParallelGripperCommand
 from geometry_msgs.msg import PoseStamped
 from moveit.core.robot_state import RobotState
 from moveit.planning import MoveItPy, MultiPipelinePlanRequestParameters
+from moveit_msgs.msg import BoundingVolume, Constraints, OrientationConstraint, PositionConstraint
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from shape_msgs.msg import SolidPrimitive
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from tf_transformations import quaternion_from_euler
@@ -114,23 +116,58 @@ class PickPlaceSM:
             return True
         return False
 
+    def _grasp_constraints(self, ps: PoseStamped) -> Constraints:
+        """position(tight) + orientation(approach 축=tool z 회전 자유) 제약.
+
+        SO-101 은 5-DOF 라 6-DOF pose 전체를 만족 못 해 cuMotion IK 가 INVERSE_KINEMATICS_FAILURE
+        를 낸다. tool z 축(approach 방향) 회전을 z_tol 로 크게 풀어 redundant DOF 를 해방하면 cuMotion
+        이 도달 가능한 자세를 찾는다. x/y(approach 방향 자체)는 ori_tol 로 좁게 유지해 down+tilt 보존.
+        """
+        c = Constraints()
+        c.name = "grasp_relaxed"
+        pc = PositionConstraint()
+        pc.header = ps.header
+        pc.link_name = EE_FRAME
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.SPHERE
+        prim.dimensions = [float(self.p["pos_tol"])]
+        bv = BoundingVolume()
+        bv.primitives.append(prim)
+        bv.primitive_poses.append(ps.pose)
+        pc.constraint_region = bv
+        pc.weight = 1.0
+        c.position_constraints.append(pc)
+        # 진단: orient_mode=0 이면 position-only goal(자세 제약 없음) — IK 실패 원인 분리용.
+        if int(self.p.get("orient_mode", 1)) == 0:
+            return c
+        oc = OrientationConstraint()
+        oc.header = ps.header
+        oc.link_name = EE_FRAME
+        oc.orientation = ps.pose.orientation
+        oc.absolute_x_axis_tolerance = float(self.p["ori_tol"])
+        oc.absolute_y_axis_tolerance = float(self.p["ori_tol"])
+        oc.absolute_z_axis_tolerance = float(self.p["yaw_free_tol"])
+        oc.weight = 1.0
+        c.orientation_constraints.append(oc)
+        return c
+
     def _move_to(self, x: float, y: float, z: float, *, tilt_candidates: list[float]) -> bool:
-        """cuMotion pose-goal 직접 계획. tilt 후보를 차례로 goal pose 로 주고 첫 성공 plan 실행.
+        """cuMotion pose-goal 직접 계획(relaxed orientation). tilt 후보 순차 시도, 첫 성공 plan 실행.
 
         기존 set_from_ik(pick_ik) → joint goal 경로는 5-DOF 에서 IK 가 모든 tilt 에 실패했다.
-        cuMotion 은 자체 IK + collision-free 궤적 최적화를 하므로 pose goal 을 직접 받아 5-DOF
-        여유/limit 안에서 도달 가능한 해를 찾는다(MoveItPy set_goal_state(pose_stamped_msg, pose_link)).
-        cuMotion 우선, 모든 tilt 실패 시 OMPL fallback.
+        cuMotion 은 자체 IK + collision-free 궤적 최적화를 하므로 task-space goal 을 직접 받는다.
+        단 5-DOF 라 6-DOF pose 를 그대로 주면 IK 가 실패하므로, tool z 회전 자유(_grasp_constraints)로
+        도달 가능 자세를 찾게 한다. cuMotion 우선, 모든 tilt 실패 시 OMPL fallback.
         """
         yaw = self._yaw_to(x, y)
         for params, label in ((self.cumotion_params, "cuMotion"), (self.ompl_params, "OMPL")):
             for tilt in tilt_candidates:
                 ps = self._pose(x, y, z, yaw, tilt)
                 self.arm.set_start_state_to_current_state()
-                self.arm.set_goal_state(pose_stamped_msg=ps, pose_link=EE_FRAME)
+                self.arm.set_goal_state(motion_plan_constraints=[self._grasp_constraints(ps)])
                 if self._plan_exec(params):
                     return True
-            self.logger.warning(f"{label} pose-goal 계획 실패(tilts={tilt_candidates}) at ({x:.3f},{y:.3f},{z:.3f})")
+            self.logger.warning(f"{label} 계획 실패(tilts={tilt_candidates}) at ({x:.3f},{y:.3f},{z:.3f})")
         self.logger.error(f"plan 실패 ({x:.3f},{y:.3f},{z:.3f}) tilts={tilt_candidates}")
         return False
 
@@ -217,6 +254,9 @@ def main() -> None:
         "place_height": 0.06, "stack_increment": 0.022, "grasped_dz": 0.03,
         "ik_timeout": 0.2, "gripper_dwell_s": 1.5, "bowl_success_radius": 0.06,
         "bowl_z_lo": 0.005, "bowl_z_hi": 0.22,
+        # goal 제약 tolerance(5-DOF): pos_tol=위치 반경(m), ori_tol=approach 방향 허용(rad),
+        # yaw_free_tol=tool z 회전 자유(rad, ~π). cuMotion IK 가 도달 가능 자세를 찾게 한다.
+        "pos_tol": 0.01, "ori_tol": 0.5, "yaw_free_tol": 3.14159, "orient_mode": 1,
     }
     params = {k: store.declare_parameter(k, v).value for k, v in defaults.items()}
 

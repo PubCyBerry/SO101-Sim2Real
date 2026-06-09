@@ -70,8 +70,25 @@ RUN . /opt/ros/jazzy/setup.sh \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     && rm -rf /opt/tbc_overlay/src /opt/tbc_overlay/build /opt/tbc_overlay/log
 
+# ⚠ isaac_ros_cumotion_moveit 플러그인 패치(upstream issue #10): MoveIt request.start_state 는
+# 전체 로봇 관절(SO-101 = arm5 + gripper)을 담는데 cuMotion cspace 는 tool-chain 5축뿐이라,
+# 무필터 전달 시 INVALID_INITIAL_CSPACE_POSITION(6 vs 5)으로 모든 계획이 실패한다. updateGoal 이
+# start_state 를 planning group 관절로 필터링하도록 패치해 overlay 로 빌드(아래 bashrc 에서 source).
+COPY patches/cumotion_moveit_filter_start_state.patch /tmp/cumotion.patch
+RUN . /opt/ros/jazzy/setup.sh \
+    && mkdir -p /opt/cumotion_overlay/src && cd /opt/cumotion_overlay/src \
+    && git clone --depth 1 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion.git \
+    && cd isaac_ros_cumotion \
+    && for d in */; do [ "$d" = "isaac_ros_cumotion_moveit/" ] || touch "$d/COLCON_IGNORE"; done \
+    && git apply /tmp/cumotion.patch \
+    && cd /opt/cumotion_overlay \
+    && colcon build --packages-select isaac_ros_cumotion_moveit \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    && rm -rf /opt/cumotion_overlay/src /opt/cumotion_overlay/build /opt/cumotion_overlay/log /tmp/cumotion.patch
+
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc \
     && echo "source /opt/tbc_overlay/install/setup.bash" >> /etc/bash.bashrc \
+    && echo "source /opt/cumotion_overlay/install/setup.bash" >> /etc/bash.bashrc \
     && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /etc/bash.bashrc \
     && echo '[ -f /workspace/ros2_ws/install/setup.bash ] && source /workspace/ros2_ws/install/setup.bash' >> /etc/bash.bashrc
 
