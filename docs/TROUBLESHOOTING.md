@@ -37,6 +37,7 @@
 - [Isaac Lab ManagerBasedRLEnvCfg 에 `rewards` 누락 시 `gym.make` 실패](#isaac-lab-managerbasedrlenvcfg-에-rewards-누락-시-gymmake-실패)
 - [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
+- [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2320,6 +2321,51 @@ Cube4 descend reached=False ee=(1.576,-0.421,1.069) cube=(1.617,-0.457,0.729)
 
 각 물체 접근 단계에서 ee xyz 와 물체 xyz 를 로깅해 추종 여부를 본다. 모든 물체가
 `reached=True` 로 잡히면 정상.
+
+---
+
+## SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장
+
+cube_desk 에서 **SO-101**(arm 5DOF)로 scripted pick-and-place 를 시도하면, IK 가 수렴해도
+(예: Lula `lula(ok=True,err=0.0000)`) **실제 손가락이 큐브를 0.05~0.1m 빗나가** 못 집는다.
+같은 씬에서 Franka(7DOF)는 4/4 로 안정적으로 잡힌다(`pick_cube_franka_state_machine.py`).
+
+```text
+# Lula IK 는 내부적으로 수렴(err 0)하나 USD 실제 손가락이 큐브에서 벗어남
+Cube1 descend reached=True lula(ok=True,err=0.0000) ee=(1.706,-0.445,0.733) cube=(1.700,-0.440,0.724)
+  jaw=(1.601,-0.432,0.811) gripper=(1.630,-0.430,0.832)   # 손가락이 큐브 위/옆
+```
+
+### 원인
+
+SO-101 5DOF 는 grasp 순간 **세 오차원이 중첩**되고, 각 오차가 자세에 따라 변해 어떤 단일
+IK 로도 동시에 못 맞춘다:
+
+1. **정합**: Lula `LulaKinematicsSolver` 는 URDF-local frame, USD articulation 은 scene
+   transform 아래 → Lula world ↔ USD world 사이 ~0.1m 잔차(RMPFLOW_BASE least-squares 로도 남음).
+2. **제어점**: Lula 제어 frame(`gripper_frame_link`)과 실제 두 손가락 grasp 갭(jaw/gripper
+   body midpoint)이 자세에 따라 상대 위치가 변한다 → 런타임 shift 보정이 매 step 흔들려 수렴 지연.
+3. **자세**: 5DOF 로 position + full orientation 동시 만족 불가. orientation 강제하면 position
+   을 0.1~0.25m 희생(`lula ok=False, err=0.11` / weighted DLS pose 동일), position-only 면
+   손가락이 큐브 위에서 누르는 자세(감쌈 실패).
+
+검증한 IK 들 — weighted DLS(local), random-FK(global sampling), Lula(position-only/orientation/
+midpoint ee) — 모두 이 중첩을 못 넘었다. (반면 Franka 7DOF 는 yaw 가 독립이고 full pose IK 가
+가능해 한 번에 grasp.)
+
+### 해결 방법 (현재 권장)
+
+- **데모는 Franka 7DOF**(`pick_cube_franka_state_machine.py`)를 쓴다 — DR 상태 4/4, ~30초.
+- SO-101 을 끝까지 가려면: GUI 로 grasp 순간을 보며 정합/offset 을 시각 보정하거나, RMPFlow
+  (자세 포함 trajectory) + `gripper_frame_link` 정합 정밀화가 필요(headless 수치 반복으론 수렴 더딤).
+- ROS2 + MoveIt2 는 호스트에 ROS2 미설치(`/opt/ros` 없음)라 대규모 인프라 필요 → 동일 목적의
+  Isaac Sim 내장 Lula 로 대체(ROS2 불필요). Lula IK 자체는 정상 동작(err 0).
+
+### 확인 방법
+
+`pick_cube_state_machine.py --active_objects 1 --object_radius_scale 0` 로 단일 큐브 진단.
+descend 로그의 `ee`(grasp 접점)·`jaw`/`gripper`(USD 손가락 body)·`cube` 를 비교해 손가락이
+큐브 xy 를 사이에 두고 z 가 큐브 높이면 grasp 가능. 빗나가면 위 3중 오차.
 
 ---
 
