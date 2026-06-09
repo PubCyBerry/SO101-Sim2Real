@@ -530,17 +530,19 @@ def time_penalty(
     cup_radius: float = 0.05,
     cup_height_range: tuple[float, float] = (0.005, 0.18),
 ) -> torch.Tensor:
-    """과제 미완료 동안 매 control step 마다 상수 페널티 (-1.0), 완료 시 0.0.
+    """과제 미완료 동안 매 control step 마다 1.0, 완료 시 0.0 반환.
 
-    RewTerm weight 를 음수로 줘 "느릴수록 더 깎이게" 한다. 큐브가 전부 배치되면
-    0 이 되어, 빠르게 성공할수록 누적 페널티가 작아진다. 탐색을 죽이지 않도록
-    weight 절댓값은 작게(예: 0.02) 둔다.
+    "경과 step 1회" 를 나타내는 양수 값을 반환하고, RewTerm weight 를 음수(예:
+    -0.02)로 줘 실제 보상은 음수(페널티)가 되게 한다. 큐브가 전부 배치되면 0 이
+    되어, 빠르게 성공할수록 누적 페널티가 작아진다. (weight 와 부호가 곱해져
+    최종 보상이 정해지므로, 여기서 음수를 반환하면 weight 음수와 만나 페널티가
+    아닌 보상이 되는 부호 버그가 생긴다 — 반드시 양수 반환.)
     """
     all_placed = _all_placed_mask(env, pen_cfgs, cup_center_xy, cup_cfg, cup_radius, cup_height_range)
     return torch.where(
         all_placed,
         torch.zeros(env.num_envs, device=env.device),
-        -torch.ones(env.num_envs, device=env.device),
+        torch.ones(env.num_envs, device=env.device),
     )
 
 
