@@ -10,9 +10,11 @@
     # grasp 기하 — FK 워크스페이스 스윕 기반(scripts/sim/probe_ik.py). 큐브(0.14,-0.125) 컬럼은
     # 모든 z 도달 가능하나 manifold 가 thin → height 를 도달 가능 LOW band 로 낮춰 sampler 부담↓.
     approach_height: 0.06        # 큐브 위 접근(z≈0.11, achievable tilt 27~36°)
-    grasp_z_offset: -0.005       # 큐브 중심 기준 grasp tip z(음수=더 깊이)
-    grasp_tilt_deg: 30.0         # grasp 자세 forward tilt. grasp z(≈0.05) achievable tilt 11°,
-                                 # approach z(≈0.11)는 27~36° — 후보 [30,15,45,0] 로 양쪽 커버.
+    grasp_z_offset: 0.012        # grasp 접점(두 손가락 중점) 목표 z = cz + 이 값. -0.006 은 FK 도달 실패
+                                 # (강tilt 로 중점을 큐브 높이까지 내리는 5-DOF config 희소). 0.012 가 도달+큐브
+                                 # 감쌈 균형점(손가락 끝이 큐브 옆, close 가 큐브 접촉). 미끄러짐은 grip force(bridge)로 해결.
+    grasp_tilt_deg: 60.0         # grasp 강tilt: jaw(두 손가락) 가 큐브 옆/아래로 내려가 감싸야 grip
+                                 # 성립(in-process SM 검증). 후보 [60,45,75,0] 로 강tilt 우선 + 수직 보조.
     grasped_dz: 0.025            # 들림 판정(큐브 z 상승량). lift 가 작아 threshold 도 하향.
     # 운반/배치 — bowl(0.22,-0.305)은 z 0.08~0.16 에서 도달 가능(낮은 z 는 거의 horizontal).
     lift_height: 0.07            # 큐브 기준 들어올림(z≈0.12, 도달 가능)
@@ -21,11 +23,19 @@
     stack_increment: 0.022       # 담긴 큐브당 release 높이 증가
     # JOINT-goal FK 샘플링(5-DOF: pose/position goal 은 planner IK 샘플러가 못 풂 → FK 로 도달 config
     # 직접 탐색). pick_place_sm.py::_fk_sample_goal 참조.
-    fk_samples: 15000            # random FK 샘플 수(in-process RobotState FK, 수십 ms~수백 ms)
-    fk_pos_gate: 0.04            # 샘플 채택 거리 gate(m). 이 안의 최근접을 골라 set_from_ik 로 정밀화
-    ik_timeout: 0.2              # set_from_ik(정밀화) timeout(s)
+    # grasp/approach 단계는 TCP(gripper_frame_link) 대신 grasp 접점(두 손가락 midpoint)을 큐브에 맞춤
+    # — TCP 만 맞추면 jaw 가 큐브 위에 남아 못 감싸던 블로커 해결.
+    fk_samples: 40000            # random FK 샘플 수(in-process RobotState FK). 강tilt+정확 xy config 확보 위해 상향
+    fk_pos_gate: 0.015           # grasp/approach 샘플 채택 거리 gate(m). 좁혀 grasp 접점-큐브 xy 정합↑
+    fk_pos_gate_transport: 0.04  # transport(lift/운반/배치) gate(m). 먼 target 도달성 위해 넓게(좁으면 lift 실패)
+    ik_timeout: 0.5              # set_from_ik(정밀화) timeout(s). 5-DOF 정밀화 신뢰성 위해 상향
+    grasp_tilt_min: 45.0         # grasp/approach tilt 하한(deg). 이 미만(수직 top-down) 배제 — jaw 가
+                                 # 큐브 옆/아래로 가야 감쌈. 통과 config 중 접점-큐브 거리 최소 선택(xy 정합).
+    grasp_axis_vert_max: 0.4     # grasp axis(두 손가락 벌어짐 방향) 수직 성분 상한 [0,1]. 0=수평(큐브 옆면
+                                 # 잡음). 이 초과면 axis 수직→큐브 위아래 눌러 실패. grasp 단계만 적용.
     # 계획 라우팅(코드 상수): grasp=OMPL 우선(grasp_order), transport=cuMotion 우선(transport_order).
     gripper_dwell_s: 1.5         # 그리퍼 open/close 정착 대기(s)
+    gripper_close_dwell_s: 3.0   # close 추가 대기(s): 큐브 감싸고 압착·마찰 정착(느린 SO-101 모터)
     # 성공 판정(그릇 기준, env_cfg 와 동기화 — BOWL_SUCCESS_RADIUS/HEIGHT_RANGE)
     bowl_success_radius: 0.06
     bowl_z_lo: 0.005

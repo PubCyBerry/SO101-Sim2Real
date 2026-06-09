@@ -107,6 +107,9 @@ JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"
 # Isaac Lab PickCubeEnvCfg 의 검증된 actuator gain (leisaac SO101_FOLLOWER_CFG).
 DRIVE_STIFFNESS = 17.8
 DRIVE_DAMPING = 0.6
+# 그리퍼는 큐브를 꽉 잡으려면 더 강한 grip force 필요(arm 17.8 은 위치추종 검증값 유지). close 가 큐브에
+# 접촉(grip -0.018)해도 stiffness 17.8 이면 grip 토크 ~2.5Nm 로 약해 lift 시 미끄러짐 → gripper 만 상향.
+GRIPPER_STIFFNESS = 80.0
 
 
 def _set_local_pose(prim, pos: tuple[float, float, float], quat_wxyz: tuple[float, float, float, float]) -> None:
@@ -235,11 +238,17 @@ def main() -> None:
     world.reset()
 
     # 검증된 actuator gain 적용(USD drive gain 은 micro 라 cuMotion 위치 명령 추종 불가).
+    # gripper(마지막 dof)만 강한 stiffness 로 grip force 확보 — 큐브 꽉 잡아 lift 시 미끄러짐 방지.
     n_dof = robot.num_dof
-    robot.get_articulation_controller().set_gains(
-        kps=np.full(n_dof, DRIVE_STIFFNESS, dtype=np.float32),
-        kds=np.full(n_dof, DRIVE_DAMPING, dtype=np.float32),
-    )
+    kps = np.full(n_dof, DRIVE_STIFFNESS, dtype=np.float32)
+    kds = np.full(n_dof, DRIVE_DAMPING, dtype=np.float32)
+    try:
+        gi = list(robot.dof_names).index("gripper")
+    except (ValueError, AttributeError, TypeError):
+        gi = n_dof - 1  # fallback: gripper 가 마지막 dof (/isaac_joint_states 순서 확인됨)
+    kps[gi] = GRIPPER_STIFFNESS
+    print(f"[bridge] gripper grip force: dof[{gi}] kps={GRIPPER_STIFFNESS} (arm kps={DRIVE_STIFFNESS})", flush=True)
+    robot.get_articulation_controller().set_gains(kps=kps, kds=kds)
 
     # 선택적 DR — scatter 범위에서 활성 큐브 위치 무작위화(간단 jitter).
     if args.dr:
