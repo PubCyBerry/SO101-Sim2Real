@@ -13,6 +13,41 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — SO-101 SM: 외부 Lula → in-sim DifferentialIK 재작성 [grasp 튜닝 진행중])
+
+- **목표(사용자)**: `pick_cube_state_machine.py`(SO-101 5DOF, grasp 불안정 WIP)를 Franka 버전처럼 동작.
+  방침 = **외부 Lula 버리고 in-sim DifferentialIK 로 재작성**(사용자 승인).
+- **진단(확정)**: Lula 는 err 0 수렴(솔버 문제 아님). 두 원인 — ① SO-101 env 가 순수 joint-space 라
+  외부 Lula 를 별도 frame 에서 돌리고 런타임 `shift` 로 끼워맞춤 → 자세 의존이라 descend 중 무효 →
+  손가락 0.05~0.1m 빗나감. ② 실행 경로가 position-only 라 자세 방치. Franka 는 in-sim DiffIK 라 ① 없음.
+- **측정(`inspect_so101_gripper_frame.py`)**: body=`[base,shoulder,upper_arm,lower_arm,wrist,gripper,jaw]`
+  (gripper_frame_link 는 USD collapse) → DiffIK `body_name="gripper"`, `body_offset=(-0.0079,-0.000218,-0.0981)`
+  (URDF gripper_frame, USD gripper-local ≡ URDF frame 검증).
+- **구현 완료**: 신규 `src/sim_to_real/tasks/pick_cube/pick_cube_so101_ik_env_cfg.py`(PickCubeSceneCfg 재사용
+  + DifferentialIKAction arm 5joint command_type=pose dls λ0.1 + BinaryJointPositionAction gripper),
+  task `SimToReal-SO101-PickCube-IK-v0`(pick_cube/__init__.py), `pick_cube_state_machine.py` 전면 재작성
+  (Lula 삭제, Franka 패턴 + radial-yaw+tilt target). **기존 PickCubeEnvCfg(North Star 6dim)는 미변경**.
+- **버그 4종 수정**: ① 로그 cp949 인코딩(em dash) silent crash → `open(...,encoding="utf-8")` ②
+  `_down_quat_world` yaw 90° 오류(손가락이 큐브 반대로) → `-π/2` 보정 ③ headless viewer skip ④
+  **AppLauncher 에 tuple 인자(view_eye) 전달 → Windows GUI `_prepare_ui` access violation** →
+  `_LAUNCHER_KEYS` 필터링(docs/TROUBLESHOOTING "_prepare_ui access violation"). 전부 코드 반영됨.
+- **검증 현황(단일 큐브, headless, DR off)**: 제어·위치·자세 **완성** — position-only + grasp_z_offset -0.02
+  로 `ee 가 큐브에 2cm`(Lula 0.05~0.1m 대비 대폭↑), `fingerdir z=-0.97`(손가락 수직), `descend reached=True`,
+  그리퍼 닫힘 `joint=-0.15` 확인. **grasp 미완** — 닫으면 큐브가 옆으로 밀림(close/open/깊이 sweep 무효).
+  = 손가락 갭 평면이 큐브 중심을 안 지나는 정렬/roll 문제로 추정(close 시 큐브 -x 밀림).
+- **GUI 진단(진행중)**: 이 Windows 박스는 GUI 모드 RTX/Hydra 크래시 2종 — ④(tuple 인자, 수정함) +
+  기본 GUI experience(isaaclab.python.kit) rtx.scenedb(→ `--enable_cameras` 로 rendering experience 전환).
+  둘 다 적용 후 GUI 로 **손가락 갭 방향** 확인 중. 갭이 좌우 아닌 정면-후방이면 grasp 시 roll 90° 보정 필요.
+- **best 파라미터(grasp 직전까지)**: `--ik_position_only --gripper_velocity 1.0 --grasp_z_offset -0.02
+  --reach_tol 0.025 --gripper_open 1.5 --gripper_close -0.15`. (pose 모드는 `--grasp_tilt_deg 35` 가 ee 2.8cm.)
+- **남은 일**: GUI 로 갭 방향 확인 → roll 보정(또는 ee xy closed-loop) → grasp 성립 → 4큐브 → full-DR 4/4 →
+  TROUBLESHOOTING "SO-101 5DOF grasp 불안정" 항목을 "in-sim DiffIK 로 제어 해결" 로 갱신.
+- **함정**: Windows 는 **kit 프로세스 1개만**(동시 2개 → KVDB lock → 2번째 부팅 silent 종료, 실행 전
+  `Stop-Process`). headless 는 carb 가 stdout 가로채니 진행 로그는 `outputs/so101_sm_progress.txt`(파일)에서 확인.
+- **진단 스크립트(보존)**: `inspect_so101_gripper_frame.py`(body 측정), `ik_env_smoke.py`(IK env gym.make 격리).
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E: cube_desk MoveIt2/cuMotion Pick&Place 브릿지 스캐폴딩)
 
 - **목표(사용자)**: cube_desk 장면에서 MoveIt2 path planning(조사 결과 **cuMotion 우선 + OMPL/Pilz 폴백**)으로 SO-101 pick&place state machine 구축. 플랫폼 = Windows+WSL2 먼저, 안 되면 Linux 서버. 충돌 = 전체(그릇+타큐브 obstacle + 잡은 큐브 attach). 통합 = Isaac Sim ROS2 bridge(`topic_based_ros2_control`).
