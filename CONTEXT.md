@@ -29,7 +29,7 @@ grasp 물리(grip 이 큐브를 못 쥠) — in-process SM 의 known-hard 영역
   - 즉 **pose/position goal 자체가 5-DOF 에 비가능**(과거 in-process SM 이 joint_fk 쓴 이유와 동일).
   - 워크스페이스 기하: **world↔base_link = Z 180° 회전**(`base_link=(1.84-wx, -0.565-wy, wz-0.6749)`).
     Cube2/4 authored 위치는 base_link 음의 x(팔 reach 뒤, shoulder_pan ±110° 밖)=도달 불가.
-- **✅ 해결(커밋 예정)**: `pick_place_sm.py` `_move_to` 를 **joint-goal** 로 전환 —
+- **✅ 해결(커밋 `4734e5b`)**: `pick_place_sm.py` `_move_to` 를 **joint-goal** 로 전환 —
   `RobotState.set_to_random_positions()` in-process FK 샘플링으로 target(x,y,z) 에 down-ish(tool z
   tilt≤max) tip 을 두는 manipulator config 를 찾고 `set_from_ik` 정밀화 → `set_goal_state(robot_state=)`.
   planner(cuMotion/OMPL)는 joint→joint collision-free 만 푼다. `_fk_sample_goal`/`_tool_tilt` 신규,
@@ -47,13 +47,25 @@ grasp 물리(grip 이 큐브를 못 쥠) — in-process SM 의 known-hard 영역
 - **사용자 결정(미적용)**: "scatter 범위 축소" — `pick_cube_env_cfg.py::_CUBE_SCATTER_X/Y_RANGE` 를
   도달 가능 world 영역(x[1.60,1.76], y[-0.465,-0.365] 권장)으로. Cube2/4 authored 위치도 reachable 로
   재배치(author_pick_cube_scene.py) 시 4큐브 가능. planning 해결과 별개라 grasp 물리 후 적용 권장.
-- **실행 환경(재현)**: 이미지 재빌드 완료(overlay baked — `/tmp/*_ws` 수동 불요). 영속 컨테이너 `so101_ros`
-  살아있음(정리 필요), bridge(host) PID 살아있음. colcon 증분: 컨테이너서 `cd /build && colcon build
-  --symlink-install --base-paths /workspace/ros2_ws/src --packages-select <pkg>`. install=`/build/install`
-  (worktree `/workspace/ros2_ws/install` 아님). launch: `source /opt/ros/jazzy + /opt/tbc_overlay +
-  /opt/cumotion_overlay + /build/install`, `SO101_REPO=/workspace`. 로그 `/build/sm_run*.log`.
-- **주의**: SM 노드 재실행은 launch 통째로(move_group orphan 은 `kill -9 <pid>`). probe_ik.py 는 move_group
-  떠 있을 때만(서비스 `/compute_fk`). bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
+- **실행 환경 현재 상태(세션 종료 시점)**: 이미지 `so101-cumotion:jazzy` 재빌드 완료(두 overlay baked
+  — `/tmp/*_ws` 수동 빌드 불요). 컨테이너 **`so101_ros` 살아있음**(`sleep infinity`, GPU 미사용). bridge·
+  move_group·cumotion **전부 정리됨**(GPU idle 375MiB). 호스트의 `isaacsim-mcp`(PID 2315xxx)는 별개
+  사전 서비스 — 건드리지 말 것. ROS 패키지 소스 미변경분은 `/build/install` symlink 반영(재빌드 불요).
+- **콜드 스타트(재현, 3터미널)**:
+  1) bridge(host, 워크트리서): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready` 대기.
+  2) (코드 수정 시만) 컨테이너서 colcon 증분: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash &&
+     cd /build && colcon build --symlink-install --base-paths /workspace/ros2_ws/src --packages-select <pkg>'`.
+     install=`/build/install`(worktree `/workspace/ros2_ws/install` 아님).
+  3) 전체 launch: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash && source /opt/tbc_overlay/install/setup.bash &&
+     source /opt/cumotion_overlay/install/setup.bash && source /build/install/setup.bash && export SO101_REPO=/workspace &&
+     ros2 launch so101_cumotion_pick_place pick_place.launch.py 2>&1 | tee /build/sm_run.log'`. 결과 grep:
+     `OK →|FK-sample 도달 config 없음|grasp 실패|RESULT:`.
+  - 컨테이너 docker run 명령(없을 때): `docker run -d --name so101_ros --network host --ipc host --gpus all
+    -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -e SO101_REPO=/workspace
+    -v <worktree>:/workspace -v /DISK1/so101-sim2real/work/ros2_build:/build so101-cumotion:jazzy sleep infinity`.
+- **주의**: SM 노드 재실행은 launch 통째로(이전 launch 의 move_group/cumotion orphan 은 `kill -9 <pid>` 로 정리
+  후 재launch — 안 그러면 노드 중복). probe_ik.py(reachability 진단)는 move_group 떠 있을 때만(`/compute_fk`
+  서비스). bridge 종료는 PID 직접 kill(`pkill -f` 자기매칭 금지). bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
 
 ---
 
