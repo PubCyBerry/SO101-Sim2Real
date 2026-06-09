@@ -44,6 +44,7 @@
 - [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
+- [Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)](#windows-isaac-sim-_prepare_ui-access-violation-tuple-인자를-applauncher-에-전달)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2585,6 +2586,62 @@ midpoint ee) — 모두 이 중첩을 못 넘었다. (반면 Franka 7DOF 는 yaw
 `pick_cube_state_machine.py --active_objects 1 --object_radius_scale 0` 로 단일 큐브 진단.
 descend 로그의 `ee`(grasp 접점)·`jaw`/`gripper`(USD 손가락 body)·`cube` 를 비교해 손가락이
 큐브 xy 를 사이에 두고 z 가 큐브 높이면 grasp 가능. 빗나가면 위 3중 오차.
+
+---
+
+## Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)
+
+### 현상
+
+Windows에서 `scripts/environments/pick_cube_franka_state_machine.py` 실행 시 Isaac Sim 확장이 모두 로드된 직후(~11초) `Windows fatal exception: access violation` 으로 크래시. 동일 머신에서 `teleop_se3_agent.py` 는 GUI 모드로 정상 동작.
+
+### 오류 메시지
+
+```
+Windows fatal exception: access violation
+
+Thread 0x0000460c (most recent call first):
+  File "...simulation_app.py", line 602 in _prepare_ui
+  File "...simulation_app.py", line 310 in __init__
+  File "...app_launcher.py", line 823 in _create_app
+  File "...app_launcher.py", line 131 in __init__
+  File "...pick_cube_franka_state_machine.py", line 100 in <module>
+```
+
+### 원인
+
+`vars(args)` 전체를 `AppLauncher(vars(args))` 로 전달할 때, argparse 커스텀 인자 중 **tuple 타입** 값(`view_eye=(3.05, -0.78, 1.02)`, `view_lookat=(1.74, -0.38, 0.74)`)이 포함된다. AppLauncher 가 알 수 없는 키를 carb 설정으로 등록 시도할 때 Windows carb 가 tuple 을 처리하지 못해 access violation 이 발생한다. Linux 에서는 동일 코드가 tuple 을 무시하거나 다르게 처리해 정상 동작한다. `teleop_se3_agent.py` 는 커스텀 인자가 모두 str/int/float/bool 이라 문제가 없다.
+
+### 해결 방법
+
+`AppLauncher` 에 전달하는 dict 를 AppLauncher 가 실제로 사용하는 키(`headless`, `enable_cameras`, `experience`, `device`, `cpu`, `disable_fabric`, `offscreen_render`, `kit_args`)만으로 필터링한다:
+
+```python
+_LAUNCHER_KEYS = {
+    "headless", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+app_launcher = AppLauncher(_launcher_args)
+```
+
+`pick_cube_franka_state_machine.py` 에 적용 완료.
+
+### 확인 방법
+
+`uv run scripts/environments/pick_cube_franka_state_machine.py` 를 `--headless` 없이 실행해 Isaac Sim GUI 가 정상 기동되고 큐브 pick-and-place 씬이 렌더링되면 수정 성공.
+
+### 플랫폼 호환성
+
+필터링 후에도 **Linux / Windows 모두 정상 동작**한다.
+
+| | Linux (수정 전) | Linux (수정 후) | Windows (수정 후) |
+|---|---|---|---|
+| tuple 인자 전달 여부 | ✓ (무시됨) | ✗ (필터링) | ✗ (필터링) |
+| AppLauncher 필수 키 포함 여부 | ✓ | ✓ | ✓ |
+| 크래시 여부 | 없음 | 없음 | 없음 |
+
+Linux 에서 수정 전 코드가 정상 동작했던 이유는 tuple 을 "잘 처리해서"가 아니라 Linux carb 가 알 수 없는 키를 **무시했기 때문**이다. 무시하던 키들을 애초에 전달하지 않으므로 Linux 동작에 영향이 없다. Isaac Lab 업그레이드 시 `add_app_launcher_args` 가 새 키를 추가하면 `_LAUNCHER_KEYS` 에도 동기화해야 한다.
 
 ---
 
