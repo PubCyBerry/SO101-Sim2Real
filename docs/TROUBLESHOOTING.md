@@ -40,6 +40,10 @@
 - [ROS 2 (WSL2) feetech read timeout 1회로 hardware deactivate (USB-IP 레이턴시)](#ros-2-wsl2-feetech-read-timeout-1회로-hardware-deactivate-usb-ip-레이턴시)
 - [ROS 2 `libfeetech_ros2_driver.so: file too short` (빌드 캐시 손상)](#ros-2-libfeetech_ros2_driverso-file-too-short-빌드-캐시-손상)
 - [ROS 2 (WSL2) `ros2 topic/node list` 가 빈 결과 (stale daemon)](#ros-2-wsl2-ros2-topicnode-list-가-빈-결과-stale-daemon)
+- [Isaac Lab ManagerBasedRLEnvCfg 에 `rewards` 누락 시 `gym.make` 실패](#isaac-lab-managerbasedrlenvcfg-에-rewards-누락-시-gymmake-실패)
+- [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
+- [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
+- [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2422,6 +2426,165 @@ ros2 topic echo /follower/joint_states --no-daemon --once
 ### 확인 방법
 
 `ros2 topic list --no-daemon` 에 `/follower/joint_states`, `/follower/robot_description` 등이 보이면 통신 자체는 정상.
+
+---
+
+## Isaac Lab ManagerBasedRLEnvCfg 에 `rewards` 누락 시 `gym.make` 실패
+
+새 task 의 env_cfg 를 `ManagerBasedRLEnvCfg` 상속으로 작성하고 `gym.make()` 하면 환경 생성 직후 죽는다. scripted state machine 데모처럼 보상이 필요 없어 `rewards` 를 정의하지 않은 경우 발생.
+
+```text
+TypeError: Missing values detected in object PickCubeFrankaEnvCfg for the following fields:
+  - rewards
+```
+
+### 원인
+
+`ManagerBasedRLEnvCfg` 는 `rewards`·`terminations` 를 `MISSING` 기본값의 필수 필드로 둔다. `gym.make` → `ManagerBasedRLEnv.__init__` → `cfg.validate()` 가 채워지지 않은 필드를 검출해 `TypeError` 를 던진다(`observations`/`actions`/`events` 만 정의하면 통과하지 못함).
+
+### 해결 방법
+
+보상을 안 쓰더라도 **빈 보상 매니저**를 제공한다. `RewardManager` 는 term 이 0 개여도 정상 동작(reward=0)한다.
+
+```python
+@configclass
+class PickCubeFrankaRewardsCfg:
+    pass
+
+@configclass
+class PickCubeFrankaEnvCfg(ManagerBasedRLEnvCfg):
+    rewards: PickCubeFrankaRewardsCfg = PickCubeFrankaRewardsCfg()
+    terminations: PickCubeFrankaTerminationsCfg = PickCubeFrankaTerminationsCfg()
+    ...
+```
+
+`commands`·`curriculum` 은 `None` 허용이라 생략 가능하지만 `rewards`·`terminations` 는 반드시 채운다.
+
+### 확인 방법
+
+`gym.make(task, cfg=env_cfg)` 가 예외 없이 env 를 반환하면 정상.
+
+---
+
+## Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)
+
+`AppLauncher` 부팅 직후의 `print` 는 보이는데, `gym.make()`(또는 `SimulationContext` 생성) 이후의 `print` 가 — 특히 출력을 파일로 리다이렉트한 headless 실행에서 — 로그에 전혀 남지 않는다. 스크립트가 멀쩡히 동작해도 진행 상황·결과를 콘솔에서 확인할 수 없어 "조용히 죽은 것"처럼 보인다.
+
+```text
+# stdout 을 파일로 받으면 부팅 로그 45줄(P2P validation)에서 끊기고,
+# 그 뒤 스크립트의 print("[SM] ...") 가 한 줄도 안 보인다. exit code 는 0.
+```
+
+### 원인
+
+Isaac Sim/omni.kit 은 `SimulationContext` 를 만들 때 `sys.stdout`/`sys.stderr` 를 carb logger 로 재바인딩한다. 출력 대상이 tty 가 아니면(파일 리다이렉트) carb 로그 자체도 대부분 억제되어, 부팅 이후 Python `print` 가 묻힌다.
+
+### 해결 방법
+
+진행/결과 로그를 **파일에 직접 기록**하거나, 인터프리터 원본 fd(`sys.__stderr__`) 로 쓴다. 둘 다 carb 재바인딩을 우회한다.
+
+```python
+_LOG_PATH = "/tmp/franka_sm_progress.txt"
+open(_LOG_PATH, "w").close()           # 실행마다 초기화
+
+def log(msg: str) -> None:
+    with open(_LOG_PATH, "a") as f:    # 파일 IO 는 carb 재바인딩과 무관
+        f.write(msg + "\n")
+    print(msg, file=sys.__stderr__, flush=True)  # GUI 콘솔용 원본 fd
+```
+
+디버깅 시 예외도 `traceback.format_exc()` 를 `log()` 로 남기면 silent 종료의 실제 원인(예: 위 `rewards` 누락)을 잡을 수 있다.
+
+### 확인 방법
+
+`gym.make` 이후 `log("...")` 한 줄이 진행 로그 파일에 남으면 정상.
+
+---
+
+## Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음
+
+> 사례: cube_desk 씬의 **Franka Emika Panda**(`isaaclab_assets.FRANKA_PANDA_HIGH_PD_CFG`,
+> 7DOF arm + parallel gripper, reach ≈0.855 m)로 큐브 4개를 그릇에 옮기는 scripted
+> state machine(`scripts/environments/pick_cube_franka_state_machine.py`). SO-101 이 아닌
+> Franka 를 쓴 이유는 SO-101 의 5DOF arm 으로는 full 6DOF pose IK 가 불가능하기 때문이다.
+
+DifferentialIK + scripted state machine 으로 여러 물체를 집을 때, 일부 물체만 잡히고
+나머지는 ee 가 목표에 도달하지 못한다. 멀리 있는 물체는 손이 안 닿고(`ee.x` 가 특정 값에
+갇힘), 너무 가까운 물체는 ee 의 z 가 위로 솟아(예: 큐브 z≈0.73 인데 ee z≈1.07) 하강을 못 한다.
+
+```text
+# 큐브 분산축과 base yaw 가 어긋난 경우 — ee.x 가 base 부근(1.89)에 갇혀 멀리 못 감
+Cube4 descend reached=False ee=(1.889,-0.327,0.746) cube=(2.064,-0.357,0.729)
+# base 가 물체에 너무 가까운 경우 — ee 가 위로 솟음
+Cube4 descend reached=False ee=(1.576,-0.421,1.069) cube=(1.617,-0.457,0.729)
+```
+
+### 원인
+
+- **yaw 어긋남**: base yaw 가 물체 분산 주축과 어긋나면 그 분산이 robot 의 side(좌우)
+  방향이 된다. manipulator 는 forward reach 는 길지만 down-facing 자세로 side 로 뻗기는
+  어려워, 분산 양끝 물체에 손이 안 닿는다.
+- **거리 부정합**: 물체 영역 폭이 manipulator 의 이상적 forward reach 환형(annulus,
+  대략 0.3~0.75 m)보다 넓으면, base 에 너무 가까운 물체는 팔이 접히는 영역에 들어가
+  IK 가 ee 를 위로 솟구치는 해로 풀고, 먼 물체는 reach 경계에 걸린다.
+
+### 해결 방법
+
+- base **yaw 를 물체 분산 주축과 forward 가 일치**하도록 둔다(예: 큐브가 world +X 로
+  넓게 퍼지면 base forward 도 +X = yaw 0°).
+- base **거리**를 가까운 물체도 forward ≥0.3 m, 먼 물체도 reach(예 Franka 0.855 m) 안에
+  들도록 조정한다. cube_desk Franka 는 `_FRANKA_POS=(1.30, -0.40, 0.71)`, yaw 0° 로
+  큐브 x∈[1.60,2.08] 전부를 forward 0.30~0.78 m 안에 두어 4/4 안정 grasp 를 얻었다.
+
+### 확인 방법
+
+각 물체 접근 단계에서 ee xyz 와 물체 xyz 를 로깅해 추종 여부를 본다. 모든 물체가
+`reached=True` 로 잡히면 정상.
+
+---
+
+## SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장
+
+cube_desk 에서 **SO-101**(arm 5DOF)로 scripted pick-and-place 를 시도하면, IK 가 수렴해도
+(예: Lula `lula(ok=True,err=0.0000)`) **실제 손가락이 큐브를 0.05~0.1m 빗나가** 못 집는다.
+같은 씬에서 Franka(7DOF)는 4/4 로 안정적으로 잡힌다(`pick_cube_franka_state_machine.py`).
+
+```text
+# Lula IK 는 내부적으로 수렴(err 0)하나 USD 실제 손가락이 큐브에서 벗어남
+Cube1 descend reached=True lula(ok=True,err=0.0000) ee=(1.706,-0.445,0.733) cube=(1.700,-0.440,0.724)
+  jaw=(1.601,-0.432,0.811) gripper=(1.630,-0.430,0.832)   # 손가락이 큐브 위/옆
+```
+
+### 원인
+
+SO-101 5DOF 는 grasp 순간 **세 오차원이 중첩**되고, 각 오차가 자세에 따라 변해 어떤 단일
+IK 로도 동시에 못 맞춘다:
+
+1. **정합**: Lula `LulaKinematicsSolver` 는 URDF-local frame, USD articulation 은 scene
+   transform 아래 → Lula world ↔ USD world 사이 ~0.1m 잔차(RMPFLOW_BASE least-squares 로도 남음).
+2. **제어점**: Lula 제어 frame(`gripper_frame_link`)과 실제 두 손가락 grasp 갭(jaw/gripper
+   body midpoint)이 자세에 따라 상대 위치가 변한다 → 런타임 shift 보정이 매 step 흔들려 수렴 지연.
+3. **자세**: 5DOF 로 position + full orientation 동시 만족 불가. orientation 강제하면 position
+   을 0.1~0.25m 희생(`lula ok=False, err=0.11` / weighted DLS pose 동일), position-only 면
+   손가락이 큐브 위에서 누르는 자세(감쌈 실패).
+
+검증한 IK 들 — weighted DLS(local), random-FK(global sampling), Lula(position-only/orientation/
+midpoint ee) — 모두 이 중첩을 못 넘었다. (반면 Franka 7DOF 는 yaw 가 독립이고 full pose IK 가
+가능해 한 번에 grasp.)
+
+### 해결 방법 (현재 권장)
+
+- **데모는 Franka 7DOF**(`pick_cube_franka_state_machine.py`)를 쓴다 — DR 상태 4/4, ~30초.
+- SO-101 을 끝까지 가려면: GUI 로 grasp 순간을 보며 정합/offset 을 시각 보정하거나, RMPFlow
+  (자세 포함 trajectory) + `gripper_frame_link` 정합 정밀화가 필요(headless 수치 반복으론 수렴 더딤).
+- ROS2 + MoveIt2 는 호스트에 ROS2 미설치(`/opt/ros` 없음)라 대규모 인프라 필요 → 동일 목적의
+  Isaac Sim 내장 Lula 로 대체(ROS2 불필요). Lula IK 자체는 정상 동작(err 0).
+
+### 확인 방법
+
+`pick_cube_state_machine.py --active_objects 1 --object_radius_scale 0` 로 단일 큐브 진단.
+descend 로그의 `ee`(grasp 접점)·`jaw`/`gripper`(USD 손가락 body)·`cube` 를 비교해 손가락이
+큐브 xy 를 사이에 두고 z 가 큐브 높이면 grasp 가능. 빗나가면 위 3중 오차.
 
 ---
 
