@@ -49,6 +49,7 @@
 - [(PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1`](#path-e-해결-isaac-lab-bridge-의-omnigraph-jointstate-가-device-0-vs--1-로-joint_states-미publish)
 - [(PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패](#path-e-isaac-sim-ros-2-bridge-가-librmw_implementationso-로드-실패--libament_index_cppso-cannot-open)
 - [(PATH E) host(bridge)↔container DDS discovery 실패 — cross-UID fastrtps SHM](#path-e-hostbridgecontainerros-스택-dds-discovery-실패--cross-uid-fastrtps-shm)
+- [(PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정](#path-e-pick_place-launchpy-ros-스택-bringup-4대-함정)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2868,3 +2869,75 @@ docker run --rm --network host --ipc host \
   'source /opt/ros/jazzy/setup.bash && ros2 topic echo /isaac_joint_states --once'
 ```
 6관절 값이 찍히면 해결.
+
+---
+
+## (PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정
+
+`pick_place.launch.py`(controllers + move_group/cuMotion + SM)를 서버에서 처음 실측 기동할 때
+연쇄로 막힌 4지점. 전부 소스/Dockerfile 에 반영됨(2026-06-09 서버 konan147).
+
+### 1) controller_manager SIGSEGV — topic_based_ros2_control ABI 불일치
+
+**현상**: `ros2_control_node` 가 hardware 'initialize' 직후 죽는다(exit -11).
+
+```
+[INFO] Loaded hardware 'SO101_follower_SYSTEM' from plugin 'topic_based_ros2_control/TopicBasedSystem'
+[INFO] Initialize hardware 'SO101_follower_SYSTEM'
+Stack trace ... hardware_interface::HardwareComponentInterface::get_lifecycle_id() const
+Segmentation fault (Address not mapped to object [0xb0])
+```
+
+**원인**: Isaac ROS apt repo 의 `ros-jazzy-topic-based-ros2-control` 가 **99.99.1-0noble**(Isaac ROS
+ros2_control 스냅샷 빌드)인데, ROS 메인 repo 가 `hardware_interface` 등을 **4.44.0**(더 최신)으로 끌어와
+ABI 가 어긋난다(`HardwareComponentParams`/`get_lifecycle_id` vtable). ROS 메인 repo 엔 topic_based
+**0.3.0 source 만** 있어 바이너리 다운그레이드 불가.
+
+**해결**: PickNik 소스(`github.com/PickNikRobotics/topic_based_ros2_control`, main=0.3.0)에서 설치된
+hardware_interface 4.44.0 헤더로 재빌드해 overlay 설치(`Dockerfile.cumotion_ros` 가 `/opt/tbc_overlay`
+에 colcon build 후 bashrc 에서 `/opt/ros/jazzy` 다음 source). 재빌드 시 `ros_testing` 누락은
+`-DBUILD_TESTING=OFF` 로 회피.
+
+**확인**: `ros2 control list_controllers -c /follower/controller_manager` 에 broadcaster/arm/gripper 가 `active`.
+
+### 2) kinematics 플러그인 `pick_ik/PickIkPlugin` 미설치 → set_from_ik SIGSEGV
+
+**현상**: move_group/SM 기동 로그에 plugin load 실패, SM 의 첫 `set_from_ik` 에서 SIGSEGV.
+
+```
+The kinematics plugin (pick_ik/PickIkPlugin) failed to load. ... class ... does not exist.
+Declared types are cached_ik_kinematics_plugin/... kdl_kinematics_plugin/KDLKinematicsPlugin ...
+```
+
+**원인**: `so101_moveit_config/config/kinematics.yaml` 이 `pick_ik/PickIkPlugin`(5-DOF 에 적합, rotation_scale 0.5 +
+approximate)을 쓰는데 이미지에 미설치. null plugin 을 set_from_ik 가 역참조 → segfault.
+
+**해결**: `Dockerfile.cumotion_ros` apt 에 `ros-jazzy-pick-ik` 추가(packages.ros.org 1.1.1, hardware_interface 와 동일 빌드일자).
+
+### 3) launch `Expected … got '()' of type tuple` — 빈 리스트 파라미터
+
+**현상**: `move_group_cumotion.launch.py`(및 이를 포함하는 pick_place) 가 노드 시작 시 즉시 예외.
+
+```
+TypeError: Expected 'value' to be one of [float, int, str, bool, bytes], but got '()' of type 'tuple'
+  (launch_ros/utilities/evaluate_parameters.py: evaluate_parameter_dict)
+```
+
+**원인**: cuMotion planning pipeline yaml 의 `request_adapters: []`(빈 리스트)가 `moveit_config.to_dict()`
+→ launch_ros 에서 빈 튜플 `()` 로 평가돼 Node 파라미터 타입검증 실패.
+
+**해결**: `so101_moveit_config/config/isaac_ros_cumotion_planning.yaml` 에서 `request_adapters: []` 줄 제거
+(키 생략 시 MoveIt 이 "request adapter 없음" 으로 처리). 일반화: launch Node 파라미터에 빈 리스트/딕트 금지.
+
+### 4) SM `NameError: name 'PoseStamped' is not defined`
+
+**원인**: `pick_place_sm.py` 가 `_pose()` 에서 `PoseStamped()` 를 쓰는데 import 누락.
+
+**해결**: `from geometry_msgs.msg import PoseStamped` 추가.
+
+### 확인 (통합)
+
+`scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1`(host) + 컨테이너에서
+`ros2 launch so101_cumotion_pick_place pick_place.launch.py use_rviz:=false`(fastrtps/UDPv4, `/build`·`/workspace` 마운트,
+overlay source) → cuMotion `CumotionPlanner` 로드 + URDF/XRDF 로 로봇 로드 성공, 컨트롤러 3종 active,
+SM 이 큐브 포즈 수신→`pick-and-place cube[0]` 까지 진행. (이후 5-DOF grasp IK 튜닝은 별개 — §PATH_E 6.)

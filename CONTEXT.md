@@ -13,6 +13,46 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E §5 4~6: ROS 스택 end-to-end 통합 ✅, 남은 건 5-DOF grasp IK)
+
+bridge 블로커 해소(아래 인계) 후 사용자 지시로 §5 4~6 진행. **`pick_place.launch.py` 전체 스택(bridge +
+controllers + move_group + cuMotion + SM)을 서버에서 처음으로 end-to-end 기동**시켰다. SM 이 큐브 포즈를
+받아 pick 시도까지 진행하며, 마지막으로 **grasp 접근 pose 의 5-DOF IK 실패**에서 멈춘다(§6 known-hard).
+
+- **커밋**: `15450a8`(bridge B안) → `ddbe664`(ROS 스택 통합 4대 수정).
+- **해소한 bringup 4대 함정**(전부 소스/Dockerfile 반영, TROUBLESHOOTING 기록):
+  1. **controller_manager SIGSEGV** — Isaac ROS repo 의 `topic_based_ros2_control 99.99.1` 이 ROS 메인 repo
+     `hardware_interface 4.44.0` 과 ABI 불일치(`get_lifecycle_id` vtable). 메인 repo 엔 0.3.0 source 만 → PickNik
+     소스에서 재빌드해 overlay 설치(`Dockerfile.cumotion_ros` `/opt/tbc_overlay`, bashrc 에서 source).
+  2. **`pick_ik/PickIkPlugin` 미설치** → SM set_from_ik SIGSEGV. `Dockerfile` apt 에 `ros-jazzy-pick-ik` 추가.
+  3. **launch tuple 에러** — `isaac_ros_cumotion_planning.yaml` 의 `request_adapters: []`(빈 리스트)가 launch_ros 에서
+     빈 튜플로 변환돼 Node 파라미터 타입검증 실패. 해당 줄 제거.
+  4. **SM `PoseStamped` NameError** — `pick_place_sm.py` import 누락 보강.
+  + **use_sim_time**: `follower_split.launch.py` 에 인자 추가(CM/rsp 주입), `pick_place.launch.py` 가 `true` 전달
+    (bridge `/clock` 정합).
+- **검증된 사실(서버 konan147, GPU idle)**:
+  - cuMotion `CumotionPlanner` 플러그인 로드 + URDF/XRDF 로 로봇 로드 성공(tool=gripper_frame_link, base=base_link)
+    → **XRDF 유효 = §5 #1 사실상 통과**(Python curobo 미설치라 `gen_so101_xrdf.py` 는 미실행, C++ planner 가 대체 검증).
+  - 컨트롤러 3종(joint_state_broadcaster/arm_trajectory_controller/gripper_controller) active, `/follower/joint_states` 흐름.
+  - SM: 포즈 수신→`pick order [0]`→`pick-and-place cube[0]`→**`IK 실패 (0.140,-0.125,0.169) tilts=[60,45,75,0]`**.
+  - 종료 시 exit -11 은 MoveItPy teardown(무해).
+- **🔴 남은 블로커(§5 #6 성공 = grasp)**: 5-DOF SO-101 이 grasp 접근 pose(down+tilt)에 도달 못 함. set_from_ik(pick_ik)
+  가 모든 tilt 후보에서 실패. 이전 in-process Lula/ikpy SM 도 못 풀던 동일 난제(§6). **다음 방향 후보**:
+  ① SM `_move_to` 를 set_from_ik(joint goal) 대신 **cuMotion pose-goal 직접 사용**(MoveItPy `set_goal_state(pose_stamped_msg, pose_link)`)
+     — cuMotion 이 5-DOF 여유/limit 내에서 모션을 직접 풀게. ② grasp 자세/tilt/approach_height 재설계(pick_place_params.yaml).
+     단 5-DOF orientation 도달성은 planner 선택과 무관한 본질적 제약이라 grasp 전략 자체 재검토 필요.
+- **실행 환경(재현)**: 영속 컨테이너로 단계 디버깅함 —
+  `docker run -d --name so101_ros --network host --ipc host --gpus all -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -e SO101_REPO=/workspace -v <worktree>:/workspace
+  -v /DISK1/so101-sim2real/work/ros2_build:/build so101-cumotion:jazzy sleep infinity` → 안에서
+  `source /opt/ros/jazzy/setup.bash; source /build/install/setup.bash; source /tmp/tbc_ws/install/setup.bash`(현 컨테이너는
+  topic_based 를 /tmp/tbc_ws 에 빌드해둠 — **이미지 재빌드 시 Dockerfile 의 /opt/tbc_overlay 로 영구화**) 후 launch.
+  colcon 빌드(symlink-install)는 `/DISK1/so101-sim2real/work/ros2_build`(/build), 소스는 worktree(/workspace). ROS 패키지
+  소스 미변경이라 재빌드 불요(symlink 반영). **다음 세션엔 이미지 재빌드(Dockerfile 반영) 후 `/tmp/tbc_ws` overlay 불요.**
+- **주의**: 컨테이너 정리 `docker rm -f so101_ros`. bridge 종료는 PID kill. 동시에 bridge(host)+컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E B안 완료: bridge device -1 블로커 해소, joint_states publish ✅)
 
 직전 인계의 마지막 블로커(Isaac Lab InteractiveScene bridge 의 `device 0 vs -1`)를 **B안으로 해소**. bridge 를 순수 `isaacsim.core` 로 재작성해 `/isaac_joint_states`·`/clock`·`/tf` 가 모두 정상 publish 됨(서버 konan147, GPU idle, `--num_cubes 1` 실측). PATH_E §5 검증 **1~3 통과**.

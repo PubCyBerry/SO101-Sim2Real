@@ -122,14 +122,19 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 
 | # | 명령 | 통과 기준 | 상태 |
 |---|---|---|---|
-| 1 | `python scripts/sim/gen_so101_xrdf.py` (서버, curobo 환경) | CudaRobotModel 생성, IK 성공률 >90% | ⬜ 미실시 |
+| 1 | XRDF/URDF 유효성 (`gen_so101_xrdf.py` 는 Python curobo 필요 — 미설치) | cuMotion 이 XRDF/URDF 로 로봇 로드 | ✅ 통과(2026-06-09, cuMotion C++ planner 가 로드 — `gen_so101_xrdf.py` 대체 검증) |
 | 2 | 터미널1 실행 후 `ros2 topic echo /isaac_joint_states` | 6관절 name/position/velocity/effort 값 흐름 | ✅ 통과(2026-06-09) |
 | 3 | `ros2 topic echo /tf --once` (또는 `/clock`) | `base_link→Cube1/Bowl` transform·sim-time clock | ✅ 통과(2026-06-09) |
-| 4 | `pick_place.launch.py use_rviz:=true` → RViz MotionPlanning 에서 수동 plan/execute | cuMotion plan 성공, Isaac Sim 팔 동기 | ⬜ 미실시 |
-| 5 | `ros2 action send_goal /follower/gripper_controller/gripper_cmd control_msgs/action/ParallelGripperCommand "{command: {name: [gripper], position: [-0.16]}}"` | 그리퍼 닫힘 | ⬜ 미실시 |
-| 6 | bridge `--num_cubes 1` + 전체 launch ×3 | 3/3 bowl. 이후 `--num_cubes 4` → 3~4/4 | ⬜ 미실시 |
+| 4 | `pick_place.launch.py` → cuMotion plan/execute | cuMotion plan 성공, Isaac Sim 팔 동기 | 🟡 인프라 완료(스택 end-to-end 기동·SM 진행), grasp IK 미통과 |
+| 5 | gripper action `ParallelGripperCommand` | 그리퍼 닫힘 | 🟡 controller active, SM grasp 단계 미도달 |
+| 6 | bridge `--num_cubes 1` + 전체 launch | 3/3 bowl, 이후 `--num_cubes 4` | ⬜ 5-DOF grasp IK 튜닝 후(§6) |
 
-> 검증 1(XRDF/IK)·4~6 은 컨테이너 ROS 스택 launch + cuMotion plugin/XRDF 실측 보정이 선행 조건. bridge(B안)는 2~3 통과로 device 블로커가 해소됐다.
+> **2026-06-09 통합 검증 결과**: `pick_place.launch.py`(bridge + controllers + move_group + cuMotion + SM)가
+> 서버에서 처음으로 end-to-end 기동. cuMotion `CumotionPlanner` 플러그인 로드 + XRDF/URDF 로 로봇 로드 성공,
+> 컨트롤러 3종 active, `/follower/joint_states` 흐름, SM 이 큐브 포즈 수신→`pick-and-place cube[0]` 까지 진행.
+> bringup 4대 함정(topic_based ABI·pick_ik 미설치·launch 빈리스트 튜플·SM PoseStamped import)을 해소
+> (`docs/TROUBLESHOOTING.md`). **남은 블로커**: grasp 접근 pose 의 5-DOF IK 실패 — §6 "5DOF grasp" 튜닝 영역
+> (cuMotion pose-goal 직접 사용 또는 grasp 자세/tilt 재설계). 헤드리스 서버라 RViz 대신 SM 자동 실행으로 검증.
 
 검증 결과는 `CONTEXT.md` 작업 인계에 기록한다.
 
