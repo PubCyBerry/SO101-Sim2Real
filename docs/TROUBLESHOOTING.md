@@ -50,6 +50,7 @@
 - [(PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패](#path-e-isaac-sim-ros-2-bridge-가-librmw_implementationso-로드-실패--libament_index_cppso-cannot-open)
 - [(PATH E) host(bridge)↔container DDS discovery 실패 — cross-UID fastrtps SHM](#path-e-hostbridgecontainerros-스택-dds-discovery-실패--cross-uid-fastrtps-shm)
 - [(PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정](#path-e-pick_place-launchpy-ros-스택-bringup-4대-함정)
+- [(PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace](#path-e-cumotion-invalid_initial_cspace_position--start_state-관절-수--cspace-gripper-포함)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2941,3 +2942,44 @@ TypeError: Expected 'value' to be one of [float, int, str, bool, bytes], but got
 `ros2 launch so101_cumotion_pick_place pick_place.launch.py use_rviz:=false`(fastrtps/UDPv4, `/build`·`/workspace` 마운트,
 overlay source) → cuMotion `CumotionPlanner` 로드 + URDF/XRDF 로 로봇 로드 성공, 컨트롤러 3종 active,
 SM 이 큐브 포즈 수신→`pick-and-place cube[0]` 까지 진행. (이후 5-DOF grasp IK 튜닝은 별개 — §PATH_E 6.)
+
+---
+
+## (PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace (gripper 포함)
+
+### 현상
+
+cuMotion 이 task-space goal 을 받자마자 모든 계획 실패. 팔이 전혀 안 움직인다.
+
+### 오류 메시지
+
+```
+[cumotion_planner] Trajectory optimization to pose failed (trajopt: INVALID_INITIAL_CSPACE_POSITION)
+Invalid c-space position: Number of c-space coordinates in 'cspace_position' [6] must equal
+  the number of c-space coordinates of the robot [5].
+Failed call to 'planToTaskSpaceTarget()': 'initial_cspace_position' [[0 0.07 0.07 0.01 0 1.4999]] is invalid.
+```
+
+### 원인
+
+MoveIt `MotionPlanRequest.start_state` 는 **전체 로봇 관절**(SO-101 = arm 5 + gripper, 마지막 1.4999=gripper)을
+담는다. cuMotion cspace 는 tool_frame(gripper_frame_link) 으로 가는 **kinematic chain 위 관절(5축)뿐**이다
+(gripper 는 분기 관절이라 XRDF cspace 에 넣어도 cuMotion 이 무시 — 구조적). cuMotion MoveIt 플러그인
+(`CumotionMoveGroupClient::updateGoal`)이 request 를 **무필터 전달**해 6관절 start_state 가 5축 cspace 와 어긋난다.
+**알려진 upstream 미해결 버그**([isaac_ros_cumotion#10](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion/issues/10),
+#53). XRDF/URDF config 로는 해결 불가(비-cspace joint 선언 메커니즘 없음, cspace 추가도 무시됨 — 3가지 시도 모두 실패).
+
+### 해결 방법
+
+플러그인을 패치해 updateGoal 이 start_state 를 **planning group(manipulator, 5축) active 관절로 필터링**하게 한다.
+`docker/patches/cumotion_moveit_filter_start_state.patch` (Dockerfile 이 isaac_ros_cumotion clone → patch apply →
+`isaac_ros_cumotion_moveit` 만 colcon build → `/opt/cumotion_overlay`, bashrc 에서 /opt/ros/jazzy 다음 source).
+핵심 로직: `getRobotModel()->getJointModelGroup(req.group_name)->getActiveJointModelNames()` 로 group 관절을 얻어
+`req.start_state.joint_state` 를 그 관절만 남기고 재구성. (gripper 는 cuMotion 계획에서 빠지고 `gripper_controller`
+action 으로 별개 제어 — 정합.)
+
+### 확인 방법
+
+clean run 에서 `INVALID_INITIAL_CSPACE_POSITION` 0건, cuMotion 로그의 `initial_cspace_position` 이 5개 값.
+※ stale cumotion 프로세스(과거 cspace=6 실험본)가 남으면 `[5] vs robot[6]` 역방향 에러가 섞이니 pkill 로 정리.
+※ 남은 과제(별개): cspace count 해결 후에도 5-DOF IK 미도달(`INVERSE_KINEMATICS_FAILURE`)은 grasp 자세 튜닝 영역(§PATH_E 6).

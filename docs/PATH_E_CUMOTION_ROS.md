@@ -47,7 +47,8 @@ Isaac Sim (run_cube_desk_ros_bridge.py)               ROS 2 그래프
 |---|---|
 | `scripts/sim/run_cube_desk_ros_bridge.py` | **(신규)** Isaac Sim standalone — 순수 `isaacsim.core.World`+`SingleArticulation` 로 cube_desk + SO-101 + ROS bridge OmniGraph + 물체 TF publish (B안) |
 | `scripts/sim/run_cube_desk_ros_bridge.sh` | **(신규)** 위 스크립트 런처 — LD_LIBRARY_PATH(번들 ROS 2 lib)·DDS env export |
-| `assets/robots/so101.xrdf` | **(신규)** cuMotion 용 collision sphere + c-space (tool_frame=gripper_frame_link) |
+| `assets/robots/so101.xrdf` | **(신규)** cuMotion 용 collision sphere + c-space 5축 (tool_frame=gripper_frame_link) |
+| `docker/patches/cumotion_moveit_filter_start_state.patch` | **(신규)** cuMotion MoveIt 플러그인 `updateGoal` 패치 — start_state 를 planning group 관절로 필터링(c-space 6vs5 해결). Dockerfile 이 적용·빌드 |
 | `scripts/sim/gen_so101_xrdf.py` | **(신규)** XRDF↔URDF 정합·FK/IK 검증 하니스 (curobo) |
 | `ros2_ws/src/so101_cumotion_moveit_config/` | **(신규)** cuMotion MoveIt config 패키지 (planner plugin yaml, MoveItPy config, launch) |
 | `ros2_ws/src/so101_cumotion_pick_place/` | **(신규)** SM 노드 패키지 (pick_place_sm.py, params, launch) |
@@ -145,8 +146,10 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 | 항목 | 메모 |
 |---|---|
 | **XRDF sphere** | `assets/robots/so101.xrdf` 의 sphere 반경/중심은 **근사 초기값**. Isaac Sim cuMotion *Robot Description Editor* 로 메시에 맞춰 튜닝 후 갱신. self-collision 오류 시 `ignore` 쌍·반경 조정 |
-| **5DOF grasp** | 완전 top-down 불가. SM 은 `set_from_ik` 에 tilt 후보(60°→±15°→0°)를 순차 시도해 첫 성공 자세로 cuMotion joint-space 계획. `grasp_tilt_deg` 로 조정 (`pick_place_params.yaml`) |
-| **cuMotion 실패 fallback** | SM 이 OMPL(`ompl_rrtc`)로 자동 재시도. plugin 클래스명/노드 파라미터는 설치된 isaac_ros_cumotion 버전 문서로 재확인 (`move_group_cumotion.launch.py` 주석) |
+| **cuMotion c-space 6vs5 (해결)** | MoveIt start_state 6관절(arm5+gripper) ≠ cuMotion cspace 5축 → `INVALID_INITIAL_CSPACE_POSITION`. upstream 버그(issue #10). `docker/patches/cumotion_moveit_filter_start_state.patch` 가 `updateGoal` 에서 start_state 를 planning group(5)으로 필터링. Dockerfile 이 `/opt/cumotion_overlay` 빌드. (TROUBLESHOOTING 참조) |
+| **5DOF grasp (남은 블로커)** | 완전 top-down 불가. SM `_move_to` = cuMotion **pose-goal + relaxed orientation**(`_grasp_constraints`: position tight + tool z 회전 자유, redundant DOF 해방). tilt 후보(60°→±15°→0°) 순차. **단 cspace 해결 후에도 cuMotion 5-DOF IK 미도달**(`INVERSE_KINEMATICS_FAILURE`) / position-only 시 start config invalid — grasp 자세·tolerance 추가 튜닝 또는 cuMotion native task-space tolerance 필요(미완, 이월). `pos_tol/ori_tol/yaw_free_tol`·`orient_mode`(진단) 로 조정 |
+| **cuMotion 실패 fallback** | SM 이 OMPL(`ompl_rrtc`)로 자동 재시도. cuMotion plugin = `isaac_ros_cumotion_moveit/CumotionPlanner`(검증됨), action server 정상 로드 |
+| **그리퍼 5-DOF 무관** | cuMotion 은 5축 팔만 계획(패치도 manipulator group 필터), 그리퍼 open/close 는 `gripper_controller`(ParallelGripperCommand action)로 별개 제어. tool z 회전 자유는 대칭 큐브엔 무해 |
 | **sim-time** | bridge `/clock` + 모든 ROS 노드 `use_sim_time:=true`. MoveIt 실행 timeout 여유 필요 |
 | **그릇 내부 미끄러움** | 큐브가 곡면 타고 바닥 중앙으로 정착(의도된 물리). `place_height`·`stack_increment` 로 낙하 충격 완화 |
 | **그리퍼 접촉 물리** | GRASP_PHYSICS 튜닝값(USD author, mass/contactOffset/friction) 유지. `gripper_dwell_s` 로 정착 |

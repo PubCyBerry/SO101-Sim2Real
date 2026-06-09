@@ -13,6 +13,41 @@
 
 ---
 
+## 작업 인계 (2026-06-09 — PATH E cuMotion pose-goal 전환 + c-space 6vs5 블로커 플러그인 패치로 해결)
+
+§5 통합(아래 인계) 후 사용자 지시로 **cuMotion pose-goal 방식** 진행. set_from_ik(pick_ik) IK 실패를
+우회하려 SM `_move_to` 를 cuMotion task-space goal 직접으로 바꿨고, 그 과정에서 **단일 핵심 블로커
+(c-space 6 vs 5)를 진단·패치로 해결**했다. 단 최종 pick-and-place 는 grasp IK 미도달로 미완(이월).
+
+- **커밋**: `a17d2aa`(pose-goal 전환+진단) → `71bcbdc`(플러그인 패치+relaxed orientation).
+- **🔑 핵심 블로커 진단·해결 (웹+MCP 조사로 확증)**:
+  - 증상: cuMotion 이 `INVALID_INITIAL_CSPACE_POSITION` (`cspace_position[6]` vs `robot[5]`)으로 모든 계획 실패.
+  - 원인: MoveIt `request.start_state` 는 전체 로봇 6관절(arm5+gripper)을 담는데 cuMotion cspace 는
+    tool_frame(gripper_frame_link) chain 위 **5축뿐**(gripper 분기 관절은 cspace 에 넣어도 무시 — 3회 확인).
+    cuMotion MoveIt 플러그인(`CumotionMoveGroupClient::updateGoal`)이 request 를 **무필터 전달** → 6 전달.
+  - 조사: **upstream [issue #10](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion/issues/10) 와 동일 버그**(open, NVIDIA fix 없음). XRDF 에 비-cspace joint 선언 메커니즘 없음(문서 확인). isaac-sim-mcp: cuMotion core 가 cspace 길이를 controlled joint 수로 엄격 검증.
+  - **해결(검증)**: `docker/patches/cumotion_moveit_filter_start_state.patch` — updateGoal 이 start_state.joint_state 를
+    planning group(manipulator,5) active 관절로 필터링. Dockerfile 이 clone+apply+build → `/opt/cumotion_overlay`.
+    → clean run 에서 INVALID_INITIAL_CSPACE **0건**, cspace_position 이 5개로 필터링, cuMotion 이 task-space IK 수행까지 진입.
+- **변경 파일**: `pick_place_sm.py`(_move_to → cuMotion pose-goal + `_grasp_constraints` relaxed orientation:
+  position tight + tool z 회전 자유로 5-DOF redundant DOF 해방. `orient_mode` 진단 토글) · `pick_place_params.yaml`
+  (pos_tol/ori_tol/yaw_free_tol) · `moveit_py_cumotion.yaml`(wait_for_initial_state_timeout 10→30, startup race) ·
+  `Dockerfile.cumotion_ros`(cumotion patch overlay) · `so101.xrdf`(cspace 제약 경위 주석).
+- **🔴 남은 블로커(grasp IK, 5-DOF)**: cspace count 는 해결됐으나 cuMotion 이 grasp 접근 자세 미도달 —
+  orientation 제약 시 `INVERSE_KINEMATICS_FAILURE`, position-only 시 start config(5개) "invalid"(관절한계/충돌 추정).
+  즉 5-DOF 가 down+tilt 접근을 그 위치에서 못 풀거나 cuMotion 이 MoveIt orientation tolerance 를 무시(exact 취급).
+  **다음 후보**: ① position-only 가 왜 start invalid 인지(관절한계/충돌/start-state 읽기) 규명 ② cuMotion native
+  task-space tolerance(plugin 의 task-space target orientation tolerance) ③ grasp 자세/approach_height 재설계
+  ④ 도달 가능 워크스페이스 확인(FK 스윕). grasp 작동(open/close)은 5-DOF 무관(gripper_controller action 별개).
+- **그리퍼 5-DOF 확인(사용자 질문)**: cuMotion 은 5축(팔)만 계획, 그리퍼는 `gripper_controller`(ParallelGripperCommand
+  action)로 별개 제어 → 패치도 start_state 를 manipulator group(gripper 제외)으로 필터링하므로 정합. tool z 회전
+  자유는 2.5cm 큐브엔 무해(대칭). 길쭉한 물체면 jaw 정렬 문제.
+- **실행 환경**: 영속 컨테이너 `so101_ros`(현재 살아있음, 정리 필요) + bridge(host). 컨테이너 내 overlay:
+  `/tmp/tbc_ws`(topic_based), `/tmp/cu_ws`(패치된 cumotion_moveit). **이미지 재빌드 시 Dockerfile 이 두 overlay 영구화** →
+  다음 세션엔 `/tmp/*_ws` 수동 빌드 불요. source 순서: /opt/ros/jazzy → /build/install → tbc → cumotion overlay.
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E §5 4~6: ROS 스택 end-to-end 통합 ✅, 남은 건 5-DOF grasp IK)
 
 bridge 블로커 해소(아래 인계) 후 사용자 지시로 §5 4~6 진행. **`pick_place.launch.py` 전체 스택(bridge +
