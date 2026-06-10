@@ -61,21 +61,17 @@ def Xform "Scene"
             uniform token physxMaterial:frictionCombineMode = "max"
             uniform token physxMaterial:restitutionCombineMode = "min"
         }
-    }
 
-    def DomeLight "DomeLight"
-    {
-        color3f inputs:color = (0.9, 0.9, 0.9)
-        float inputs:intensity = 2000
-    }
-
-    def DistantLight "KeyLight"
-    {
-        float inputs:angle = 1
-        color3f inputs:color = (1, 0.98, 0.95)
-        float inputs:intensity = 1800
-        float3 xformOp:rotateXYZ = (-50, 0, -35)
-        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        def Material "CubeFriction" (
+            prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
+        )
+        {
+            float physics:dynamicFriction = 1.5
+            float physics:restitution = 0
+            float physics:staticFriction = 1.8
+            uniform token physxMaterial:frictionCombineMode = "average"
+            uniform token physxMaterial:restitutionCombineMode = "min"
+        }
     }
 
     def Cube "Ceiling" (
@@ -193,6 +189,15 @@ def Xform "Scene"
         float xformOp:rotateZ = 20
         double3 xformOp:translate = (1.7000000000000002, -0.44, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+
+        over "Box" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding:physics = </Scene/Looks/CubeFriction> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+        }
     }
 
     def Xform "Cube2" (
@@ -202,6 +207,15 @@ def Xform "Scene"
         float xformOp:rotateZ = -35
         double3 xformOp:translate = (1.9800000000000002, -0.46, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+
+        over "Box" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding:physics = </Scene/Looks/CubeFriction> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+        }
     }
 
     def Xform "Cube3" (
@@ -211,6 +225,15 @@ def Xform "Scene"
         float xformOp:rotateZ = 50
         double3 xformOp:translate = (1.7400000000000002, -0.35, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+
+        over "Box" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding:physics = </Scene/Looks/CubeFriction> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+        }
     }
 
     def Xform "Cube4" (
@@ -220,6 +243,15 @@ def Xform "Scene"
         float xformOp:rotateZ = -20
         double3 xformOp:translate = (1.9300000000000002, -0.38, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+
+        over "Box" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding:physics = </Scene/Looks/CubeFriction> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+        }
     }
 }
 

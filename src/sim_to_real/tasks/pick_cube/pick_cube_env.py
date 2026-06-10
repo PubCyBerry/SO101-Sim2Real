@@ -18,7 +18,7 @@ import torch
 
 from isaaclab.envs import ManagerBasedRLEnv
 
-from sim_to_real.utils.constant import CUBE_NAMES
+from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim
 
 
@@ -33,6 +33,37 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._bootstrap_prob = float(getattr(cfg, "grasp_bootstrap_prob", 0.0))
         self._bootstrap_close = float(getattr(cfg, "grasp_bootstrap_close", -0.05))
         self._bootstrap_lift = float(getattr(cfg, "grasp_bootstrap_lift", 0.0))
+        # annealing: prob 를 initial→final 로 선형 감쇠(common_step_counter 기준).
+        # anneal_steps<=0 이면 감쇠 없음(prob 고정).
+        self._bootstrap_prob_final = float(getattr(cfg, "grasp_bootstrap_prob_final", self._bootstrap_prob))
+        self._bootstrap_anneal_steps = float(getattr(cfg, "grasp_bootstrap_anneal_steps", 0.0))
+        # graded backward curriculum: 부트스트랩 env 중 pre-grasp(열린 그리퍼가 책상 위
+        # 큐브 바로 위에 hover) 비율. anneal 진행도 p 로 0→1 ramp — 초반엔 full-grasp 로
+        # 하류를 가르치고, 후반엔 pre-grasp 로 '실제 grasp 행동'을 가르친다.
+        self._bootstrap_pregrasp_open = float(getattr(cfg, "grasp_bootstrap_pregrasp_open", 0.90))
+        self._bootstrap_rest_z = float(getattr(cfg, "grasp_bootstrap_rest_z", 0.726))
+        # pre-grasp 비율 오버라이드(>=0 이면 anneal p 대신 이 고정값 사용). 모니터가 세 가지
+        # 시작조건(scratch/full/pre)을 동시에 측정할 때 사용. -1=anneal p(학습 기본).
+        self._bootstrap_pregrasp_frac = float(getattr(cfg, "grasp_bootstrap_pregrasp_frac", -1.0))
+        # env별 현재 에피소드 부트스트랩 여부(모니터의 scratch/bootstrap 단계별 집계용).
+        # 0=scratch(정상 시작), 1=full-grasp, 2=pre-grasp.
+        self.bootstrap_kind = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        # 그릇(동적 rigid body) 초기 pose — 교란 패널티(bowl_disturb)의 기준.
+        # reset(randomize_bowl) 직후 값을 "교란 안 된 상태"로 저장 → reward 가 현재 pose 와
+        # 비교해 tilt(엎힘)·xy 변위를 패널티화. 운반·place 중 그릇을 밀치거나 엎는 것 억제.
+        self._bowl_init_quat = torch.zeros(self.num_envs, 4, device=self.device)
+        self._bowl_init_quat[:, 0] = 1.0
+        self._bowl_init_xy = torch.zeros(self.num_envs, 2, device=self.device)
+
+    def _anneal_progress(self) -> float:
+        """학습 진행도 p∈[0,1] (common_step_counter / anneal_steps). 감쇠 없으면 0."""
+        if self._bootstrap_anneal_steps <= 0.0:
+            return 0.0
+        return float(min(1.0, max(0.0, self.common_step_counter / self._bootstrap_anneal_steps)))
+
+    def _current_bootstrap_prob(self, p: float) -> float:
+        return self._bootstrap_prob * (1.0 - p) + self._bootstrap_prob_final * p
 
     def _cache_grasp_geom(self) -> None:
         robot = self.scene["robot"]
@@ -48,35 +79,72 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._gripper_jid = list(robot.data.joint_names).index("gripper")
 
     def _bootstrap_grasp(self, env_ids: torch.Tensor) -> None:
-        """env_ids 중 일부를 '큐브 잡힌 상태'로 초기화."""
-        if self._grasp_offset is None or self._bootstrap_prob <= 0.0 or len(env_ids) == 0:
+        """env_ids 중 일부를 grasp 부트스트랩 상태(full-grasp 또는 pre-grasp)로 초기화.
+
+        annealing: 진행도 p 에 따라 부트스트랩 prob 감쇠 + pre-grasp 비율 0→1 ramp.
+          - full-grasp: 큐브를 grasp point(3D)에 두고 그리퍼 닫음 → 하류(lift~success) 학습.
+          - pre-grasp : 큐브를 grasp point XY·책상 높이에 두고 그리퍼 open → '실제 grasp
+            행동(하강+닫기)'을 align 보상과 함께 학습. grasp 갭을 단계적으로 메움.
+        """
+        if self._grasp_offset is None or len(env_ids) == 0:
+            return
+        p = self._anneal_progress()
+        prob = self._current_bootstrap_prob(p)
+        if prob <= 0.0:
             return
         device = self.device
-        mask = torch.rand(len(env_ids), device=device) < self._bootstrap_prob
+        mask = torch.rand(len(env_ids), device=device) < prob
         sel = env_ids[mask]
         if len(sel) == 0:
             return
+        # 선택된 env 를 pre-grasp / full-grasp 로 분할 (pre-grasp 비율 = override 또는 anneal p)
+        pre_frac = self._bootstrap_pregrasp_frac if self._bootstrap_pregrasp_frac >= 0.0 else p
+        is_pre = torch.rand(len(sel), device=device) < pre_frac
         robot = self.scene["robot"]
-        # 활성 큐브 1개(stage 별 첫 큐브)를 gr리퍼 grasp point 로 텔레포트
-        cube = self.scene[CUBE_NAMES[0]]
-        offset = self._grasp_offset.clone()
-        offset[2] += self._bootstrap_lift  # 책상 위로 살짝 들어올린 높이에 배치
-        pos = self.scene.env_origins[sel] + offset.unsqueeze(0)
+        cube = self.scene[CUBE_NAMES[0]]  # 활성 큐브 1개(stage 별 첫 큐브)
+        origins = self.scene.env_origins[sel]
         quat = torch.zeros(len(sel), 4, device=device); quat[:, 0] = 1.0
+
+        # 큐브 위치: full-grasp=grasp point(+lift), pre-grasp=grasp XY·책상 높이
+        offset = self._grasp_offset.unsqueeze(0).expand(len(sel), -1).clone()  # (M,3)
+        offset[:, 2] += self._bootstrap_lift
+        pre_off = offset.clone()
+        pre_off[:, 2] = self._bootstrap_rest_z  # 책상 위 resting 높이로 대체
+        cube_off = torch.where(is_pre.unsqueeze(-1), pre_off, offset)
+        pos = origins + cube_off
         cube.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=sel)
         cube.write_root_velocity_to_sim(torch.zeros(len(sel), 6, device=device), env_ids=sel)
-        # 그리퍼 joint 를 닫힘 각으로 (큐브를 문 상태)
-        jpos = robot.data.joint_pos[sel, self._gripper_jid].clone()
-        jpos[:] = self._bootstrap_close
+
+        # 그리퍼 joint: full-grasp=닫힘각, pre-grasp=열림(큐브 받아들일 자세)
+        jpos = torch.where(
+            is_pre,
+            torch.full((len(sel),), self._bootstrap_pregrasp_open, device=device),
+            torch.full((len(sel),), self._bootstrap_close, device=device),
+        )
         robot.write_joint_position_to_sim(
             jpos.unsqueeze(-1), joint_ids=[self._gripper_jid], env_ids=sel
+        )
+        # 부트스트랩 종류 기록(모니터 집계용): pre-grasp=2, full-grasp=1
+        self.bootstrap_kind[sel] = torch.where(
+            is_pre,
+            torch.full((len(sel),), 2, device=device, dtype=torch.long),
+            torch.full((len(sel),), 1, device=device, dtype=torch.long),
         )
 
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
+        # 리셋되는 env 는 일단 scratch(0)로 초기화 — _bootstrap_grasp 가 선택된 env 만 1/2 로.
+        self.bootstrap_kind[env_ids] = 0
         # offset 은 step() 에서 1회 캐시(첫 init reset 때는 body_pos_w 미확정일 수 있어
         # 캐시 전이면 부트스트랩 skip — _bootstrap_grasp 내부 가드).
         self._bootstrap_grasp(env_ids)
+        # 그릇 초기 pose 저장(super()._reset_idx 안에서 randomize_bowl 이 적용된 직후).
+        # 교란 패널티의 기준점. env-origin 무관(방향=quat, 변위=env-local xy).
+        bowl = self.scene[BOWL_NAME]
+        self._bowl_init_quat[env_ids] = bowl.data.root_quat_w[env_ids].clone()
+        self._bowl_init_xy[env_ids] = (
+            bowl.data.root_pos_w[env_ids, :2] - self.scene.env_origins[env_ids, :2]
+        ).clone()
 
     def step(self, action):
         if self._grasp_offset is None:

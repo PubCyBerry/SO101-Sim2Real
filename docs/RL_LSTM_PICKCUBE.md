@@ -138,6 +138,67 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
   - **탐색**: **RND**(Random Network Distillation) 추가 — 내재 보상으로 grasp 탐색 벽 공략. `--rnd`(rnd_state=rl_policy 자동, weight 0.5 linear 감쇠, state/reward norm on).
 - 정책 검토 메모: 거의 완전관측 상태라 MLP도 경쟁력 있음(LSTM은 요구사항이라 유지); student-teacher 증류는 sim2real 로드맵; symmetry 부적합.
 
+### T15. grasp 물리 sanity — 30/40mm 양쪽 가능 확정, D 전제 반증
+- `grasp_feasibility.py`로 Cube1(30mm)·Cube3(40mm) 검증: **둘 다 held_and_lifted 1.0**.
+- close_target -0.15/0.0/0.10(gripper joint 0.05/0.20/0.30) **전 구간 hold 1.0** — 일단 seated 되면 do-nothing(offset 0.20)에서도 안 놓침.
+- 결론: grasp 막힘은 물리/hold 아님. **gripper offset/range 변경 불필요**(D 원래 전제 반증). arm action scale 축소도 기각(scale 1.0=±1rad 범위라 줄이면 reach 불가, reach 보상 현재 작동). 정밀도 레버는 obs+정렬 보상으로 이동.
+
+### T16. obs 충분성 — 방향·크기 누락 식별 → 64→83dim 확장
+- 진단: rl_state 64dim이 전부 위치+선속도. **큐브 yaw 없음**(평행 jaw 정렬 불가), **EE 방향 없음**, **큐브 크기 없음**(30/40mm 2종인데 벌림 폭 매칭 불가). 모서리 좌표·크기 절대값은 중복(center+yaw+크기로 유도) → 제외.
+- 수정: `rl_state(include_orientation=True, pen_half_extents=(.015,.015,.020,.020))` — pen yaw sin/cos(8)+half-extent(4)+ee quat(4)+grasp→cup(3) = **+19 → 83dim**. LSTM input 83 확인.
+
+### T17. grasp 점화 직격 — 정렬 보상 + graded 부트스트랩 annealing
+- **탐색 valley 진단**: reach(0.30m, 거침)→정렬→닫기→lift 사이, "열린 채 정렬됐는데 닫는 순간 align의 open조건도 깨지고 lift도 아직 0"인 무보상 구간이 grasp 탐색 벽.
+- **`grasp_align_reward`(신규, weight 3.0)**: 열린 그리퍼 grasp point를 미배치 큐브에 정밀 3D 정렬(xy×z×open_frac, lift 게이트 없음). open_frac 항이 "닫은 채 근접"(camping) 제외 → pregrasp local optimum 회피. pregrasp weight 0.5→0.2 축소(open/close 상충).
+- **graded 부트스트랩 annealing**(`PickCubeEnv`): prob 0.75→0 선형 감쇠(`common_step_counter` 기준) + 부트스트랩 env를 full-grasp↔pre-grasp(열린 그리퍼가 책상 위 큐브 바로 위 hover)로 분할, pre-grasp 비율 진행도 p로 0→1 ramp. 초반=하류 학습, 후반=실제 grasp 행동 학습. 정상-env grasp 학습 압력 생성(고정 0.75의 핵심 결함 해소).
+- 접촉(ContactSensor) 기반 grasp는 폴백으로 보류(USD/센서 리스크) — 정렬+annealing으로 grasp 안 켜지면 도입.
+
+### T18. RND 부분공간 명시 + 비활성 큐브 마스킹
+- `obs_groups`에 `rnd_state` 명시(미지정 경고 제거, `--rnd_state_group`). 단일 큐브 스테이지에선 `rl_state(num_active=1)`로 비활성 큐브(위치·상대·속도·yaw·크기) 0 마스킹 → distractor 제거 + RND novelty 활성 큐브 집중.
+
+### T19. align local-optimum 진단 → close-bridge 보상(개입 A, resume 적용)
+- 추이(grasp_v2): iter 250~500 **scratch reach 1.0 / grasp·lift·success 0** 고착. 학습 로그 `grasp_align_cube` 0→1.78(최대 보상항). **정렬은 완벽히 학습됐으나 grasp(닫고 들기) 미점화** = align 자체가 새 local optimum("열린 그리퍼로 큐브 위 hover 캠핑"). 닫으면 align(open_frac)이 깎이는데 guided_lift는 lift 전까지 0 → **align→lift 보상 valley**를 못 넘음. pre-grasp(hover) 부트스트랩도 같은 캠프로 빠짐(monitor pre_grasp grasp 0).
+- model_500 baseline(monitor): scratch reach 1.0 / grasp 0 / lift 0 / success 0 (iter450 lift 0.069는 노이즈, 안 이어짐).
+- **개입 A**(grasp_v2 model_500 → grasp_v3 resume, 정책 보존):
+  - **`grasp_close_reward`(신규, weight 2.5)**: grasp point가 큐브에 정밀 정렬된 채 **닫는 행동**을 보상(align의 거울: closed_frac). lift 게이트 없음 → 열림→닫힘으로 갈 때 align↓·close↑로 연속 그래디언트 = valley 제거.
+  - **grasp_align weight 3→1.5**: hover 캠프 매력 축소.
+  - resume: `--resume_checkpoint model_500.pt`, bootstrap 0.5/anneal 500, iteration 500→2000. 결과: align 0.78 복귀(정책 로드 확인), **`grasp_close_cube` 0.0025→0.015 성장**(close 학습 시작), grasp_cube 깜빡임.
+  - 정체 시 다음 레버: close weight↑ / align 추가↓ / pre-grasp를 반쯤 닫힌 상태로 시작.
+
+### T20. 비활성 큐브 물리 비활성화
+- 단일 큐브 스테이지인데 Cube2~4가 scatter돼 작업공간에 물리·시각적으로 존재(distractor). `randomize_cubes_scattered(num_active=N)`로 앞 N개만 배치, 나머지는 **지면 아래(z=-1.0)로 치워 비활성화**(낙하해 작업공간 이탈). 커리큘럼 `active_objects`와 연동(`apply_curriculum`이 scatter·obs 양쪽에 주입).
+
+### T21. align-camp 미돌파 → 전체 개입 묶음 + fresh 재시작(grasp_v4, claude-fable-5 검토 반영)
+- grasp_v3(resume) 진단: model_500 baseline scratch grasp/lift/success=0 (align-camp 고착, iter450 lift 0.069는 노이즈). resume의 close-bridge로도 캠프 탈출 불확실 → **claude-fable-5 설계 검토** 후 **fresh 재시작**(이미 굳은 캠프를 물려받지 않는 게 더 깨끗).
+- 적용 묶음(grasp_v4):
+  - **보상 rebalance**: grasp_align 1.5→**1.0**, grasp_close 2.5→**3.0** → open→closed 보상 합이 단조 증가(닫을수록 이득) = valley 제거의 1차 메커니즘.
+  - **`grasp_contact_reward`(신규 2.0, ContactSensor)**: jaw·gripper 두 손가락이 같은 큐브에 물리 접촉 시 보상(`force_matrix_w`). 기하 proxy보다 직접적 grasp 신호. 로봇 spawn `activate_contact_sensors=True` + jaw/gripper 센서(큐브 필터). 필터 목록은 모듈 상수(클래스 속성이면 InteractiveScene이 asset 오인).
+  - **그리퍼 slew 5→2.5 rad/s**(pick_cube 전용 dict override): 닫을 때 명령속도↓로 큐브 안 튕김 → 정렬 유지(valley 실원인 완화). 공유 상수 불변.
+  - **pre-grasp open 0.90→0.65**: 너무 벌린 부트스트랩 시작이 "닫기 마무리" 학습 방해 → 큐브 받아들일 최소폭.
+  - **RND를 grasp_focus(30dim) 부분공간으로**: 전체 83dim novelty가 reach 후 무관 noise 추구하는 것 방지. `grasp_focus_state`(joint pos/vel+grasp point+gripper+active cube pos/vel/rel/yaw). `--rnd_state_group grasp_focus`.
+  - **batch**: num_steps_per_env 48→24, epochs 8→10, mini_batches 4→8(미세탐색 density↑). bootstrap anneal 800→1000.
+  - 검토 메모: transition/aperture 보상은 contact가 직접신호라 중복·충돌 위험으로 제외. arm scale↓는 reach 깨져 기각. **단일 큐브 목표 eval≥0.80**(4큐브 산술벽 대비 현실 기준).
+  - 판정 leading: scratch.grasp/lift 점화 + 학습 로그 grasp_contact/grasp_close 성장. 미점화 시 다음 레버: contact weight↑·force_threshold↓·pre-grasp 더 닫기.
+
+### T22. ✅ grasp 점화 돌파 완전 확정 (v4) — 탐색 벽 넘음
+- **결과(cron 30분 점검 추이, scratch)**: grasp 0.107(model_150)→0.30→0.53→0.52→**0.84**(650)→0.71(750). lift 0.18→**0.81**. over_bowl 0.07→0.71. v1~v3 전 구간 **scratch.grasp ≡ 0**(align hover local-optimum)이던 탐색 벽을 v4가 안정적으로 넘음.
+- **효과 확인된 v4 개입**: `grasp_contact_reward`(ContactSensor 양손가락) + `grasp_close_reward`(close-bridge 3.0) + 그리퍼 slew 2.5 + RND grasp_focus(30dim) + 보상 rebalance(align 1.0/close 3.0).
+- **monitor_eval 집계 버그 수정**: `placed=0`인데 `success>0` 모순 발견. 원인 = `ever[stage] |= flag & ~done_mask` 게이트가 success termination(=done) step의 placed/over_bowl 누적을 제외. 성공은 정의상 모든 선행 단계 통과 → 카운트 시 함의 처리(단조성 보장: success⊆placed⊆over_bowl). `monitor_eval.py` 수정.
+
+### T23. ⏳ place/release valley 개입 (v5, fresh) — 그릇 위 떨구기 + 그릇 교란 패널티
+- **진단(v4 정체)**: grasp 해결 후 병목이 **place**로 이동. scratch `over_bowl 0.71 → placed 0.23`. 영상 관찰: 큐브를 그릇 위로 가져가도 **그리퍼를 안 연다(떨구질 못함)**. 추가로 운반/place 중 **그릇을 밀치거나 엎는** 경우 관찰.
+- **원인**:
+  1. **release valley**: 잡은 채 그릇 위 hover = carry(8)+transport(8)+place_height(≤30)+insert(80, 그리퍼 무관)을 계속 받음. 그리퍼를 여는 순간 carry/place_height 즉시 끊기고 큐브가 튈 리스크 → "여는 행위"의 기대값이 "잡고 버티기"보다 낮은 local optimum(grasp 때 align-hover와 동형).
+  2. **gripper offset 0.20**(do-nothing=닫힘) → open(>0.6)은 능동적 큰 +action 필요, LSTM은 grasp 유지로 닫는 쪽 바이어스.
+  3. **그릇이 동적 rigid body인데 obs에 그릇 center(3)만 있고 자세(quat) 없음** → 정책이 엎은 걸 관측조차 못 함(부분관측). 참고: success termination(`task_done`)은 `require_open=False` — 그리퍼 안 열어도 큐브가 그릇 안에 들어가면 성공. 즉 엄밀히 "release 실패"가 아니라 "그릇 안에 안정적으로 넣기" 병목.
+- **개입(v5, fresh 재시작 — obs 차원 변경으로 v4 ckpt 비호환)**:
+  - **그릇 quat obs**(`rl_state include_container_orientation`): cup quat wxyz +4 → **83→87dim**. 동적 그릇 tilt/엎힘 관측(부분관측 해소).
+  - **`over_bowl_drop_reward`(신규, weight 12)**: 들린 큐브가 그릇 XY 위일 때 그리퍼 open_frac을 dense 보상(inside 게이트 없음). carry/transport 잡고-버티기 탈출 → 그릇 위에서 손 펴 떨구기 유도. 바닥까지 안 내려도 됨(그릇 내부 미끄러워 위에서 떨궈도 중앙 정착, [[bowl-interior-slippery]]).
+  - **`bowl_disturb_penalty`(신규, weight -5)**: reset 직후 저장한 그릇 초기 pose(quat·xy) 기준 tilt(1-cosθ, 주신호)+xy변위(disp_coef 4) 패널티. `PickCubeEnv._reset_idx`가 randomize_bowl 직후 `_bowl_init_quat/_bowl_init_xy` 저장. weight 작게(과하면 그릇 근처 접근 회피).
+  - carry(8)는 부트스트랩 하류 학습에 중요해 유지 — drop(12)>carry(8)로 여는 게 이득이게 설계.
+- **나머지는 v4 그대로**: 16384env, gamma 0.997, RND grasp_focus, 부트스트랩 0.75→0(anneal 1000), batch 24/10/16, grasp 보상(align1/close3/contact2). run `lstm256_stage1_grasp_v5`, 로그 `train_grasp_v5.log`.
+- **판정**: scratch `placed`가 `over_bowl`을 따라 올라오는지(release valley 해소) + 그릇 엎힘 감소. scratch.success→0.80 = 단일 큐브 통과 → 커리큘럼 1→2.
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)
@@ -171,13 +232,12 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ---
 
-## 7. 현재 진행 (2026-06-10 세션, T14 묶음 적용 후)
+## 7. 현재 진행 (2026-06-10 세션, T21 fresh grasp_v4)
 
-- **학습 중**: run `lstm256_stage1_velrnd`, 로그 `train_velrnd.log`. stage-1, LSTM(256,1층)+PPO, **num_envs 8192**, bootstrap_prob 0.75/close -0.15, gripper offset 0.20, carry 8/guided_lift 10, entropy 0.02.
-- **T14 신규 적용**: obs **64dim(속도 포함)**, **gamma 0.997**, **RND on**(weight 0.5 linear 감쇠). RND 정상 동작(rnd_state=rl_policy, rnd loss 로깅), overflow 0.
-- 이전 boot075 eval **실성공률 0.0% 확정**(grasp 미점화). 이번 묶음으로 grasp 점화 시도.
-- 판정: `grasp_cube`>0 + **eval 실성공률 상승**(매시간 점검, 부트스트랩 없이)이 진짜 지표.
-- VRAM ~16-20GB(예산 32GB), patch overflow 0.
+- **학습 중**: run `lstm256_stage1_grasp_v4`, 로그 `train_grasp_v4.log`. **처음부터(fresh)**, stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 16384**(큐브 머티리얼 통합으로 64K 한도 회피 — TROUBLESHOOTING §materials), iter 0→1500, VRAM ~23GB, ~11s/iter.
+- **전체 개입 묶음(T15~T21)**: obs rl_policy **83dim**(방향·크기) + RND용 grasp_focus **30dim**, 보상 align **1.0**/close **3.0**/**contact 2.0**(ContactSensor)/guided_lift 10/carry 8/…, 그리퍼 slew **2.5**, pre-grasp open **0.65**, graded 부트스트랩 0.75→0(anneal 1000), 비활성 큐브 비활성화, batch num_steps24/epochs10/mini8, gamma 0.997.
+- 판정: **scratch.grasp/lift 점화**(monitor scratch 그룹) → **scratch.success ≥0.80** = 단일 큐브 통과 → 1→2→3→4 확장. (train 로그 success는 bootstrap-inflated, 진짜 지표 아님.)
+- 30분 모니터 루프(`monitor_eval.py`, 카메라=사용자 보정 고정뷰)가 scratch/full/pre 단계별 + 16-env 비디오 자동 생성. 상태: `/tmp/train_pid.txt`, `/tmp/lstm_monitor_state.txt`.
 
 ---
 
@@ -195,16 +255,19 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 | 항목 | 값 |
 |---|---|
 | 정책 | ActorCriticRecurrent, rnn_type lstm, hidden 256, layers 1, MLP [256,128], elu, obs_normalization on |
-| PPO | num_steps_per_env 48, learning_epochs 8, mini_batches 4, lr 3e-4(adaptive), entropy 0.02, **gamma 0.997**, lam .95, clip .2 |
-| **탐색(RND)** | `--rnd` weight 0.5(×step_dt) linear→0, num_outputs 64, predictor/target [256,128], state/reward norm on, rnd_state=rl_policy |
-| **관측 차원** | rl_policy **64dim**(속도 포함): joint_pos6+target6+gripper_pos3+cube12+bowl3+rel12+gripper1 +joint_vel6+ee_vel3+cube_vel12 |
-| num_envs | 8192 (VRAM 32GB 예산) |
+| PPO(v4) | num_steps_per_env **24**, learning_epochs **10**, mini_batches **16**(16384env서 ~24.5k/batch), lr 3e-4(adaptive), entropy 0.02, **gamma 0.997**, lam .95, clip .2 |
+| **탐색(RND)** | `--rnd` weight 0.5(×step_dt) linear→0, num_outputs 64, predictor/target [256,128], state/reward norm on, **rnd_state=grasp_focus(30dim 부분공간)** |
+| **관측 차원** | rl_policy **83dim**(속도+방향·크기): joint_pos6+target6+gripper_pos3+cube12+bowl3+rel12+gripper1 +joint_vel6+ee_vel3+cube_vel12 +cube_yaw8+half_extent4+ee_quat4+grasp→cup3. 단일 스테이지 비활성 큐브 0 마스킹(num_active) |
 | 속도 보상 | `time_penalty` weight -0.02(미완료 step당), `early_finish_bonus` weight 100(완료 시각 비례, 종료 1회) |
-| 단계 보상(T13 후) | reach 1, pregrasp 0.5(diff 0.045), **guided_lift 10**, grasp 1, **carry 8**, lift 2, transport 8, place_height 30, insert 80, release 10, task_success 200 |
-| 부트스트랩 | **prob 0.75**, close -0.15(held 0.94), grasp point=default 자세 jaw·gripper 중점 캐시 |
+| 단계 보상(T21/v4) | reach 1, **grasp_align 1.0**(열림+정밀), **grasp_close 3.0**(닫힘+정밀, close>align→단조), **grasp_contact 2.0**(ContactSensor 양손가락 접촉), pregrasp 0.2, **guided_lift 10**, grasp 1, **carry 8**, lift 2, transport 8, place_height 30, insert 80, release 10, task_success 200 |
+| 그리퍼 slew | pick_cube 전용 dict: arm 5.0, **gripper 2.5 rad/s**(부드러운 닫기). 공유 상수 불변 |
+| 부트스트랩 | prob 0.75→0 annealing(v4 anneal_iters **1000**), graded full↔pre-grasp(p ramp), **pre-grasp open 0.65**, close -0.15, grasp point=default 자세 캐시 |
+| batch(v4) | num_steps_per_env **24**, learning_epochs **10**, mini_batches **8** |
+| 비활성 큐브 | `num_active`=active_objects, 비활성 큐브 지면 아래(z=-1.0) 비활성화(T20) |
 | gripper | **init/offset 0.20**(do-nothing 닫힘쪽 유지로 잡은 큐브 안 놓침, open 1.20 까지), open>0.6 / close<0.5(<0.26 강) |
 | 큐브 DR | scatter x[1.60,2.08] y[-0.47,-0.33] yaw±30°(도달 검증 max 0.333m<0.44), 마찰/질량 startup DR, rl_state GaussianNoise σ0.005 |
-| GPU 버퍼 | gpu_max_rigid_patch_count 10·2¹⁶, aggregate 512k, collision_stack 2²⁸ |
+| GPU 버퍼(16384) | gpu_max_rigid_patch_count 16·2¹⁶, aggregate 1M, collision_stack 2²⁹ |
+| num_envs | **16384**(VRAM ~23GB). 큐브 4개 CubeFriction→공유 1개로 env당 물리 머티리얼 6→3, PhysX 64K 한도 회피(TROUBLESHOOTING). 8192 초과 불가였던 원인 |
 | viewer(영상) | eye (1.90,0.95,0.98) lookat (1.85,-0.32,0.76) res 1280×720 |
 | 금지선 | container_radius_scale 1.0 고정, grasp weld 없음 |
 
@@ -212,11 +275,28 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ## 10. 모니터링 / 상태 파일
 
-- 학습 로그: `train_boot.log`(또는 최신 `train_*.log`).
+- 학습 로그: 최신 `train_grasp_v2.log`(또는 `train_*.log`).
 - 상태 파일: `/tmp/train_pid.txt`(TRAIN_PID), `/tmp/lstm_stage.txt`(현재 활성 큐브 수), `/tmp/lstm_monitor_state.txt`(마지막 평가 체크포인트 index).
-- 체크포인트/영상: `outputs/rl/rsl_rl/lstm_ppo_pickcube/<run>/` (`model_*.pt`, `videos/eval/*.mp4`).
-- 매시간 자동 점검: 생존확인 → 진행 grep → 새 체크포인트 eval(성공률 128env + 영상 1env) → ≥0.90 시 커리큘럼 확장.
-- 실시간 모니터: success 30% 돌파 / 정상-env grasp 본격화 / 크래시 알림.
+- 체크포인트/영상: `outputs/rl/rsl_rl/lstm_ppo_pickcube/<run>/` (`model_*.pt`, `videos/monitor/*.mp4`).
+
+### `monitor_eval.py` — 단계별(env-type별) 성공률 + 그리드 비디오 (30분 주기)
+- scratch(정상시작=진짜 실력) / full-grasp / pre-grasp 부트스트랩을 **따로 집계**. 단계: reach→grasp→lift→over_bowl→placed→success.
+- 16-env 그리드를 한 화면에 담아 녹화(`video_length` step). **multi-env 과노출 근본 해결**: 광원을 scene.usd(per-env 복제)에서 빼고 `PickCubeSceneCfg`가 `/World/Light`(dome)·`/World/KeyLight`(distant)에 단일 author → env 수 무관 복제 안 됨(IsaacLab #4340). 모니터는 추가로 광원 개수 정규화(혹시 복제본 있으면 1/k) + **천장(`/Scene/Ceiling`) 비가시화**(부감 시 책상 가림 방지) + 실제 큐브 world 좌표로 oblique 카메라 자동 프레이밍.
+- `--force_kind {1,2}`: 전부 full/pre-grasp 강제 시작 데모(grasp_offset 캐시 후 전체 강제 reset → step0부터 해당 상태 녹화). 0=혼합(scratch/full/pre).
+- 첫 에피소드는 `_grasp_offset` 미캐시라 전부 scratch → bootstrap 그룹은 2번째+ 에피소드에서 채워짐(num_episodes 넉넉히).
+- 카메라 CLI: `--cam_side`(±좌우)·`--cam_back`(거리)·`--cam_height`(높이)·`--cam_look`(고개) — 그리드 span 배수.
+- **`--gui`**: Isaac Sim GUI 로 추론 실행(headless 해제, 녹화·집계 없음). 뷰포트에서 직접 카메라 이동(Alt+좌클릭 회전 / Alt+중클릭 pan / 스크롤 줌), 5초마다 현재 카메라 eye/target 을 set_camera_view 형식으로 콘솔 출력 → 원하는 뷰 값 확보용. (DISPLAY 있는 세션에서 실행.)
+- 표준 호출:
+  ```bash
+  D=$(ls -td outputs/rl/rsl_rl/lstm_ppo_pickcube/*grasp_v2 | head -1)
+  OMNI_KIT_ACCEPT_EULA=YES PYTHONPATH=$(pwd)/src $ROOT/.venv/bin/python \
+    scripts/reinforcement_learning/monitor_eval.py --recurrent --rnn_hidden_dim 256 \
+    --rnn_num_layers 1 --obs_normalization --checkpoint "$D/model_<N>.pt" \
+    --num_envs 16 --num_episodes 48 --max_steps 5000 --active_objects 1 \
+    --bootstrap_prob 0.6 --pregrasp_frac 0.5 --video --video_length 450 --device cuda:0
+  ```
+- **판정 지표**: `scratch.grasp`>0 점화(annealing 후반 핵심), `scratch.success` 추이(→0.90 = 단일 큐브 통과). full/pre_grasp 는 하류·grasp-행동 역량 진단.
+- `eval.py`(부트스트랩 0, 단일 success_rate 만): 최종 합격 판정용.
 
 ---
 

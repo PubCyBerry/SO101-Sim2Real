@@ -2695,6 +2695,54 @@ AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 
 
 `nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.
 
+## Isaac Lab 대규모 num_envs 에서 PhysX 물리 머티리얼 64K 한도 초과 (createMaterial limit)
+
+### 현상
+
+PickCube 를 num_envs 12288/16384 로 올리면 씬 init 중 PhysX 에러 후 학습이 진행되지 않고 멈춘다(VRAM 은 충분히 남음 — VRAM 문제 아님). 8192 는 정상.
+
+### 오류 메시지
+
+```
+[Error] [omni.physx.plugin] PhysX error: PxPhysics::createMaterial: limit of 64K materials reached.,
+  FILE .../physx/src/NpPhysics.cpp, LINE 637
+```
+
+### 원인
+
+PhysX 는 **distinct 물리 머티리얼 64,000 개** 하드 한도가 있다(IsaacLab #941/#2494). InteractiveScene 이 env 를 복제할 때 **각 env 가 물리 머티리얼을 자기 사본으로 생성**한다(static scene + per-object 머티리얼은 physics replication 으로 공유되지 않음). PickCube 는 env 당 물리 머티리얼이 **6개**였다:
+
+- `CubeFriction` ×4 — 큐브 4개가 **각자 자기 USD 안에** CubeFriction 보유(`/Scene/CubeN/Looks/CubeFriction`)
+- `BowlFriction` ×1, `DeskFriction` ×1
+- (로봇 머티리얼 3개는 **visual** 이라 `createMaterial`(물리) 카운트에 무관)
+- (material DR `randomize_rigid_body_material` 은 `num_buckets` 로 풀링 → 256개 1회 생성, env 마다 복제 아님 → 주범 아님)
+
+`8192×6=49K`(통과) → `12288×6=74K`/`16384×6=98K`(초과). 한도가 VRAM 이 아니라 **env 당 머티리얼 수 × num_envs** 라, 8192 부근이 상한이었다.
+
+### 해결 방법
+
+**값이 동일한 머티리얼 인스턴스를 1개로 공유**한다(maintainer 권고: per-object 머티리얼 제거/공유). 4개 큐브가 동일 `FRICTION_CUBE` 값이므로 인스턴스만 4→1 로 합쳐 env 당 6→3 개로 줄였다(`16384×3=49K` 통과, 물리값 불변).
+
+`scripts/environments/author_pick_cube_scene.py`:
+
+1. **큐브 USD 에서 per-cube `CubeFriction` 제거** — `author_cube()` 에서 `_physics_material(... "CubeFriction" ...)` 생성과 collider `_bind_physics` 삭제(큐브 USD 는 물리 머티리얼 0개).
+2. **scene.usd 에 공유 `CubeFriction` 1개 author + over-bind** — `author_scene()` 에서 `/Scene/Looks/CubeFriction` 1개 생성, 큐브 payload 참조 직후 `stage.OverridePrim("/Scene/{name}/Box")` 로 collider 에 over-bind(`materialPurpose="physics"`).
+3. **재author**: `OMNI_KIT_ACCEPT_EULA=YES PYTHONPATH=$(pwd)/src $ROOT/.venv/bin/python scripts/environments/author_pick_cube_scene.py` (scene + 큐브 USD 재생성).
+4. 16384 env 대비 PhysX 버퍼도 상향: `pick_cube_env_cfg.py` `gpu_max_rigid_patch_count 16·2¹⁶`, `gpu_total_aggregate_pairs_capacity 1M`, `gpu_collision_stack_size 2²⁹`.
+
+> 부수효과(허용): 큐브 friction DR(`randomize_object_material`)이 4큐브 공유 머티리얼을 쓰게 되어 per-cube friction 다양성이 사라진다(env 단위 다양성은 유지). 동일 조명 복제 이슈(`/World` 단일 광원)와 같은 계열의 "env 복제 시 공유" 문제다.
+
+### 확인 방법
+
+```bash
+# 재author 후 큐브 USD 에 물리 머티리얼 0개, scene.usd 에 3개(Desk/Cube/Bowl)인지
+.venv/bin/python -c "from pxr import Usd,UsdPhysics; \
+  [print(p, [x.GetPath() for x in Usd.Stage.Open(p).Traverse() if x.HasAPI(UsdPhysics.MaterialAPI)]) \
+   for p in ['assets/scenes/cube_desk/scene.usd','assets/scenes/cube_desk/objects/Cube1/Cube1.usd']]"
+```
+
+스모크 학습(`--num_envs 16384 --max_iterations 2`)이 `64K materials` 에러 없이 `Learning iteration` 까지 도달하면 OK. VRAM ~23GB(예산 32GB 내).
+
 ## Windows Isaac Sim 에서 ROS2/OmniGraph 확장 런타임 enable 시 RTX 그래픽 재초기화 크래시
 
 ### 현상

@@ -172,6 +172,7 @@ def _randomize_cubes_scattered_fn(
     min_cube_sep: float,
     min_bowl_sep: float,
     max_attempts: int,
+    num_active: int | None = None,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -202,9 +203,22 @@ def _randomize_cubes_scattered_fn(
     min_bowl_sep_sq = min_bowl_sep ** 2
     min_cube_sep_sq = min_cube_sep ** 2
 
-    for cube_cfg in cube_cfgs:
+    n_active = len(cube_cfgs) if num_active is None else max(1, min(len(cube_cfgs), int(num_active)))
+
+    for cube_idx, cube_cfg in enumerate(cube_cfgs):
         asset: RigidObject = env.scene[cube_cfg.name]
         default = asset.data.default_root_state[env_ids].clone()  # (n, 13)
+
+        # 비활성 큐브(stage 에서 안 쓰는 큐브): 지면 아래로 치워 비활성화
+        # (작업공간·시야·물리 간섭 제거). 떨어져 사라지며 obs 는 num_active 로 0 마스킹됨.
+        if cube_idx >= n_active:
+            park = default[:, :3].clone()
+            park[:, 2] = -1.0  # 지면(z=0) 아래로 → 낙하해 작업공간 이탈
+            park_pos = park + env.scene.env_origins[env_ids]
+            pose = torch.cat([park_pos, default[:, 3:7]], dim=-1)
+            asset.write_root_pose_to_sim(pose, env_ids=env_ids)
+            asset.write_root_velocity_to_sim(torch.zeros(n, 6, device=device), env_ids=env_ids)
+            continue
 
         # 최종 위치. 조건 충족 못한 env 는 default 좌표로 유지
         final_x = default[:, 0].clone()
@@ -286,8 +300,12 @@ def randomize_cubes_scattered(
     min_cube_sep: float = 0.10,
     min_bowl_sep: float = 0.18,
     max_attempts: int = 50,
+    num_active: int | None = None,
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
+
+    num_active 지정 시 앞 num_active 개만 workspace 에 배치하고, 나머지는 지면 아래로
+    치워 비활성화한다(커리큘럼의 active_objects 와 연동).
 
     Args:
         cube_names: 배치할 큐브 prim 이름 목록. 순서대로 처리한다.
@@ -313,6 +331,7 @@ def randomize_cubes_scattered(
             "min_cube_sep": float(min_cube_sep),
             "min_bowl_sep": float(min_bowl_sep),
             "max_attempts": int(max_attempts),
+            "num_active": num_active,
         },
     )
 

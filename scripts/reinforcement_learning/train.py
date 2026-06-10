@@ -80,6 +80,10 @@ parser.add_argument("--grasp_bootstrap_prob", type=float, default=0.0,
                     help="초기상태 grasp 부트스트랩 비율(0~1). reset 시 이 비율의 env 를 큐브-인-그리퍼로 시작.")
 parser.add_argument("--grasp_bootstrap_close", type=float, default=-0.15,
                     help="부트스트랩 시 gripper 닫힘 각(rad). -0.15 가 30mm 큐브 held 0.94.")
+parser.add_argument("--grasp_bootstrap_prob_final", type=float, default=0.0,
+                    help="부트스트랩 prob 를 이 값으로 선형 감쇠(annealing). 정상-env grasp 학습 압력↑.")
+parser.add_argument("--grasp_bootstrap_anneal_iters", type=int, default=0,
+                    help="부트스트랩 감쇠 구간(iteration). 0=감쇠 없음. steps=iters×num_steps_per_env.")
 # 진행 모니터링용 주기적 에피소드 비디오 녹화
 parser.add_argument("--video", action="store_true", default=False,
                     help="학습 중 주기적으로 에피소드 비디오 녹화(headless offscreen). enable_cameras 자동 on.")
@@ -106,6 +110,9 @@ parser.add_argument("--rnd", action="store_true", default=False,
                     help="Random Network Distillation(내재 탐색 보상) 사용 — grasp 탐색 벽 공략.")
 parser.add_argument("--rnd_weight", type=float, default=0.5,
                     help="RND 내재 보상 weight(초당; 내부에서 step_dt 곱해짐).")
+parser.add_argument("--rnd_state_group", default=None,
+                    help="RND novelty 계산에 쓸 obs 그룹. 미지정 시 --obs_group. "
+                         "단일 큐브 스테이지에선 비활성 큐브 마스킹으로 rl_policy 가 사실상 grasp 집중.")
 # LSTM(recurrent) 정책 옵션 — 설정 시 ActorCriticRecurrent 사용
 parser.add_argument("--recurrent", action="store_true", default=False,
                     help="ActorCriticRecurrent(LSTM) 정책 사용. 미설정 시 기존 feedforward ActorCritic.")
@@ -163,6 +170,11 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
     rl_device = args.rl_device if args.rl_device is not None else args.device
     obs_group = args.obs_group
     critic_group = args.critic_obs_group if args.critic_obs_group is not None else obs_group
+    obs_groups = {"policy": [obs_group], "critic": [critic_group]}
+    # RND novelty 입력 그룹을 명시(미지정 시 rsl_rl 가 policy 로 폴백하며 경고).
+    if args.rnd:
+        rnd_group = args.rnd_state_group if args.rnd_state_group is not None else obs_group
+        obs_groups["rnd_state"] = [rnd_group]
 
     # 정책 설정 — --recurrent 시 LSTM/GRU(ActorCriticRecurrent), 아니면 feedforward.
     # OnPolicyRunner 가 policy["class_name"] 을 eval() 로 rsl_rl.modules 에서 찾는다.
@@ -228,7 +240,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "load_run": ".*",
         "load_checkpoint": "model_.*.pt",
         "logger": "tensorboard",
-        "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
+        "obs_groups": obs_groups,
         "policy": policy_cfg,
         "algorithm": algorithm_cfg,
     }
@@ -296,6 +308,11 @@ def main() -> None:
         if hasattr(env_cfg, "grasp_bootstrap_prob"):
             env_cfg.grasp_bootstrap_prob = args.grasp_bootstrap_prob
             env_cfg.grasp_bootstrap_close = args.grasp_bootstrap_close
+            # annealing: anneal_iters → common_step_counter 단위(=iters×num_steps_per_env)
+            env_cfg.grasp_bootstrap_prob_final = args.grasp_bootstrap_prob_final
+            env_cfg.grasp_bootstrap_anneal_steps = float(
+                args.grasp_bootstrap_anneal_iters * args.num_steps_per_env
+            )
 
         # 로그 디렉터리(비디오 폴더가 필요해 env 생성 전에 결정)
         log_dir = _resolve_log_dir(args)

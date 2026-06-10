@@ -37,17 +37,6 @@ def Xform "Cube4" (
                 token outputs:surface
             }
         }
-
-        def Material "CubeFriction" (
-            prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
-        )
-        {
-            float physics:dynamicFriction = 1.5
-            float physics:restitution = 0
-            float physics:staticFriction = 1.8
-            uniform token physxMaterial:frictionCombineMode = "average"
-            uniform token physxMaterial:restitutionCombineMode = "min"
-        }
     }
 
     def Mesh "Visual" (
@@ -64,13 +53,10 @@ def Xform "Cube4" (
     }
 
     def Cube "Box" (
-        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI", "MaterialBindingAPI"]
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
     )
     {
         float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
-        rel material:binding:physics = </Cube4/Looks/CubeFriction> (
-            bindMaterialAs = "weakerThanDescendants"
-        )
         bool physics:collisionEnabled = 1
         float physxCollision:contactOffset = 0.002
         float physxCollision:minTorsionalPatchRadius = 0.001

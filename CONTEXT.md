@@ -13,6 +13,23 @@
 
 ---
 
+## 작업 인계 (2026-06-10 — PickCube LSTM(PPO) RL: v5 place/release valley 개입)
+
+> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T23 전체 시행착오). 여기는 인계 요약만.
+
+- **위치**: worktree `lstm-ppo-pickcube`(브랜치 worktree-lstm-ppo-pickcube). 실행 = 메인 `.venv` + `PYTHONPATH=$(pwd)/src`. 서버 konan147 GPU(48GB) 공유.
+- **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.
+- **✅ grasp 점화 해결(v4)**: v1~v3 내내 scratch.grasp≡0(align-hover)이던 탐색 벽을 v4가 넘음. cron 점검 추이 scratch.grasp 0.11→0.84, lift→0.81. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+그리퍼 slew 2.5+RND grasp_focus.
+- **현재 문제 = place/release valley(v5 개입)**: grasp 후 병목이 place로 이동. scratch `over_bowl 0.71 → placed 0.23`. 큐브를 그릇 위로 가져가도 **그리퍼를 안 연다**(잡고-버티기 local optimum: carry8+transport8+insert80 계속 받고 release하면 끊김). + 운반 중 **그릇 밀치기/엎기**, 그릇 자세(quat) obs 부재로 엎힘 관측 불가. (success termination은 require_open=False — 그리퍼 안 열어도 큐브가 그릇 안이면 성공.)
+- **현재 학습 중**: run `lstm256_stage1_grasp_v5`(fresh), 로그 `train_grasp_v5.log`. **num_envs 16384**(VRAM~29GB), ETA~6.8h. v5 개입(T23): obs **83→87dim**(그릇 quat, `include_container_orientation`), **`over_bowl_drop_reward`(12)**(그릇 위 그리퍼 열기 dense 유도), **`bowl_disturb_penalty`(-5)**(그릇 tilt+xy변위, `_reset_idx`가 초기 pose 저장). 나머지 v4 동일(grasp 보상·RND·부트스트랩·gamma 0.997).
+- **16384 가능케 한 핵심**: PhysX 64K 물리 머티리얼 한도 → 큐브 4개 CubeFriction을 scene.usd 공유 1개로 통합(env당 6→3). PhysX 버퍼 상향. 상세 `docs/TROUBLESHOOTING.md`.
+- **모니터(cron 분리됨, 세션 독립)**: `scripts/reinforcement_learning/cron_monitor_v4.sh`가 **crontab `*/30`** 으로 자동 점검. 최신 run 자동 탐색 → 최신 ckpt에 `monitor_eval.py`(scratch/full/pre 단계 집계 + 16-env 비디오). 새 ckpt 없으면 skip(flock 중복방지). 결과 → `<run>/monitor_history/history.jsonl`, 비디오 → `<run>/monitor_history/video_<ts>_model_N.mp4`. cron 로그 `logs/cron_monitor_v4.cron.log`. 진짜 지표 = **scratch 그룹**(train 로그 success는 bootstrap-inflated). 끄기: `crontab -l | grep -vF cron_monitor_v4.sh | crontab -`.
+- **상태 파일**: `/tmp/train_pid.txt`(현재 v5 PID).
+- **신규 코드(v5)**: `over_bowl_drop_reward`·`bowl_disturb_penalty`(rewards.py), `include_container_orientation`(observations.py rl_state), 그릇 초기 pose 저장(pick_cube_env.py `_reset_idx`), env_cfg obs 87dim·RewTerm 2개·`_CUBE_REWARD_TERMS`에 over_bowl_drop, monitor_eval 집계 단조성 버그 수정, cron_monitor_v4.sh.
+- **판정/다음 레버**: scratch.placed가 over_bowl 따라 상승 = release valley 해소 + 그릇 엎힘 감소. 안 되면 drop weight↑·carry↓·gripper offset 재고. scratch.success→0.80 시 커리큘럼 1→2 확장(현재 수동 판단).
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E: cube_desk MoveIt2/cuMotion Pick&Place 브릿지 스캐폴딩)
 
 - **목표(사용자)**: cube_desk 장면에서 MoveIt2 path planning(조사 결과 **cuMotion 우선 + OMPL/Pilz 폴백**)으로 SO-101 pick&place state machine 구축. 플랫폼 = Windows+WSL2 먼저, 안 되면 Linux 서버. 충돌 = 전체(그릇+타큐브 obstacle + 잡은 큐브 attach). 통합 = Isaac Sim ROS2 bridge(`topic_based_ros2_control`).
