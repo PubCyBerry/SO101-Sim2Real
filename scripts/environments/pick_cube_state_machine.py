@@ -1798,9 +1798,12 @@ def _deterministic_solve_joint_target(
             write_q(q2)
             gp = _grasp_point_pos(robot)[0].clone()
             pos_err = float(torch.linalg.norm(target - gp).item())
-            # 수평 오차는 별도 gate — 30mm 큐브에서 수평 7mm 이상 빗나가면 꼭지점 근처를
-            # 집게 된다(3D gate 1.1cm 만으로는 못 거름).
-            pos_err_h = float(torch.linalg.norm(target[:2] - gp[:2]).item())
+            # 수평 오차를 *방향 분해*한다(면 중심 잡기의 soft 구현):
+            #   ∥개방축(무는 방향) 성분 = 패드가 닫히며 감싸므로 비교적 무해
+            #   ⊥개방축(면을 따라 미끄러진) 성분 = 패드가 면 중심을 벗어나 모서리/꼭지점을
+            #     집는 직접 원인 → 강하게 가중. (hard gate 는 v7 에서 후보 전멸→회귀 확인.)
+            err_h_vec = (target - gp)[:2]
+            pos_err_h = float(torch.linalg.norm(err_h_vec).item())
             jaw_z = _finger_min_z(robot, "jaw")
             fix_z = _finger_min_z(robot, "gripper")
             # 책상 *극단* 침투 필터: 가상 FK 엔 접촉 해소가 없어 좋은 scoop 계획도 손끝이
@@ -1816,9 +1819,15 @@ def _deterministic_solve_joint_target(
             if o_des is not None:
                 o_now = _gripper_open_axis_h(robot)
                 roll_err = math.acos(max(-1.0, min(1.0, abs(float(torch.dot(o_now, o_des).item())))))
+            if o_des is not None:
+                err_along = abs(float(torch.dot(err_h_vec, o_des[:2]).item()))
+                err_perp = math.sqrt(max(0.0, pos_err_h * pos_err_h - err_along * err_along))
+            else:
+                err_along = err_perp = pos_err_h * 0.7071
             score = (
                 pos_err
-                + 1.0 * pos_err_h
+                + 0.3 * err_along
+                + 2.0 * err_perp
                 + _DET_SCOOP_WEIGHT * tilt_pen
                 + _DET_CONTINUITY_WEIGHT * continuity
                 + 0.05 * roll_err
@@ -1827,12 +1836,16 @@ def _deterministic_solve_joint_target(
                 "det_tilt_deg": tilt_deg,
                 "det_pos_err_m": round(pos_err, 5),
                 "det_pos_err_h_m": round(pos_err_h, 5),
+                "det_err_perp_m": round(err_perp, 5),
                 "det_tilt_pen": round(tilt_pen, 5),
                 "det_roll_err_deg": round(math.degrees(roll_err), 1),
                 "det_jaw_min_z": round(jaw_z, 5),
                 "det_fix_min_z": round(fix_z, 5),
             }
-            if pos_err <= pos_gate and pos_err_h <= 0.007 and (best is None or score < best[0]):
+            # 수평 오차는 hard gate 가 아니라 *점수 가중*으로만 다룬다 — hard 7mm gate 는
+            # reach 가장자리에서 후보를 전멸시켜 90→75% 회귀(v7). 실행 후 수평 오차가 크면
+            # descend_fix 가 보정한다.
+            if pos_err <= pos_gate and (best is None or score < best[0]):
                 best = (score, q2, gp, info)
                 # 위치 정합 + scoop + 면 정렬 모두 충분한 해 → 남은 후보 생략(결정적 순서라 재현 동일)
                 if pos_err <= pos_gate * 0.5 and tilt_pen <= 0.005 and roll_err <= math.radians(15.0):
@@ -1965,6 +1978,23 @@ def _pick_gripper_open(cube_name: str) -> float:
 
 def _pick_descend_gripper(cube_name: str) -> float:
     return max(float(args.descend_gripper), DESCEND_GRIPPER_BY_CUBE.get(cube_name, 0.0))
+
+
+# 큐브가 이 영역을 벗어나면 더 시도하지 않는다(밀려나 reach 밖/책상 밖 — 재시도 낭비 방지).
+# scatter 범위(x[1.66,2.04], y[-0.46,-0.345]) + 6cm 마진.
+_CUBE_RANGE_X = (1.60, 2.10)
+_CUBE_RANGE_Y = (-0.52, -0.285)
+
+
+def _cube_out_of_range(env, cube_name: str) -> str | None:
+    """큐브가 회수 불가 영역이면 사유 문자열, 아니면 None."""
+    pos = env.unwrapped.scene[cube_name].data.root_pos_w[0]
+    x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+    if z < CUBE_DESK_TOP_Z - 0.05:
+        return "fell_off_desk"
+    if not (_CUBE_RANGE_X[0] <= x <= _CUBE_RANGE_X[1] and _CUBE_RANGE_Y[0] <= y <= _CUBE_RANGE_Y[1]):
+        return "pushed_out_of_reach"
+    return None
 
 
 def _cube_lifted(env, cube_name: str, min_lift: float = 0.08) -> bool:
@@ -2790,6 +2820,26 @@ def _run_state_machine(
         grasped = False
         for attempt in range(1, max(1, args.max_grasp_attempts) + 1):
             attempt_prefix = f"{phase_prefix}.attempt{attempt}"
+            # 큐브가 밀려나 회수 불가(책상 낙하/reach 밖)면 남은 재시도를 버린다(fail-fast).
+            oor_reason = _cube_out_of_range(env, cube_name)
+            if oor_reason is not None:
+                _append_fsm_event(
+                    fsm_trace,
+                    PickCubeFSMState.MARK_DONE,
+                    cube_name=cube_name,
+                    attempt=attempt,
+                    next_state=PickCubeFSMState.IDLE,
+                    reason=f"cube_out_of_range:{oor_reason}",
+                    done=False,
+                    cube_w=_round_list(scene[cube_name].data.root_pos_w[0]),
+                )
+                trace.append({
+                    "phase": f"{attempt_prefix}.abort_out_of_range",
+                    "reason": oor_reason,
+                    "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
+                })
+                break
+            cube_attempt_start = scene[cube_name].data.root_pos_w[0].clone()
             _append_fsm_event(
                 fsm_trace,
                 PickCubeFSMState.OPEN_GRIPPER,
@@ -2966,10 +3016,17 @@ def _run_state_machine(
                     scene[cube_name].data.root_pos_w[0] - _grasp_point_pos(robot)[0]
                 ).item()
             )
+            # 변위 진단: 잘 집으면 큐브가 거의 안 움직인다 — 밀침 정량화(영상 관찰 검증용).
+            cube_moved = float(
+                torch.linalg.norm(
+                    scene[cube_name].data.root_pos_w[0, :2] - cube_attempt_start[:2]
+                ).item()
+            )
             trace.append({
                 "phase": f"{attempt_prefix}.lift_check",
                 "grasped": grasped,
                 "grasp_hold_dist_m": round(grasp_hold_dist, 5),
+                "cube_moved_m": round(cube_moved, 5),
                 "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
                 "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
                 **_diagnostic_pose(env),
@@ -3389,8 +3446,10 @@ def main() -> None:
                     fail_diag = []
                     _diag_keys = (
                         "phase", "grasped", "grasp_hold_dist_m", "inside_bowl",
-                        "det_tilt_deg", "det_pos_err_m", "det_tilt_pen", "det_roll_err_deg",
+                        "det_tilt_deg", "det_pos_err_m", "det_pos_err_h_m", "det_err_perp_m",
+                        "det_tilt_pen", "det_roll_err_deg",
                         "det_fallback", "det_grasp_hold_pose", "jacobian_refine_steps",
+                        "cube_moved_m",
                         "planned_error_m", "final_error_m", "early_exit_step", "cube_w",
                     )
                     for entry in ep_result.get("trace", []):
