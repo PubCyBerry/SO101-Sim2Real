@@ -152,14 +152,14 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             pos=_ROBOT_POS,
             rot=_ROBOT_ROT,
-            # gripper 는 0.80 rad(=open, open 판정 >0.6) 으로 시작한다. 두 가지 이유:
-            #  1) RL 정책이 "닫힌 손"으로 시작하면 pregrasp 보상(닫힘+근접)을 손을
-            #     벌리지 않고 공짜로 받아 큐브를 감싸 잡을 유인이 사라진다(정체 원인).
-            #  2) use_default_offset=True 라 action target=raw*scale(1.0)+offset(=이 값).
-            #     clip_actions=1.0 이면 도달 범위=[offset-1, offset+1]. offset=0 이면
-            #     최대 open 이 1.0 rad 뿐이라 40mm 큐브를 감쌀 폭이 부족했다. offset=0.80
-            #     이면 [-0.20, 1.80] 으로 full open(1.745)↔full close(-0.174) 모두 도달.
-            joint_pos={**{j: 0.0 for j in SO101_JOINT_ORDER}, "gripper": 0.80},
+            # gripper offset(=이 init 값). action target = raw*scale(1.0)+offset, clip 1.0
+            # → 도달범위 [offset-1, offset+1]. 트레이드오프:
+            #  - offset 큼(0.80): "아무것도 안 함(action≈0)" → target 0.80 = 활짝 열림.
+            #    부트스트랩으로 큐브를 잡고 시작해도 정책이 손을 벌려 곧 놓침(하류 학습 저해).
+            #  - offset 0.20: do-nothing target 0.20(닫힘쪽, open 판정<0.6) → 잡은 큐브 유지.
+            #    open 은 1.20 까지(30mm 큐브 grasp 충분), close 는 -0.174 full 도달.
+            # pregrasp 공짜획득 우려는 pregrasp 보상 재설계(weight 0.5, diff 0.045)로 해소됨.
+            joint_pos={**{j: 0.0 for j in SO101_JOINT_ORDER}, "gripper": 0.20},
         ),
         actuators={
             # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
@@ -509,7 +509,7 @@ class PickCubeRewardsCfg:
 
     guided_lift_cube = RewTerm(
         func=task_mdp.guided_lift_reward,
-        weight=8.0,
+        weight=10.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -534,9 +534,10 @@ class PickCubeRewardsCfg:
     )
 
     # Stage 2.5: 닫힌 그리퍼 + 들린 큐브 + 그릇 방향 운반 (밀집 도우미)
+    # weight 4→8: 부트스트랩 큐브를 "잡은 채 유지"하도록 강한 유인(놓치면 보상 급감).
     carry_cube = RewTerm(
         func=task_mdp.carry_pen,
-        weight=4.0,
+        weight=8.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
