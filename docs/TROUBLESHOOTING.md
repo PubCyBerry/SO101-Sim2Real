@@ -2714,6 +2714,29 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac \
 
 `--headless --selftest` 로그에 `base_drift=0.0000m base_fixed=True` 가 찍히고 `OK — 4/4` 통과. GUI 에서 Play 해도 팔이 베이스에 붙은 채 target 을 추종한다.
 
+## SO-101 RMPFlow(`--controller rmpflow`) 가 target 에 ~0.1-0.2m 못 미침 (untuned scaffold)
+
+**현상**: `follow_target_so101.py --controller rmpflow` 에서 EE 가 target 을 따라가긴 하나 **일정하게 0.1-0.2 m 못 미친 채 멈춘다**. 같은 target 들을 `--controller ik` 는 sub-cm 로 도달한다.
+
+### 원인
+
+`so101_rmpflow_config.yaml` 은 주석대로 *"controller validation scaffold"* — 미튜닝이다. 두 요인이 겹친다:
+1. **`cspace_target_rmp` (home-posture attractor)** 의 `metric_scalar` 가 크면(초기 35) default_q(home)로 끌어당기는 힘이 EE attractor(`target_rmp`)를 이겨 정지상태 오차가 남는다.
+2. **`joint_velocity_cap_rmp.max_velocity`** 가 낮으면(초기 1.0) 정착 window 안에 다 못 움직인다.
+3. obstacle 등록 시엔 `collision_rmp.metric_modulation_radius`(0.25 m)가 커서, cube_desk 처럼 작업영역이 좁으면 workspace target 이 회피 영역 안이라 EE 가 **일부러** 거리를 둔다(회피는 정상 동작).
+
+### 해결 방법
+
+- `cspace_target_rmp.metric_scalar` 를 **1.0** 으로 낮추고(자세 정규화용으로만), `joint_velocity_cap_rmp.max_velocity` 3.0, `target_rmp.accel_p_gain` 80 으로 올리면 raw 추종이 ~0.07-0.16 m 로 개선된다(1/4 → 4/4 @0.18 m). IK(sub-cm)만큼은 아니다 — 5-DOF + scaffold 한계.
+- **추종 정확도 검증은 `--no_obstacles`** 로 한다(obstacle 켜면 회피 때문에 거리 측정이 무의미). 정밀이 필요하면 `--controller ik`, 부드러움·회피가 필요하면 `rmpflow`.
+
+### 확인 방법
+
+```bash
+... follow_target_so101.py --headless --selftest --controller rmpflow --no_obstacles
+```
+→ `OK — 4/4 ... (≤0.18m)`, `base_fixed=True`. obstacle 켠 인터랙티브 모드에서는 큐브 근처로 target 을 끌면 EE 가 거리를 두고 우회한다.
+
 ## Isaac Sim headless 씬 author/검증 스크립트가 부팅 후 hang (단일 GPU 경합 / app.close 좀비)
 
 **현상**: `author_pick_cube_scene.py`(PhysxSchema 정식 API 라 `AppLauncher` headless 부팅 필요) 또는 `gym.make` 검증 스크립트를 headless 로 띄우면, GPU 배너·CUDA P2P 검증까지 로그가 찍힌 뒤 더 진행하지 않고 멈춘다. 프로세스는 살아 있고 GPU 메모리(수백 MB~수 GB)를 점유하지만 CPU 0~3% 로 idle. USD export 나 결과 파일은 멈추기 전에 기록되기도 한다.
