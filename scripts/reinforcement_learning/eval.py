@@ -34,6 +34,13 @@ parser.add_argument("--critic_obs_group", default=None)
 parser.add_argument("--clip_actions", type=float, default=1.0)
 parser.add_argument("--deterministic", action="store_true", default=False,
                     help="평균 액션(deterministic) 사용. 미설정 시 stochastic.")
+# 진행 모니터링용 에피소드 비디오 녹화(평가 시 소수 env 뷰포트 → 학습 속도와 무관)
+parser.add_argument("--video", action="store_true", default=False,
+                    help="평가 에피소드를 비디오로 녹화(enable_cameras 자동 on).")
+parser.add_argument("--video_length", type=int, default=600,
+                    help="녹화 길이(policy step). 600≈20s.")
+parser.add_argument("--video_dir", default=None,
+                    help="비디오 저장 폴더(기본: 체크포인트 dir/videos/eval).")
 # 정책 아키텍처 (체크포인트와 일치해야 함)
 parser.add_argument("--recurrent", action="store_true", default=False)
 parser.add_argument("--rnn_type", default="lstm", choices=["lstm", "gru"])
@@ -49,9 +56,13 @@ parser.add_argument("--container_angle_scale", type=float, default=1.0)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
+if args.video:
+    args.enable_cameras = True
 
 launcher = AppLauncher(args)
 simulation_app = launcher.app
+
+import os  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
@@ -124,7 +135,20 @@ def main() -> None:
             container_angle_scale=args.container_angle_scale,
             container_radius_scale=1.0,
         )
-        env = gym.make(args.task, cfg=env_cfg)
+        env = gym.make(args.task, cfg=env_cfg,
+                       render_mode="rgb_array" if args.video else None)
+
+        if args.video:
+            vdir = args.video_dir or os.path.join(
+                os.path.dirname(os.path.abspath(args.checkpoint)), "videos", "eval")
+            os.makedirs(vdir, exist_ok=True)
+            env = gym.wrappers.RecordVideo(
+                env, video_folder=vdir,
+                step_trigger=lambda step: step == 0,  # 시작 시 1회 녹화
+                video_length=args.video_length, disable_logger=True,
+            )
+            print(json.dumps({"video_dir": vdir, "length": args.video_length}), flush=True)
+
         env = RslRlVecEnvWrapper(env, clip_actions=args.clip_actions)
 
         torch.manual_seed(args.seed)
