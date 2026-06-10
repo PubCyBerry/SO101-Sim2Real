@@ -44,6 +44,20 @@
                     <param name="usb_port">${usb_port}</param>
                     <param name="joint_config_file">${joint_config_file}</param>
                 </xacro:if>
+
+                <!-- Isaac Sim (Windows) <-> MoveIt(WSL2) 브릿지.
+                     topic_based_ros2_control 이 /isaac_joint_states(상태) 를 구독하고
+                     /isaac_joint_commands(명령) 를 발행한다. Isaac Sim OmniGraph 가
+                     반대편(상태 발행 + 명령 구독→ArticulationController)을 담당.
+                     sum_wrapped_joint_states: wrist_roll 처럼 ±2π wrap 추적. -->
+                <xacro:if value="${hardware_type == 'isaac'}">
+                    <!-- Jazzy: topic_based_ros2_control 이 joint_state_topic_hardware_interface 로 개명됨
+                         (pkg: ros-jazzy-joint-state-topic-hardware-interface). -->
+                    <plugin>joint_state_topic_hardware_interface/JointStateTopicSystem</plugin>
+                    <param name="joint_commands_topic">/isaac_joint_commands</param>
+                    <param name="joint_states_topic">/isaac_joint_states</param>
+                    <param name="sum_wrapped_joint_states">true</param>
+                </xacro:if>
             </hardware>
             
             <!-- arm joints -->

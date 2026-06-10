@@ -9,8 +9,11 @@ api_version: 1.0
 joint_limit_buffers: [0.02, 0.02, 0.02, 0.02, 0.02]
 
 rmp_params:
+  # NOTE: cspace_target_rmp 는 default_q(home) 로 끌어당기는 posture attractor 다.
+  # metric_scalar 가 크면 EE attractor(target_rmp)를 이겨 EE 가 target 에 못 닿고
+  # 정지상태 오차(~0.1-0.2m)가 남는다. follow-target 에선 약하게(자세 정규화용)만 둔다.
   cspace_target_rmp:
-    metric_scalar: 35.0
+    metric_scalar: 1.0
     position_gain: 60.0
     damping_gain: 35.0
     robust_position_term_thresh: 0.5
@@ -33,12 +36,12 @@ rmp_params:
     accel_potential_exploder_length_scale: 0.1
     accel_potential_exploder_eps: 0.01
   joint_velocity_cap_rmp:
-    max_velocity: 1.0
+    max_velocity: 3.0
     velocity_damping_region: 0.3
     damping_gain: 120.0
     metric_weight: 80.0
   target_rmp:
-    accel_p_gain: 45.0
+    accel_p_gain: 80.0
     accel_d_gain: 70.0
     accel_norm_eps: 0.075
     metric_alpha_length_scale: 0.05

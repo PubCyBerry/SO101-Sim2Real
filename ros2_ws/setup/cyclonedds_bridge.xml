@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WSL2 <-> Windows host 브릿지용 CycloneDDS 설정 (Isaac Sim 연동).
+
+  cyclonedds_localhost.xml 은 lo unicast 로 WSL2 내부 노드 간 통신만 처리한다.
+  Isaac Sim 은 Windows 호스트에서 돌며 ROS 2 토픽(/isaac_joint_states,
+  /isaac_joint_commands, /clock)을 발행/구독한다. WSL2(Cyclone) <-> Windows(Fast DDS)
+  통신을 위해 Windows 호스트 IP 를 unicast peer 로 추가하고, WSL eth0 인터페이스를
+  사용한다(lo 만으로는 호스트에 닿지 않음).
+
+  사용법:
+    1) WSL2 IP        : wsl 안에서  `ip addr show eth0`  또는 `hostname -I`
+    2) Windows host IP : wsl 안에서  `ip route show default | awk '{print $3}'`
+                         (WSL2 NAT 모드의 게이트웨이 = Windows 호스트)
+       → 미러드(mirrored) 네트워킹 모드면 localhost 로 충분.
+    3) 아래 <Peer> 의 WINDOWS_HOST_IP 를 위 값으로 치환하거나, 환경변수로 주입한다.
+    4) env_bridge.sh (또는 env.sh override) 에서:
+         export CYCLONEDDS_URI="file://.../cyclonedds_bridge.xml"
+
+  포트포워딩/방화벽: Windows 측에서 DDS discovery 포트(7400,7410,7411,7412 및
+  9387 영역, ROS_DOMAIN_ID 의존)를 WSL2 로 허용해야 한다. docs 참조.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <!-- WSL2 eth0 로 호스트와 통신 (lo 는 호스트에 닿지 않음).
+           미러드 네트워킹이면 lo 로도 가능하나 eth0 가 안전. -->
+      <Interfaces>
+        <NetworkInterface name="eth0" multicast="false"/>
+        <NetworkInterface name="lo" multicast="false"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <Peers>
+        <!-- WSL2 내부 노드 -->
+        <Peer address="localhost"/>
+        <!-- Windows 호스트 (Isaac Sim). 실제 IP 로 치환하거나 미러드면 localhost. -->
+        <Peer address="WINDOWS_HOST_IP"/>
+      </Peers>
+      <ParticipantIndex>auto</ParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

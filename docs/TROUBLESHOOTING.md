@@ -2663,6 +2663,101 @@ SO101-Leader connected.
 
 > 한계(공통): 5-DOF position-only IK 는 큐브별 grasp 자세 편차가 커서 **4-cube 신뢰성은 검증된 `joint_fk` direct FSM 이 우위**다. lula_ik/ikpy 는 단일 큐브 검증·대안 백엔드 용도.
 
+## Core API follow-target: EE frame(`gripper_frame_link`) 이 USD prim 으로 안 보임
+
+**현상**: Core API standalone(`follow_target_so101.py`, `World`+`SingleArticulation`+`ArticulationKinematicsSolver`)에서 EE world pose 를 읽으려고 스테이지를 `Stage.Traverse()` 로 순회해 `gripper_frame_link` prim 을 찾으면 못 찾는다. `simulation_app.close()` 가 종료 코드를 덮어써 **exit code 는 0 으로 나와 성공처럼 보이지만** 실제로는 예외로 중단된다(진행 로그도 carb 재바인딩에 묻힘).
+
+```
+RuntimeError: 'gripper_frame_link' prim 을 스테이지에서 찾지 못했다.
+```
+
+### 원인
+
+`gripper_frame_link` 는 **URDF/Lula 전용 TCP 프레임**이라 SO-101 USD 에는 같은 이름의 prim 이 없다(USD body 는 `jaw`·`gripper` 등 다른 이름). Lula 솔버는 URDF 를 읽으므로 이 프레임을 알아 IK/`ArticulationKinematicsSolver` 생성은 정상이지만, USD 스테이지 순회로는 잡히지 않는다.
+
+### 해결 방법
+
+- EE world pose 는 prim 검색 대신 **`ArticulationKinematicsSolver.compute_end_effector_pose()`** 로 얻는다(현재 관절 상태 FK + `set_robot_base_pose` 반영, world frame). `[0]` 이 position.
+- 굳이 USD body 로 읽어야 하면 `gripper_frame_link` 가 아니라 실제 USD body 이름(`jaw`/`gripper`)을 쓴다(`pick_cube_state_machine.py` 의 grasp midpoint 패턴).
+- 부팅 후 스크립트는 예외가 `close()` 에 묻히지 않도록 `main()` 을 try/except 로 감싸 traceback 을 파일(`/tmp/...`)에 남긴다(carb stdout 재바인딩 회피).
+
+### 확인 방법
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac \
+  python scripts/environments/follow_target_so101.py --headless --selftest
+```
+→ `/tmp/so101_follow_target.txt` 에 `[selftest] #0..#3 ... pass=True`, `OK — 4/4` (EE 추종 오차 ~0.005–0.008 m). 5-DOF position-only IK 는 grasp 와 달리 접촉 정밀도 부담이 없어 follow-target 은 sub-cm 로 수렴한다.
+
+## Core API standalone 로봇이 실행 직후 넘어져 날아감 (floating base — fix_root_link 누락)
+
+**현상**: Core API `World` + `add_reference_to_stage(robot.usd)` + `SingleArticulation` 로 SO-101 을 띄우면, Play 직후 IK 가 팔을 움직이는 순간 **로봇 전체가 반력으로 넘어져 책상 위로 날아간다**. Isaac Lab env(`gym.make`)에서는 멀쩡하던 로봇이 standalone 에서만 무너진다.
+
+### 원인
+
+`add_reference_to_stage` 는 USD 를 그대로 참조만 한다 → 베이스가 world 에 고정되지 않은 **floating base** 다. Isaac Lab env 는 `ArticulationCfg.spawn` 의 `ArticulationRootPropertiesCfg(fix_root_link=True)` 로 베이스를 고정하는데, raw 참조는 이 단계를 건너뛴다. 또 raw USD 드라이브 게인이 env 의 soft-PD(stiffness 17.8/damping 0.6)와 달라 IK target 으로 급스냅하며 물체를 쳐낸다.
+
+`compute_end_effector_pose()` 기반 self-test 가 통과하는데도 무너지는 이유: 그 FK 는 **고정 가정 base**(set_robot_base_pose) 기준이라, 실제 root 가 넘어져도 joint 각도만 맞으면 EE 거리는 통과로 보인다(false pass).
+
+### 해결 방법
+
+- 로봇은 `add_reference_to_stage` 대신 **Isaac Lab spawn** 으로 띄워 env 와 동일하게 `fix_root_link=True` (+ `enabled_self_collisions`, solver iter 4/4) 적용:
+  ```python
+  import isaaclab.sim as sim_utils
+  spawn = sim_utils.UsdFileCfg(usd_path=..., articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=True, ...))
+  spawn.func("/World/Robot", spawn, translation=ROBOT_POS, orientation=ROBOT_QUAT)
+  ```
+- reset 후 `robot.get_articulation_controller().set_gains(kps=17.8, kds=0.6)` (+ `set_max_efforts(10)`) 로 env soft-PD 이식.
+- self-test 는 EE 거리 외에 **root world pose 이탈**(`robot.get_world_pose()` ↔ ROBOT_POS, ≤0.02 m)도 검사해 floating base 를 잡는다.
+
+### 확인 방법
+
+`--headless --selftest` 로그에 `base_drift=0.0000m base_fixed=True` 가 찍히고 `OK — 4/4` 통과. GUI 에서 Play 해도 팔이 베이스에 붙은 채 target 을 추종한다.
+
+## SO-101 RMPFlow(`--controller rmpflow`) 가 target 에 ~0.1-0.2m 못 미침 (untuned scaffold)
+
+**현상**: `follow_target_so101.py --controller rmpflow` 에서 EE 가 target 을 따라가긴 하나 **일정하게 0.1-0.2 m 못 미친 채 멈춘다**. 같은 target 들을 `--controller ik` 는 sub-cm 로 도달한다.
+
+### 원인
+
+`so101_rmpflow_config.yaml` 은 주석대로 *"controller validation scaffold"* — 미튜닝이다. 두 요인이 겹친다:
+1. **`cspace_target_rmp` (home-posture attractor)** 의 `metric_scalar` 가 크면(초기 35) default_q(home)로 끌어당기는 힘이 EE attractor(`target_rmp`)를 이겨 정지상태 오차가 남는다.
+2. **`joint_velocity_cap_rmp.max_velocity`** 가 낮으면(초기 1.0) 정착 window 안에 다 못 움직인다.
+3. obstacle 등록 시엔 `collision_rmp.metric_modulation_radius`(0.25 m)가 커서, cube_desk 처럼 작업영역이 좁으면 workspace target 이 회피 영역 안이라 EE 가 **일부러** 거리를 둔다(회피는 정상 동작).
+
+### 해결 방법
+
+- `cspace_target_rmp.metric_scalar` 를 **1.0** 으로 낮추고(자세 정규화용으로만), `joint_velocity_cap_rmp.max_velocity` 3.0, `target_rmp.accel_p_gain` 80 으로 올리면 raw 추종이 ~0.07-0.16 m 로 개선된다(1/4 → 4/4 @0.18 m). IK(sub-cm)만큼은 아니다 — 5-DOF + scaffold 한계.
+- **추종 정확도 검증은 `--no_obstacles`** 로 한다(obstacle 켜면 회피 때문에 거리 측정이 무의미). 정밀이 필요하면 `--controller ik`, 부드러움·회피가 필요하면 `rmpflow`.
+
+### 확인 방법
+
+```bash
+... follow_target_so101.py --headless --selftest --controller rmpflow --no_obstacles
+```
+→ `OK — 4/4 ... (≤0.18m)`, `base_fixed=True`. obstacle 켠 인터랙티브 모드에서는 큐브 근처로 target 을 끌면 EE 가 거리를 두고 우회한다.
+
+## Lula Test Widget 에서 SO-101 EE frame 이 손끝과 ~90° 어긋남 / IK 계속 실패
+
+**현상**: GUI 의 `Tools > Robotics > Lula Test Widget` 으로 SO-101 을 따라가게 하면, `/Lula/end_effector` 프레임이 실제 로봇 손끝과 떨어진 곳에 뜨고 `Failed to compute Inverse Kinematics` 가 도배되며 로봇이 target 을 안 따라온다.
+
+```
+[Warning][isaacsim.robot_motion.lula_test_widget.controllers] Failed to compute Inverse Kinematics
+```
+
+### 원인
+
+URDF(Lula 가 읽는 모델)의 base 프레임이 SO-101 **USD articulation root 와 ~90° Z 회전** 어긋나게 baked 돼 있다(URDF→USD 변환 산물). 원점·zero-joint 측정: Lula FK `gripper_frame_link`=(0.39, 0, 0.23)(팔 +X) vs 실제 USD `jaw`=(0.04, −0.30, 0.29)(팔 −Y). `pick_cube_state_machine.py` 는 손으로 맞춘 `RMPFLOW_BASE`(쿼터니언 ~90°Z) + per-solve shift 로 이를 보정한다. **위젯은 base pose 를 `articulation.get_world_pose()`(보정 없음)로만 설정**해 이 90° 를 못 넣는다 — 로봇을 회전 spawn 해도 시각·Lula 가 같이 돌아 상대 오차는 불변이라 정렬 불가.
+
+### 해결 방법
+
+- 위젯의 live follow 는 이 에셋엔 못 쓴다. **`default_q` 편집은 Robot Description Editor 로**(관절값을 USD 에 직접 적용 — 프레임 무관), **RMPFlow 게인은 yaml 편집 + `follow_target_so101.py --controller rmpflow` 헤드리스 검증**으로 튜닝(스크립트는 보정된 `RMPFLOW_BASE` 사용). 자세한 절차는 `LULA_GUI_TUNING.md`.
+- 근본 해결은 URDF↔USD base 프레임을 일치시키는 에셋 재작업(미수행).
+
+### 확인 방법
+
+`/tmp/lula_fk_probe.py` 류로 원점·zero-joint 에서 `lula.compute_forward_kinematics("gripper_frame_link",[0]*5)` 와 USD `jaw` body world pose 를 비교 → +X vs −Y (~90°) 차이가 보이면 동일 원인.
+
 ## Isaac Sim headless 씬 author/검증 스크립트가 부팅 후 hang (단일 GPU 경합 / app.close 좀비)
 
 **현상**: `author_pick_cube_scene.py`(PhysxSchema 정식 API 라 `AppLauncher` headless 부팅 필요) 또는 `gym.make` 검증 스크립트를 headless 로 띄우면, GPU 배너·CUDA P2P 검증까지 로그가 찍힌 뒤 더 진행하지 않고 멈춘다. 프로세스는 살아 있고 GPU 메모리(수백 MB~수 GB)를 점유하지만 CPU 0~3% 로 idle. USD export 나 결과 파일은 멈추기 전에 기록되기도 한다.
@@ -2694,3 +2789,99 @@ AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 
 ### 확인 방법
 
 `nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.
+
+## Windows Isaac Sim 에서 ROS2/OmniGraph 확장 런타임 enable 시 RTX 그래픽 재초기화 크래시
+
+### 현상
+
+Windows 네이티브 Isaac Sim 5.1(standalone SimulationApp/AppLauncher)에서 부팅 후
+`enable_extension("isaacsim.ros2.bridge")`(또는 `isaacsim.core.nodes`)를 호출하면
+access violation 으로 즉사. GUI 모드는 `_prepare_ui`, headless 모드는 확장 enable 중
+viewport window 생성 단계에서 죽는다. scene/OmniGraph 사용자 코드는 실행되기 전.
+
+### 오류 메시지
+
+```
+[Error] [gpu.foundation.plugin] DriverShaderCacheManager::init() called with a different graphics interface, without a shutdown()!
+[Warning] [carb.graphics-vulkan.plugin] Aftermath Error 0xbad00009
+Windows fatal exception: access violation
+  ... omni/kit/widget/viewport/impl/texture.py ... __enable_hydra_engine
+  ... rtx.scenedb.plugin.dll!carbOnPluginStartup ...
+  ... omni.usd.dll!omni::usd::UsdManager::createHydraEngine ...
+```
+
+### 원인
+
+headless kit(`isaaclab.python.headless.kit`)은 그래픽 인터페이스를 **D3D12** 로 먼저 띄운다.
+런타임에 `isaacsim.ros2.bridge`/`isaacsim.core.nodes` 를 enable 하면 transitive 로
+`omni.kit.viewport.window` 가 끌려와 viewport window + RTX Hydra 엔진을 **Vulkan** 으로
+재생성하려 한다. 이미 D3D12 로 초기화된 위에 다른 그래픽 인터페이스로 재init → `rtx.scenedb`
+크래시. 즉 확장을 **런타임에** enable 하는 게 문제(부팅 시 headless 면 viewport 억제됨).
+
+### 해결 방법
+
+- **부팅-시점 로드도 실패(2026-06-09 검증)**: `--kit_args "--enable isaacsim.ros2.bridge ..."`
+  로 부팅 시점에 로드하면 그래픽이 처음부터 Vulkan 단일이라 D3D12↔Vulkan 재init 은 사라진다.
+  그러나 (1) `[Error] ROS2 Bridge startup failed` — bridge 확장이 Windows 에서 시작 자체 실패,
+  (2) 부팅 중 `omni.usd!createHydraEngine` → `rtx.scenedb.plugin.dll` access violation 여전.
+  GUI/headless·런타임/부팅·최소ext 등 4가지 모두 RTX/Hydra 층에서 크래시. → **이 Windows 박스
+  (RTX A4000 / driver 596.36 / Isaac Sim 5.1)에서 Isaac Sim ROS2 bridge 는 불가로 결론.**
+- **해결(확정)**: Isaac Sim + ROS2 bridge 경로(PATH E)는 **네이티브 Linux 서버**에서 실행.
+  Linux 는 Vulkan 단일 스택·ROS2 Jazzy·cuMotion 네이티브. `docs/PATH_E_CUMOTION_PICKPLACE.md`
+  §cuMotion(Linux 서버) 참조. Windows 에서 동작하는 검증된 대안 = RViz mock(OMPL) pick&place
+  (`ros2_ws/setup/run_mock_pickplace_demo.sh`, physics 없는 kinematic, 4/4 planned).
+
+### 확인 방법
+
+Linux 서버에서 동일 `scripts/ros2/cube_desk_ros2_sim.py` 실행 시
+`[cube_desk_ros2_sim] 브릿지 실행...` 까지 도달하고 `ros2 topic echo /isaac_joint_states`
+가 수신되면 정상.
+
+## MoveIt gripper action 이 `wait_for_server` 타임아웃 (GripperCommand ↔ ParallelGripperCommand 타입 불일치)
+
+### 현상
+
+pick&place orchestrator(`so101_pick_place_orchestrator.py`)가 그리퍼를 명령할 때마다
+실패하고, 그리퍼가 RViz/실기기에서 전혀 움직이지 않는다. arm trajectory 는 정상 실행.
+매 그리퍼 호출마다 5초씩 지연(`wait_for_server` 타임아웃)되어 사이클이 길어진다.
+
+### 오류 메시지
+
+```
+[ERROR] [so101_pick_place]: gripper action server 없음
+```
+
+### 원인
+
+action **이름**(`/follower/gripper_controller/gripper_cmd`)은 맞지만 **타입**이 다르다.
+`follower_split_controllers.yaml`(및 isaac variant)의 gripper_controller 는
+`parallel_gripper_action_controller/GripperActionController` 라서 action 타입이
+`control_msgs/action/ParallelGripperCommand` 인데, orchestrator 의 ActionClient 는
+구형 `control_msgs/action/GripperCommand` 로 생성돼 있었다. ROS 2 action 은 이름이 같아도
+타입이 다르면 매칭되지 않아 `wait_for_server` 가 영영 False 를 반환한다.
+
+`GripperCommand.Goal` = `command.position`(스칼라) + `command.max_effort` 인 반면,
+`ParallelGripperCommand.Goal` = `command`(`sensor_msgs/JointState`, `name[]`/`position[]`) 로
+goal 구조도 다르다.
+
+### 해결 방법
+
+orchestrator 의 그리퍼 클라이언트를 컨트롤러 타입에 맞춘다:
+
+```python
+from control_msgs.action import ParallelGripperCommand
+# ...
+self._client = ActionClient(node, ParallelGripperCommand,
+                            "/follower/gripper_controller/gripper_cmd")
+# ...
+goal = ParallelGripperCommand.Goal()
+goal.command.name = ["gripper"]        # 컨트롤러 joint 이름
+goal.command.position = [float(position)]
+```
+
+### 확인 방법
+
+재실행 시 `gripper action server 없음` 로그가 사라지고, 컨트롤러 측 demo.log 에
+`[follower.gripper_controller]: Received & accepted new action goal` 이 그리퍼 명령마다
+찍힌다. RViz 에서 그리퍼 jaw 가 open/close 한다. 그리퍼 호출당 5초 타임아웃이 없어져
+pick&place 사이클도 빨라진다(예: 큐브당 ~16s → ~5s).
