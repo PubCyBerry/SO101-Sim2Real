@@ -28,11 +28,25 @@ if multiprocessing.get_start_method() != "spawn":
 
 
 CAMERA_NAMES = ("top_camera", "wrist_camera", "front_camera")
+_FRONT_CAMERA_PRIM_CUBE = "/World/envs/env_0/Robot/shoulder/FrontCamera"
+_FRONT_CAMERA_PRIM_PEN  = "/World/envs/env_0/FrontCamera"
+
 CAMERA_PRIM_PATHS = {
     "top_camera": "/World/envs/env_0/TopCamera",
     "wrist_camera": "/World/envs/env_0/Robot/gripper/WristCamera",
-    "front_camera": "/World/envs/env_0/FrontCamera",
+    # front_camera 는 task에 따라 다름 — args_cli 파싱 후 _resolve_camera_prim_paths() 호출로 확정.
+    "front_camera": _FRONT_CAMERA_PRIM_CUBE,
 }
+
+
+def _resolve_camera_prim_paths(task: str | None) -> None:
+    """task 이름에 따라 CAMERA_PRIM_PATHS["front_camera"] 를 확정한다."""
+    if task and "Cube" in task:
+        CAMERA_PRIM_PATHS["front_camera"] = _FRONT_CAMERA_PRIM_CUBE
+    else:
+        CAMERA_PRIM_PATHS["front_camera"] = _FRONT_CAMERA_PRIM_PEN
+
+
 KEY_BINDINGS = {
     "Q": (0, 1.0, "shoulder_pan +"),
     "A": (0, -1.0, "shoulder_pan -"),
@@ -89,7 +103,7 @@ parser.add_argument("--port", type=str, default="/dev/ttyACM0", help="Port for s
 parser.add_argument("--remote_endpoint", type=str, default=None, help="Reserved for old remote so101leader path")
 parser.add_argument("--left_arm_port", type=str, default="/dev/ttyACM0")
 parser.add_argument("--right_arm_port", type=str, default="/dev/ttyACM1")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--task", type=str, default="SimToReal-SO101-PickCube-v0", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed for the environment.")
 parser.add_argument("--sensitivity", type=float, default=1.0, help="Keyboard sensitivity factor.")
 parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
@@ -160,12 +174,13 @@ parser.add_argument("--top_focal", type=float, default=None, help="top focal len
 parser.add_argument("--wrist_pos", type=_vec3, default=None, help="x,y,z gripper-local position")
 parser.add_argument("--wrist_rot", type=_quat, default=None, help="w,x,y,z gripper-local quaternion")
 parser.add_argument("--wrist_focal", type=float, default=None, help="wrist focal length in mm")
-parser.add_argument("--front_pos", type=_vec3, default=None, help="x,y,z world position for front camera")
-parser.add_argument("--front_target", type=_vec3, default=None, help="x,y,z world look-at target for front camera")
+parser.add_argument("--front_local_pos", type=_vec3, default=None, help="x,y,z shoulder_link local position for front camera")
+parser.add_argument("--front_local_rot", type=_quat, default=None, help="w,x,y,z shoulder_link local quaternion for front camera")
 parser.add_argument("--front_focal", type=float, default=None, help="front focal length in mm")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+_resolve_camera_prim_paths(getattr(args_cli, "task", None))
 
 if args_cli.num_envs != 1:
     raise ValueError("This local GUI teleop script currently supports --num_envs=1 only.")
@@ -626,8 +641,8 @@ def capture_camera_views(env, capture_dir: Path) -> None:
             "wrist_pos": args_cli.wrist_pos,
             "wrist_rot": args_cli.wrist_rot,
             "wrist_focal": args_cli.wrist_focal,
-            "front_pos": args_cli.front_pos,
-            "front_target": args_cli.front_target,
+            "front_local_pos": args_cli.front_local_pos,
+            "front_local_rot": args_cli.front_local_rot,
             "front_focal": args_cli.front_focal,
         },
     }
@@ -790,10 +805,11 @@ def create_camera_tuner(env) -> object | None:
         except Exception:
             pass
 
+    _front_frame_label = "shoulder-local" if "shoulder" in CAMERA_PRIM_PATHS["front_camera"] else "world"
     specs = [
         ("Top Camera", "top_camera", CAMERA_PRIM_PATHS["top_camera"], "world"),
         ("Wrist Camera", "wrist_camera", CAMERA_PRIM_PATHS["wrist_camera"], "gripper-local"),
-        ("Front Camera", "front_camera", CAMERA_PRIM_PATHS["front_camera"], "world"),
+        ("Front Camera", "front_camera", CAMERA_PRIM_PATHS["front_camera"], _front_frame_label),
     ]
     state: dict[str, dict] = {}
     window = ui.Window("SO101 Camera Tuner", width=430, height=640)
@@ -856,7 +872,7 @@ def create_camera_tuner(env) -> object | None:
                         print(f"  # {title} [{frame_label}]")
                         print(f"  pos          = ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
                         print(f"  rot_xyz_deg  = ({euler[0]:.2f}, {euler[1]:.2f}, {euler[2]:.2f})  # 위젯 슬라이더 Rot X/Y/Z (prim frame)")
-                        print(f"  rot_quat     = ({world_q[0]:.4f}, {world_q[1]:.4f}, {world_q[2]:.4f}, {world_q[3]:.4f})  # wxyz, world-conv (cfg 상수용)")
+                        print(f"  rot_quat     = ({world_q[0]:.4f}, {world_q[1]:.4f}, {world_q[2]:.4f}, {world_q[3]:.4f})  # wxyz, world-conv [{frame_label}] (cfg 상수용)")
                         print(f"  focal        = {s['fc'].get_value_as_float():.2f}")
                     print("[tuner] ===============================================================\n")
 
@@ -902,24 +918,29 @@ def main() -> None:  # noqa: C901
         env_cfg.sim.render.antialiasing_mode = "FXAA"
         env_cfg.sim.render.rendering_mode = "quality"
     if args_cli.enable_cameras:
-        # Task 이름에 따라 카메라 주입 함수 선택 (PickCube → add_pick_cube_cameras, 그 외 → add_pick_pen_cameras)
-        if args_cli.task and "Cube" in args_cli.task and add_pick_cube_cameras is not None:
-            add_cameras_fn = add_pick_cube_cameras
-        else:
-            add_cameras_fn = add_pick_pen_cameras
-
-        add_cameras_fn(
-            env_cfg.scene,
+        _common_cam_kwargs = dict(
             top_pos=args_cli.top_pos,
             top_target=args_cli.top_target,
             top_focal=args_cli.top_focal,
             wrist_local_pos=args_cli.wrist_pos,
             wrist_local_rot=args_cli.wrist_rot,
             wrist_focal=args_cli.wrist_focal,
-            front_pos=args_cli.front_pos,
-            front_target=args_cli.front_target,
             front_focal=args_cli.front_focal,
         )
+        # PickCube: front 카메라가 shoulder_link 로컬 좌표 — front_local_pos/rot 사용.
+        # 그 외 (PickPen 등): front 카메라가 world 좌표 — front_pos/front_target 사용.
+        if args_cli.task and "Cube" in args_cli.task and add_pick_cube_cameras is not None:
+            add_pick_cube_cameras(
+                env_cfg.scene,
+                **_common_cam_kwargs,
+                front_local_pos=args_cli.front_local_pos,
+                front_local_rot=args_cli.front_local_rot,
+            )
+        else:
+            add_pick_pen_cameras(
+                env_cfg.scene,
+                **_common_cam_kwargs,
+            )
         # 카메라 sensor update_period 는 task cfg 기본값(1/30s)을 쓴다.
         # 이는 North Star observation.images.* fps 30 계약과 leisaac 템플릿 설정에 맞춘 값이다.
         # 실시간 성능은 보조 viewport docking 을 --tune_cameras 일 때만 켜서 확보한다.

@@ -106,11 +106,14 @@ _WRIST_CAM_LOCAL_POS = (0.0, 0.045, -0.04)
 _WRIST_CAM_LOCAL_ROT = (-0.3642, 0.6061, -0.6061, -0.3642)
 _WRIST_CAMERA_FOCAL = 23.0
 
-# front: 책상 정면에서 작업공간을 바라보는 카메라.
-# 기본값은 --tune_cameras 로 튜닝 후 이 상수에 업데이트할 것.
-_FRONT_CAMERA_POS = (1.87, 0.65, 1.10)
-_FRONT_CAMERA_TARGET = (2.14, -0.15, 0.80)
-_FRONT_CAMERA_FOCAL = 18.0
+# front: shoulder 링크에 장착 — shoulder_pan 회전을 따라간다.
+# (USD 컨벤션: URDF `shoulder_link` → USD `shoulder`, `_link` 접미사 제거)
+# pos/rot 은 --tune_cameras GUI 튜너로 실측한 shoulder local frame 값.
+#   rot_xyz_deg=(-90, 0, -90), rot_quat=(0, 0, 1, 0) wxyz
+_FRONT_CAMERA_POS = (1.81, -0.57, 0.75)       # world ref (shoulder_pan=0, 기록용)
+_FRONT_CAM_LOCAL_POS = (0.030, 0.0, 0.0)         # shoulder local frame (tuner 실측)
+_FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (tuner 실측)
+_FRONT_CAMERA_FOCAL = 23.0
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +244,8 @@ def make_pick_cube_camera_cfgs(
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
-    front_pos: tuple[float, float, float] | None = None,
-    front_target: tuple[float, float, float] | None = None,
+    front_local_pos: tuple[float, float, float] | None = None,
+    front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
 ) -> dict[str, TiledCameraCfg]:
     """top/wrist/front 카메라 cfg 3개를 반환.
@@ -252,6 +255,8 @@ def make_pick_cube_camera_cfgs(
     각 카메라는 480×640 RGB.
 
     top 회전: ``top_target`` 이 주어지면 look_at 계산, 없으면 튜닝된 기본 ``_TOP_CAMERA_ROT``.
+    front: shoulder_link 하위 prim — shoulder_pan 회전을 따라간다.
+           pos/rot 은 shoulder_link local frame 기준.
     """
 
     top_pos = _TOP_CAMERA_POS if top_pos is None else top_pos
@@ -259,8 +264,8 @@ def make_pick_cube_camera_cfgs(
     wrist_local_pos = _WRIST_CAM_LOCAL_POS if wrist_local_pos is None else wrist_local_pos
     wrist_local_rot = _WRIST_CAM_LOCAL_ROT if wrist_local_rot is None else wrist_local_rot
     wrist_focal = _WRIST_CAMERA_FOCAL if wrist_focal is None else wrist_focal
-    front_pos = _FRONT_CAMERA_POS if front_pos is None else front_pos
-    front_target = _FRONT_CAMERA_TARGET if front_target is None else front_target
+    front_local_pos = _FRONT_CAM_LOCAL_POS if front_local_pos is None else front_local_pos
+    front_local_rot = _FRONT_CAM_LOCAL_ROT if front_local_rot is None else front_local_rot
     front_focal = _FRONT_CAMERA_FOCAL if front_focal is None else front_focal
 
     if top_target is not None:
@@ -276,8 +281,7 @@ def make_pick_cube_camera_cfgs(
         focus_distance=1.3,
         clipping_range=(0.1, 6.0),
     )
-    # wrist: robot 링크의 자식 prim → gripper 회전을 따라 이동/회전한다.
-    # pos/rot 은 gripper local frame 기준. 정확한 화각은 GUI 렌더로 튜닝한다.
+    # wrist: gripper 링크 자식 prim → gripper 회전을 따라간다.
     wrist = _pinhole_camera_cfg(
         "{ENV_REGEX_NS}/Robot/gripper/WristCamera",
         wrist_local_pos,
@@ -286,10 +290,12 @@ def make_pick_cube_camera_cfgs(
         focus_distance=0.2,
         clipping_range=(0.02, 3.0),
     )
+    # front: shoulder 링크 자식 prim → shoulder_pan 회전을 따라간다.
+    # USD에서 URDF `shoulder_link` → `shoulder` (`_link` 접미사 제거 컨벤션).
     front = _pinhole_camera_cfg(
-        "{ENV_REGEX_NS}/FrontCamera",
-        front_pos,
-        _look_at_quat_world(front_pos, front_target),
+        "{ENV_REGEX_NS}/Robot/shoulder/FrontCamera",
+        front_local_pos,
+        front_local_rot,
         front_focal,
         focus_distance=1.0,
         clipping_range=(0.1, 6.0),
@@ -306,8 +312,8 @@ def add_pick_cube_cameras(
     wrist_local_pos: tuple[float, float, float] | None = None,
     wrist_local_rot: tuple[float, float, float, float] | None = None,
     wrist_focal: float | None = None,
-    front_pos: tuple[float, float, float] | None = None,
-    front_target: tuple[float, float, float] | None = None,
+    front_local_pos: tuple[float, float, float] | None = None,
+    front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
 ) -> PickCubeSceneCfg:
     """top/wrist/front 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
@@ -323,8 +329,8 @@ def add_pick_cube_cameras(
         wrist_local_pos=wrist_local_pos,
         wrist_local_rot=wrist_local_rot,
         wrist_focal=wrist_focal,
-        front_pos=front_pos,
-        front_target=front_target,
+        front_local_pos=front_local_pos,
+        front_local_rot=front_local_rot,
         front_focal=front_focal,
     ).items():
         setattr(scene_cfg, name, cam_cfg)
