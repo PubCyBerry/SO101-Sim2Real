@@ -35,6 +35,8 @@
 - [Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)](#sim-to-real-펜이-펜통-안에서-spawn-되어-겹침-펜펜통-sampling-영역-분리-누락)
 - [Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)](#sim-to-real-펜통-호-sampling-이-매트책상-밖으로-나감-radius-와-default-좌표-불일치)
 - [ROS 2 (WSL2) 노드 간 토픽 통신 불가 — lo 에 MULTICAST 없어 DDS discovery 실패](#ros-2-wsl2-노드-간-토픽-통신-불가--lo-에-multicast-없어-dds-discovery-실패)
+- [ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps — CycloneDDS + mirrored 네트워킹의 대용량 샘플 전달 실패](#ros-2-wsl2-카메라-image_raw-토픽이-0-fps--cyclonedds--mirrored-네트워킹의-대용량-샘플-전달-실패)
+- [ROS 2 (WSL2) gscam·v4l2_camera 가 usbipd-win 가상 V4L2 디바이스에서 동작 안 함](#ros-2-wsl2-gscamv4l2_camera-가-usbipd-win-가상-v4l2-디바이스에서-동작-안-함)
 - [ROS 2 colcon 빌드가 `catkin_pkg` 못 찾음 (dotfiles 의 ~/.local python 이 ament 가로챔)](#ros-2-colcon-빌드가-catkin_pkg-못-찾음-dotfiles-의-local-python-이-ament-가로챔)
 - [ROS 2 빌드 스크립트 `set -u` 가 setup.bash 와 충돌 (AMENT_TRACE_SETUP_FILES unbound)](#ros-2-빌드-스크립트-set--u-가-setupbash-와-충돌-ament_trace_setup_files-unbound)
 - [ROS 2 (WSL2) feetech read timeout 1회로 hardware deactivate (USB-IP 레이턴시)](#ros-2-wsl2-feetech-read-timeout-1회로-hardware-deactivate-usb-ip-레이턴시)
@@ -44,6 +46,7 @@
 - [Isaac Lab `gym.make` 이후 Python `print`/로그가 사라짐 (carb stdout 재바인딩)](#isaac-lab-gymmake-이후-python-print로그가-사라짐-carb-stdout-재바인딩)
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
+- [Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)](#windows-isaac-sim-_prepare_ui-access-violation-tuple-인자를-applauncher-에-전달)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2264,7 +2267,9 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file://<repo>/ros2_ws/setup/cyclonedds_localhost.xml
 ```
 
-`ros2_ws/setup/env.sh` 가 이 두 변수를 자동 export 하며, `04_setup_bashrc.sh` 가 bashrc 에 등록한다.
+`ros2_ws/setup/env.sh` 가 이 두 변수를 export 하며, `04_setup_bashrc.sh` 가 bashrc 에 등록한다.
+
+> ⚠️ **이 CycloneDDS unicast 방식은 `.wslconfig` `networkingMode=mirrored` 에서 `sensor_msgs/Image` 등 대용량·복합 타입을 cross-process 로 전달하지 못한다**(discovery·작은 메시지는 정상, 카메라만 0 fps). 현재 `env.sh` 는 이 문제 때문에 **FastDDS 를 기본 RMW 로 사용**하며 위 CycloneDDS 블록은 주석으로 남아 있다. 아래 §"ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps" 참조.
 
 ### 확인 방법
 
@@ -2275,6 +2280,94 @@ ros2 run demo_nodes_cpp talker & ros2 run demo_nodes_py listener &
 ```
 
 mock launch 에서 컨트롤러 3개가 "Configured and activated" 되면 해결.
+
+---
+
+## ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps — CycloneDDS + mirrored 네트워킹의 대용량 샘플 전달 실패
+
+**현상**: WSL2 ROS 2 에서 카메라 노드가 `Started stream` 까지 정상이고 `ros2 topic list` 에 `image_raw` 가 보이는데, 어떤 구독자도(다른 프로세스·rosbridge·`ros2 topic hz`) 이미지를 **0 개** 받는다. 반면 `joint_states` 같은 작은 토픽은 같은 graph 에서 정상 전달된다. 노드 discovery 자체는 성공(`ros2 node list` 에 보임).
+
+**오류 메시지**: 없음(에러 없이 조용히 0 fps). 격리 진단으로만 드러난다:
+
+```
+# 같은 프로세스 안에서 두 노드로 pub→sub (동일 QoS depth10):
+std_msgs/String   : 120 msgs   ← 정상
+sensor_msgs/Image : 0 msgs     ← 32x32(3KB)·640x480(921KB) 모두 0, 크기 무관
+```
+
+### 원인
+
+`.wslconfig` 의 `[experimental] networkingMode=mirrored` 환경에서 **CycloneDDS 가 `sensor_msgs/Image` 같은 복합 타입을 cross-process 로 전달하지 못한다**. discovery 와 단순 타입(String/JointState)은 정상이라 "통신은 되는데 카메라만 안 되는" 형태로 나타난다. 메시지 크기와 무관(32×32 도 0)하므로 소켓 버퍼(`rmem_max`)·`MaxMessageSize`·QoS(RELIABLE/BEST_EFFORT) 튜닝으로 해결되지 않는다. mirrored 모드가 loopback/localhost 동작을 바꾸면서 CycloneDDS 의 해당 타입 데이터 경로가 깨지는 것으로 보인다.
+
+### 해결 방법
+
+RMW 를 **FastDDS(`rmw_fastrtps_cpp`)** 로 전환한다. FastDDS 는 같은 호스트를 **공유메모리(SHM)** 로 전송해 깨진 mirrored loopback 경로를 우회한다. `ros2_ws/setup/env.sh`:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# (CycloneDDS 의 RMW_IMPLEMENTATION / CYCLONEDDS_URI export 는 주석 처리)
+```
+
+- **모든 노드가 같은 RMW 여야 한다** — follower·rosbridge·카메라를 전부 `source env.sh` 한 셸에서 재기동. RMW 가 섞이면 graph 가 분리돼 서로 안 보인다.
+- 보조로 `net.core.rmem_max` 를 올려두면(UDP fallback 대비) 안전하다: `ros2_ws/setup/wsl_ros2_sysctl.conf` → `/etc/sysctl.d/99-ros2-wsl.conf`, `sudo sysctl --system`.
+
+### 확인 방법
+
+```bash
+source <repo>/ros2_ws/setup/env.sh   # RMW=rmw_fastrtps_cpp
+# 카메라 노드 기동 후 다른 셸(역시 env.sh)에서:
+ros2 topic hz /camera/top/image_raw   # ~20fps 이상 찍히면 OK
+```
+
+3캠(`/camera/{top,wrist,front}/image_raw`)이 각 ~23fps 로 cross-process 수신되면 해결.
+
+---
+
+## ROS 2 (WSL2) gscam·v4l2_camera 가 usbipd-win 가상 V4L2 디바이스에서 동작 안 함
+
+**현상**: usbipd 로 attach 한 UVC 웹캠을 `gscam` / `v4l2_camera` 로 띄우면 노드는 뜨는데 프레임이 안 나온다(0 fps). `gst-launch-1.0` 로 같은 파이프라인을 돌리면 프레임이 흐른다.
+
+**오류 메시지**:
+
+```
+# gscam
+[ERROR] [cam]: Could not get gstreamer sample.
+# v4l2_camera (YUYV)
+[v4l2_camera]: Starting camera        ← 여기서 멈춤(DQBUF 무한 대기)
+# v4l2_camera (MJPG)
+[v4l2_camera]: Current pixel format is not supported yet: MJPG
+terminate called after throwing an instance of 'cv_bridge::Exception'
+# 공통(IO 모드)
+streaming stopped, reason not-negotiated (-4)   # io-mode=2(mmap) 사용 시
+```
+
+### 원인
+
+usbipd-win 의 가상 V4L2 디바이스는 표준 드라이버가 기대하는 동작을 일부 못 한다:
+- `gscam`: appsink 가 첫 샘플을 1초 내 pull 못 해 포기(USB-IP 지연).
+- `v4l2_camera` **YUYV**: 비압축 대역폭이 커 `DQBUF` 가 무한 대기(행).
+- `v4l2_camera` **MJPG**: 디바이스는 받아들이나 노드가 MJPG→rgb8 디코드를 미지원해 크래시.
+- GStreamer `io-mode=2`(mmap): 가상 디바이스에서 협상 실패(`not-negotiated`).
+- 추가로 카메라 기본 framerate 가 640×480 에서 25fps 인데 30fps 를 요청하면 `not-negotiated`.
+
+### 해결 방법
+
+OpenCV(MJPG 압축 스트림) 로 직접 캡처해 발행하는 노드를 쓴다: `ros2_ws/src/so101_bringup/scripts/cv2_camera_publisher.py`. 핵심:
+- `cv2.CAP_V4L2` + `MJPG` fourcc (압축이라 USB-IP 대역폭 안정).
+- **단일 스레드 라운드로빈** — USB-IP 가상 디바이스는 다중 스레드 동시 블로킹 read 와 동시 open 경합을 못 버틴다. 한 스레드에서 카메라들을 순차로 `read()` → 발행(3캠 합산 ~18fps, FastDDS 로 각 ~23fps 전달).
+- `ros2 launch so101_bringup cameras_cv2.launch.py` 또는 `ros2 run so101_bringup cv2_camera_publisher.py`.
+
+> 참고: 이미지가 발행돼도 RMW 가 CycloneDDS+mirrored 면 구독자에 0 fps 다(위 §참조). FastDDS 와 함께 써야 한다.
+
+### 확인 방법
+
+```bash
+# 디바이스 자체 캡처 가능 여부(드라이버 무관):
+gst-launch-1.0 v4l2src device=/dev/cam_top num-buffers=3 ! image/jpeg,width=640,height=480,framerate=25/1 ! jpegdec ! videoconvert ! fakesink
+# → Execution ended ... (ERROR 없이) 면 캡처 OK
+```
+
+노드 로그에 `... -> /camera/<name>/image_raw 스트리밍 시작` 3줄이 뜨고 `ros2 topic hz` 가 찍히면 해결.
 
 ---
 
@@ -2356,7 +2449,7 @@ usbipd-win 의 USB/IP 는 polling 기반이라 serial round-trip 레이턴시가
 
 `feetech_ros2_driver` 와 컨트롤러 설정을 WSL2 레이턴시에 맞게 조정(이 레포에 반영):
 
-- `feetech_driver/include/feetech_driver/serial_port.hpp`: serial `timeout_` 5ms → **50ms**
+- `feetech_driver/include/feetech_driver/serial_port.hpp`: serial `timeout_` 5ms → **50ms → 250ms**
 - `feetech_ros2_driver/src/feetech_ros2_driver.cpp` `on_activate`: 초기 read 전 안정화 `sleep_for(150ms)` 추가
 - `so101_bringup/config/ros2_control/follower_split_controllers.yaml`: `update_rate` 100 → **50Hz**
 
@@ -2366,6 +2459,10 @@ colcon build --symlink-install --packages-select feetech_ros2_driver so101_bring
 ```
 
 네이티브 Linux(직결 USB)에서는 레이턴시가 작아 원래 값(5ms/100Hz) 복원 가능.
+
+**(2026-06-10) timeout 만으로는 부족 — read 실패 ride-through 가 정답**: timeout 을 250ms 까지 늘려도 USB-IP 지연/desync 스파이크가 가끔 초과해 단일 실패로 죽었다. 연속실패 임계(10/100) 방식도 burst 가 임계를 넘으면 죽음. **최종 수정**: `read()` 가 sync_read 실패 시 ① `communication_protocol_->flush_input()`(=`SerialPort::flashInputBuffer()` 노출, 입력버퍼 flush 로 desync 재동기화) ② **`return_type::OK` 를 항상 반환(마지막 상태 유지, 절대 deactivate 안 함)**. 진짜 단선은 joint_states freshness(stamp 갱신 멈춤)로 외부 감지. `feetech_ros2_driver.{hpp,cpp}` + `communication_protocol.hpp(flush_input)` 반영.
+
+**🔴 미해결 — 프레임 시프트 corruption**: 위 ride-through 로 deactivate 는 막았으나, USB-IP 링크가 수 분 내 품질 저하하면 read 가 **checksum 통과하지만 joint↔value 어긋난 값**(명령 안 한 gripper 가 -1.098 등)을 간헐 반환한다. joint_states 를 신뢰 못해 캘리브/closed-loop 가 불가. `usbipd detach 4-1 && usbipd attach --wsl --busid 4-1` 재연결로 ~1~2분 깨끗해지나 곧 재저하. 근본해결은 USB-IP/하드웨어 레벨(WSL mirrored→NAT 검토, update_rate 20Hz 로 트래픽↓, 팔을 네이티브 Linux 직결). 현재 미해결.
 
 ### 확인 방법
 
@@ -2572,19 +2669,105 @@ IK 로도 동시에 못 맞춘다:
 midpoint ee) — 모두 이 중첩을 못 넘었다. (반면 Franka 7DOF 는 yaw 가 독립이고 full pose IK 가
 가능해 한 번에 grasp.)
 
-### 해결 방법 (현재 권장)
+### 후속 1 — in-sim DifferentialIK 18회 진단 (2026-06-09): 위 오차는 풀렸으나 grip 은 불가
 
-- **데모는 Franka 7DOF**(`pick_cube_franka_state_machine.py`)를 쓴다 — DR 상태 4/4, ~30초.
-- SO-101 을 끝까지 가려면: GUI 로 grasp 순간을 보며 정합/offset 을 시각 보정하거나, RMPFlow
-  (자세 포함 trajectory) + `gripper_frame_link` 정합 정밀화가 필요(headless 수치 반복으론 수렴 더딤).
-- ROS2 + MoveIt2 는 호스트에 ROS2 미설치(`/opt/ros` 없음)라 대규모 인프라 필요 → 동일 목적의
-  Isaac Sim 내장 Lula 로 대체(ROS2 불필요). Lula IK 자체는 정상 동작(err 0).
+외부 Lula 를 버리고 Isaac Lab **in-sim `DifferentialIKAction`**(env `SimToReal-SO101-PickCube-IK-v0`)
+으로 재작성해 18회 headless 진단했다. 위 "정합"·"제어점" 오차는 in-sim IK(제어점=도달점 동일)로
+원천 제거됐고, 세부 실패도 데이터로 순차 해결:
+
+- **갭 roll 정렬은 원인 아님**(gap_misalign 1~6°, 기각).
+- **ee 도달**: position-only + 단계별 arm stiffness(descend 120, soft PD 정상상태 오차 제거)로
+  3.2cm → **0.4cm**.
+- **수평 밀림**: 닫을 때 큐브 밀림을 gripper-local 축으로 분해하니 거의 전부 **X축(jaw 회전 호
+  방향)** 성분 → 그 축으로 lateral 보정해 4.4cm → **1.3cm**. (closed-loop close 는 ee 가 큐브를
+  쫓아가 18cm 비산 → 역효과, 고정 hold 가 정답.)
+- **z 튐**: descend z over-drive 게인 1.2~1.5 로 손가락을 큐브 측면 깊이로 내려 해소.
+
+그러나 **grip 자체는 5DOF DiffIK 로 불가**임이 확정: **강 tilt(jaw 를 큐브 측면으로) + ee 도달을
+동시에 못 푼다**. position-only=수직(jaw 가 큐브 위 8cm 에 떠 손가락이 큐브에 안 닿음→안 들림),
+pose tilt=강 tilt 시 ee 가 멀어짐(tilt20→ee1.2cm·jaw위, tilt30→ee4.5cm, tilt35→자세붕괴,
+`--ik_lambda`↓는 DLS 불안정). env action space 가 부팅 시 고정이라 descend(position)/close(pose)
+모드 혼용도 불가.
+
+### 후속 2 — joint_fk (in-sim FK 샘플링) 로 1큐브 grasp 해결 (2026-06-10)
+
+IK 를 버리고 **`--controller_mode joint_fk`**(random-FK 로 joint target 직접 샘플링)로 가면 IK 가
+못 만드는 강 tilt 자세를 직접 탐색해 grip 이 성립한다. **1큐브 DR-off 1/1 성공**(DiffIK 18회 0/1
+대비). 복원 소스 = 커밋 `62303d9`(env `SimToReal-SO101-PickCube-v0`, joint-space
+`SlewLimitedJointPositionAction`; `94780bd` DiffIK 재작성에서 제거됐던 것).
+
+- **4큐브 full-DR 은 평균 1.5/4 (all-4 ~0%) — 별도 blocker**. reach 매핑(1큐브 12 ep, spawn 위치
+  로깅) 결과 실패는 robot base 거리와 무관(먼 0.30m 성공, 가까운 0.11m 실패)해 "reach 불가
+  스폰"이 아니라 **random-FK 의 marginal grasp(단일 ~67%) + 4큐브 상호작용**(나중 큐브 approach 가
+  기존 큐브/그릇을 침)이 주 원인. scatter range 를 reach 안쪽으로 제한
+  (`_CUBE_SCATTER_X_RANGE`=[1.66,2.04], `_CUBE_SCATTER_Y_RANGE`=[-0.46,-0.345])하고
+  `--object_order far_base_first`(base 에서 먼 큐브 먼저)를 적용해도 1.5/4 로 개선되지 않았다
+  (grasp 품질 근본 한계). 즉 **1큐브 grasp 는 해결, 4큐브 신뢰 expert 는 미해결 blocker**.
+- 데모/비교용으로 Franka 7DOF(`pick_cube_franka_state_machine.py`, 4/4 ~30초)도 유지.
 
 ### 확인 방법
 
-`pick_cube_state_machine.py --active_objects 1 --object_radius_scale 0` 로 단일 큐브 진단.
-descend 로그의 `ee`(grasp 접점)·`jaw`/`gripper`(USD 손가락 body)·`cube` 를 비교해 손가락이
-큐브 xy 를 사이에 두고 z 가 큐브 높이면 grasp 가능. 빗나가면 위 3중 오차.
+1큐브 grasp: `pick_cube_state_machine.py --controller_mode joint_fk --task
+SimToReal-SO101-PickCube-v0 --active_objects 1 --object_radius_scale 0 --headless --no_videos`
+→ 결과 JSON 의 `final_inside.Cube1=true`, `placed_and_released=true`. 4큐브 신뢰성은
+`--active_objects 4 --object_radius_scale 1 --num_episodes N` sweep 의 per-cube/all-4 로
+측정(현재 평균 1.5/4). DiffIK 진단(폐기)은 `diffik_grasp_diag.patch`(commit `12265e1` 대비)로 보존.
+
+---
+
+## Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)
+
+### 현상
+
+Windows에서 `scripts/environments/pick_cube_franka_state_machine.py` 실행 시 Isaac Sim 확장이 모두 로드된 직후(~11초) `Windows fatal exception: access violation` 으로 크래시. 동일 머신에서 `teleop_se3_agent.py` 는 GUI 모드로 정상 동작.
+
+### 오류 메시지
+
+```
+Windows fatal exception: access violation
+
+Thread 0x0000460c (most recent call first):
+  File "...simulation_app.py", line 602 in _prepare_ui
+  File "...simulation_app.py", line 310 in __init__
+  File "...app_launcher.py", line 823 in _create_app
+  File "...app_launcher.py", line 131 in __init__
+  File "...pick_cube_franka_state_machine.py", line 100 in <module>
+```
+
+### 원인
+
+`vars(args)` 전체를 `AppLauncher(vars(args))` 로 전달할 때, argparse 커스텀 인자 중 **tuple 타입** 값(`view_eye=(3.05, -0.78, 1.02)`, `view_lookat=(1.74, -0.38, 0.74)`)이 포함된다. AppLauncher 가 알 수 없는 키를 carb 설정으로 등록 시도할 때 Windows carb 가 tuple 을 처리하지 못해 access violation 이 발생한다. Linux 에서는 동일 코드가 tuple 을 무시하거나 다르게 처리해 정상 동작한다. `teleop_se3_agent.py` 는 커스텀 인자가 모두 str/int/float/bool 이라 문제가 없다.
+
+### 해결 방법
+
+`AppLauncher` 에 전달하는 dict 를 AppLauncher 가 실제로 사용하는 키(`headless`, `enable_cameras`, `experience`, `device`, `cpu`, `disable_fabric`, `offscreen_render`, `kit_args`)만으로 필터링한다:
+
+```python
+_LAUNCHER_KEYS = {
+    "headless", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+app_launcher = AppLauncher(_launcher_args)
+```
+
+`pick_cube_franka_state_machine.py` 에 적용 완료.
+
+### 확인 방법
+
+`uv run scripts/environments/pick_cube_franka_state_machine.py` 를 `--headless` 없이 실행해 Isaac Sim GUI 가 정상 기동되고 큐브 pick-and-place 씬이 렌더링되면 수정 성공.
+
+### 플랫폼 호환성
+
+필터링 후에도 **Linux / Windows 모두 정상 동작**한다.
+
+| | Linux (수정 전) | Linux (수정 후) | Windows (수정 후) |
+|---|---|---|---|
+| tuple 인자 전달 여부 | ✓ (무시됨) | ✗ (필터링) | ✗ (필터링) |
+| AppLauncher 필수 키 포함 여부 | ✓ | ✓ | ✓ |
+| 크래시 여부 | 없음 | 없음 | 없음 |
+
+Linux 에서 수정 전 코드가 정상 동작했던 이유는 tuple 을 "잘 처리해서"가 아니라 Linux carb 가 알 수 없는 키를 **무시했기 때문**이다. 무시하던 키들을 애초에 전달하지 않으므로 Linux 동작에 영향이 없다. Isaac Lab 업그레이드 시 `add_app_launcher_args` 가 새 키를 추가하면 `_LAUNCHER_KEYS` 에도 동기화해야 한다.
 
 ---
 

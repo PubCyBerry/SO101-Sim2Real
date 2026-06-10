@@ -13,30 +13,46 @@ Domain Randomization 으로 큐브/그릇 위치가 무작위화된 상태에서
 - 이동 단계(APPROACH/DESCEND/LIFT/TRANSPORT/LOWER/RETREAT)는 도달 OR
   max_phase_steps 를 초과하면 다음 단계로 전이한다(IK 미수렴 안전장치).
 
+제어는 Isaac Lab task-space DifferentialIK. 목표 ee pose 의 **방향은 robot base
+기준 수직 아래로 고정**하고(위치만 world→base 변환), 그래서 운반 중 손목(panda_joint7)이
+±180° 로 휙 도는 현상을 막는다. 그리퍼는 binary(열림 +1 / 닫힘 -1) action.
+
 실행:
     OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \\
         scripts/environments/pick_cube_franka_state_machine.py \\
         --num_envs 4 --active_objects 4
+
+headless 실행:
+    OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \\
+        scripts/environments/pick_cube_franka_state_machine.py \\
+        --num_envs 4 --active_objects 4 --headless
 """
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import os
 import sys
 from enum import IntEnum
 
 from isaaclab.app import AppLauncher
 
-_LOG_PATH = "/tmp/franka_sm_progress.txt"
-open(_LOG_PATH, "w").close()  # 실행마다 진행 로그 초기화
+_LOG_PATH = os.path.abspath("outputs/franka_sm_progress.txt")
+os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+open(_LOG_PATH, "w").close()
+# C 레벨 크래시(access violation 등) Python traceback 을 파일로 덤프.
+_FH_FILE = open(os.path.abspath("outputs/franka_faulthandler.txt"), "w")
+faulthandler.enable(file=_FH_FILE)
 
 
 def log(msg: str) -> None:
-    """진행 로그. Isaac Sim 은 gym.make 로 SimulationContext 를 만들 때 stdout/stderr 를
-    carb logger 로 재바인딩한다. 그 이후의 일반 print 는 (특히 출력을 파일로 리다이렉트한
-    headless 실행에서) 묻히므로, 별도 파일에 직접 append 하고 원본 stderr fd 에도 쓴다."""
+    """Isaac Sim 이 gym.make 후 stdout/stderr 를 carb 로 재바인딩해 print 가 묻히므로,
+    진행 로그를 파일에 직접 append 하고 fsync 로 disk 강제 반영(크래시 시 buffer 유실 방지)."""
     with open(_LOG_PATH, "a") as f:
         f.write(msg + "\n")
+        f.flush()
+        os.fsync(f.fileno())
     print(msg, file=sys.__stderr__, flush=True)
 
 
@@ -96,7 +112,15 @@ if args.video:
     args.enable_cameras = True
 
 # AppLauncher 부팅 (isaac 모듈 import 전에).
-app_launcher = AppLauncher(vars(args))
+# vars(args) 전체를 넘기면 view_eye/view_lookat 같은 tuple 커스텀 인자가
+# AppLauncher → carb 설정 경로로 전달되어 Windows에서 _prepare_ui access violation 발생.
+# AppLauncher가 실제로 사용하는 키만 필터링해서 전달한다.
+_LAUNCHER_KEYS = {
+    "headless", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+app_launcher = AppLauncher(_launcher_args)
 simulation_app = app_launcher.app
 
 # ---------------------------------------------------------------------------

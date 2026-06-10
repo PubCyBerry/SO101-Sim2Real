@@ -1,0 +1,21 @@
+# SO-101 안정 심볼릭 링크 (usbipd-win via WSL2 vhci)
+# 설치: 06_setup_host_devices.sh 가 /etc/udev/rules.d/99-so101.rules 로 복사 후 reload.
+#
+# ⚠️ 기기마다 값이 다르다 — 그대로 쓰지 말고 본인 기기 값으로 교체할 것:
+#   - 팔(tty): ID_SERIAL_SHORT 로 구분(견고). 확인:
+#       udevadm info --query=property --name=/dev/ttyACM0 | grep ID_SERIAL_SHORT
+#   - 카메라(video4linux): 3대가 동일 시리얼이라 부득이 USB vhci PATH 로 구분한다.
+#     PATH(platform-vhci_hcd.0-usb-0:N:1.0)의 N 은 usbipd attach 한 bus 위치에 따라
+#     달라지므로 top/wrist/front 배정이 뒤바뀔 수 있다. 반드시 프레임을 캡처해
+#     육안 확인 후 N 을 맞출 것(아래 §확인). 확인:
+#       udevadm info /dev/video0 | grep -E 'ID_PATH|ID_SERIAL'
+
+# ── 팔 (시리얼 기반) ──
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="55d3", ENV{ID_SERIAL_SHORT}=="5AE6057916", SYMLINK+="so101_follower", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="55d3", ENV{ID_SERIAL_SHORT}=="5AE6082830", SYMLINK+="so101_leader",   GROUP="dialout", MODE="0660"
+
+# ── 카메라 (USB vhci PATH 기반 — 동일 시리얼이라 PATH 로 구분) ──
+# 현재 기기: 0:2=front, 0:3=top, 0:4=wrist (육안 확인 완료). 다르면 N 교체.
+SUBSYSTEM=="video4linux", ENV{ID_PATH}=="platform-vhci_hcd.0-usb-0:2:1.0", SYMLINK+="cam_front", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ENV{ID_PATH}=="platform-vhci_hcd.0-usb-0:3:1.0", SYMLINK+="cam_top",   GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ENV{ID_PATH}=="platform-vhci_hcd.0-usb-0:4:1.0", SYMLINK+="cam_wrist", GROUP="video", MODE="0660"

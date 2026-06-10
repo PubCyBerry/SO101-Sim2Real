@@ -1,0 +1,17 @@
+# WSL2 전역 설정 예시 — Windows 의 C:\Users\<username>\.wslconfig 로 복사.
+# 적용: 변경 후 PowerShell 에서 `wsl --shutdown` 후 WSL 재진입.
+#
+# networkingMode=mirrored 가 이 셋업의 전제다. 단, mirrored 에서는 CycloneDDS 가
+# sensor_msgs/Image 를 cross-process 로 전달하지 못하므로 RMW 를 FastDDS 로 쓴다
+# (ros2_ws/setup/env.sh, docs/TROUBLESHOOTING 의 "카메라 image_raw 0 fps" 참조).
+
+[wsl2]
+memory=32GB
+MaxCrashDumpCount=-1
+processors=8
+swap=0
+
+[experimental]
+networkingMode=mirrored
+dnsTunneling=true
+autoproxy=true

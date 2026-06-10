@@ -14,6 +14,13 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# WSL2 USB-IP + FastDDS 카메라 publisher (gscam/v4l2_camera 가 USB-IP 에서
+# 동작하지 않아 OpenCV MJPG 캡처로 대체). ros2 run so101_bringup cv2_camera_publisher.py
+install(
+  PROGRAMS scripts/cv2_camera_publisher.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 
 
 

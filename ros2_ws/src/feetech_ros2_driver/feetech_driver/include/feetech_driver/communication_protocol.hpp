@@ -28,6 +28,10 @@ class CommunicationProtocol {
  public:
   explicit CommunicationProtocol(std::unique_ptr<SerialPort> /*serial_port*/);
 
+  // USB-IP(WSL2 mirrored) 바이트 드롭으로 serial 스트림이 desync 되면 check_head 가 header 를
+  // 영원히 못 찾는다(연속 실패). read 실패 시 입력버퍼를 비워 다음 cycle 이 fresh 바이트로 재동기화하게 한다.
+  Result flush_input() { return serial_port_->flashInputBuffer(); }
+
   Result ping(int id);
 
   Result write_position(uint8_t id, int position, int speed, int acceleration);
@@ -189,6 +193,14 @@ class CommunicationProtocol {
       if (static_cast<std::byte>(calculated_checksum) != static_cast<std::byte>(checksum)) {
         return tl::make_unexpected(fmt::format(
             "CommunicationProtocol::sync_read [calculated_checksum={}, checksum={}]", calculated_checksum, checksum));
+      }
+      // 응답의 servo ID(response_buffer[0]) 가 기대 ID(ids[i]) 와 다르면 프레임 misalignment 다.
+      // USB-IP 바이트 드롭으로 응답이 한 servo 밀리면, per-servo checksum 은 통과하지만 data 가
+      // 잘못된 joint 로 배정되는 corruption(joint 값 뒤섞임)이 발생한다. ID 를 검증해 거부하면
+      // 상위 read() 의 flush+skip(ride-through)으로 다음 cycle 에 재동기화된다.
+      if (response_buffer[0] != ids[i]) {
+        return tl::make_unexpected(fmt::format(
+            "CommunicationProtocol::sync_read [servo id mismatch: expected={}, got={}]", ids[i], response_buffer[0]));
       }
     }
     return {};

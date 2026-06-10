@@ -1,9 +1,10 @@
 follower:
   controller_manager:
     ros__parameters:
-      # WSL2/USB-IP 환경: serial read 스파이크가 커서 100Hz(10ms)는 매 사이클 오버런.
-      # 50Hz(20ms)로 낮춰 sync_read 여유 확보 (실기기 검증 목적, 네이티브 Linux면 100Hz 복원 가능).
-      update_rate: 50
+      # WSL2/USB-IP 환경: serial read 스파이크가 커서 100Hz 는 오버런. 게다가 motion(sync_write)+read 가
+      # 동시에 몰리면 half-duplex 버스 + USB-IP 레이턴시로 read 가 sustained corruption(checksum 실패) 된다.
+      # 25Hz(40ms)로 더 낮춰 write/read 턴어라운드 여유 확보 (네이티브 Linux면 100Hz 복원 가능).
+      update_rate: 25
 
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
@@ -35,7 +36,7 @@ follower:
         - position
         - velocity
 
-      state_publish_rate: 50.0
+      state_publish_rate: 25.0
       action_monitor_rate: 20.0
 
       allow_partial_joints_goal: false

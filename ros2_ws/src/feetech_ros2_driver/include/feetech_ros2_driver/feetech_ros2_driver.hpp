@@ -51,6 +51,12 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
 
   std::vector<uint8_t> joint_ids_;
 
+  // USB-IP(WSL2 mirrored) 지연 스파이크로 인한 일시적 read timeout 톨러런스:
+  // 단일 실패에 hardware 를 deactivate 하지 않고, 연속 실패가 임계치를 넘을 때만 ERROR 를 반환한다.
+  // (실패 cycle 은 마지막으로 읽은 상태를 그대로 유지한 채 skip 한다.)
+  // read 실패 연속 횟수(로깅용). read() 는 실패 시 flush 후 OK 를 반환해 절대 deactivate 하지 않는다.
+  std::size_t consecutive_read_failures_ = 0;
+
   CallbackReturn init_transport_();
   CallbackReturn load_yaml_config_and_warn_(JointIdConfigMap& out_yaml);
   CallbackReturn configure_joints_(const JointIdConfigMap& yaml_by_id);

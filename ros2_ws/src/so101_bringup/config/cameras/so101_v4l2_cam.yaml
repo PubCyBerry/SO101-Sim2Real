@@ -30,3 +30,8 @@
     video_device: "/dev/cam_overhead"
     frame_id: "cam_overhead"
     camera_name: "cam_overhead"
+/front_camera/cam_front:
+  ros__parameters:
+    video_device: "/dev/cam_front"
+    frame_id: "cam_front"
+    camera_name: "cam_front"
