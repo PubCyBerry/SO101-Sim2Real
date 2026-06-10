@@ -152,7 +152,14 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             pos=_ROBOT_POS,
             rot=_ROBOT_ROT,
-            joint_pos={j: 0.0 for j in SO101_JOINT_ORDER},
+            # gripper 는 0.80 rad(=open, open 판정 >0.6) 으로 시작한다. 두 가지 이유:
+            #  1) RL 정책이 "닫힌 손"으로 시작하면 pregrasp 보상(닫힘+근접)을 손을
+            #     벌리지 않고 공짜로 받아 큐브를 감싸 잡을 유인이 사라진다(정체 원인).
+            #  2) use_default_offset=True 라 action target=raw*scale(1.0)+offset(=이 값).
+            #     clip_actions=1.0 이면 도달 범위=[offset-1, offset+1]. offset=0 이면
+            #     최대 open 이 1.0 rad 뿐이라 40mm 큐브를 감쌀 폭이 부족했다. offset=0.80
+            #     이면 [-0.20, 1.80] 으로 full open(1.745)↔full close(-0.174) 모두 도달.
+            joint_pos={**{j: 0.0 for j in SO101_JOINT_ORDER}, "gripper": 0.80},
         ),
         actuators={
             # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
