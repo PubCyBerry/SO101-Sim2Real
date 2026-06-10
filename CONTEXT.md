@@ -13,9 +13,9 @@
 
 ---
 
-## 작업 인계 (2026-06-10 — PickCube LSTM(PPO) RL: v5 place/release valley 개입)
+## 작업 인계 (2026-06-11 — PickCube LSTM(PPO) RL: v6 place valley + grasp 신뢰성)
 
-> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T23 전체 시행착오). 여기는 인계 요약만.
+> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T24 전체 시행착오). 여기는 인계 요약만.
 
 - **위치**: worktree `lstm-ppo-pickcube`(브랜치 worktree-lstm-ppo-pickcube). 실행 = 메인 `.venv` + `PYTHONPATH=$(pwd)/src`. 서버 konan147 GPU(48GB) 공유.
 - **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.

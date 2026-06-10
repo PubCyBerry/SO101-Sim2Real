@@ -56,6 +56,11 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._bowl_init_quat[:, 0] = 1.0
         self._bowl_init_xy = torch.zeros(self.num_envs, 2, device=self.device)
 
+        # 큐브 초기 xy(에피소드 시작 = scatter/부트스트랩 적용 후) — cube_predisturb 패널티
+        # 의 기준. CUBE_NAMES 순서 (num_envs, n_cubes, 2). 잡기 전 큐브를 쳐서 밀어낸
+        # 거리를 이 기준으로 측정한다.
+        self._cube_init_xy = torch.zeros(self.num_envs, len(CUBE_NAMES), 2, device=self.device)
+
     def _anneal_progress(self) -> float:
         """학습 진행도 p∈[0,1] (common_step_counter / anneal_steps). 감쇠 없으면 0."""
         if self._bootstrap_anneal_steps <= 0.0:
@@ -145,6 +150,14 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._bowl_init_xy[env_ids] = (
             bowl.data.root_pos_w[env_ids, :2] - self.scene.env_origins[env_ids, :2]
         ).clone()
+        # 큐브 초기 xy 저장(scatter + 부트스트랩 텔레포트 적용 후 = 에피소드 시작 위치).
+        # cube_predisturb 패널티가 "이 위치에서 밀려난 정도"를 측정.
+        origins_xy = self.scene.env_origins[env_ids, :2]
+        for i, name in enumerate(CUBE_NAMES):
+            cube_i = self.scene[name]
+            self._cube_init_xy[env_ids, i] = (
+                cube_i.data.root_pos_w[env_ids, :2] - origins_xy
+            ).clone()
 
     def step(self, action):
         if self._grasp_offset is None:

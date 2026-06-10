@@ -640,6 +640,39 @@ def over_bowl_drop_reward(
 
 
 # ---------------------------------------------------------------------------
+# 큐브 변위 패널티 — 잡기 전 큐브를 쳐서 밀어내는 것 억제 (정밀 grasp proxy)
+# ---------------------------------------------------------------------------
+
+
+def cube_predisturb_penalty(
+    env: ManagerBasedRLEnv,
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    lift_min: float = 0.02,
+) -> torch.Tensor:
+    """잡기 전(책상 위·안 들린) 큐브가 reset 초기 xy 에서 밀려난 거리 합(+값).
+
+    제대로 정밀 접근하면 그리퍼/팔이 큐브를 안 쳐 변위≈0. 거칠게 접근해 큐브를 치면
+    변위↑ → 패널티. 들어올린 큐브(lifted)는 의도된 이동이라 제외(들기 전 책상 위
+    수평 변위만 본다). "큐브를 최소로 움직이며 감싸 잡기"를 유도 = 정밀 grasp 의 proxy.
+    RewTerm weight 는 음수. ``env._cube_init_xy``(PickCubeEnv 가 reset 직후 저장,
+    CUBE_NAMES 순서 (N, n_pens, 2)) 가 없으면 0 — getattr 가드.
+    """
+    init_xy = getattr(env, "_cube_init_xy", None)
+    if init_xy is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    total = torch.zeros(env.num_envs, device=env.device)
+    for i, cfg in enumerate(cfgs):
+        pen_pos = _pen_pos_w(env, cfg)
+        local = pen_pos - env.scene.env_origins
+        lifted = local[:, 2] > (_DESK_TOP_Z + lift_min)
+        disp = torch.linalg.vector_norm(local[:, :2] - init_xy[:, i, :], dim=-1)
+        total = total + (~lifted).float() * disp
+    return total
+
+
+# ---------------------------------------------------------------------------
 # 그릇 교란 패널티 — 운반/place 중 그릇을 밀치거나 엎는 것 억제
 # ---------------------------------------------------------------------------
 

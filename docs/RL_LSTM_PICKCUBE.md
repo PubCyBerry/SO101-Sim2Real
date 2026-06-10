@@ -196,8 +196,18 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
   - **`over_bowl_drop_reward`(신규, weight 12)**: 들린 큐브가 그릇 XY 위일 때 그리퍼 open_frac을 dense 보상(inside 게이트 없음). carry/transport 잡고-버티기 탈출 → 그릇 위에서 손 펴 떨구기 유도. 바닥까지 안 내려도 됨(그릇 내부 미끄러워 위에서 떨궈도 중앙 정착, [[bowl-interior-slippery]]).
   - **`bowl_disturb_penalty`(신규, weight -5)**: reset 직후 저장한 그릇 초기 pose(quat·xy) 기준 tilt(1-cosθ, 주신호)+xy변위(disp_coef 4) 패널티. `PickCubeEnv._reset_idx`가 randomize_bowl 직후 `_bowl_init_quat/_bowl_init_xy` 저장. weight 작게(과하면 그릇 근처 접근 회피).
   - carry(8)는 부트스트랩 하류 학습에 중요해 유지 — drop(12)>carry(8)로 여는 게 이득이게 설계.
-- **나머지는 v4 그대로**: 16384env, gamma 0.997, RND grasp_focus, 부트스트랩 0.75→0(anneal 1000), batch 24/10/16, grasp 보상(align1/close3/contact2). run `lstm256_stage1_grasp_v5`, 로그 `train_grasp_v5.log`.
-- **판정**: scratch `placed`가 `over_bowl`을 따라 올라오는지(release valley 해소) + 그릇 엎힘 감소. scratch.success→0.80 = 단일 큐브 통과 → 커리큘럼 1→2.
+- **나머지는 v4 그대로**: 16384env, gamma 0.997, RND grasp_focus, 부트스트랩 0.75→0(anneal 1000), batch 24/10/16, grasp 보상(align1/close3/contact2).
+- v5는 iter 170(grasp 재점화 전)에서 **v6로 흡수**(아래) — 결과 미수집.
+
+### T24. ⏳ grasp 신뢰성 — 큐브 변위 패널티 + 추락 종료 (v6, fresh)
+- **진단(사용자 관찰)**: reach→grasp 과정에서 그리퍼/팔이 큐브를 **쳐서 밀어냄**. 심하면 도달 불가 영역/책상 아래로 추락 → 영영 못 집음(에피소드 실패). 이게 grasp 신뢰성(병목 ①, reach 1.0인데 grasp ~0.8)의 일부. **통찰: 제대로 집으면 큐브를 안 친다 → 큐브 변위 = 정밀 grasp의 proxy.**
+- **단계 전이 분석(v4 model_750 scratch)**: reach 1.0 → grasp 0.71 → lift 0.81 → over_bowl 0.71 → placed/success 0.23. 병목 두 곳 = ① grasp 신뢰성(~0.8) ② over_bowl→placed 전이(~0.32). success ≈ 곱 0.23. 90%엔 각 전이 ~0.97+ 필요.
+- **개입(v6, fresh — obs 87dim 불변, 보상/종료만 추가)**:
+  - **`cube_predisturb_penalty`(신규, weight -3)**: 잡기 전(책상 위·안 들린) 큐브가 reset 초기 xy에서 밀려난 거리 패널티. `~lifted` 게이트(들어올린 변위는 의도된 거라 제외). 정밀 접근하면 변위≈0, 거칠게 치면 패널티 → "큐브 최소 이동으로 감싸 잡기" 유도. `PickCubeEnv._reset_idx`가 scatter/부트스트랩 후 `_cube_init_xy`(N,n_cubes,2) 저장.
+  - **`cube_lost` termination(신규, time_out=False)**: 활성 큐브가 책상보다 0.10m 아래 추락하면 실패 종료. 회복 불가 에피소드 컷(학습 낭비 방지) + early term으로 '그 큐브 가치 0' critic 전파 → 안 쳐내도록 압력. 비활성 큐브는 active_cfgs 주입으로 제외(apply_curriculum).
+- **v5 개입(T23: 그릇 quat obs 87dim + over_bowl_drop 12 + bowl_disturb -5) 포함** — v6 = v4 + T23(place) + T24(grasp 신뢰성) 통합. run `lstm256_stage1_grasp_v6`, 로그 `train_grasp_v6.log`.
+- **판정**: ① grasp 신뢰성(reach→grasp 전이↑) + cube_predisturb 음수 작아짐(큐브 덜 침) + cube_lost 종료율↓ ② placed가 over_bowl 따라 상승. scratch.success→0.80 = 단일 통과 → 커리큘럼 1→2.
+- **멀티 큐브 전망(분석)**: 4큐브 0.90 = 큐브당 97.4%(산술 벽). 멀티 특유 문제 = 이미 든 큐브 교란(bowl_disturb 유리)·distractor·그릇 포화·순차 선택(grasp_focus/부트스트랩이 CUBE_NAMES[0] 단일 전제 → 재설계 필요). 현실 목표 = 단일 큐브 0.90.
 
 ---
 

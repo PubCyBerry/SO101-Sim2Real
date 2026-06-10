@@ -744,6 +744,15 @@ class PickCubeRewardsCfg:
         params={"bowl_cfg": SceneEntityCfg(BOWL_NAME), "disp_coef": 4.0},
     )
 
+    # 큐브 변위 패널티 — 잡기 전 큐브를 쳐서 밀어내기 억제(정밀 grasp proxy).
+    # 안 들린 큐브의 초기 xy 대비 변위(m). 정밀 접근하면 ≈0, 거칠게 치면 패널티.
+    # weight 중간: 큐브 ~10cm 밀면 -0.3/step(reach 1.0과 균형). grasp 시도 자체는 안 막게.
+    cube_predisturb = RewTerm(
+        func=task_mdp.cube_predisturb_penalty,
+        weight=-3.0,
+        params={"pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES], "lift_min": 0.02},
+    )
+
     # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
     task_success = RewTerm(
         func=task_mdp.task_success_bonus,
@@ -819,6 +828,16 @@ class PickCubeTerminationsCfg:
             "radius": BOWL_SUCCESS_RADIUS,
             "height_range": BOWL_HEIGHT_RANGE,
             "require_rest_pose": False,  # rest-pose check is TA.1 territory
+        },
+    )
+    # 큐브 추락 = 회복 불가 → 실패 종료(time_out=False, success 아님). 잘못된 grasp 로
+    # 큐브를 책상 밖/아래로 쳐낸 에피소드를 빠르게 컷(낭비 방지) + 안 쳐내도록 압력.
+    cube_lost = DoneTerm(
+        func=task_mdp.cube_lost,
+        time_out=False,
+        params={
+            "pens_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
+            "fall_z": 0.10,
         },
     )
 
@@ -953,6 +972,7 @@ _CUBE_REWARD_TERMS = (
     "insert_cube",
     "release_cube",
     "over_bowl_drop_cube",
+    "cube_predisturb",
     "task_success",
     # 속도 보상도 활성 큐브 수에 맞춰 pen_cfgs 갱신
     "time_penalty",
@@ -1006,6 +1026,10 @@ def apply_curriculum(
 
     env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
     env_cfg.terminations.success.params["radius"] = bowl_radius
+    # 큐브 추락 종료도 활성 큐브만 검사(비활성 큐브는 지면 아래라 오탐 방지)
+    cube_lost_term = getattr(env_cfg.terminations, "cube_lost", None)
+    if cube_lost_term is not None:
+        cube_lost_term.params["pens_cfg"] = active_cfgs
 
     # rl_state 관측의 비활성 큐브 마스킹(distractor 제거 + RND novelty 집중)
     rl_obs = getattr(env_cfg.observations.rl_policy, "rl_state_obs", None)
