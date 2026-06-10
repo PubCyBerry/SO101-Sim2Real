@@ -284,8 +284,17 @@ def main() -> int:
     log(f"[follow_target] main 시작 (controller={args.controller}, selftest={args.selftest})")
     world = World(stage_units_in_meters=1.0, physics_dt=PHYSICS_DT, rendering_dt=PHYSICS_DT)
 
-    # cube_desk 씬(책상·큐브·그릇·조명 포함).
-    add_reference_to_stage(usd_path=str(SCENE_USD_PATH), prim_path="/World/Scene")
+    # --tune: Lula Test Widget 의 IK/EE-viz 는 robot 이 world 원점에 있다고 가정한다
+    # (set_robot_base_pose 미호출). cube_desk 배치(1.84,…)면 위젯 솔버가 원점 기준으로 풀어
+    # EE 프레임이 원점에 박히고 target 이 도달 밖이 된다. → 원점 + ground plane 으로 띄운다.
+    # (게인·default_q 튜닝은 배치 무관이라 결과는 cube_desk 에 그대로 적용된다.)
+    if args.tune:
+        world.scene.add_default_ground_plane()
+        robot_pos, robot_quat = (0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)
+    else:
+        add_reference_to_stage(usd_path=str(SCENE_USD_PATH), prim_path="/World/Scene")
+        robot_pos = tuple(float(x) for x in ROBOT_POS)
+        robot_quat = tuple(float(x) for x in ROBOT_QUAT)
 
     # SO-101 follower: pick_cube env 와 동일하게 fix_root_link 로 spawn.
     # raw reference 만 하면 베이스가 떠 있어(floating base) 팔 반력으로 로봇이 넘어진다.
@@ -298,23 +307,22 @@ def main() -> int:
             solver_velocity_iteration_count=4,
         ),
     )
-    robot_spawn.func(
-        "/World/Robot", robot_spawn,
-        translation=tuple(float(x) for x in ROBOT_POS),
-        orientation=tuple(float(x) for x in ROBOT_QUAT),
-    )
+    robot_spawn.func("/World/Robot", robot_spawn, translation=robot_pos, orientation=robot_quat)
     robot = SingleArticulation(prim_path="/World/Robot", name="so101",
-                               position=ROBOT_POS, orientation=ROBOT_QUAT)
+                               position=np.asarray(robot_pos, dtype=np.float32),
+                               orientation=np.asarray(robot_quat, dtype=np.float32))
     world.scene.add(robot)
 
-    target = VisualCuboid(
-        prim_path="/World/target",
-        name="follow_target",
-        position=np.asarray(args.target_init, dtype=np.float32),
-        scale=np.array([0.03, 0.03, 0.03], dtype=np.float32),
-        color=np.array([1.0, 0.0, 0.0], dtype=np.float32),
-    )
-    world.scene.add(target)
+    target = None
+    if not args.tune:  # tune 모드는 위젯이 자체 target(/World/Target)을 만든다
+        target = VisualCuboid(
+            prim_path="/World/target",
+            name="follow_target",
+            position=np.asarray(args.target_init, dtype=np.float32),
+            scale=np.array([0.03, 0.03, 0.03], dtype=np.float32),
+            color=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        )
+        world.scene.add(target)
 
     log("[follow_target] world.reset() ...")
     world.reset()
@@ -334,7 +342,10 @@ def main() -> int:
 
     robot.set_joint_positions(np.zeros(n, dtype=np.float32))
 
-    set_camera_view(eye=np.asarray(args.view_eye), target=np.asarray(args.view_lookat))
+    if args.tune:  # 원점 로봇을 가까이서 본다
+        set_camera_view(eye=np.array([1.0, -1.0, 0.8]), target=np.array([0.0, 0.0, 0.2]))
+    else:
+        set_camera_view(eye=np.asarray(args.view_eye), target=np.asarray(args.view_lookat))
 
     # --tune: 컨트롤러를 구동하지 않고 GUI 만 띄워 대기. Lula Test Widget 이 RMPFlow 로
     # 이 로봇을 잡아 튜닝한다(두 컨트롤러 충돌 방지). 베이스는 이미 fix_root_link 로 고정.
@@ -359,8 +370,10 @@ def _run_tune(world) -> int:
             enable_extension(ext)
         except Exception as exc:  # noqa: BLE001
             log(f"[follow_target][tune] 확장 '{ext}' 활성화 실패: {exc}")
-    log("[follow_target][tune] scene + 고정된 SO-101 준비됨. "
-        "Tools > Robotics > Lula Test Widget 으로 RMPFlow 를 튜닝하세요.")
+    log("[follow_target][tune] world 원점에 고정된 SO-101 준비됨. "
+        "Tools > Robotics > Lula Test Widget 으로 튜닝하세요. "
+        "위젯 target(/World/Target)은 (0.5,0,0.5)에 생기니 SO-101 도달 범위인 "
+        "~(0.2,0,0.25)로 옮기세요(Property>Transform).")
     if args.headless:  # smoke: 부팅·로딩만 확인하고 종료
         for _ in range(60):
             world.step(render=False)

@@ -30,13 +30,14 @@ Isaac Sim **GUI 위젯**으로 SO-101 의 Lula RMPFlow·robot description 을 �
 ## 1. GUI 여는 법
 
 ### 방법 A (권장) — `--tune` 모드
-scene + 베이스 고정된 SO-101 이 이미 올라오고, 위젯 확장도 자동 활성화된다.
+SO-101 을 **world 원점**에 베이스 고정해 띄우고(+ground plane), 위젯 확장도 자동 활성화한다.
 ```bash
 OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac \
   python scripts/environments/follow_target_so101.py --tune
 ```
 - 자체 컨트롤러를 구동하지 않으므로 위젯의 RMPFlow 와 충돌하지 않는다.
 - **로봇 로드·베이스 고정 단계를 건너뛴다** (이미 `fix_root_link` 적용됨).
+- ⚠ **왜 원점인가**: Lula Test Widget 의 IK follow·EE-frame 시각화는 `set_robot_base_pose` 를 호출하지 않아 **robot 이 world 원점에 있다고 가정**한다(`test_scenarios.py`). cube_desk 배치(world ~1.84,…)면 위젯 솔버가 원점 기준으로 풀어 `/Lula/end_effector` 가 원점에 박히고 IK 가 `Failed to compute Inverse Kinematics` 로 실패한다. 게인·`default_q` 튜닝은 배치 무관이라 결과는 cube_desk 에 그대로 적용된다.
 
 ### 방법 B — 표준 풀 GUI
 ```bash
@@ -77,7 +78,7 @@ Isaac Sim WebRTC Streaming Client 로 접속. (로컬 디스플레이가 있으�
 
 ### 2.2 실행·관찰 (RmpFlow 패널)
 - ⚠ **버튼 주의**: "Follow Target" 버튼이 **두 곳**에 있다. RMPFlow 튜닝은 **`RmpFlow` 패널의 Follow Target**("Use RmpFlow to follow a target")을 쓴다. `Lula Kinematics Solver` 패널의 Follow Target 은 IK 점검용 — 도달 불가 시 `Failed to compute Inverse Kinematics` 를 뱉으며 로봇이 안 움직인다.
-- ⚠ **target 이 멀리 생긴다**: 위젯은 target 을 항상 **world (0.5, 0, 0.5)** 에 만든다(`test_scenarios.py` 의 `_create_target`). SO-101 은 cube_desk 에서 world ~(1.84, -0.565, 0.67) 에 있어 **이 기본 target 은 도달 범위(대략 x 1.6~2.0 / y -0.6~-0.25 / z 0.7~1.0) 밖**이다. → Stage 에서 **`/World/Target` 선택 → Property > Transform > Translate 를 `(1.80, -0.42, 0.85)`** 같은 도달 지점으로 옮긴 뒤 드래그한다.
+- ⚠ **target 이 멀리 생긴다**: 위젯은 target 을 항상 **world (0.5, 0, 0.5)** 에 만든다(`test_scenarios.py` 의 `_create_target`). SO-101 은 5-DOF 라 도달 반경이 ~0.35 m 뿐이라 (0.5,0,0.5)(원점에서 0.7 m)도 멀다. → Stage 에서 **`/World/Target` 선택 → Property > Transform > Translate 를 `(0.2, 0, 0.25)`** 정도(원점 로봇 기준 도달 범위)로 옮긴 뒤 드래그한다. (`--tune` 은 로봇을 원점에 둔다)
 - **`Follow Target`**(RmpFlow) → target 큐브 생성 → 위처럼 도달 범위로 옮기면 EE 가 추종.
 - **`Toggle Debugging Mode`** → **collision sphere 표시**. 떨림/자기충돌/반발 지점을 눈으로 확인.
 - **Sinusoidal Target** (frequency·radius·height 슬라이더) → 자동 궤적 추종으로 지연·떨림 정량 관찰.
