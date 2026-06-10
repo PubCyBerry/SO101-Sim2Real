@@ -80,6 +80,13 @@ parser.add_argument("--grasp_bootstrap_prob", type=float, default=0.0,
                     help="초기상태 grasp 부트스트랩 비율(0~1). reset 시 이 비율의 env 를 큐브-인-그리퍼로 시작.")
 parser.add_argument("--grasp_bootstrap_close", type=float, default=-0.15,
                     help="부트스트랩 시 gripper 닫힘 각(rad). -0.15 가 30mm 큐브 held 0.94.")
+# 진행 모니터링용 주기적 에피소드 비디오 녹화
+parser.add_argument("--video", action="store_true", default=False,
+                    help="학습 중 주기적으로 에피소드 비디오 녹화(headless offscreen). enable_cameras 자동 on.")
+parser.add_argument("--video_length", type=int, default=450,
+                    help="녹화 길이(policy step 수, 30Hz 기준 450≈15s)")
+parser.add_argument("--video_interval", type=int, default=1500,
+                    help="녹화 간격(policy step 수). 이 step 마다 1회 녹화 시작.")
 parser.add_argument("--resume_checkpoint", default=None,
                     help="이어학습 체크포인트 경로 (.pt). 설정 시 learn() 전 로드.")
 parser.add_argument("--resume_without_optimizer", action="store_true",
@@ -110,6 +117,9 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 # headless 기본값 강제 (명시적으로 --no-headless 를 전달하지 않은 경우)
 args.headless = True
+# 비디오 녹화 시 offscreen 렌더를 위해 카메라 활성화 강제
+if args.video:
+    args.enable_cameras = True
 
 launcher = AppLauncher(args)
 simulation_app = launcher.app
@@ -260,7 +270,27 @@ def main() -> None:
         if hasattr(env_cfg, "grasp_bootstrap_prob"):
             env_cfg.grasp_bootstrap_prob = args.grasp_bootstrap_prob
             env_cfg.grasp_bootstrap_close = args.grasp_bootstrap_close
-        env = gym.make(args.task, cfg=env_cfg)
+
+        # 로그 디렉터리(비디오 폴더가 필요해 env 생성 전에 결정)
+        log_dir = _resolve_log_dir(args)
+
+        env = gym.make(args.task, cfg=env_cfg,
+                       render_mode="rgb_array" if args.video else None)
+
+        # 주기적 에피소드 비디오 녹화 (RL 래퍼보다 먼저 감싼다)
+        if args.video:
+            video_dir = os.path.join(log_dir, "videos", "train")
+            os.makedirs(video_dir, exist_ok=True)
+            env = gym.wrappers.RecordVideo(
+                env,
+                video_folder=video_dir,
+                step_trigger=lambda step: step % args.video_interval == 0,
+                video_length=args.video_length,
+                disable_logger=True,
+            )
+            print(json.dumps({"video": True, "video_dir": video_dir,
+                              "interval": args.video_interval, "length": args.video_length}),
+                  flush=True)
 
         # rsl_rl VecEnv 래퍼
         env = RslRlVecEnvWrapper(env, clip_actions=args.clip_actions)
@@ -270,9 +300,8 @@ def main() -> None:
         if hasattr(env, "seed"):
             env.seed(args.seed)
 
-        # 학습 설정 및 로그 디렉터리
+        # 학습 설정
         train_cfg = _build_train_cfg(args)
-        log_dir = _resolve_log_dir(args)
 
         # OnPolicyRunner 생성 및 학습
         run_start_time = time.time()
