@@ -262,9 +262,19 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
   std::vector<std::array<uint8_t, 4>> data;
   data.reserve(joint_ids_.size());
   if (auto result = communication_protocol_->sync_read(joint_ids_, SMS_STS_PRESENT_POSITION_L, &data); !result) {
-    spdlog::error("FeetechHardwareInterface::read -> {}", result.error());
+    // 일시적 USB-IP 지연 스파이크: 연속 실패가 임계치 미만이면 마지막 상태를 유지하고 cycle 을 skip 한다.
+    // 단일 read timeout 으로 전체 하드웨어/컨트롤러가 deactivate 되던 것을 방지한다.
+    ++consecutive_read_failures_;
+    if (consecutive_read_failures_ < kMaxConsecutiveReadFailures) {
+      spdlog::warn("FeetechHardwareInterface::read transient failure {}/{} -> {}", consecutive_read_failures_,
+                   kMaxConsecutiveReadFailures, result.error());
+      return hardware_interface::return_type::OK;
+    }
+    spdlog::error("FeetechHardwareInterface::read -> {} ({} consecutive failures, deactivating)", result.error(),
+                  consecutive_read_failures_);
     return hardware_interface::return_type::ERROR;
   }
+  consecutive_read_failures_ = 0;
   ranges::for_each(data | ranges::views::enumerate, [&](const auto& values) {
     const auto& [index, readings] = values;
     state_hw_positions_[index] = feetech_driver::to_radians(

@@ -1,7 +1,10 @@
 follower:
   controller_manager:
     ros__parameters:
-      update_rate: 100
+      # USB-IP(usbipd-win) + WSL2 mirrored 환경: serial read 가 14~26ms 스파이크라
+      # 100Hz(10ms 예산)면 overrun 누적 후 read timeout 으로 hardware deactivate 된다.
+      # 50Hz(20ms 예산)로 낮춰 안정화. 네이티브 Linux 면 100 복원 가능.
+      update_rate: 50
 
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster

@@ -35,6 +35,8 @@
 - [Sim-to-Real 펜이 펜통 안에서 spawn 되어 겹침 (펜·펜통 sampling 영역 분리 누락)](#sim-to-real-펜이-펜통-안에서-spawn-되어-겹침-펜펜통-sampling-영역-분리-누락)
 - [Sim-to-Real 펜통 호 sampling 이 매트/책상 밖으로 나감 (radius 와 default 좌표 불일치)](#sim-to-real-펜통-호-sampling-이-매트책상-밖으로-나감-radius-와-default-좌표-불일치)
 - [ROS 2 (WSL2) 노드 간 토픽 통신 불가 — lo 에 MULTICAST 없어 DDS discovery 실패](#ros-2-wsl2-노드-간-토픽-통신-불가--lo-에-multicast-없어-dds-discovery-실패)
+- [ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps — CycloneDDS + mirrored 네트워킹의 대용량 샘플 전달 실패](#ros-2-wsl2-카메라-image_raw-토픽이-0-fps--cyclonedds--mirrored-네트워킹의-대용량-샘플-전달-실패)
+- [ROS 2 (WSL2) gscam·v4l2_camera 가 usbipd-win 가상 V4L2 디바이스에서 동작 안 함](#ros-2-wsl2-gscamv4l2_camera-가-usbipd-win-가상-v4l2-디바이스에서-동작-안-함)
 - [ROS 2 colcon 빌드가 `catkin_pkg` 못 찾음 (dotfiles 의 ~/.local python 이 ament 가로챔)](#ros-2-colcon-빌드가-catkin_pkg-못-찾음-dotfiles-의-local-python-이-ament-가로챔)
 - [ROS 2 빌드 스크립트 `set -u` 가 setup.bash 와 충돌 (AMENT_TRACE_SETUP_FILES unbound)](#ros-2-빌드-스크립트-set--u-가-setupbash-와-충돌-ament_trace_setup_files-unbound)
 - [ROS 2 (WSL2) feetech read timeout 1회로 hardware deactivate (USB-IP 레이턴시)](#ros-2-wsl2-feetech-read-timeout-1회로-hardware-deactivate-usb-ip-레이턴시)
@@ -2265,7 +2267,9 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file://<repo>/ros2_ws/setup/cyclonedds_localhost.xml
 ```
 
-`ros2_ws/setup/env.sh` 가 이 두 변수를 자동 export 하며, `04_setup_bashrc.sh` 가 bashrc 에 등록한다.
+`ros2_ws/setup/env.sh` 가 이 두 변수를 export 하며, `04_setup_bashrc.sh` 가 bashrc 에 등록한다.
+
+> ⚠️ **이 CycloneDDS unicast 방식은 `.wslconfig` `networkingMode=mirrored` 에서 `sensor_msgs/Image` 등 대용량·복합 타입을 cross-process 로 전달하지 못한다**(discovery·작은 메시지는 정상, 카메라만 0 fps). 현재 `env.sh` 는 이 문제 때문에 **FastDDS 를 기본 RMW 로 사용**하며 위 CycloneDDS 블록은 주석으로 남아 있다. 아래 §"ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps" 참조.
 
 ### 확인 방법
 
@@ -2276,6 +2280,94 @@ ros2 run demo_nodes_cpp talker & ros2 run demo_nodes_py listener &
 ```
 
 mock launch 에서 컨트롤러 3개가 "Configured and activated" 되면 해결.
+
+---
+
+## ROS 2 (WSL2) 카메라 image_raw 토픽이 0 fps — CycloneDDS + mirrored 네트워킹의 대용량 샘플 전달 실패
+
+**현상**: WSL2 ROS 2 에서 카메라 노드가 `Started stream` 까지 정상이고 `ros2 topic list` 에 `image_raw` 가 보이는데, 어떤 구독자도(다른 프로세스·rosbridge·`ros2 topic hz`) 이미지를 **0 개** 받는다. 반면 `joint_states` 같은 작은 토픽은 같은 graph 에서 정상 전달된다. 노드 discovery 자체는 성공(`ros2 node list` 에 보임).
+
+**오류 메시지**: 없음(에러 없이 조용히 0 fps). 격리 진단으로만 드러난다:
+
+```
+# 같은 프로세스 안에서 두 노드로 pub→sub (동일 QoS depth10):
+std_msgs/String   : 120 msgs   ← 정상
+sensor_msgs/Image : 0 msgs     ← 32x32(3KB)·640x480(921KB) 모두 0, 크기 무관
+```
+
+### 원인
+
+`.wslconfig` 의 `[experimental] networkingMode=mirrored` 환경에서 **CycloneDDS 가 `sensor_msgs/Image` 같은 복합 타입을 cross-process 로 전달하지 못한다**. discovery 와 단순 타입(String/JointState)은 정상이라 "통신은 되는데 카메라만 안 되는" 형태로 나타난다. 메시지 크기와 무관(32×32 도 0)하므로 소켓 버퍼(`rmem_max`)·`MaxMessageSize`·QoS(RELIABLE/BEST_EFFORT) 튜닝으로 해결되지 않는다. mirrored 모드가 loopback/localhost 동작을 바꾸면서 CycloneDDS 의 해당 타입 데이터 경로가 깨지는 것으로 보인다.
+
+### 해결 방법
+
+RMW 를 **FastDDS(`rmw_fastrtps_cpp`)** 로 전환한다. FastDDS 는 같은 호스트를 **공유메모리(SHM)** 로 전송해 깨진 mirrored loopback 경로를 우회한다. `ros2_ws/setup/env.sh`:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# (CycloneDDS 의 RMW_IMPLEMENTATION / CYCLONEDDS_URI export 는 주석 처리)
+```
+
+- **모든 노드가 같은 RMW 여야 한다** — follower·rosbridge·카메라를 전부 `source env.sh` 한 셸에서 재기동. RMW 가 섞이면 graph 가 분리돼 서로 안 보인다.
+- 보조로 `net.core.rmem_max` 를 올려두면(UDP fallback 대비) 안전하다: `ros2_ws/setup/wsl_ros2_sysctl.conf` → `/etc/sysctl.d/99-ros2-wsl.conf`, `sudo sysctl --system`.
+
+### 확인 방법
+
+```bash
+source <repo>/ros2_ws/setup/env.sh   # RMW=rmw_fastrtps_cpp
+# 카메라 노드 기동 후 다른 셸(역시 env.sh)에서:
+ros2 topic hz /camera/top/image_raw   # ~20fps 이상 찍히면 OK
+```
+
+3캠(`/camera/{top,wrist,front}/image_raw`)이 각 ~23fps 로 cross-process 수신되면 해결.
+
+---
+
+## ROS 2 (WSL2) gscam·v4l2_camera 가 usbipd-win 가상 V4L2 디바이스에서 동작 안 함
+
+**현상**: usbipd 로 attach 한 UVC 웹캠을 `gscam` / `v4l2_camera` 로 띄우면 노드는 뜨는데 프레임이 안 나온다(0 fps). `gst-launch-1.0` 로 같은 파이프라인을 돌리면 프레임이 흐른다.
+
+**오류 메시지**:
+
+```
+# gscam
+[ERROR] [cam]: Could not get gstreamer sample.
+# v4l2_camera (YUYV)
+[v4l2_camera]: Starting camera        ← 여기서 멈춤(DQBUF 무한 대기)
+# v4l2_camera (MJPG)
+[v4l2_camera]: Current pixel format is not supported yet: MJPG
+terminate called after throwing an instance of 'cv_bridge::Exception'
+# 공통(IO 모드)
+streaming stopped, reason not-negotiated (-4)   # io-mode=2(mmap) 사용 시
+```
+
+### 원인
+
+usbipd-win 의 가상 V4L2 디바이스는 표준 드라이버가 기대하는 동작을 일부 못 한다:
+- `gscam`: appsink 가 첫 샘플을 1초 내 pull 못 해 포기(USB-IP 지연).
+- `v4l2_camera` **YUYV**: 비압축 대역폭이 커 `DQBUF` 가 무한 대기(행).
+- `v4l2_camera` **MJPG**: 디바이스는 받아들이나 노드가 MJPG→rgb8 디코드를 미지원해 크래시.
+- GStreamer `io-mode=2`(mmap): 가상 디바이스에서 협상 실패(`not-negotiated`).
+- 추가로 카메라 기본 framerate 가 640×480 에서 25fps 인데 30fps 를 요청하면 `not-negotiated`.
+
+### 해결 방법
+
+OpenCV(MJPG 압축 스트림) 로 직접 캡처해 발행하는 노드를 쓴다: `ros2_ws/src/so101_bringup/scripts/cv2_camera_publisher.py`. 핵심:
+- `cv2.CAP_V4L2` + `MJPG` fourcc (압축이라 USB-IP 대역폭 안정).
+- **단일 스레드 라운드로빈** — USB-IP 가상 디바이스는 다중 스레드 동시 블로킹 read 와 동시 open 경합을 못 버틴다. 한 스레드에서 카메라들을 순차로 `read()` → 발행(3캠 합산 ~18fps, FastDDS 로 각 ~23fps 전달).
+- `ros2 launch so101_bringup cameras_cv2.launch.py` 또는 `ros2 run so101_bringup cv2_camera_publisher.py`.
+
+> 참고: 이미지가 발행돼도 RMW 가 CycloneDDS+mirrored 면 구독자에 0 fps 다(위 §참조). FastDDS 와 함께 써야 한다.
+
+### 확인 방법
+
+```bash
+# 디바이스 자체 캡처 가능 여부(드라이버 무관):
+gst-launch-1.0 v4l2src device=/dev/cam_top num-buffers=3 ! image/jpeg,width=640,height=480,framerate=25/1 ! jpegdec ! videoconvert ! fakesink
+# → Execution ended ... (ERROR 없이) 면 캡처 OK
+```
+
+노드 로그에 `... -> /camera/<name>/image_raw 스트리밍 시작` 3줄이 뜨고 `ros2 topic hz` 가 찍히면 해결.
 
 ---
 

@@ -66,9 +66,11 @@ class SerialPort {
  private:
   [[nodiscard]] Result check_port() const noexcept;
   std::string dev_;
-  // WSL2/USB-IP 레이턴시 대응: 5ms → 50ms. USB-IP는 polling 기반이라 round-trip 스파이크가
-  // 수십 ms까지 튄다. 단 1회 read timeout도 hardware 전체 deactivate를 유발하므로 넉넉히 잡는다.
-  std::chrono::milliseconds timeout_ = std::chrono::milliseconds(50);
+  // WSL2/USB-IP 레이턴시 대응: 5ms → 50ms → 250ms. USB-IP(특히 .wslconfig mirrored)는
+  // polling 기반이라 round-trip 스파이크가 수십~수백 ms까지 튄다. 단 1회 read timeout 도
+  // hardware 전체 deactivate 를 유발하므로 넉넉히 잡는다. 50ms 는 mirrored 에서 부족해
+  // 수 분마다 deactivate 됐다(50Hz=20ms 주기라 250ms 는 느린 read 시 overrun 경고만 유발).
+  std::chrono::milliseconds timeout_ = std::chrono::milliseconds(250);
   LibSerial::SerialPort port_;
 };
 }  // namespace feetech_driver

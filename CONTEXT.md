@@ -13,6 +13,54 @@
 
 ---
 
+## 작업 인계 (2026-06-10 — 실기기 grasp 파이프라인: feetech deactivate 근본해결 + 제어 파이프라인 동작 / 진행중)
+
+- **목표**: scripted-expert(top 호모그래피 + IK + wrist visual servo)로 SO-101 큐브 grasp 데모 자율 생성 → LeRobot v3.0 녹화. 범위=캘리브→grasp→녹화(유저 확정). 계획서: `~/.claude/plans/context-md-dynamic-meadow.md`.
+- **Step 0 완료**: 스택 재기동(follower+move_group+cv2 3캠+rosbridge, FastDDS, env.sh). WSL ws src 는 Windows repo **심링크**(sync 불필요). 250ms 헤더는 빌드에 이미 반영돼 있었음.
+- **🔑 근본 블로커 해결 — feetech 단일 read timeout → 전체 deactivate**: `FeetechHardwareInterface::read()` 가 sync_read 1회 실패에 `return_type::ERROR` 반환 → ros2_control 이 하드웨어+3컨트롤러 전부 deactivate. 250ms timeout 으로도 USB-IP(mirrored) 지연 스파이크가 가끔 초과 → 수십 분~시간 내 1회 발생만으로 팔이 죽음(이전 세션 "deactivate" 의 진짜 원인). **수정(적용·재빌드·검증)**: `feetech_ros2_driver.{hpp,cpp}` 에 `consecutive_read_failures_` + `kMaxConsecutiveReadFailures=10` 추가 — 연속 실패 임계 미만이면 마지막 상태 유지 후 OK(cycle skip), 임계 이상(진짜 단선)일 때만 ERROR. 재빌드 후 재기동 → 3컨트롤러 active 유지.
+- **🔑 데이터 경로 경험적 판정**:
+  - native rclpy **카메라** 수신 OK(`cap.py` 3캠), **rosbag2** OK(joint_states 50Hz + 3캠 25fps 캡처 검증) → 녹화는 rosbag2 가능.
+  - native rclpy **joint_states/TF 수신은 불안정** — 단 이는 discovery 문제가 아니라 **하드웨어 deactivate 시 broadcaster 가 죽어 새 메시지 0**(rosbridge 는 마지막값 캐시라 동작)인 정황. → **제어(joint_states/IK/FK/trajectory)는 ros-mcp(rosbridge) 경유**, **이미지 캡처·검출은 native cap.py/detect_*.py** 로 역할 분담.
+- **제어 파이프라인 동작 확인**: ros-mcp `/compute_ik`(group manipulator, gripper_frame_link) → `send_action_goal` `/follower/arm_trajectory_controller/follow_joint_trajectory`(5축, 단일점+velocities) → 실기기 이동 성공("Goal successfully reached!") → joint_states+top 이미지로 검증. **pick_ik 는 global 모드라 flip 위험 → 모션 전 joint delta 안전검사 필수.**
+- **⚠️ 주의/관측**: ① joint_states `name` 순서=**알파벳순**[elbow_flex,gripper,shoulder_lift,shoulder_pan,wrist_flex,wrist_roll] — 이름기준 재정렬 필수. ② 5-DOF IK 위치오차(z 명령0.051→실제0.043, ~9mm) → 캘리브는 **이동 후 FK XY** 로 페어링. ③ Overrun WARN(read~22ms>20ms@50Hz) 빈발하나 deactivate 아님 — 필요시 update_rate 30~40Hz 하향 여지. ④ 캘리브/grasp 전 **방 조명 필수**(야간 소등 시 3캠 암흑→검출 0). ⑤ WSL 호출은 PowerShell 툴 사용, inline 에 `>`/`2>`/`$()`/`&&` 금지(Git Bash MSYS 경로변환·PowerShell 리다이렉트 가로챔) → 스크립트 파일 패턴.
+- **씬**: top 오버헤드(팔=화면 하단 진입), 큐브 4개 상단-중앙(`detect_cubes.py` 4/4: px (253,219)(300,257)(350,166)(400,223)), 그릇 좌측. 현재 EE base (0.186,-0.023,0.043).
+- **임시 스크립트(Windows %TEMP%)**: `so101_cal.py`(native IK/FK/move 헬퍼 — native js 불안정으로 보조용), `so101_run.sh`(env.sh source 래퍼); WSL `/tmp` 에 `cap.py`/`detect_cubes.py`/`detect_gripper.py`. Step 4 에서 repo `ros2_ws/src/so101_bringup/scripts/` 로 승격 예정.
+- **다음(진행중)**: Step 1 캘리브 sweep — 고정 orientation+고정 z 로 base XY 격자 ~6~9점 이동(ros-mcp IK→traj, joint delta 가드) → 각 점 top tip 픽셀(detect_gripper) ↔ 이동후 FK XY 페어 → `cv2.findHomography` → `top_homography.json`. 이어서 Step 2 grasp, Step 3 rosbag2 녹화+변환.
+
+---
+
+## 작업 인계 (2026-06-09 — 실기기 조작 + VLA teleop 데이터 생성 착수 / 진행중)
+
+- **상위 목표(유저 확인)**: 현재 학습된 VLA 성공률 ~10%(엉망). **재학습용 양질 teleop 데이터를 Claude가 생성**하는 게 목적. 전략 = 시뮬 대량(오라클) + 실기기 소량(sim2real 보정) **둘 다**, **소규모 검증 먼저**. (기존 소량 데이터는 유저가 수동 제작.)
+- **VLA 추론 현 구조**: ROS2 미경유, policy-server gRPC 직결 → 추후 수정 필요(유저 언급).
+
+### 실기기(WSL2 ROS2) 진행 — 이번 세션
+- **통합 graph**: follower + cv2 카메라 3캠 + rosbridge 전부 **FastDDS** 단일 graph. ros-mcp(127.0.0.1:9090)로 제어/관측. [[project-wsl2-camera-fastdds]]
+- **하드웨어 deactivate 2건 해결**:
+  - `config/ros2_control/follower_controllers.yaml` `update_rate 100→50Hz` (USB-IP overrun 누적 완화)
+  - `feetech_ros2_driver/.../serial_port.hpp` serial timeout **50→250ms** (mirrored USB-IP 지연 스파이크가 50ms 초과 → 수 분마다 deactivate 되던 것 해결). feetech 재빌드 필요. **이게 핵심** — manual·MoveIt 공통.
+- **arm 직접 joint 제어**: `FollowJointTrajectory` 액션(send_action_goal)으로 동작 확인. 단일 점 목표 + velocities 포함 형식. 컨트롤러 active 일 때만 수락.
+- **수동 grasp 시도 → 실패(예상)**: 캘리브·인식 없이 5축 팔을 2.5cm 큐브에 눈대중 정렬 불가 → MoveIt 전환.
+- **MoveIt 데모 실기기 기동**: `follower_moveit_demo.launch.py hardware_type:=real usb_port:=/dev/so101_follower`. move_group(group `manipulator`, base_link→gripper_frame_link) + RViz. **RViz Plan&Execute 동작 = IK 입증**. (RViz marker 안 보임 → Displays>MotionPlanning>Planning Request: "Query Goal State" 체크 + "Interactive Marker Size" 0→0.1.)
+- **scripted expert 파이프라인(task #1~4)**:
+  - ✅ #1 큐브 검출: `/tmp/detect_cubes.py` HSV(S<55,105<V<215)+면적/aspect 필터로 top 4/4 정확. 그릇/깃털/그리퍼 배제.
+  - 🔄 #2 hand-eye 캘리브(진행중): `/compute_fk`(ros-mcp call_service)로 gripper_frame_link base XYZ OK(예: 현재 x0.189 y-0.024 z0.023). 여러 자세 (FK base XY ↔ top 픽셀) → homography 적합 예정. **계획: 거친 homography로 큐브 base XY → IK hover → wrist 카메라로 XY 미세보정(visual servo) → 하강·닫기·들기.**
+  - ⏳ #3 단일 큐브 IK grasp 검증 / ⏳ #4 녹화+LeRobot v3.0 변환(so_follower,6-dim,images.{top,wrist,front} 480×640 fps30).
+
+### 알려진 이슈(이번 세션 발견)
+- **fresh rclpy 프로세스가 데모 노드 데이터 수신 0**: publisher 디스커버리는 됨(`get_publisher_count`=1)인데 메시지 0개(QoS best_effort로도). ros-mcp(rosbridge)는 정상. FastDDS+mirrored late-joiner 데이터 전송 문제로 추정. **현재 모든 그래프 상호작용 ros-mcp 경유 우회.** recorder(#4)도 fresh 노드라 같은 문제 — 해결 필요(데모 launch 내부 recorder 추가 / rosbag2 / ros-mcp 구독 저장 중 택1).
+
+### 시뮬 오라클 구상(별도, 아직 미진행)
+- `pick_cube_state_machine.py`(cube_desk, `SimToReal-SO101-PickCube-v0`) 5축 grasp 실패 = **"타겟엔 IK로 가는데 grasp 자체 실패(손가락이 큐브 못 감쌈/관통/미끄러짐)"**(유저 확인). Franka 7축은 됨. `So101LulaIK`·`grasp_tilt_deg`·`rot_weight_grasp` 등 정교한 시도 누적(`docs/TROUBLESHOOTING` "SO-101 5DOF grasp 불안정").
+- **아이디어(유저)**: Claude가 시뮬에서 **직접 interactive 제어**(시뮬은 큐브 pose ground-truth → 인식·캘리브 불필요 = 실기기 블로커 없음)로 grasp 성립 후 오라클 코드화. **매크로 액션 단위**(이동→렌더 캡처→조정 반복).
+
+### 변경 파일(uncommitted, 커밋 안 함)
+- 카메라/RMW: `ros2_ws/setup/{env.sh,cyclonedds_localhost.xml,wsl_ros2_sysctl.conf*,wslconfig.example*,99-so101.rules*,06_setup_host_devices.sh*,02_install_ros2_packages.sh}`, `src/so101_bringup/{scripts/cv2_camera_publisher.py*,launch/cameras_cv2.launch.py*,CMakeLists.txt,config/cameras/*.yaml}`
+- 실기기 제어: `config/ros2_control/follower_controllers.yaml`(50Hz), `feetech_ros2_driver/.../serial_port.hpp`(250ms)
+- 문서: `docs/{PATH_D_ROS2_WSL_MOVEIT.md,TROUBLESHOOTING.md}`, CONTEXT.md (*=신규)
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E: cube_desk MoveIt2/cuMotion Pick&Place 브릿지 스캐폴딩)
 
 - **목표(사용자)**: cube_desk 장면에서 MoveIt2 path planning(조사 결과 **cuMotion 우선 + OMPL/Pilz 폴백**)으로 SO-101 pick&place state machine 구축. 플랫폼 = Windows+WSL2 먼저, 안 되면 Linux 서버. 충돌 = 전체(그릇+타큐브 obstacle + 잡은 큐브 attach). 통합 = Isaac Sim ROS2 bridge(`topic_based_ros2_control`).
@@ -98,6 +146,19 @@
 - **🎯 7차 — env 수정 후 재측정(진행 중)**: 그리퍼 cap 1.0 + 팔 2 rad/s + continuity 0.05 로 현재 SM 을 full-DR(seeds 7,11,12) 재측정 → `fixenv_fulldr_{7,11,12}.json`. (이전 ~1.5/4 는 망가진 env 결과라 무효.)
 - **권고/다음(env 수정 후)**: ① full-DR 신뢰성 재측정 결과로 deliverable 확정 ② teleop(31s,2rad/s) 기준 효율화(phase floor 축소·재시도↓) 로 ≤60~120s ③ 4/4 seed v3 dataset 재기록(이전 fixedpos 기록은 망가진 env 라 1/4, 폐기) ④ docs/TROUBLESHOOTING 에 "env 그리퍼 cap 5.0 → grasp 실패" 항목 추가.
 - **임시 진단 파일(konan147)**: `orig_sm_20260605.py`(원본 추출본), `orig_dropoff_s7.json`(cap5→0/4), `orig_dropoff_gripper1_s7.json`(grip1→4/4). 정리 대상.
+
+---
+
+## 작업 인계 (2026-06-09 — WSL2 실기기 카메라 0fps 해결 + RMW FastDDS 전환)
+
+- **목표**: ros-mcp 로 SO-101 follower + 3캠(top/wrist/front) 실기기 동작. arm 은 즉시 성공(trajectory action), 카메라가 0 fps 였음.
+- **근본 원인(3겹)**: ① gscam/v4l2_camera 가 usbipd-win 가상 V4L2 에서 동작 안 함(MMAP/MJPG 디코드) ② net.core.rmem_max 208KB ③ **★ `.wslconfig` networkingMode=mirrored 에서 CycloneDDS 가 sensor_msgs/Image cross-process 전달 실패**(String 은 됨, 크기 무관). 상세는 메모리 `project-wsl2-camera-fastdds`.
+- **해결**: ① OpenCV(MJPG) 단일스레드 라운드로빈 publisher `ros2_ws/src/so101_bringup/scripts/cv2_camera_publisher.py` (USB-IP 동시 open/멀티스레드 read 불가) ② `ros2_ws/setup/wsl_ros2_sysctl.conf`→`/etc/sysctl.d/99-ros2-wsl.conf`(rmem 16MB) ③ **`ros2_ws/setup/env.sh` RMW CycloneDDS→FastDDS**(SHM 전송으로 우회). FastDDS 로 3캠 각 ~23fps cross-process 수신 검증.
+- **토픽 네이밍 통일**: `/camera/{top,wrist,front}/image_raw` + `/camera/{top,wrist,front}/camera_info` (North Star observation.images 키와 일치). frame_id=`<name>_camera_optical_frame`.
+- **검증 완료**: ros-mcp(rosbridge, FastDDS) 8노드 통합 graph, joint_states + 3캠 image 수신, rqt_graph/rqt_image_view 시각 확인.
+- **변경 파일(uncommitted, main 작업트리)**: `ros2_ws/setup/env.sh`(RMW), `cyclonedds_localhost.xml`(대용량 튜닝 — FastDDS 전환으로 비활성이나 보존), `wsl_ros2_sysctl.conf`(신규), `src/so101_bringup/scripts/cv2_camera_publisher.py`(신규), `launch/cameras_cv2.launch.py`(신규), `CMakeLists.txt`(scripts install), `config/cameras/so101_{cameras,gs_cam,v4l2_cam}.yaml`(gscam/v4l2 잔재 — 비활성). **커밋 미진행**.
+- **실행 방법**: 각 노드 `source ros2_ws/setup/env.sh` 후 — follower `ros2 launch so101_bringup follower.launch.py use_rviz:=false arm_controller:=trajectory_controller`, rosbridge `ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:=9090`, 카메라 `ros2 launch so101_bringup cameras_cv2.launch.py`(또는 `ros2 run so101_bringup cv2_camera_publisher.py`). RMW 안 섞이게 모두 env.sh 필수.
+- **주의/남은 일**: ① USB-IP 디바이스는 publisher 종료 후 FD 해제에 수 초 걸림(재기동 시 open 실패면 대기 후 재시도) ② gscam/v4l2 yaml 잔재 정리 또는 cv2 로 일원화 ③ MoveIt/cuMotion(PATH D/E)을 FastDDS 에서 회귀 확인 필요 ④ 카메라 보정(camera_info 현재 미보정 width/height 만).
 
 ---
 
