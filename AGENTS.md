@@ -12,6 +12,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/PATH_C_ISAAC_SIM.md` | Isaac Sim 시뮬 경로 |
 | `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
 | `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
+| `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
@@ -126,6 +127,10 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
+| `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽 |
+| `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |
+
+> **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.
 
 ### 씬 재생성
 

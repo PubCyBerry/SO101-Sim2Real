@@ -13,6 +13,9 @@ def generate_launch_description():
     namespace = LaunchConfiguration("namespace")
     hardware_type = LaunchConfiguration("hardware_type")
     usb_port = LaunchConfiguration("usb_port")
+    # Isaac Sim 시뮬(PATH E) 에서는 bridge /clock 에 맞춰 use_sim_time:=true 로 띄운다.
+    # 실기기(PATH D) 는 기본 false. CM 노드에 주면 로드되는 컨트롤러가 그 클럭을 상속한다.
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
     joint_config_file = LaunchConfiguration("joint_config_file")
     controller_config_file = LaunchConfiguration("controller_config_file")
     arm_controller = LaunchConfiguration("arm_controller")
@@ -67,7 +70,7 @@ def generate_launch_description():
         package="robot_state_publisher",
         executable="robot_state_publisher",
         namespace=namespace,
-        parameters=[{"robot_description": robot_description}],
+        parameters=[{"robot_description": robot_description, "use_sim_time": use_sim_time}],
         output="screen",
     )
 
@@ -75,7 +78,7 @@ def generate_launch_description():
         package="controller_manager",
         executable="ros2_control_node",
         namespace=namespace,
-        parameters=[controller_config_file],
+        parameters=[controller_config_file, {"use_sim_time": use_sim_time}],
         output="screen",
         emulate_tty=True,
     )
@@ -115,6 +118,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("namespace", default_value="follower"),
             DeclareLaunchArgument("hardware_type", default_value="real"),  # real | mock
+            DeclareLaunchArgument("use_sim_time", default_value="false"),  # PATH E sim: true
             DeclareLaunchArgument("usb_port", default_value="/dev/so101_follower"),
             DeclareLaunchArgument(
                 "joint_config_file",

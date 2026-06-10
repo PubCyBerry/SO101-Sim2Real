@@ -1,0 +1,95 @@
+# PATH E — ROS 2 Jazzy + MoveIt 2 + NVIDIA cuMotion 개발 이미지 (Isaac ROS 4.4 / Ubuntu 24.04).
+#
+# isaac-ros-cli 래퍼 대신 동일한 공식 apt repo(Isaac ROS / CUDA / Jetson-x86 / ROS 2)를 직접
+# 구성해 cuMotion·MoveIt·ros2_control·topic_based_ros2_control 을 설치한다. 호스트 ROS 미설치.
+# 워크스페이스(ros2_ws)·에셋은 런타임에 마운트한다(이미지에 COPY 안 함).
+#
+# 빌드:  docker build -f docker/Dockerfile.cumotion_ros -t so101-cumotion:jazzy <small-context>
+# 실행:  docker run --rm -it --gpus all --network host \
+#           -v <repo>:/workspace -w /workspace so101-cumotion:jazzy bash
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=jazzy
+ENV LANG=en_US.UTF-8
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg lsb-release sudo locales build-essential git \
+    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+# ROS 2 apt source (ros-infrastructure 공식 deb)
+RUN curl -L -o /tmp/ros2-apt-source.deb \
+      "https://github.com/ros-infrastructure/ros-apt-source/releases/download/1.1.0/ros2-apt-source_1.1.0.noble_all.deb" \
+    && dpkg -i /tmp/ros2-apt-source.deb && rm /tmp/ros2-apt-source.deb
+
+# CUDA apt repo (cuMotion/curobo 의 CUDA 런타임 의존)
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
+
+# Jetson x86_64 apt repo (Isaac ROS 일부 NVIDIA 라이브러리 의존)
+RUN apt-key adv --fetch-key https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
+    && echo 'deb http://repo.download.nvidia.com/jetson/x86_64/noble r38.4 main' \
+       > /etc/apt/sources.list.d/nvidia-jetson-apt-source.list
+
+# Isaac ROS apt repo (release-4.4, Jazzy/Noble)
+RUN k=/usr/share/keyrings/nvidia-isaac-ros.gpg \
+    && curl -fsSL https://isaac.download.nvidia.com/isaac-ros/repos.key | gpg --dearmor | tee -a "$k" > /dev/null \
+    && echo "deb [signed-by=$k] https://isaac.download.nvidia.com/isaac-ros/release-4.4 $(lsb_release -cs) main external-main" \
+       > /etc/apt/sources.list.d/nvidia-isaac-ros.list
+
+# ROS 2 Jazzy + MoveIt + ros2_control + topic_based + cuMotion + 빌드 도구
+RUN apt-get update && apt-get install -y \
+        ros-jazzy-ros-base \
+        ros-jazzy-moveit \
+        ros-jazzy-moveit-py \
+        ros-jazzy-ros2-control \
+        ros-jazzy-ros2-controllers \
+        ros-jazzy-joint-trajectory-controller \
+        ros-jazzy-parallel-gripper-controller \
+        ros-jazzy-topic-based-ros2-control \
+        ros-jazzy-pick-ik \
+        ros-jazzy-tf-transformations \
+        ros-jazzy-xacro \
+        ros-jazzy-rmw-fastrtps-cpp \
+        ros-jazzy-isaac-ros-cumotion \
+        ros-jazzy-isaac-ros-cumotion-moveit \
+        python3-colcon-common-extensions python3-rosdep git \
+    && rm -rf /var/lib/apt/lists/*
+
+# ⚠ Isaac ROS apt repo 의 topic_based_ros2_control(99.99.1)은 ROS 메인 repo 의
+# hardware_interface(4.44.0)와 ABI 불일치 → controller_manager 가 hardware 'initialize' 중
+# HardwareComponentInterface::get_lifecycle_id() 에서 SIGSEGV(-11). ROS 메인 repo 엔 0.3.0
+# source 만 있어 바이너리 교체 불가 → 소스에서 설치된 hardware_interface 헤더로 재빌드해
+# overlay 로 깔고(아래 bashrc 에서 /opt/ros/jazzy 다음 source) 깨진 99.99.1 plugin 을 가린다.
+RUN . /opt/ros/jazzy/setup.sh \
+    && mkdir -p /opt/tbc_overlay/src && cd /opt/tbc_overlay/src \
+    && git clone --depth 1 https://github.com/PickNikRobotics/topic_based_ros2_control.git \
+    && cd /opt/tbc_overlay \
+    && colcon build --packages-select topic_based_ros2_control \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    && rm -rf /opt/tbc_overlay/src /opt/tbc_overlay/build /opt/tbc_overlay/log
+
+# ⚠ isaac_ros_cumotion_moveit 플러그인 패치(upstream issue #10): MoveIt request.start_state 는
+# 전체 로봇 관절(SO-101 = arm5 + gripper)을 담는데 cuMotion cspace 는 tool-chain 5축뿐이라,
+# 무필터 전달 시 INVALID_INITIAL_CSPACE_POSITION(6 vs 5)으로 모든 계획이 실패한다. updateGoal 이
+# start_state 를 planning group 관절로 필터링하도록 패치해 overlay 로 빌드(아래 bashrc 에서 source).
+COPY patches/cumotion_moveit_filter_start_state.patch /tmp/cumotion.patch
+RUN . /opt/ros/jazzy/setup.sh \
+    && mkdir -p /opt/cumotion_overlay/src && cd /opt/cumotion_overlay/src \
+    && git clone --depth 1 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion.git \
+    && cd isaac_ros_cumotion \
+    && for d in */; do [ "$d" = "isaac_ros_cumotion_moveit/" ] || touch "$d/COLCON_IGNORE"; done \
+    && git apply /tmp/cumotion.patch \
+    && cd /opt/cumotion_overlay \
+    && colcon build --packages-select isaac_ros_cumotion_moveit \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    && rm -rf /opt/cumotion_overlay/src /opt/cumotion_overlay/build /opt/cumotion_overlay/log /tmp/cumotion.patch
+
+RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc \
+    && echo "source /opt/tbc_overlay/install/setup.bash" >> /etc/bash.bashrc \
+    && echo "source /opt/cumotion_overlay/install/setup.bash" >> /etc/bash.bashrc \
+    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /etc/bash.bashrc \
+    && echo '[ -f /workspace/ros2_ws/install/setup.bash ] && source /workspace/ros2_ws/install/setup.bash' >> /etc/bash.bashrc
+
+WORKDIR /workspace

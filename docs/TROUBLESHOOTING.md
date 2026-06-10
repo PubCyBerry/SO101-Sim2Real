@@ -47,6 +47,13 @@
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
 - [Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)](#windows-isaac-sim-_prepare_ui-access-violation-tuple-인자를-applauncher-에-전달)
+- [(PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`](#path-e-isaac-sim-헤드리스에서-omnigraph-생성-실패--unable-to-create-prim-for-graph)
+- [(PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` — inotify watch 고갈](#path-e-isaac-sim-부팅-중-errno28-no-space-left-on-device-가-수천-줄--inotify-watch-고갈)
+- [(PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1`](#path-e-해결-isaac-lab-bridge-의-omnigraph-jointstate-가-device-0-vs--1-로-joint_states-미publish)
+- [(PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패](#path-e-isaac-sim-ros-2-bridge-가-librmw_implementationso-로드-실패--libament_index_cppso-cannot-open)
+- [(PATH E) host(bridge)↔container DDS discovery 실패 — cross-UID fastrtps SHM](#path-e-hostbridgecontainerros-스택-dds-discovery-실패--cross-uid-fastrtps-shm)
+- [(PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정](#path-e-pick_place-launchpy-ros-스택-bringup-4대-함정)
+- [(PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace](#path-e-cumotion-invalid_initial_cspace_position--start_state-관절-수--cspace-gripper-포함)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 
 ---
@@ -2973,6 +2980,8 @@ AttributeError: 'ManagerBasedRLEnv' object has no attribute '_is_closed'   # GC 
 
 `nvidia-smi` 에 isaacsim python 이 1개뿐인 상태에서 위 환경변수로 띄우면 P2P 검증을 통과해 `Authored ...` / `MAKE_OK` 가 출력된다. 결과 파일(`/tmp/...`)에 `STEP_OK` 와 객체 위치(`nan=False`)가 찍히면 런타임 로드 정상.
 
+---
+
 ## Windows Isaac Sim 에서 ROS2/OmniGraph 확장 런타임 enable 시 RTX 그래픽 재초기화 크래시
 
 ### 현상
@@ -3068,3 +3077,328 @@ goal.command.position = [float(position)]
 `[follower.gripper_controller]: Received & accepted new action goal` 이 그리퍼 명령마다
 찍힌다. RViz 에서 그리퍼 jaw 가 open/close 한다. 그리퍼 호출당 5초 타임아웃이 없어져
 pick&place 사이클도 빨라진다(예: 큐브당 ~16s → ~5s).
+
+---
+
+## (PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`
+
+### 현상
+
+PATH E bridge(`scripts/sim/run_cube_desk_ros_bridge.py`)가 ROS 2 bridge OmniGraph(`og.Controller.edit`)를 만들 때 종료. 빈 스테이지·최소 그래프·모든 evaluator/path 에서도 동일.
+
+### 오류 메시지
+
+```
+[Error] [omni.graph.core.plugin] Unable to create prim for graph at /ROSBridge
+omni.graph.core._impl.errors.OmniGraphError: Failed to wrap graph in node given
+  {'graph_path': '/ROSBridge', 'evaluator_name': 'execution'}
+```
+
+### 원인
+
+Isaac Lab 의 기본 헤드리스 experience(`isaaclab.python.headless.kit`)는 OmniGraph 의 USD authoring/orchestration 을 strip 한다 → 그래프 prim 을 만들 수 없다. 풀 `SimulationApp` 이나 렌더링 experience 에서는 정상(`isaacsim import SimulationApp` 단독 테스트로 확인).
+
+### 해결 방법
+
+AppLauncher 로 부팅하되 **렌더링 experience 를 강제**한다 — `args.enable_cameras = True` 면 `isaaclab.python.headless.rendering.kit`(풀 렌더 + OmniGraph USD authoring 포함)가 로드돼 OmniGraph 와 InteractiveScene 둘 다 동작한다.
+
+```python
+args.enable_cameras = True   # AppLauncher(vars(args)) 전에
+```
+
+### 확인 방법
+
+bridge 가 `[bridge] ready` 까지 진행하고 `ros2 topic list`(컨테이너, --network host)에 `/clock /isaac_joint_states /isaac_joint_commands /tf` 4개가 보이면 그래프 생성·광고 정상.
+
+---
+
+## (PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` 가 수천 줄 — inotify watch 고갈
+
+### 현상
+
+디스크는 충분한데도 Isaac Sim 부팅 로그가 `Failed to create change watch ... errno=28` 로 도배되고, 이어서 OmniGraph `Unable to create prim` 등이 연쇄 발생.
+
+### 오류 메시지
+
+```
+[Error] [carb] Failed to create change watch for `.../isaacsim/exts/...`: errno=28/No space left on device
+```
+
+### 원인
+
+`errno=28`(ENOSPC)은 디스크가 아니라 **inotify watch 한도 초과**다. Isaac Sim 이 확장 hot-reload 용 watch 를 수천 개 만드는데, 동시 실행 프로세스(학습·isaacsim-mcp·다른 세션)와 합쳐 `fs.inotify.max_user_instances`(기본 128)/`max_user_watches`(기본 65536)를 소진. USD 프림 생성까지 실패로 번진다.
+
+### 해결 방법
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=1048576
+# 영구: /etc/sysctl.d/99-inotify.conf 에 같은 두 줄
+```
+
+### 확인 방법
+
+재실행 후 로그에서 `grep -c "No space left on device"` 가 0. (inotify 한도를 올려도 별개 블로커인 device -1 은 남는다 — 아래 항목.)
+
+---
+
+## (PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1` 로 joint_states 미publish
+
+### 현상
+
+bridge 가 `[bridge] ready` 까지 가고 토픽도 광고되지만, 루프에서 JointState/ArticulationController OmniGraph 노드가 articulation 물리 텐서를 못 읽어 `/isaac_joint_states`·`/clock` 에 **값이 안 실린다**(`ros2 topic echo` 무응답, `hz` 가 not published).
+
+### 오류 메시지
+
+```
+[Error] [omni.physx.tensors.plugin] Incompatible device of DOF position tensor in
+  function getDofAttribute: expected device 0, received device -1
+[Ros2JointStateMessage] Failed to get dof positions / velocities / efforts
+```
+
+### 원인
+
+Isaac Lab `InteractiveScene`(Fabric/GPU 파이프라인)가 만든 physx tensor simulation view 와 OmniGraph 물리 노드(`IsaacArticulationController`/`ROS2PublishJointState`)가 만드는 view 가 충돌한다. graph 를 reset 전/후 생성, `OnPlaybackTick`→`OnTick`+`evaluate_sync` 강제평가, `PickCubeEnvCfg().sim`(GPU 파이프라인) 사용 — 설정으로는 미해결.
+
+### 해결 방법 (B안 — 적용·검증 완료, 2026-06-09)
+
+bridge 의 scene 로드/시뮬 파이프라인을 Isaac Lab `InteractiveScene`+`SimulationContext` 대신 **순수 `isaacsim.core.api.World`(CPU numpy 백엔드) + `SingleArticulation`** 으로 교체. `cube_desk/scene.usd`(SCENE_OFFSET baked → 객체 world 좌표 그대로) + `so101_follower.usd` 를 `add_reference_to_stage` 로 직접 stage 에 올린다. NVIDIA 공식 ROS2 standalone 예제와 동일 경로라 OmniGraph 물리노드가 simulation view 를 **단독 소유** → device 정합(CPU 백엔드면 양쪽 모두 -1 로 일치, GPU fabric view 와의 충돌 자체가 사라짐). 단일 로봇+소수 큐브라 CPU 물리로 cuMotion 제어에 충분.
+
+세부:
+- base 고정 = `isaaclab.sim.schemas.modify_articulation_root_properties(fix_root_link=True)` 재사용(순수 USD authoring, 시뮬 파이프라인 무관). fixed joint 생성 + ArticulationRootAPI 를 부모로 이동(PhysX parser 한계) → articulation root 가 `/World/Robot` 로 올라온다.
+- 로봇 pose = `PickCubeEnvCfg._ROBOT_POS/_ROBOT_ROT` 재사용(PATH C 시뮬과 동일 배치). 단 referenced root 의 `xformOp:orient` 가 `quatd` 라 `AddOrientOp(PrecisionFloat)` 는 Tf 에러 — 기존 op precision 에 맞춰 값만 Set.
+- USD drive gain 이 micro(0.05~0.85) 라 `articulation.get_articulation_controller().set_gains(kps=17.8, kds=0.6)` 로 leisaac 검증값 적용(안 하면 cuMotion 위치 명령 미추종).
+- 루프 = `world.step(render=True)` 한 줄(OnPlaybackTick 으로 그래프 자동 평가 — A안의 수동 `evaluate_sync` 불요).
+
+진입점 = `scripts/sim/run_cube_desk_ros_bridge.sh`(LD_LIBRARY_PATH·DDS env export 래퍼, 아래 두 항목 참조).
+
+### 확인 방법
+
+```bash
+ros2 topic echo /isaac_joint_states --once   # 6관절 name/position/velocity/effort 값
+ros2 topic echo /tf --once                   # base_link→Cube1/Bowl transform
+```
+bridge 로그에 `expected device` 에러 0건. 2026-06-09 서버 konan147 에서 `--num_cubes 1` 로 위 3토픽 모두 값 흐름 확인(검증 §5 1~3 통과). 이후 §5 4~6(RViz dry-run → 단일/4큐브 pick-and-place)은 컨테이너 ROS 스택 launch + cuMotion XRDF 검증 후.
+
+---
+
+## (PATH E) Isaac Sim ROS 2 bridge 가 `librmw_implementation.so` 로드 실패 — `libament_index_cpp.so: cannot open`
+
+### 현상
+
+호스트 uv 환경(ROS 2 미설치)에서 bridge 부팅 중 `isaacsim.ros2.bridge` extension 이 startup 실패. 토픽이 하나도 안 뜬다.
+
+### 오류 메시지
+
+```
+[Error] [isaacsim.ros2.bridge.impl.extension] ROS2 Bridge startup failed
+Could not load the dynamic library from .../isaacsim.ros2.bridge/jazzy/lib/librmw_implementation.so.
+Error: libament_index_cpp.so: cannot open shared object file: No such file or directory
+```
+
+### 원인
+
+호스트에 ROS 2 가 없으면 bridge 는 isaacsim 번들 ROS 2 lib(`exts/isaacsim.ros2.bridge/jazzy/lib`)를 dlopen 한다. 이 .so 들엔 `$ORIGIN` RPATH 가 없어, `librmw_implementation.so` 가 같은 디렉터리의 의존성(`libament_index_cpp.so` 등)을 못 찾는다. 동적 링커는 **프로세스 시작 시** `LD_LIBRARY_PATH` 를 읽으므로 python 안에서 `os.environ` 으로 늦게 넣어도 무효.
+
+### 해결 방법
+
+launch **전에** 번들 lib 경로를 `LD_LIBRARY_PATH` 에 export. `scripts/sim/run_cube_desk_ros_bridge.sh` 래퍼가 수행:
+
+```bash
+export LD_LIBRARY_PATH="<repo>/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH"
+```
+
+### 확인 방법
+
+bridge 로그에 `ROS2 Bridge startup failed` 가 없고 `ros2 topic list` 에 `/isaac_joint_states` 등이 뜬다.
+
+---
+
+## (PATH E) host(bridge)↔container(ROS 스택) DDS discovery 실패 — cross-UID fastrtps SHM
+
+### 현상
+
+bridge 가 `/isaac_joint_states` 등을 정상 publish 하고(`/dev/shm/fastrtps_*` 세그먼트 + UDP 7400/7410/7411 listening 확인), 컨테이너를 `--network host --ipc host` 로 띄워 RMW·DOMAIN 을 맞춰도 `ros2 topic list` 가 **빈 결과**.
+
+### 원인
+
+host bridge 는 일반 유저(uid 1000), 컨테이너 ROS 스택은 root(uid 0)로 실행된다. fastrtps 기본 transport 의 SHM(`/dev/shm/fastrtps_*`)은 서로의 세그먼트 lock/ring-buffer 에 **cross-UID 로 접근**해야 하는데 권한이 안 맞아 same-host 참가자 간 SHM 협상이 실패한다(metatraffic 도 SHM 우선 시 안 보임).
+
+### 해결 방법
+
+양쪽 모두 fastdds 를 **UDP-only** 로 강제해 SHM 협상을 우회한다:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+```
+
+- bridge: 래퍼(`run_cube_desk_ros_bridge.sh`)가 export + `.py` 도 `os.environ.setdefault`(DDS init 은 python 시작 이후라 유효).
+- 컨테이너: `docker run -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 --network host --ipc host …`.
+
+> ROS 2 가 양쪽 다 fastrtps 여야 한다. isaacsim 번들은 **fastrtps 만** 포함(cyclonedds 없음)하므로 컨테이너도 fastrtps 로 맞춘다(`ros2_ws/setup/env.sh` 의 cyclonedds 는 WSL2 PATH D 전용 — PATH E 에서 source 금지).
+
+### 확인 방법
+
+```bash
+docker run --rm --network host --ipc host \
+  -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+  so101-cumotion:jazzy bash -c \
+  'source /opt/ros/jazzy/setup.bash && ros2 topic echo /isaac_joint_states --once'
+```
+6관절 값이 찍히면 해결.
+
+---
+
+## (PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정
+
+`pick_place.launch.py`(controllers + move_group/cuMotion + SM)를 서버에서 처음 실측 기동할 때
+연쇄로 막힌 4지점. 전부 소스/Dockerfile 에 반영됨(2026-06-09 서버 konan147).
+
+### 1) controller_manager SIGSEGV — topic_based_ros2_control ABI 불일치
+
+**현상**: `ros2_control_node` 가 hardware 'initialize' 직후 죽는다(exit -11).
+
+```
+[INFO] Loaded hardware 'SO101_follower_SYSTEM' from plugin 'topic_based_ros2_control/TopicBasedSystem'
+[INFO] Initialize hardware 'SO101_follower_SYSTEM'
+Stack trace ... hardware_interface::HardwareComponentInterface::get_lifecycle_id() const
+Segmentation fault (Address not mapped to object [0xb0])
+```
+
+**원인**: Isaac ROS apt repo 의 `ros-jazzy-topic-based-ros2-control` 가 **99.99.1-0noble**(Isaac ROS
+ros2_control 스냅샷 빌드)인데, ROS 메인 repo 가 `hardware_interface` 등을 **4.44.0**(더 최신)으로 끌어와
+ABI 가 어긋난다(`HardwareComponentParams`/`get_lifecycle_id` vtable). ROS 메인 repo 엔 topic_based
+**0.3.0 source 만** 있어 바이너리 다운그레이드 불가.
+
+**해결**: PickNik 소스(`github.com/PickNikRobotics/topic_based_ros2_control`, main=0.3.0)에서 설치된
+hardware_interface 4.44.0 헤더로 재빌드해 overlay 설치(`Dockerfile.cumotion_ros` 가 `/opt/tbc_overlay`
+에 colcon build 후 bashrc 에서 `/opt/ros/jazzy` 다음 source). 재빌드 시 `ros_testing` 누락은
+`-DBUILD_TESTING=OFF` 로 회피.
+
+**확인**: `ros2 control list_controllers -c /follower/controller_manager` 에 broadcaster/arm/gripper 가 `active`.
+
+### 2) kinematics 플러그인 `pick_ik/PickIkPlugin` 미설치 → set_from_ik SIGSEGV
+
+**현상**: move_group/SM 기동 로그에 plugin load 실패, SM 의 첫 `set_from_ik` 에서 SIGSEGV.
+
+```
+The kinematics plugin (pick_ik/PickIkPlugin) failed to load. ... class ... does not exist.
+Declared types are cached_ik_kinematics_plugin/... kdl_kinematics_plugin/KDLKinematicsPlugin ...
+```
+
+**원인**: `so101_moveit_config/config/kinematics.yaml` 이 `pick_ik/PickIkPlugin`(5-DOF 에 적합, rotation_scale 0.5 +
+approximate)을 쓰는데 이미지에 미설치. null plugin 을 set_from_ik 가 역참조 → segfault.
+
+**해결**: `Dockerfile.cumotion_ros` apt 에 `ros-jazzy-pick-ik` 추가(packages.ros.org 1.1.1, hardware_interface 와 동일 빌드일자).
+
+### 3) launch `Expected … got '()' of type tuple` — 빈 리스트 파라미터
+
+**현상**: `move_group_cumotion.launch.py`(및 이를 포함하는 pick_place) 가 노드 시작 시 즉시 예외.
+
+```
+TypeError: Expected 'value' to be one of [float, int, str, bool, bytes], but got '()' of type 'tuple'
+  (launch_ros/utilities/evaluate_parameters.py: evaluate_parameter_dict)
+```
+
+**원인**: cuMotion planning pipeline yaml 의 `request_adapters: []`(빈 리스트)가 `moveit_config.to_dict()`
+→ launch_ros 에서 빈 튜플 `()` 로 평가돼 Node 파라미터 타입검증 실패.
+
+**해결**: `so101_moveit_config/config/isaac_ros_cumotion_planning.yaml` 에서 `request_adapters: []` 줄 제거
+(키 생략 시 MoveIt 이 "request adapter 없음" 으로 처리). 일반화: launch Node 파라미터에 빈 리스트/딕트 금지.
+
+### 4) SM `NameError: name 'PoseStamped' is not defined`
+
+**원인**: `pick_place_sm.py` 가 `_pose()` 에서 `PoseStamped()` 를 쓰는데 import 누락.
+
+**해결**: `from geometry_msgs.msg import PoseStamped` 추가.
+
+### 확인 (통합)
+
+`scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1`(host) + 컨테이너에서
+`ros2 launch so101_cumotion_pick_place pick_place.launch.py use_rviz:=false`(fastrtps/UDPv4, `/build`·`/workspace` 마운트,
+overlay source) → cuMotion `CumotionPlanner` 로드 + URDF/XRDF 로 로봇 로드 성공, 컨트롤러 3종 active,
+SM 이 큐브 포즈 수신→`pick-and-place cube[0]` 까지 진행. (이후 5-DOF grasp IK 튜닝은 별개 — §PATH_E 6.)
+
+---
+
+## (PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace (gripper 포함)
+
+### 현상
+
+cuMotion 이 task-space goal 을 받자마자 모든 계획 실패. 팔이 전혀 안 움직인다.
+
+### 오류 메시지
+
+```
+[cumotion_planner] Trajectory optimization to pose failed (trajopt: INVALID_INITIAL_CSPACE_POSITION)
+Invalid c-space position: Number of c-space coordinates in 'cspace_position' [6] must equal
+  the number of c-space coordinates of the robot [5].
+Failed call to 'planToTaskSpaceTarget()': 'initial_cspace_position' [[0 0.07 0.07 0.01 0 1.4999]] is invalid.
+```
+
+### 원인
+
+MoveIt `MotionPlanRequest.start_state` 는 **전체 로봇 관절**(SO-101 = arm 5 + gripper, 마지막 1.4999=gripper)을
+담는다. cuMotion cspace 는 tool_frame(gripper_frame_link) 으로 가는 **kinematic chain 위 관절(5축)뿐**이다
+(gripper 는 분기 관절이라 XRDF cspace 에 넣어도 cuMotion 이 무시 — 구조적). cuMotion MoveIt 플러그인
+(`CumotionMoveGroupClient::updateGoal`)이 request 를 **무필터 전달**해 6관절 start_state 가 5축 cspace 와 어긋난다.
+**알려진 upstream 미해결 버그**([isaac_ros_cumotion#10](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion/issues/10),
+#53). XRDF/URDF config 로는 해결 불가(비-cspace joint 선언 메커니즘 없음, cspace 추가도 무시됨 — 3가지 시도 모두 실패).
+
+### 해결 방법
+
+플러그인을 패치해 updateGoal 이 start_state 를 **planning group(manipulator, 5축) active 관절로 필터링**하게 한다.
+`docker/patches/cumotion_moveit_filter_start_state.patch` (Dockerfile 이 isaac_ros_cumotion clone → patch apply →
+`isaac_ros_cumotion_moveit` 만 colcon build → `/opt/cumotion_overlay`, bashrc 에서 /opt/ros/jazzy 다음 source).
+핵심 로직: `getRobotModel()->getJointModelGroup(req.group_name)->getActiveJointModelNames()` 로 group 관절을 얻어
+`req.start_state.joint_state` 를 그 관절만 남기고 재구성. (gripper 는 cuMotion 계획에서 빠지고 `gripper_controller`
+action 으로 별개 제어 — 정합.)
+
+### 확인 방법
+
+clean run 에서 `INVALID_INITIAL_CSPACE_POSITION` 0건, cuMotion 로그의 `initial_cspace_position` 이 5개 값.
+※ stale cumotion 프로세스(과거 cspace=6 실험본)가 남으면 `[5] vs robot[6]` 역방향 에러가 섞이니 pkill 로 정리.
+※ 남은 과제(별개): cspace count 해결 후에도 5-DOF IK 미도달(`INVERSE_KINEMATICS_FAILURE`)은 grasp 자세 튜닝 영역(§PATH_E 6).
+
+## (PATH E) 5-DOF 팔에서 cuMotion/OMPL 이 grasp pose-goal 을 못 푼다 — joint-goal 로 전환
+
+### 현상
+
+cuMotion + ROS 로 SO-101(5축) pick-and-place 시, c-space 6vs5 패치 후에도 grasp 접근 pose 계획이
+모든 시도에서 실패. orientation 제약을 풀어도(`yaw_free_tol=π`), tolerance 를 키워도, **orientation 을
+완전히 제거(position-only)해도** 실패. 팔이 큐브 근처로 전혀 안 간다.
+
+### 오류 메시지
+
+```
+[ompl] manipulator[RRTConnect]: Unable to sample any valid states for goal tree
+[cumotion_planner] Trajectory optimization to pose failed (trajopt: INVERSE_KINEMATICS_FAILURE)
+# /compute_ik 직접 호출 시: error_code.val = -31 (NO_IK_SOLUTION) — 거의 모든 pose 에서
+```
+
+### 원인
+
+**MoveIt(OMPL constraint sampler)·cuMotion 의 goal 샘플러는 task-space(pose/position) goal 을
+"orientation 을 정하고 IK 로 config 를 찾는" 방식으로 푼다.** 5-DOF 팔은 임의의 6-DOF orientation 을
+정확히 만들 수 없어(achievable orientation 이 위치마다 thin 한 2-manifold), 샘플러가 고르는 거의 모든
+orientation 에서 IK 가 실패 → goal state 를 못 만든다. position-only 도 내부적으로 랜덤 orientation+IK
+라 동일하게 실패. 즉 **pose/position goal 방식 자체가 5-DOF 에 비가능**(planner/tolerance 문제 아님).
+`/compute_ik` 는 exact 6-DOF pose 를 요구해 5-DOF 에선 거의 `-31` — 이걸로 reachability 판단하면 오해.
+
+### 해결 방법
+
+goal 을 **JOINT config** 로 준다(5-DOF-aware). `scripts/sim/probe_ik.py`(`/compute_fk` 랜덤 FK 샘플링)
+로 워크스페이스를 매핑해 위치 도달성·achievable tilt 를 확인하고, SM `pick_place_sm.py::_move_to` 를
+다음으로 전환:
+1. `RobotState.set_to_random_positions()` 로 in-process FK 랜덤 샘플링(joint bounds 자동 준수) →
+   target(x,y,z) 근처(`fk_pos_gate`)에 down-ish(tool z tilt≤max) tip 을 두는 manipulator config 탐색.
+2. 그 config 의 (도달 가능) orientation + 목표 위치로 `set_from_ik` 정밀화(seed=coarse config).
+3. `arm.set_goal_state(robot_state=goal_rs)` → planner(cuMotion/OMPL)는 joint→joint collision-free 만 푼다.
+
+(과거 in-process SM 이 `joint_fk` 를 쓴 것과 동일 원리. `/compute_ik` 의존을 버리는 게 핵심.)
+
+### 확인 방법
+
+`OMPL OK → (x,y,z) q=[...]` 로 approach→grasp→lift 가 전부 plan+exec. `Unable to sample`/
+`INVERSE_KINEMATICS_FAILURE` 0건. ※ grasp 가 큐브를 실제로 쥐는지(grip 물리)는 별개 과제 —
+moving_jaw 가 큐브를 감싸도록 강tilt·그리퍼 close·위치정확도 튜닝 필요(§PATH_E 6).

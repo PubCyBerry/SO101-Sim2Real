@@ -1,7 +1,8 @@
 manipulator:
   kinematics_solver: pick_ik/PickIkPlugin
-  kinematics_solver_timeout: 0.3
-  kinematics_solver_attempts: 10
+  # timeout/attempts 는 PATH E(worktree) OMPL goal 샘플·set_from_ik 정밀화 신뢰성용 상향.
+  kinematics_solver_timeout: 1.0
+  kinematics_solver_attempts: 50
   # 5-DOF SO-101: position-priority IK. full 6-DOF pose(위치+방향)는 thin manifold 라
   # orientation 까지 맞추면 대부분 XY 에서 IK 실패(-31). orientation_threshold 를 크게(≈π) 줘서
   # "방향은 아무거나, 위치만 맞으면 성공" 으로 만든다. rotation_scale 은 낮게 둬 down-ish 를 약하게 선호.

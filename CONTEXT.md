@@ -143,6 +143,354 @@
 
 ---
 
+## 작업 인계 (2026-06-10 — PATH E grasp 디버깅: 진단 반전 + 위치정합 해결 ✅, 남은 건 접촉 물리(사용자 방향 결정 보류))
+
+직전 인계의 "gripper close 간헐 실패" 블로커를 라이브 디버깅하다 **진단이 뒤집혔다**. close 는 실패가
+아니라 **성공**(grip 매번 -0.16 완전닫힘)이고, 진짜 문제는 **grasp 접촉**(패드가 2.5cm 큐브를 못 뭄)이었다.
+근본원인 = `_grasp_point` 가 link **원점(pivot)** 을 써서 실제 패드와 7~8cm 어긋난 것. 이를 **실측 패드 기준**
+으로 재정의해 **위치 정합을 해결**(패드가 큐브 양옆을 정확히 감쌈)했으나, 그래도 grip 이 큐브를 못 물고
+끝까지 닫힌다(접촉 물리 = PATH C 가 강tilt-scoop 으로만 풀었던 11사이클 난제). **다음 방향은 사용자 결정 보류 중.**
+
+> ⚠ **인수인계 필수 3가지** (먼저 읽기):
+> 1. **`run_sm.sh` 는 워크트리에 없다.** 내가 만든 임시 SM 단발 실행 헬퍼 — 위치 = 호스트
+>    `/DISK1/so101-sim2real/work/ros2_build/run_sm.sh` = 컨테이너 `/build/run_sm.sh`. launch 띄우고
+>    `RESULT:` 대기 후 스택 자동 정리(orphan 방지). 로직은 전부 `pick_place_sm.py` 에 있음. (원하면 `scripts/sim/` 로 옮겨 git 포함.)
+> 2. **코드 변경 2파일 미커밋**(working tree): `ros2_ws/src/so101_cumotion_pick_place/so101_cumotion_pick_place/pick_place_sm.py`
+>    + `.../config/pick_place_params.yaml`. 아래 "변경 내역" 참조. (symlink-install 이라 colcon 재빌드 없이 launch 반영.)
+> 3. **headless bridge 가 살아있다**(호스트 PID 278427, `run_cube_desk_ros_bridge.sh --num_cubes 1`). 컨테이너 `so101_ros` up.
+>    **GUI bridge 는 디버깅에 쓰지 말 것**(아래 ⚠ 컨트롤러 race). 디버깅은 headless bridge 로.
+
+### 🎯 목표
+PATH E(cuMotion+ROS) cube_desk pick-and-place **State Machine 을 동작**시키기. (close 디버깅에서 출발했으나
+진단이 grasp 접촉으로 이동.) 사용자 방침: **"강tilt든 top-down이든 무관, pick-place 만 잘 되면 됨."**
+
+### ✅ 완료 / 확정한 것
+1. **진단 반전(4회 baseline b1~b4)**: close 명령(-0.16)이 매번 bridge 도달 + grip 매번 -0.16 **완전닫힘**.
+   → close 는 실패가 아님. 2.5cm 큐브가 패드 사이에 있었다면 -0.16 까지 못 닫힘(중간 stall). 즉 **패드가
+   큐브를 빗나가 헛닫힘**. CONTEXT 의 "grip 1.5 미닫힘" 프레이밍은 틀림.
+2. **근본원인(패드 기하)**: 기존 `_grasp_point` = `JAW_LINK`·`gripper_link` **link 원점(pivot/모터 위치)** 중점.
+   mesh AABB 측정(`.venv/bin/python3` STL 파싱)으로 확인 — moving_jaw 는 JAW_LINK 프레임에서 **-y 로 ~8.2cm
+   뻗은 손가락**, gripper_frame_link(TCP)은 gripper_link z≈-0.098 = **고정 finger tip** 근처. → 원점 중점은
+   실제 패드와 **7~8cm 어긋나** 큐브 위 2~4cm 헛집음(g5 등 gpt z=0.094 vs cube 0.049).
+3. **위치 정합 해결**: `_grasp_point` = **(고정 finger tip=TCP) + (moving jaw tip=`JAW_TIP_LOCAL`) 중점** 으로
+   재정의. tilt 제약 해제(사용자 방침) 후 **g15~17 = FK 3/3 성공, 실행된 grasp 중심이 큐브에서 0.7~1.2cm,
+   패드가 큐브 양옆을 감쌈**(g17: jaw_tip y=-0.110·fix_tip y=-0.130 사이에 cube y=-0.125, z≈0.045).
+4. **FK/IK/실행 정상 확인(selftest)**: 사용자 요청으로 "좌표 지정→EE 도달 측정" 루틴 추가. 4좌표 모두
+   **실행오차(plan↔exec) 7~9mm**, FK샘플오차 14~18mm(gate 0.04 탓). → **FK/IK·실행은 멀쩡.** 앞서 본
+   13cm·8cm 괴리는 FK/IK 가 아니라 ⬇ 컨트롤러 race 탓이었음.
+5. **⚠ 컨트롤러 spawn race 원인 규명**: GUI(렌더링) bridge 로 시스템 부하↑ 시, launch 의 spawner 들이
+   `load_controller`/`configure` 서비스 타임아웃으로 연쇄 실패(`Failed loading`/`already loaded↔no controller`).
+   → 팔이 계획대로 안 움직여 grasp 중심 13cm 괴리. **headless bridge(가벼움)에선 0 실패.** (b1~b4 정상,
+   g6~g8 GUI bridge 라 실패.)
+
+### 🔴 남은 블로커 — grasp 접촉 물리
+위치 정합(패드가 큐브 양옆)했는데도 **grip 이 -0.16 까지 완전히 닫히고 큐브 안 들림**(g15~17). 큐브는 안 움직임
+(=안 튕김). 즉 **2.5cm 큐브가 이 그리퍼의 닫힘 aperture 한계 근처**라 패드 표면이 큐브를 물지 못하고 닫힘.
+PATH C(in-process)는 같은 그리퍼·큐브로 4/4 성공했는데, 비결이 **"강tilt 로 moving jaw 를 큐브 옆/아래로
+퍼올리듯(scoop)"**(memory `path-e-cumotion-ros-status`/in-process SM 6차). 단순 top-down/center 정렬로는 안 뭄.
+
+### ⏭ 진행 예정 — 사용자 결정 보류 중 (AskUserQuestion 했으나 "추가 질문 후 결정" 으로 보류)
+사용자가 "큐브에 일정 거리 이상 가까이 접근 못 함" 을 관찰 → 구조 도식 설명 요청 → 이 문서 작성. 결정 대기.
+선택지(제시함):
+- **A. Sim grasp-assist(부착)** — close+큐브근접 시 bridge 에서 fixed joint 부착, open 시 해제. 위치 정합이
+  정확해 물리적 정당. pick-place 안정 완주. (사용자 1차엔 "물리" 택했으나 접촉 벽 확인 후 "어떻게 집든 무관" 으로 완화.)
+- **B. 강tilt-scoop 물리 재현(PATH C 방식)** — tilt 다시 강하게 + FK 점수를 moving jaw 가 큐브 아래로 가도록.
+  5-DOF ROS 에선 FK manifold 얇아 신뢰성 낮음(~15%).
+- **C. 큐브 크기 상향**(2.5→3.0cm 등, aperture 에 맞춤) — North Star 계약(2.5cm) 영향 확인 필요.
+- (추가 물리 레버: 느린 close / 마찰↑ / GRIPPER_CLOSED 덜 닫기 — 단 grip 이 끝까지 닫힘=접촉 자체가 없어 효과 제한적 추정.)
+
+### 📊 결과 데이터 (대표, headless bridge, `/build/sm_run_<tag>.log`)
+| tag | 의미 | FK grasp | 실행 grasp중심 vs cube | grip | 결과 |
+|---|---|---|---|---|---|
+| b1~b4 | baseline(원점 중점) | — | 중심 2~4cm 위(헛집음) | -0.16 완전닫힘 | 0/1 |
+| g15~17 | 패드중점+tilt해제 | 3/3 d 0.7~1.1cm | **0.7~1.2cm(정합 OK)** | -0.16 완전닫힘 | 0/1(접촉 실패) |
+| st1 | selftest(FK/IK검증) | — | 실행오차 7~9mm | — | FK/IK 정상 |
+- g13 진단: FK 실패 시 위치상 최근접 config 가 **tilt 1°(top-down)·near_d 1cm** → 강tilt 필터가 reachable
+  config 를 버리고 있었음(그래서 tilt 제약 해제함).
+
+### 🔧 변경 내역 (미커밋, 2파일)
+- **`pick_place_sm.py`**:
+  - `JAW_TIP_LOCAL=(0.0,-0.065,0.019)` 상수(moving jaw 패드 접점, JAW_LINK frame. mesh AABB 기반 추정 — 미세조정 여지).
+  - `_jaw_tip`/`_fix_tip` 헬퍼 + `_grasp_point`(두 tip 중점) / `_grasp_axis_vert`(두 tip 벡터) 재정의.
+  - `_diag_grasp` 로그 확장: `jaw_tip`·`fix_tip`·`gpt`(grasp중심)·cube.
+  - `_fk_sample_goal`: gate 를 stage 별 분리(grasp=fk_pos_gate, approach/transport=wide), **실패 시 near_d/tilt/axis
+    진단 로그** 추가, near-sample 추적.
+  - `_move_to`: 계획된 TCP/grasp중심을 `self._last_goal_tcp` 등에 저장(selftest 비교용), grasp/approach 는 goal_rs 도 CLOSED 기준.
+  - `selftest()` 메서드 + main 에 `selftest` 파라미터 분기.
+- **`pick_place_params.yaml`**: `grasp_z_offset` 0.012→**0.0**(중심을 큐브 중심에), `fk_pos_gate` 0.015→**0.025**,
+  `grasp_tilt_min` 45→**0.0**(top-down 허용), `grasp_axis_vert_max` 0.4→**0.6**, `selftest: false`(검증 시 true).
+
+### 🔑 진단 도구 (코드에 남김)
+- `DIAG grasp` 로그(jaw_tip/fix_tip/gpt/cube/grip/grip_cmd/axis_vert).
+- `FK[grasp] 실패` 시 near_d/tilt/axis 로그(reach 문제 vs 필터 문제 판별).
+- **selftest 모드**: yaml `selftest: true` → pick 대신 4좌표로 TCP 도달 측정(FK샘플오차/실행오차/전체오차 분리). 검증 후 false 로.
+
+### 🖥 환경 상태(세션 종료 시점)
+- headless bridge **살아있음**(호스트 PID 278427). 컨테이너 `so101_ros` **up**(24h). GPU idle.
+- 미커밋 2파일(위). 마지막 커밋 `487504b`.
+- 호스트 `isaacsim-mcp` 별개 서비스 — 건드리지 말 것.
+
+### ▶ 콜드 스타트(재현, headless 권장)
+1. **bridge**(호스트, 워크트리): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready` +
+   `gripper grip force: dof[5] kps=80.0` 대기. (이미 278427 떠 있으면 생략.)
+2. **SM 1회**(헬퍼): `docker exec so101_ros bash /build/run_sm.sh <tag> 1` → 끝에 `DIAG (tag)` 출력 + 스택 자동 정리.
+   - 코드 수정 시: symlink-install 이라 colcon 불요(파이썬). 깨끗하게 하려면 `colcon build --symlink-install
+     --base-paths /workspace/ros2_ws/src --packages-select so101_cumotion_pick_place` 1회.
+   - 로그: 컨테이너 `/build/sm_run_<tag>.log` = 호스트 `/DISK1/so101-sim2real/work/ros2_build/sm_run_<tag>.log`.
+3. **GUI 로 보려면**(컨트롤러 race 주의): bridge 를 `DISPLAY=:1 scripts/sim/run_cube_desk_ros_bridge.sh ...`(로컬
+   `:1` 데스크톱) 또는 `--livestream 2`(WebRTC). **단 GUI bridge 부하로 컨트롤러 spawn 이 깨질 수 있음** —
+   GUI 로 보려면 spawner 견고화(아래 주의) 선행 필요.
+
+### ⚠ 주의 (함정)
+- **GUI bridge 컨트롤러 race(미해결)**: 사용자가 GUI 로 watch 하려면 `follower_split.launch.py` 의 spawner 들에
+  `--controller-manager-timeout` 추가 / 순차화 필요. 지금은 headless 로만 안정.
+- **셸 `rtk` 래퍼 함정**: 호스트 `ps aux | grep ...` 가 dotfiles 의 `rtk` 함수에 먹혀 깨짐 → **`pgrep -af` 사용**.
+  `pkill -f`/`kill $(pgrep)` 는 자기 셸 매칭=자살 → **PID 직접 kill**. orphan 정리도 컨테이너서 PID 직접.
+- bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수. GPU 서버 공유(학습 경합 주의).
+- `JAW_TIP_LOCAL` 은 mesh AABB 기반 **추정값** — 접촉이 끝내 안 되면 실제 패드 접점으로 미세조정 여지(닫힘 시 두 tip 간격 ~2cm 측정됨 vs 큐브 2.5cm).
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E grasp 물리: planning self-collision 해결 ✅ + grasp 정합 7메커니즘 확립, 남은 건 gripper close 간헐 실패)
+
+직전 인계의 "grasp 물리(jaw 가 큐브 못 감쌈)" 블로커를 11사이클 라이브 디버깅으로 깊이 규명했다.
+in-process SM 의 강tilt 전략을 ROS SM 에 포팅하며 **planning self-collision 블로커를 완전 해결**하고
+grasp 정합을 단계적으로 끌어올렸으나(큐브를 손가락 사이에 정렬·xy 정합·axis 수평 달성), 마지막
+**gripper close 가 grasp 자세 의존적으로 간헐 실패**해 `RESULT 1/1` 미달. **커밋 `853beb8`**(코드 3파일).
+
+- **변경 파일(커밋 `853beb8`)**: `pick_place_sm.py`(대폭) · `pick_place_params.yaml` · `scripts/sim/run_cube_desk_ros_bridge.py`(gripper grip force).
+- **✅ 해결한 것**:
+  1. **planning self-collision(근본 블로커)**: `set_to_random_positions` 가 joint bounds 만 지키고 self-collision
+     무시 → FK 샘플이 shoulder↔lower_arm colliding config 선택 → OMPL "goal tree 샘플 실패"/cuMotion
+     `INVALID_INITIAL_CSPACE_POSITION`. **`PlanningScene.is_state_colliding` 로 FK 샘플 배제**(`_colliding`,
+     best 후보·정밀화 모두 체크) → approach/grasp/lift **전부 OMPL OK**, self-collision 에러 0건.
+  2. **grasp 자세 정합 7메커니즘**(`_fk_sample_goal`): ① grasp 단계는 TCP 대신 **두 손가락 중점**(JAW_LINK·
+     FIX_LINK FK 중점, `_grasp_point`)을 큐브에 맞춤 ② tilt **하한 필터**(grasp_tilt_min 45°, 수직 top-down
+     배제) ③ 통과 config 중 **거리 최소**(xy 정합, gate 0.015 시 d 0.004 달성) ④ **CLOSED 기준 중점**(gripper
+     닫으면 jaw 회전해 중점 z↑3cm → OPEN 정합은 close 후 큐브 위로 뜸) ⑤ **grasp axis 수평**(grasp_axis_vert_max
+     0.4, `_grasp_axis_vert` — 두 손가락 벌어짐이 수직이면 큐브 위아래 눌러 실패) ⑥ transport 는 **gate 분리**
+     (0.04, 좁은 gate 면 lift FK 도달 실패) ⑦ bridge **gripper grip force**(dof[5] kps 17.8→80).
+  - 결과: 큐브를 손가락 사이(y)에 정렬 + xy 0.8cm + axis_vert 0.11(수평) 자세 도달 — **grasp 직전까지 완성**.
+- **🔴 남은 블로커(gripper close 간헐 실패)**: close 명령(-0.16)은 항상 bridge 도달(DIAG `grip_cmd=-0.16` 확인)
+  하나, grasp 자세에 따라 articulation grip 이 **-0.16(닫힘) ↔ 1.5+(미닫힘) 간헐**. jaw 가 책상/큐브 윗면에
+  박히거나 self-collision 반력으로 닫힘 토크(URDF effort 10 한계)를 못 이기는 것으로 추정. grip force 80 으로도
+  못 이김. **다음 후보**: ① bridge `enabled_self_collisions` 가 jaw close 경로 막는지(끄거나 gripper 링크쌍만
+  disable) ② grasp z 를 큐브 윗면(jaw 0.069 vs 윗면 ~0.064) 아래로 더 내리되 도달성 확보(scatter 축소로 큐브를
+  도달 쉬운 위치=base_link x[1.60,1.76]·y[-0.465,-0.365] 권장 — CONTEXT 기존 "사용자 결정 미적용") ③ close 동역학
+  (느린 close + dwell↑) ④ closed-loop grasp servoing.
+- **🔑 진단 도구(코드에 남김)**: `DIAG grasp` 로그(grip·grip_cmd·axis_vert·ee·jaw·fix·gpt·cube) + store 노드의
+  `/isaac_joint_commands` 구독(`last_grip_cmd`). grasp 디버깅 재현 시 그대로 활용.
+- **핵심 파라미터(yaml)**: grasp_tilt_deg 60 / grasp_tilt_min 45 / grasp_axis_vert_max 0.4 / grasp_z_offset 0.012
+  / fk_samples 40000 / fk_pos_gate 0.015 / fk_pos_gate_transport 0.04 / gripper grip force(bridge) 80.
+- **실행 환경(세션 종료 시점)**: 컨테이너 `so101_ros` 살아있음(sleep infinity, GPU 미사용). bridge·launch 전부
+  정리됨(GPU idle, gnome 340MiB 뿐). 호스트 `isaacsim-mcp` 별개 서비스 — 건드리지 말 것. 이미지 재빌드 불요
+  (두 overlay baked, 소스 미변경분 symlink 반영). **코드 변경은 symlink-install 이라 colcon 증분만 하면 launch 반영.**
+- **콜드 스타트(재현, 3터미널)**: ① bridge(host, 워크트리): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1`
+  → `[bridge] ready` + `gripper grip force: dof[5] kps=80.0` 대기. ② (코드 수정 시) `docker exec so101_ros bash -c
+  'source /opt/ros/jazzy/setup.bash && cd /build && colcon build --symlink-install --base-paths /workspace/ros2_ws/src
+  --packages-select so101_cumotion_pick_place'`. ③ launch: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash
+  && source /opt/tbc_overlay/install/setup.bash && source /opt/cumotion_overlay/install/setup.bash && source /build/install/setup.bash
+  && export SO101_REPO=/workspace && ros2 launch so101_cumotion_pick_place pick_place.launch.py num_cubes:=1 2>&1 | tee /build/sm_run.log'`.
+  로그 grep: `FK\[grasp\]|DIAG grasp|RESULT|grasp 실패|도달 config 없음`.
+- **주의**: launch 재실행은 통째로 — 이전 move_group/cumotion/ros2_control orphan 을 정리해야(누적되면 controller_manager
+  경합으로 controller 스폰 실패). 정리는 PID 직접 kill 또는 **브래킷 트릭**(`grep -E '[r]os2_control_node|[m]ove_group|...'`)
+  으로 — `pkill -f`/`kill $(pgrep -f ...)` 는 docker exec 자기 셸 cmdline 을 매칭해 자살(exit 137). bridge 종료도 PID 직접.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E 5-DOF planning 블로커 해결: joint-goal FK 샘플링 ✅, 남은 건 grasp 물리)
+
+직전 인계의 "5-DOF grasp IK" 블로커를 **근본 진단 후 해결**했다. 다중 세션 블로커의 진짜 원인은
+cuMotion/IK 가 아니라 **MoveIt/cuMotion 의 goal 샘플러가 5-DOF 를 못 다루는 것**이었고, SM 을
+**joint-space goal(FK 샘플링)** 로 바꿔 approach→grasp→lift 가 전부 planning OK 가 됐다. 남은 건
+grasp 물리(grip 이 큐브를 못 쥠) — in-process SM 의 known-hard 영역.
+
+- **🔑 근본 진단(서버 konan147, GPU idle, 라이브)**:
+  - OMPL `Unable to sample valid states for goal tree` + cuMotion `INVERSE_KINEMATICS_FAILURE` 이
+    **orientation 제약/완화/position-only 전부에서** 발생. `/compute_ik` 는 5-DOF 에서 exact 6-DOF
+    pose 라 거의 -31(NO_IK_SOLUTION). **`/compute_fk` 랜덤 FK 샘플링**(`scripts/sim/probe_ik.py` 신규)
+    으로 워크스페이스 매핑: 큐브 위치는 도달 가능하나 achievable orientation manifold 가 thin(예 grasp
+    z≈0.05 에서 tilt 4~52°) → planner 의 "랜덤 orientation+IK" 샘플러가 thin manifold 를 못 찾음.
+  - 즉 **pose/position goal 자체가 5-DOF 에 비가능**(과거 in-process SM 이 joint_fk 쓴 이유와 동일).
+  - 워크스페이스 기하: **world↔base_link = Z 180° 회전**(`base_link=(1.84-wx, -0.565-wy, wz-0.6749)`).
+    Cube2/4 authored 위치는 base_link 음의 x(팔 reach 뒤, shoulder_pan ±110° 밖)=도달 불가.
+- **✅ 해결(커밋 `4734e5b`)**: `pick_place_sm.py` `_move_to` 를 **joint-goal** 로 전환 —
+  `RobotState.set_to_random_positions()` in-process FK 샘플링으로 target(x,y,z) 에 down-ish(tool z
+  tilt≤max) tip 을 두는 manipulator config 를 찾고 `set_from_ik` 정밀화 → `set_goal_state(robot_state=)`.
+  planner(cuMotion/OMPL)는 joint→joint collision-free 만 푼다. `_fk_sample_goal`/`_tool_tilt` 신규,
+  pose-goal 기계(`_pose`/`_yaw_to`/`_grasp_constraints`) 제거. param: `fk_samples`(15000)/`fk_pos_gate`(0.04)
+  추가, pose-goal tolerance 제거, height LOW band(approach_height 0.12→0.06, lift 0.12→0.07, transport
+  0.15→0.12, grasp_tilt 60→30). yaml top-key `pick_place_object_store:`→`/**:`(store 노드명≠launch
+  타겟 노드명 문제로 param 미로딩이던 것 해결). kinematics.yaml pick_ik timeout 0.2→1.0/attempts 10→50.
+- **검증(서버, /build/sm_run5.log)**: `OMPL OK → (0.140,-0.125,0.109/0.044/0.119)` approach/grasp/lift 전부 plan+exec.
+  단 `grasp 실패(안 들림)`.
+- **🔴 남은 블로커(grasp 물리, planning 무관)**: ① grasp config 의 moving_jaw 가 큐브 위(z 0.089 vs
+  cube 0.049) — TCP(gripper_frame_link)만 큐브 근처, jaw 가 안 감쌈 ② 그리퍼 완전히 안 닫힘(0.086 vs
+  -0.16 목표). **다음 후보**: FK 샘플링 목적함수에 jaw-z 점수(`_finger_min_z` 식, 강tilt 로 moving_jaw 를
+  큐브 옆/아래로) / 그리퍼 close dwell·force / 위치 gate(fk_pos_gate) 강화 / set_from_ik 정밀도. in-process
+  SM 이 ~1.4/4 로 marginal 했던 동일 난제 — grasp 물리는 별도 phase.
+- **사용자 결정(미적용)**: "scatter 범위 축소" — `pick_cube_env_cfg.py::_CUBE_SCATTER_X/Y_RANGE` 를
+  도달 가능 world 영역(x[1.60,1.76], y[-0.465,-0.365] 권장)으로. Cube2/4 authored 위치도 reachable 로
+  재배치(author_pick_cube_scene.py) 시 4큐브 가능. planning 해결과 별개라 grasp 물리 후 적용 권장.
+- **실행 환경 현재 상태(세션 종료 시점)**: 이미지 `so101-cumotion:jazzy` 재빌드 완료(두 overlay baked
+  — `/tmp/*_ws` 수동 빌드 불요). 컨테이너 **`so101_ros` 살아있음**(`sleep infinity`, GPU 미사용). bridge·
+  move_group·cumotion **전부 정리됨**(GPU idle 375MiB). 호스트의 `isaacsim-mcp`(PID 2315xxx)는 별개
+  사전 서비스 — 건드리지 말 것. ROS 패키지 소스 미변경분은 `/build/install` symlink 반영(재빌드 불요).
+- **콜드 스타트(재현, 3터미널)**:
+  1) bridge(host, 워크트리서): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready` 대기.
+  2) (코드 수정 시만) 컨테이너서 colcon 증분: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash &&
+     cd /build && colcon build --symlink-install --base-paths /workspace/ros2_ws/src --packages-select <pkg>'`.
+     install=`/build/install`(worktree `/workspace/ros2_ws/install` 아님).
+  3) 전체 launch: `docker exec so101_ros bash -c 'source /opt/ros/jazzy/setup.bash && source /opt/tbc_overlay/install/setup.bash &&
+     source /opt/cumotion_overlay/install/setup.bash && source /build/install/setup.bash && export SO101_REPO=/workspace &&
+     ros2 launch so101_cumotion_pick_place pick_place.launch.py 2>&1 | tee /build/sm_run.log'`. 결과 grep:
+     `OK →|FK-sample 도달 config 없음|grasp 실패|RESULT:`.
+  - 컨테이너 docker run 명령(없을 때): `docker run -d --name so101_ros --network host --ipc host --gpus all
+    -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -e SO101_REPO=/workspace
+    -v <worktree>:/workspace -v /DISK1/so101-sim2real/work/ros2_build:/build so101-cumotion:jazzy sleep infinity`.
+- **주의**: SM 노드 재실행은 launch 통째로(이전 launch 의 move_group/cumotion orphan 은 `kill -9 <pid>` 로 정리
+  후 재launch — 안 그러면 노드 중복). probe_ik.py(reachability 진단)는 move_group 떠 있을 때만(`/compute_fk`
+  서비스). bridge 종료는 PID 직접 kill(`pkill -f` 자기매칭 금지). bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E cuMotion pose-goal 전환 + c-space 6vs5 블로커 플러그인 패치로 해결)
+
+§5 통합(아래 인계) 후 사용자 지시로 **cuMotion pose-goal 방식** 진행. set_from_ik(pick_ik) IK 실패를
+우회하려 SM `_move_to` 를 cuMotion task-space goal 직접으로 바꿨고, 그 과정에서 **단일 핵심 블로커
+(c-space 6 vs 5)를 진단·패치로 해결**했다. 단 최종 pick-and-place 는 grasp IK 미도달로 미완(이월).
+
+- **커밋**: `a17d2aa`(pose-goal 전환+진단) → `71bcbdc`(플러그인 패치+relaxed orientation).
+- **🔑 핵심 블로커 진단·해결 (웹+MCP 조사로 확증)**:
+  - 증상: cuMotion 이 `INVALID_INITIAL_CSPACE_POSITION` (`cspace_position[6]` vs `robot[5]`)으로 모든 계획 실패.
+  - 원인: MoveIt `request.start_state` 는 전체 로봇 6관절(arm5+gripper)을 담는데 cuMotion cspace 는
+    tool_frame(gripper_frame_link) chain 위 **5축뿐**(gripper 분기 관절은 cspace 에 넣어도 무시 — 3회 확인).
+    cuMotion MoveIt 플러그인(`CumotionMoveGroupClient::updateGoal`)이 request 를 **무필터 전달** → 6 전달.
+  - 조사: **upstream [issue #10](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion/issues/10) 와 동일 버그**(open, NVIDIA fix 없음). XRDF 에 비-cspace joint 선언 메커니즘 없음(문서 확인). isaac-sim-mcp: cuMotion core 가 cspace 길이를 controlled joint 수로 엄격 검증.
+  - **해결(검증)**: `docker/patches/cumotion_moveit_filter_start_state.patch` — updateGoal 이 start_state.joint_state 를
+    planning group(manipulator,5) active 관절로 필터링. Dockerfile 이 clone+apply+build → `/opt/cumotion_overlay`.
+    → clean run 에서 INVALID_INITIAL_CSPACE **0건**, cspace_position 이 5개로 필터링, cuMotion 이 task-space IK 수행까지 진입.
+- **변경 파일**: `pick_place_sm.py`(_move_to → cuMotion pose-goal + `_grasp_constraints` relaxed orientation:
+  position tight + tool z 회전 자유로 5-DOF redundant DOF 해방. `orient_mode` 진단 토글) · `pick_place_params.yaml`
+  (pos_tol/ori_tol/yaw_free_tol) · `moveit_py_cumotion.yaml`(wait_for_initial_state_timeout 10→30, startup race) ·
+  `Dockerfile.cumotion_ros`(cumotion patch overlay) · `so101.xrdf`(cspace 제약 경위 주석).
+- **🔴 남은 블로커(grasp IK, 5-DOF)**: cspace count 는 해결됐으나 cuMotion 이 grasp 접근 자세 미도달 —
+  orientation 제약 시 `INVERSE_KINEMATICS_FAILURE`, position-only 시 start config(5개) "invalid"(관절한계/충돌 추정).
+  즉 5-DOF 가 down+tilt 접근을 그 위치에서 못 풀거나 cuMotion 이 MoveIt orientation tolerance 를 무시(exact 취급).
+  **다음 후보**: ① position-only 가 왜 start invalid 인지(관절한계/충돌/start-state 읽기) 규명 ② cuMotion native
+  task-space tolerance(plugin 의 task-space target orientation tolerance) ③ grasp 자세/approach_height 재설계
+  ④ 도달 가능 워크스페이스 확인(FK 스윕). grasp 작동(open/close)은 5-DOF 무관(gripper_controller action 별개).
+- **그리퍼 5-DOF 확인(사용자 질문)**: cuMotion 은 5축(팔)만 계획, 그리퍼는 `gripper_controller`(ParallelGripperCommand
+  action)로 별개 제어 → 패치도 start_state 를 manipulator group(gripper 제외)으로 필터링하므로 정합. tool z 회전
+  자유는 2.5cm 큐브엔 무해(대칭). 길쭉한 물체면 jaw 정렬 문제.
+- **실행 환경**: 영속 컨테이너 `so101_ros`(현재 살아있음, 정리 필요) + bridge(host). 컨테이너 내 overlay:
+  `/tmp/tbc_ws`(topic_based), `/tmp/cu_ws`(패치된 cumotion_moveit). **이미지 재빌드 시 Dockerfile 이 두 overlay 영구화** →
+  다음 세션엔 `/tmp/*_ws` 수동 빌드 불요. source 순서: /opt/ros/jazzy → /build/install → tbc → cumotion overlay.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E §5 4~6: ROS 스택 end-to-end 통합 ✅, 남은 건 5-DOF grasp IK)
+
+bridge 블로커 해소(아래 인계) 후 사용자 지시로 §5 4~6 진행. **`pick_place.launch.py` 전체 스택(bridge +
+controllers + move_group + cuMotion + SM)을 서버에서 처음으로 end-to-end 기동**시켰다. SM 이 큐브 포즈를
+받아 pick 시도까지 진행하며, 마지막으로 **grasp 접근 pose 의 5-DOF IK 실패**에서 멈춘다(§6 known-hard).
+
+- **커밋**: `15450a8`(bridge B안) → `ddbe664`(ROS 스택 통합 4대 수정).
+- **해소한 bringup 4대 함정**(전부 소스/Dockerfile 반영, TROUBLESHOOTING 기록):
+  1. **controller_manager SIGSEGV** — Isaac ROS repo 의 `topic_based_ros2_control 99.99.1` 이 ROS 메인 repo
+     `hardware_interface 4.44.0` 과 ABI 불일치(`get_lifecycle_id` vtable). 메인 repo 엔 0.3.0 source 만 → PickNik
+     소스에서 재빌드해 overlay 설치(`Dockerfile.cumotion_ros` `/opt/tbc_overlay`, bashrc 에서 source).
+  2. **`pick_ik/PickIkPlugin` 미설치** → SM set_from_ik SIGSEGV. `Dockerfile` apt 에 `ros-jazzy-pick-ik` 추가.
+  3. **launch tuple 에러** — `isaac_ros_cumotion_planning.yaml` 의 `request_adapters: []`(빈 리스트)가 launch_ros 에서
+     빈 튜플로 변환돼 Node 파라미터 타입검증 실패. 해당 줄 제거.
+  4. **SM `PoseStamped` NameError** — `pick_place_sm.py` import 누락 보강.
+  + **use_sim_time**: `follower_split.launch.py` 에 인자 추가(CM/rsp 주입), `pick_place.launch.py` 가 `true` 전달
+    (bridge `/clock` 정합).
+- **검증된 사실(서버 konan147, GPU idle)**:
+  - cuMotion `CumotionPlanner` 플러그인 로드 + URDF/XRDF 로 로봇 로드 성공(tool=gripper_frame_link, base=base_link)
+    → **XRDF 유효 = §5 #1 사실상 통과**(Python curobo 미설치라 `gen_so101_xrdf.py` 는 미실행, C++ planner 가 대체 검증).
+  - 컨트롤러 3종(joint_state_broadcaster/arm_trajectory_controller/gripper_controller) active, `/follower/joint_states` 흐름.
+  - SM: 포즈 수신→`pick order [0]`→`pick-and-place cube[0]`→**`IK 실패 (0.140,-0.125,0.169) tilts=[60,45,75,0]`**.
+  - 종료 시 exit -11 은 MoveItPy teardown(무해).
+- **🔴 남은 블로커(§5 #6 성공 = grasp)**: 5-DOF SO-101 이 grasp 접근 pose(down+tilt)에 도달 못 함. set_from_ik(pick_ik)
+  가 모든 tilt 후보에서 실패. 이전 in-process Lula/ikpy SM 도 못 풀던 동일 난제(§6). **다음 방향 후보**:
+  ① SM `_move_to` 를 set_from_ik(joint goal) 대신 **cuMotion pose-goal 직접 사용**(MoveItPy `set_goal_state(pose_stamped_msg, pose_link)`)
+     — cuMotion 이 5-DOF 여유/limit 내에서 모션을 직접 풀게. ② grasp 자세/tilt/approach_height 재설계(pick_place_params.yaml).
+     단 5-DOF orientation 도달성은 planner 선택과 무관한 본질적 제약이라 grasp 전략 자체 재검토 필요.
+- **실행 환경(재현)**: 영속 컨테이너로 단계 디버깅함 —
+  `docker run -d --name so101_ros --network host --ipc host --gpus all -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -e SO101_REPO=/workspace -v <worktree>:/workspace
+  -v /DISK1/so101-sim2real/work/ros2_build:/build so101-cumotion:jazzy sleep infinity` → 안에서
+  `source /opt/ros/jazzy/setup.bash; source /build/install/setup.bash; source /tmp/tbc_ws/install/setup.bash`(현 컨테이너는
+  topic_based 를 /tmp/tbc_ws 에 빌드해둠 — **이미지 재빌드 시 Dockerfile 의 /opt/tbc_overlay 로 영구화**) 후 launch.
+  colcon 빌드(symlink-install)는 `/DISK1/so101-sim2real/work/ros2_build`(/build), 소스는 worktree(/workspace). ROS 패키지
+  소스 미변경이라 재빌드 불요(symlink 반영). **다음 세션엔 이미지 재빌드(Dockerfile 반영) 후 `/tmp/tbc_ws` overlay 불요.**
+- **주의**: 컨테이너 정리 `docker rm -f so101_ros`. bridge 종료는 PID kill. 동시에 bridge(host)+컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E B안 완료: bridge device -1 블로커 해소, joint_states publish ✅)
+
+직전 인계의 마지막 블로커(Isaac Lab InteractiveScene bridge 의 `device 0 vs -1`)를 **B안으로 해소**. bridge 를 순수 `isaacsim.core` 로 재작성해 `/isaac_joint_states`·`/clock`·`/tf` 가 모두 정상 publish 됨(서버 konan147, GPU idle, `--num_cubes 1` 실측). PATH_E §5 검증 **1~3 통과**.
+
+- **변경 파일**:
+  - `scripts/sim/run_cube_desk_ros_bridge.py` — **전면 재작성(B안)**. `SimulationContext+InteractiveScene` → `World(physics_dt=1/120, rendering_dt=1/30)` CPU 백엔드 + `SingleArticulation`. `add_reference_to_stage` 로 `cube_desk/scene.usd`(+`so101_follower.usd`) 직접 로드. base 고정 = `isaaclab.sim.schemas.modify_articulation_root_properties(fix_root_link=True)` 재사용(→ articulation root 가 `/World/Robot` 로 올라옴). 로봇 pose = `PickCubeEnvCfg._ROBOT_POS/_ROBOT_ROT`. drive gain = `set_gains(kps=17.8, kds=0.6)`(leisaac). OmniGraph 는 `OnPlaybackTick`(수동 evaluate_sync 제거), 루프 = `world.step(render=True)`. TF parent = `/World/Robot/base/base_link` Xform 신설(USD base 링크명이 `base` 라 동명 Xform 으로 frame "base_link" 생성).
+  - `scripts/sim/run_cube_desk_ros_bridge.sh` — **(신규)** 런처. `LD_LIBRARY_PATH`(번들 ROS 2 lib)·`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`·`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`·`OMNI_KIT_ACCEPT_EULA` export 후 uv run.
+  - docs: TROUBLESHOOTING.md(device -1 → 해결 + 신규 2건), PATH_E_CUMOTION_ROS.md(§검증 상태·실행·파일맵·§5 표), 이 인계.
+- **🔑 해결한 환경 함정 3건(전부 TROUBLESHOOTING 기록)**:
+  1. **device -1**: Isaac Lab GPU fabric view ↔ OmniGraph 노드 view 충돌. 순수 `World`(CPU 백엔드)는 OmniGraph 가 sim view 단독 소유 → 양쪽 device 일치, 충돌 소멸. 단일 로봇+소수 큐브라 CPU 물리로 충분.
+  2. **`librmw_implementation.so` 로드 실패**(`libament_index_cpp.so cannot open`): 호스트 ROS 2 없음 → isaacsim 번들 jazzy/lib 의 `$ORIGIN` RPATH 부재. 동적 링커가 프로세스 시작 시 LD_LIBRARY_PATH 읽으므로 **launch 전 export 필수**(python os.environ 무효). 래퍼가 처리.
+  3. **host↔container DDS discovery 실패**: bridge=일반유저·컨테이너=root 의 cross-UID `/dev/shm` fastrtps SHM lock 충돌. **양쪽 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`**(UDP 강제)로 우회. isaacsim 번들은 fastrtps 만 → 컨테이너도 fastrtps(env.sh 의 cyclonedds 는 WSL2 PATH D 전용, PATH E 에서 source 금지).
+- **검증 명령(재현)**: 터미널1 `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready`, 로그에 `expected device` 0건. 터미널2 `docker run --rm --network host --ipc host -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 so101-cumotion:jazzy bash -c 'source /opt/ros/jazzy/setup.bash && ros2 topic echo /isaac_joint_states --once'` → 6관절 값. `/tf` 도 `base_link→Cube1/Bowl`(좌표 검산 일치: world offset 을 `_ROBOT_ROT` z-180° 회전한 값).
+- **➡ 다음(PATH_E §5 4~6, 컨테이너 ROS 스택 필요)**: ① `gen_so101_xrdf.py` IK>90% + sphere 튜닝(§5 1) ② `pick_place.launch.py use_rviz:=true`(컨테이너, fastrtps/UDPv4 env) → RViz 수동 plan/execute, 팔 동기 ③ 그리퍼 action ④ 단일→4큐브 SM 성공률. cuMotion plugin 클래스명/노드 파라미터는 설치 버전 문서로 재확인. ROS 스택 launch 시 bridge 와 RMW/transport 일치 필수.
+- **주의**: bridge 종료는 PID 직접 kill(`pkill -f` 금지=자기 매칭). 래퍼는 `/World/Robot` 단일 env(env-NS 없음) prim 레이아웃. drive gain 미적용 시 cuMotion 위치명령 미추종.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E 라이브 검증: 빌드·인프라 OK, bridge joint_states 가 마지막 블로커)
+
+서버 konan147 에서 빌드~실행 검증 진행. **인프라·빌드는 전부 성공**, Isaac Sim bridge 의 joint_states publish 한 지점이 미해결로 남아 **순수 isaacsim 재작성(B안)으로 이월**.
+
+- **성공(재현됨)**:
+  - Docker 이미지 `so101-cumotion:jazzy`(18.8GB) 빌드 — `docker/Dockerfile.cumotion_ros`. Isaac ROS 4.4 apt repo(release-4.4 noble main external-main) + CUDA/Jetson-x86/ROS2 repo. 설치: ros-jazzy-moveit(+moveit-py)·ros2-controllers·joint-trajectory-controller·parallel-gripper-controller·**topic-based-ros2-control**·tf-transformations·**isaac-ros-cumotion(+moveit)**·curobo는 C++ `libcumotion_planner_lib.so`(libcudart.so.13 링크, 의존성 전부 해소, Python curobo 불요).
+  - **cuMotion MoveIt plugin 클래스 = `isaac_ros_cumotion_moveit/CumotionPlanner`**(추정 CumotionPlannerManager 아님 — yaml 수정함). cuMotion action server 파라미터 = `cumotion_action_server.{urdf_file_path,xrdf_file_path,read_esdf_world,...}`(상류 isaac_ros_cumotion.launch.py include, move_group_cumotion.launch.py 반영).
+  - colcon 빌드 5패키지 OK(`/DISK1/so101-sim2real/work/ros2_build`). xacro `hardware_type:=isaac`→TopicBasedSystem OK. MoveItPy/ParallelGripperCommand/tf_transformations import OK. 양쪽 launch `--show-args` OK.
+  - cuMotion pipeline yaml 은 **so101_moveit_config/config/isaac_ros_cumotion_planning.yaml** 에 둬야 MoveItConfigsBuilder 가 찾음(so101_cumotion_moveit_config 에서 옮김).
+  - Isaac Sim uv 동기(`uv sync --group isaac`, 캐시 `/DISK1/so101-sim2real/cache/uv`). bridge **부팅·OmniGraph 생성·토픽 4개 광고·host↔container DDS discovery 전부 OK**(FastRTPS, --network host).
+- **해결한 환경 함정**(TROUBLESHOOTING 기록):
+  - Isaac Sim 헤드리스에서 OmniGraph 생성 실패("Unable to create prim")→**rendering experience 필요**(`args.enable_cameras=True`→isaaclab.python.headless.rendering.kit). 기본 headless.kit 는 OmniGraph USD authoring strip.
+  - inotify watch 고갈(errno=28)→`sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=1048576`(세션 적용함, 영구는 /etc/sysctl.d).
+  - `sleep`/loop 가 셸 dotfiles(`rtk`)에 깨짐→백그라운드 명령에 sleep 금지(Monitor/직접 Read 사용). `pkill -f run_cube_desk_ros_bridge` 는 자기 명령줄 매칭→자살하므로 금지.
+  - bridge launch GPU OOM 은 동시 학습(policy-server 34GB) 탓 — 학습 중단하면 48GB 확보.
+- **🔴 미해결 블로커**: bridge 루프에서 OmniGraph JointState/ArticulationController 노드가 `omni.physx.tensors: expected device 0, received device -1` → joint_states 값 미publish(토픽은 광고됨). **Isaac Lab InteractiveScene + OmniGraph 물리노드의 device 바인딩 불일치**. 시도해 실패: graph를 reset 전/후 생성, OnPlaybackTick→OnTick+`evaluate_sync` 강제평가, `PickCubeEnvCfg().sim`(GPU 파이프라인) 사용 — 전부 device -1 지속.
+- **➡ 다음(B안, 권장)**: bridge 를 **순수 `isaacsim.core`(World+Articulation)** 로 재작성 — Isaac Lab InteractiveScene 대신 cube_desk `scene.usd`+SO-101 `so101_follower.usd` 직접 stage 로드. NVIDIA 공식 ROS2 예제(create_ros_action_graph)와 동일 경로라 device 0 정합됨. 나머지(컨테이너 ros 스택·SM·cuMotion)는 그대로 재사용. 그 후 PATH_E §5 검증 4~6.
+- **현재 bridge 스크립트 상태**: Isaac Lab 버전(rendering exp + OnTick+evaluate_sync + env_cfg.sim + graph-before-reset). joint_states 직전까지 동작. B안에서 scene 로드부만 교체.
+
+---
+
+## 작업 인계 (2026-06-09 — PATH E: cuMotion + ROS 2 cube_desk pick-and-place scaffold)
+
+- **목표(사용자)**: Isaac Sim MCP·NVIDIA Isaac ROS pick-and-place 튜토리얼을 조사해 **cuMotion + ROS** 로 SO-101 cube_desk SM 작성 + 재현 문서.
+- **배경/근거**: 기존 in-process Lula IK SM(`pick_cube_state_machine.py`)은 Lula↔USD 정합 잔차(~0.1m)로 grasp 미완. cuMotion 은 articulation frame 에서 직접 collision-free 계획 → 좌표 정합 문제 구조적 제거. `isaac_ros_cumotion` 이 ROS 2 Jazzy/x86_64 공식 지원이라 기존 `ros2_ws`(so101_moveit_config) 재사용 가능.
+- **확정 결정(사용자)**: ① 플랫폼 = Linux 서버 네이티브(Jazzy+cuMotion+Isaac Sim 한 머신) ② 인지 = 시뮬 ground-truth 포즈 ③ SM = 커스텀 ROS 2 Python 노드(MoveItPy+cuMotion).
+- **구현 완료(코드/설정/문서, 빌드·실행 검증 미실시 — GPU+ROS 서버 필요)**:
+  - `scripts/sim/run_cube_desk_ros_bridge.py` — Isaac Sim standalone(InteractiveScene + PickCubeSceneCfg 재사용) + `isaacsim.ros2.bridge` OmniGraph(JointState pub/sub, Clock, ArticulationController) + 물체 포즈 publish(`/cube_poses`,`/bowl_pose`, **base_link frame**).
+  - `assets/robots/so101.xrdf`(collision sphere 근사·튜닝 필요) + `scripts/sim/gen_so101_xrdf.py`(curobo 검증 하니스).
+  - `ros2_ws/src/so101_cumotion_moveit_config/`(cuMotion planner plugin yaml·moveit_py_cumotion.yaml·move_group_cumotion.launch.py) — so101_moveit_config SRDF/kinematics 재사용.
+  - `ros2_ws/src/so101_cumotion_pick_place/`(pick_place_sm.py = MoveItPy manipulator+cuMotion 8단계, params, pick_place.launch.py).
+  - `so101_ros2_control.xacro` `hardware_type:=isaac`(TopicBasedSystem, state `/isaac_joint_states`/cmd `/isaac_joint_commands`) + `follower_isaac_controllers.yaml`(100Hz).
+  - 문서 `docs/PATH_E_CUMOTION_ROS.md`(셋업/실행/검증 6단계/튜닝), `AGENTS.md` 경로표·스크립트표 갱신.
+- **핵심 설계 결정**:
+  - 토픽 분리: `/isaac_joint_states`(bridge↔TopicBasedSystem) ≠ `/follower/joint_states`(broadcaster→MoveIt) — 피드백 루프 방지.
+  - 프레임: SRDF virtual_joint(world→base_link)=identity → 모든 포즈 base_link frame 통일(bridge 가 robot base 빼서 publish). robot-base-offset static TF **불필요**.
+  - 5DOF grasp: `set_from_ik` 에 tilt 후보(60°→±15°→0°) 순차 시도 → 첫 성공 자세로 cuMotion joint-space 계획. cuMotion 실패 시 OMPL fallback.
+  - MoveItPy 파라미터 매칭: SM Node `name="pick_place_moveit"` 로 moveit config+named set 전달, store 노드는 params yaml(node key) 로.
+- **검증(로컬)**: 작성 Python 6종 `py_compile` OK, yaml/xml/xacro 파싱 OK. (ROS/Isaac/curobo import·빌드·실행은 서버에서 미실시.)
+- **남은 일(서버 GPU+ROS 필요)**: ① `gen_so101_xrdf.py` IK>90% 확인 + sphere 튜닝(cuMotion Robot Description Editor) ② `colcon build` 5패키지 ③ bridge↔topic 토픽 흐름 확인(PATH_E §5) ④ RViz dry-run plan/execute ⑤ 단일→4큐브 SM 성공률 ⑥ `isaac_ros_cumotion` plugin 클래스명/노드 파라미터를 설치 버전 문서로 재확인(`move_group_cumotion.launch.py` 주석). 성공 시 TROUBLESHOOTING 기록.
+- **주의**: XRDF sphere·cuMotion plugin 파라미터명은 버전 의존이라 서버에서 실측 보정 필요. `SO101_REPO` env 로 XRDF/URDF 절대경로 해결.
+
+---
+
 ## 작업 인계 (2026-06-08 — 3cam 전환: top/wrist → top/wrist/front)
 
 - **목표(사용자)**: 레포지토리 전체를 3개 카메라(top/wrist/front) 기준으로 통일.
