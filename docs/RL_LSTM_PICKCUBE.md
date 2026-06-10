@@ -208,6 +208,22 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - **v5 개입(T23: 그릇 quat obs 87dim + over_bowl_drop 12 + bowl_disturb -5) 포함** — v6 = v4 + T23(place) + T24(grasp 신뢰성) 통합. run `lstm256_stage1_grasp_v6`, 로그 `train_grasp_v6.log`.
 - **판정**: ① grasp 신뢰성(reach→grasp 전이↑) + cube_predisturb 음수 작아짐(큐브 덜 침) + cube_lost 종료율↓ ② placed가 over_bowl 따라 상승. scratch.success→0.80 = 단일 통과 → 커리큘럼 1→2.
 - **멀티 큐브 전망(분석)**: 4큐브 0.90 = 큐브당 97.4%(산술 벽). 멀티 특유 문제 = 이미 든 큐브 교란(bowl_disturb 유리)·distractor·그릇 포화·순차 선택(grasp_focus/부트스트랩이 CUBE_NAMES[0] 단일 전제 → 재설계 필요). 현실 목표 = 단일 큐브 0.90.
+- **참고(모델 검토)**: obs 87dim이 위치+속도+방향 다 포함 = near-MDP(거의 완전관측) → 이론상 MLP로 충분, LSTM 이득 작음. LSTM 유지 근거 = 요구사항 + sim2real(부분관측 vision student로 갈 때 recurrent 연속성) + 약한 obs 노이즈 필터. 정체 원인은 아키텍처 아니라 보상/탐색(valley). Transformer는 현 규모/on-policy엔 오버킬.
+
+### T25. ⚠️ v6 결과 — grasp 신뢰성 성공 / place 미해결 + jitter·hover 발견 → v7 개입
+- **v6 결과(cron scratch 추이)**: grasp/lift/over_bowl이 model_300 0.39 → model_600~1250 **0.85~0.89**(v4 0.71~0.84보다↑·안정). 그러나 **placed/success 0~0.10**(over_bowl→placed 전이 ~12%, v4의 32%보다 오히려 나쁨).
+  - **✅ grasp 신뢰성(T24) 성공 확정**: cube_predisturb -0.40→-0.077(큐브 거의 안 침), cube_lost 6.9%→3.4%(추락 절반). 큐브 변위 패널티+추락 종료가 의도대로 작동.
+  - **❌ place valley 미해결 + 정밀도가 진짜 병목으로 판명**: over_bowl_drop 보상 2.7로 크게 받는데 placed 0.10 → "여는 행위는 늘었으나 그릇 안 안착 안 됨". release valley(안 열어서) 아니라 **정밀도(열어도 그릇 안 정확히 안 들어감)** 가 주범.
+- **영상 관찰(2가지 비정상 행동)**:
+  1. **큐브 든 채 위아래로 진동(jitter)**: action_rate/joint_vel 페널티 -1e-4(사실상 0) → jittery action 미억제. guided_lift(10, 로그 6.88 최대)가 높이 보상이라 진동해도 평균 보상 받음. sim2real 치명적.
+  2. **그릇 위 hover(place 안 함)**: over_bowl_drop의 open_frac(0.2~0.6 선형)이 "**살짝 열고 버티기**"도 부분 보상 → 큐브 안 떨구는 새 캠핑. + bowl_disturb(-5) 위축 + place 정밀도 부족.
+- **v7 개입(보상 param만, obs 87dim 불변, fresh)**:
+  - **smoothness**: action_rate/joint_vel weight **-1e-4 → -1e-3**(10×) — jitter 억제. sim2real 필수.
+  - **over_bowl_drop 캠핑 차단**: close_ref **0.20→0.40**(거의 다 열어야 보상, 살짝 열기 0) + xy_range **0.10→0.06**(그릇 중심 정밀).
+  - **place 정밀도**: place_height xy_range **0.18→0.08**(그릇 중심 정렬, 가장자리 hover 보상 차단).
+  - **bowl_disturb 완화**: **-5→-3**(그릇 근접 위축 완화 — 정밀 place 허용).
+  - run `lstm256_stage1_grasp_v7`, 로그 `train_grasp_v7.log`.
+- **판정**: ① jitter 감소(action_rate 페널티 절대값↓, 영상 매끄러움) ② over_bowl→placed 전이가 v6 0.12 넘어 상승(정밀도 해소). scratch.success→0.80.
 
 ---
 

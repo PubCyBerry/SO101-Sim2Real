@@ -13,20 +13,21 @@
 
 ---
 
-## 작업 인계 (2026-06-11 — PickCube LSTM(PPO) RL: v6 place valley + grasp 신뢰성)
+## 작업 인계 (2026-06-11 — PickCube LSTM(PPO) RL: v7 smoothness + place 정밀도)
 
-> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T24 전체 시행착오). 여기는 인계 요약만.
+> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T25 전체 시행착오). 여기는 인계 요약만.
 
 - **위치**: worktree `lstm-ppo-pickcube`(브랜치 worktree-lstm-ppo-pickcube). 실행 = 메인 `.venv` + `PYTHONPATH=$(pwd)/src`. 서버 konan147 GPU(48GB) 공유.
 - **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.
-- **✅ grasp 점화 해결(v4)**: v1~v3 내내 scratch.grasp≡0(align-hover)이던 탐색 벽을 v4가 넘음. cron 점검 추이 scratch.grasp 0.11→0.84, lift→0.81. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+그리퍼 slew 2.5+RND grasp_focus.
-- **현재 문제 = place/release valley(v5 개입)**: grasp 후 병목이 place로 이동. scratch `over_bowl 0.71 → placed 0.23`. 큐브를 그릇 위로 가져가도 **그리퍼를 안 연다**(잡고-버티기 local optimum: carry8+transport8+insert80 계속 받고 release하면 끊김). + 운반 중 **그릇 밀치기/엎기**, 그릇 자세(quat) obs 부재로 엎힘 관측 불가. (success termination은 require_open=False — 그리퍼 안 열어도 큐브가 그릇 안이면 성공.)
-- **현재 학습 중**: run `lstm256_stage1_grasp_v5`(fresh), 로그 `train_grasp_v5.log`. **num_envs 16384**(VRAM~29GB), ETA~6.8h. v5 개입(T23): obs **83→87dim**(그릇 quat, `include_container_orientation`), **`over_bowl_drop_reward`(12)**(그릇 위 그리퍼 열기 dense 유도), **`bowl_disturb_penalty`(-5)**(그릇 tilt+xy변위, `_reset_idx`가 초기 pose 저장). 나머지 v4 동일(grasp 보상·RND·부트스트랩·gamma 0.997).
-- **16384 가능케 한 핵심**: PhysX 64K 물리 머티리얼 한도 → 큐브 4개 CubeFriction을 scene.usd 공유 1개로 통합(env당 6→3). PhysX 버퍼 상향. 상세 `docs/TROUBLESHOOTING.md`.
-- **모니터(cron 분리됨, 세션 독립)**: `scripts/reinforcement_learning/cron_monitor_v4.sh`가 **crontab `*/30`** 으로 자동 점검. 최신 run 자동 탐색 → 최신 ckpt에 `monitor_eval.py`(scratch/full/pre 단계 집계 + 16-env 비디오). 새 ckpt 없으면 skip(flock 중복방지). 결과 → `<run>/monitor_history/history.jsonl`, 비디오 → `<run>/monitor_history/video_<ts>_model_N.mp4`. cron 로그 `logs/cron_monitor_v4.cron.log`. 진짜 지표 = **scratch 그룹**(train 로그 success는 bootstrap-inflated). 끄기: `crontab -l | grep -vF cron_monitor_v4.sh | crontab -`.
-- **상태 파일**: `/tmp/train_pid.txt`(현재 v5 PID).
-- **신규 코드(v5)**: `over_bowl_drop_reward`·`bowl_disturb_penalty`(rewards.py), `include_container_orientation`(observations.py rl_state), 그릇 초기 pose 저장(pick_cube_env.py `_reset_idx`), env_cfg obs 87dim·RewTerm 2개·`_CUBE_REWARD_TERMS`에 over_bowl_drop, monitor_eval 집계 단조성 버그 수정, cron_monitor_v4.sh.
-- **판정/다음 레버**: scratch.placed가 over_bowl 따라 상승 = release valley 해소 + 그릇 엎힘 감소. 안 되면 drop weight↑·carry↓·gripper offset 재고. scratch.success→0.80 시 커리큘럼 1→2 확장(현재 수동 판단).
+- **✅ grasp 해결(v4 점화 + v6 신뢰성)**: scratch.grasp/lift/over_bowl **0.85~0.89** 안정. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+slew 2.5+RND grasp_focus(v4) + **cube_predisturb 패널티(-3)·cube_lost 추락 종료**(v6, 큐브 변위 -0.40→-0.08·추락 6.9%→3.4%).
+- **남은 핵심 문제 = place 정밀도(v7 개입)**: grasp 후 `over_bowl 0.86 → placed 0.10`(전이 12%). 진단 = release valley(안 열어서) 아니라 **정밀도(열어도 그릇 안 정확히 안 들어감)**. 영상서 2가지 비정상: ① 큐브 든 채 **위아래 진동(jitter)**(smoothness 페널티 -1e-4 사실상 0) ② 그릇 위 **hover**(over_bowl_drop이 '살짝 열고 버티기' 캠핑 보상 + bowl_disturb 위축).
+- **현재 학습 중**: run `lstm256_stage1_grasp_v7`(fresh), 로그 `train_grasp_v7.log`. **num_envs 16384**(VRAM~29GB). v7 개입(T25, 모두 보상 param·obs 87dim 불변): **action_rate/joint_vel -1e-4→-1e-3**(jitter 억제, sim2real 필수), **over_bowl_drop close_ref 0.2→0.4+xy_range 0.10→0.06**(살짝열기 캠핑 차단+그릇중심 정밀), **place_height xy_range 0.18→0.08**(중심 정렬), **bowl_disturb -5→-3**(접근 위축 완화). 나머지 v4~v6 동일.
+- **obs 87dim**: joint·grasp point·큐브·그릇 pos+rel + 속도 + 큐브 yaw/크기·ee quat·**그릇 quat**(`include_container_orientation`). near-MDP → MLP도 가능하나 LSTM 유지(요구사항+sim2real 부분관측 연속성).
+- **16384 핵심**: PhysX 64K 머티리얼 한도 → 큐브 CubeFriction scene.usd 공유 통합(env당 6→3). 상세 `docs/TROUBLESHOOTING.md`.
+- **모니터(cron, 세션 독립)**: `scripts/reinforcement_learning/cron_monitor_v4.sh` crontab `*/30` 자동 점검. 최신 run 자동 탐색 → 최신 ckpt `monitor_eval.py`(scratch/full/pre 집계 + 16-env 비디오). 결과 `<run>/monitor_history/history.jsonl`, 비디오 `video_<ts>_model_N.mp4`. cron 로그 `logs/cron_monitor_v4.cron.log`. 진짜 지표 = **scratch 그룹**. 끄기 `crontab -l|grep -vF cron_monitor_v4.sh|crontab -`.
+- **상태 파일**: `/tmp/train_pid.txt`(현재 v7 PID).
+- **신규 코드 누적**: `over_bowl_drop_reward`·`bowl_disturb_penalty`·`cube_predisturb_penalty`(rewards.py), `cube_lost`(terminations.py), `include_container_orientation`(observations.py), 그릇/큐브 초기 pose 저장(pick_cube_env.py `_reset_idx`), monitor_eval 단조성 버그 수정, cron_monitor_v4.sh.
+- **판정/다음 레버**: ① jitter 감소(영상 매끄러움) ② over_bowl→placed 전이가 v6 0.12 넘어 상승(정밀도 해소). 안 되면 place_height xy 더 타이트·over_bowl_drop drop_z 게이트·sub-skill chaining(멀티 확장 시 1순위). scratch.success→0.80 시 커리큘럼 1→2(수동 판단).
 
 ---
 

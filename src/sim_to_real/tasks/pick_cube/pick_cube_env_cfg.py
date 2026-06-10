@@ -678,6 +678,8 @@ class PickCubeRewardsCfg:
     )
 
     # Stage 4.5: 그릇 XY 근처에서 그릇 안 높이로 낮추기 (밀집)
+    # v7: xy_range 0.18(느슨)→0.08 — 그릇 중심 정밀 정렬 유도(가장자리 hover 보상 차단).
+    # place 정밀도 부족(v6 over_bowl 0.86→placed 0.10)의 핵심 레버.
     place_height_cube = RewTerm(
         func=task_mdp.place_height_reward,
         weight=30.0,
@@ -688,6 +690,7 @@ class PickCubeRewardsCfg:
             "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
+            "xy_range": 0.08,
             "require_carry": False,
         },
     )
@@ -721,7 +724,9 @@ class PickCubeRewardsCfg:
 
     # Stage 5.5: 그릇 위에서 그리퍼 열기 유도 — release valley 메움 (밀집)
     # carry(8)+transport(8) 잡고-버티기 local optimum 탈출. inside 게이트 없이
-    # '그릇 위 + 들림 + open_frac' 에 연속 gradient → 그릇 위에서 손 펴 떨구기.
+    # '그릇 중심 + 들림 + open_frac' 에 연속 gradient → 그릇 위에서 손 펴 떨구기.
+    # v7: close_ref 0.20→0.40(거의 다 열어야 보상 — '살짝 열고 hover' 캠핑 차단),
+    #     xy_range 0.10→0.06(그릇 중심 정밀 정렬 유도, 가장자리 떨구기 방지).
     over_bowl_drop_cube = RewTerm(
         func=task_mdp.over_bowl_drop_reward,
         weight=12.0,
@@ -730,17 +735,18 @@ class PickCubeRewardsCfg:
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
             "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "xy_range": 0.10,
+            "xy_range": 0.06,
             "open_threshold": 0.60,
-            "close_ref": 0.20,
+            "close_ref": 0.40,
         },
     )
 
     # 그릇 교란 패널티 — 운반/place 중 그릇 밀치기/엎기 억제(tilt 주신호 + xy 변위).
-    # weight 작게: 과하면 그릇 근처 접근 자체를 회피해 place 실패.
+    # v7: -5→-3 완화. 과한 패널티가 그릇 근처 정밀 접근을 위축시켜 place(안착)를 막는
+    # 것으로 의심(v6: over_bowl 0.86인데 placed 0.10). 엎기 억제는 유지하되 접근 허용.
     bowl_disturb = RewTerm(
         func=task_mdp.bowl_disturb_penalty,
-        weight=-5.0,
+        weight=-3.0,
         params={"bowl_cfg": SceneEntityCfg(BOWL_NAME), "disp_coef": 4.0},
     )
 
@@ -770,11 +776,12 @@ class PickCubeRewardsCfg:
         },
     )
 
-    # 행동률·관절 속도 페널티
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
+    # 행동률·관절 속도 페널티 — smoothness. v7: -1e-4→-1e-3(10×). 큐브 든 채 위아래로
+    # 진동하는 jittery 정책 억제(이전 -1e-4 는 사실상 0 이라 흔들기 방치). sim2real 필수.
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-1e-4,
+        weight=-1e-3,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
