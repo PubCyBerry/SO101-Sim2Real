@@ -9,6 +9,24 @@ Isaac Sim **GUI 위젯**으로 SO-101 의 Lula RMPFlow·robot description 을 �
 
 ---
 
+## SO-101 모션 솔버 선택 (먼저 읽기)
+
+SO-101 USD 는 **URDF(Lula 모델) ↔ USD articulation root 가 ~90° Z 회전** 어긋나게 baked 돼 있다. 이 정합 문제는 **"Isaac Sim 안에서 Lula 의 URDF-FK 와 USD-world 를 섞어 쓰는 경우"에만** 영향을 준다.
+
+| 솔버 / 도구 | SO-101 사용 | 비고 |
+|---|---|---|
+| **Lula Test Widget (GUI)** | ❌ 불가 | base pose 를 `articulation.get_world_pose()` 로만 잡아 90° 보정을 못 넣음 → EE frame 어긋남·IK 실패. **위젯은 `default_q` 편집(Robot Description Editor)에만 사용** |
+| **코드 내 Lula IK** (`follow_target_so101.py --controller ik`, `pick_cube_state_machine.py`) | ✅ 동작 | `RMPFLOW_BASE`(90° 보정 quat) + per-solve shift 를 직접 주입해 정렬. follow 는 sub-cm. 단 5-DOF 정밀도 한계 |
+| **코드 내 RMPFlow** (`--controller rmpflow`) | △ 동작·헐렁 | config 가 미튜닝 scaffold → ~0.1 m. 부드러움·obstacle 회피 데모용 |
+| **cuMotion + ROS** (Isaac ROS manipulation, PATH E) | ✅ **이 문제와 무관** | 별도 ROS 프로세스가 **`base_link` 프레임**에서 계획하고 물체 포즈도 `base_link` 기준 TF 로 받음 → world-level 회전이 식에 안 들어옴 |
+
+**요점**:
+- 정밀 task-space 모션이 필요하면 → **cuMotion+ROS**(PATH E, `.claude/worktrees/isaac-sim-ros-pickplace/`). 프레임 문제 없음. 진짜 숙제는 5-DOF 계획(joint-goal 로 해결됨)과 grasp 물리.
+- Isaac Sim 안 단독 데모/오라클이면 → **코드 내 Lula IK**(보정값 주입). 위젯 GUI 튜닝은 이 에셋엔 불가.
+- 근본 해결(위젯까지 쓰려면) = URDF↔USD base 프레임을 일치시키는 에셋 재작업(미수행).
+
+---
+
 ## 0. 무엇을 어디서 튜닝하나
 
 | 도구 (메뉴 `Tools > Robotics`) | 편집 파일 | 튜닝 대상 |
