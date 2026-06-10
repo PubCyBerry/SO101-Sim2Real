@@ -786,6 +786,12 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**16
         # contact stack 도 대규모 env 대비 상향 (기본 2^26).
         self.sim.physx.gpu_collision_stack_size = 2**28
+        # 비디오/뷰포트 카메라(RecordVideo 가 이 viewer 를 씀) — 작업공간 정면·약간
+        # 낮은 각도로 두어 머리 위 KeyLight 평면에 가리지 않게 한다. world 좌표(env0).
+        # robot base (1.84,-0.565,0.6749), 큐브/그릇 작업공간 x~1.6-2.1, y~-0.5~-0.2.
+        self.viewer.eye = (1.90, 0.95, 0.98)
+        self.viewer.lookat = (1.85, -0.32, 0.76)
+        self.viewer.resolution = (1280, 720)
 
 
 # ---------------------------------------------------------------------------
