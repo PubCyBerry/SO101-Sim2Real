@@ -99,6 +99,13 @@ parser.add_argument("--entropy_coef", type=float, default=0.005,
                     help="PPO entropy coefficient")
 parser.add_argument("--learning_rate", type=float, default=3e-4,
                     help="PPO learning rate")
+parser.add_argument("--gamma", type=float, default=0.99,
+                    help="PPO 할인율. 긴 지평(900 step/30s)엔 0.997 권장.")
+parser.add_argument("--lam", type=float, default=0.95, help="GAE lambda")
+parser.add_argument("--rnd", action="store_true", default=False,
+                    help="Random Network Distillation(내재 탐색 보상) 사용 — grasp 탐색 벽 공략.")
+parser.add_argument("--rnd_weight", type=float, default=0.5,
+                    help="RND 내재 보상 weight(초당; 내부에서 step_dt 곱해짐).")
 # LSTM(recurrent) 정책 옵션 — 설정 시 ActorCriticRecurrent 사용
 parser.add_argument("--recurrent", action="store_true", default=False,
                     help="ActorCriticRecurrent(LSTM) 정책 사용. 미설정 시 기존 feedforward ActorCritic.")
@@ -176,6 +183,39 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
             "rnn_num_layers": args.rnn_num_layers,
         })
 
+    algorithm_cfg = {
+        "class_name": "PPO",
+        "num_learning_epochs": args.num_learning_epochs,
+        "num_mini_batches": args.num_mini_batches,
+        "learning_rate": args.learning_rate,
+        "schedule": args.schedule,
+        "gamma": args.gamma,
+        "lam": args.lam,
+        "entropy_coef": args.entropy_coef,
+        "desired_kl": 0.01,
+        "max_grad_norm": 1.0,
+        "value_loss_coef": 1.0,
+        "use_clipped_value_loss": True,
+        "clip_param": 0.2,
+    }
+    # RND(내재 탐색 보상). num_states/obs_groups 는 OnPolicyRunner 가 rnd_state(=policy obs)
+    # 로 자동 채움. weight 는 내부에서 step_dt 곱해짐. 후반 과탐색 방지 위해 선형 감쇠.
+    if args.rnd:
+        algorithm_cfg["rnd_cfg"] = {
+            "weight": args.rnd_weight,
+            "num_outputs": 64,
+            "predictor_hidden_dims": [256, 128],
+            "target_hidden_dims": [256, 128],
+            "activation": "elu",
+            "learning_rate": 1e-3,
+            "state_normalization": True,
+            "reward_normalization": True,
+            "weight_schedule": {
+                "mode": "linear", "initial_step": 0,
+                "final_step": args.max_iterations, "final_value": 0.0,
+            },
+        }
+
     return {
         "seed": args.seed,
         "device": rl_device,
@@ -190,21 +230,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "logger": "tensorboard",
         "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
         "policy": policy_cfg,
-        "algorithm": {
-            "class_name": "PPO",
-            "num_learning_epochs": args.num_learning_epochs,
-            "num_mini_batches": args.num_mini_batches,
-            "learning_rate": args.learning_rate,
-            "schedule": args.schedule,
-            "gamma": 0.99,
-            "lam": 0.95,
-            "entropy_coef": args.entropy_coef,
-            "desired_kl": 0.01,
-            "max_grad_norm": 1.0,
-            "value_loss_coef": 1.0,
-            "use_clipped_value_loss": True,
-            "clip_param": 0.2,
-        },
+        "algorithm": algorithm_cfg,
     }
 
 

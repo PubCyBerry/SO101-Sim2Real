@@ -453,6 +453,7 @@ class PickCubeObservationsCfg:
             params={
                 "pen_names": CUBE_NAMES,
                 "cup_name": BOWL_NAME,
+                "include_velocities": True,  # joint_vel+ee vel+cube vel 추가(부분관측 해소) → 43→64dim
             },
             noise=GaussianNoiseCfg(mean=0.0, std=0.005),
         )

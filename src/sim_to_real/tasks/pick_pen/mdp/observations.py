@@ -212,6 +212,7 @@ def rl_state(
     cup_name: str = "PenCup",
     gripper_body_name: str = "gripper",
     action_term_name: str = "arm",
+    include_velocities: bool = False,
 ) -> torch.Tensor:
     """Privileged state vector for RL training.
 
@@ -276,5 +277,17 @@ def rl_state(
     # full-open ≈ 1.0 rad, full-closed ≈ 0.0 rad (Feetech STS3215 limits)
     gripper_open = joint_pos[:, -1:].clamp(0.0, 1.0)  # (N, 1)
 
-    state = torch.cat([joint_pos, joint_target, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open], dim=-1)
+    parts = [joint_pos, joint_target, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open]
+
+    # --- 속도 항(선택) — 부분관측 해소(MDP화). joint_vel(6)+ee lin vel(3)+pen lin vel(4×3) ---
+    if include_velocities:
+        ee_body_idx = jaw_idx if "jaw" in body_names else gripper_idx
+        joint_vel = robot.data.joint_vel  # (N, nj)
+        ee_vel = robot.data.body_lin_vel_w[:, ee_body_idx, :]  # (N, 3) world frame(env 정지라 무관)
+        pen_vel = torch.cat(
+            [env.scene[n].data.root_lin_vel_w for n in pen_names], dim=-1
+        )  # (N, 4*3)
+        parts += [joint_vel, ee_vel, pen_vel]
+
+    state = torch.cat(parts, dim=-1)
     return state.float()

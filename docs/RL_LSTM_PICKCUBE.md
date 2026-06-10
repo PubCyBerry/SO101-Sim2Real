@@ -129,6 +129,15 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - 수정(커밋 `29857af`): **gripper offset 0.80→0.20**(do-nothing 닫힘쪽 유지, open 1.20 까지 grasp 가능), **carry_cube 4→8 / guided_lift 8→10**(hold 강화), **bootstrap_prob 0.5→0.75**.
 - 판정 지표: (1) training success 가 0.13 정체 깨고 0.3~0.6 상승 = 하류 정상화. (2) `grasp_cube`>0 = 정상-env grasp 점화(eval 상승 전제).
 
+### T14. hold-fix 효과 일부 + eval 실성공률 0% 확정 → 정책/하이퍼/입력 묶음 개입
+- boot075(offset 0.20+carry/guided_lift↑+bootstrap 0.75): training success 0.13→**0.20**(hold-fix 효과 O), guided_lift 0.29. 그러나 **grasp_cube 여전히 ≈0**.
+- **model_100 eval(부트스트랩 없이 128env/256ep) = success_rate 0.0** → 0.20 은 부트스트랩 inflated, **실제 실력 0% 확정**. 탐색 벽 미돌파.
+- 정책/하이퍼/입력 전면 검토 후 **묶음 적용**(커밋 참조):
+  - **입력**: rl_state 에 속도 추가(joint_vel 6 + ee lin vel 3 + cube lin vel 4×3) → 43→**64dim**. 부분관측 해소(LSTM 의 속도추정 부담 제거). `include_velocities=True`.
+  - **하이퍼**: gamma 0.99→**0.997**(유효지평 3.3s→11s, 장기 credit). `--gamma`/`--lam` CLI.
+  - **탐색**: **RND**(Random Network Distillation) 추가 — 내재 보상으로 grasp 탐색 벽 공략. `--rnd`(rnd_state=rl_policy 자동, weight 0.5 linear 감쇠, state/reward norm on).
+- 정책 검토 메모: 거의 완전관측 상태라 MLP도 경쟁력 있음(LSTM은 요구사항이라 유지); student-teacher 증류는 sim2real 로드맵; symmetry 부적합.
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)
@@ -162,12 +171,13 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ---
 
-## 7. 현재 진행 (2026-06-10 세션, T13 수정 적용 후)
+## 7. 현재 진행 (2026-06-10 세션, T14 묶음 적용 후)
 
-- **학습 중**: stage-1(단일 큐브), LSTM(hidden 256, 1층)+PPO, **num_envs 8192**, **grasp_bootstrap_prob 0.75**/close -0.15, **gripper offset 0.20**, carry 8/guided_lift 10, entropy 0.02, adaptive LR. 로그 `train_boot2.log`, ETA ~7h.
-- 직전 run(boot8192, offset 0.80) 지표: success 0.13 에서 정체 + grasp_cube≈0 → T13 진단·수정 후 재시작.
-- 판정 대기: training success 가 0.13 정체를 깨는지 + grasp_cube>0 점화 여부. 부트스트랩 없는 **eval 실성공률**(매시간 점검)이 진짜 지표.
-- VRAM ~16-20GB(예산 32GB 내), patch overflow 0.
+- **학습 중**: run `lstm256_stage1_velrnd`, 로그 `train_velrnd.log`. stage-1, LSTM(256,1층)+PPO, **num_envs 8192**, bootstrap_prob 0.75/close -0.15, gripper offset 0.20, carry 8/guided_lift 10, entropy 0.02.
+- **T14 신규 적용**: obs **64dim(속도 포함)**, **gamma 0.997**, **RND on**(weight 0.5 linear 감쇠). RND 정상 동작(rnd_state=rl_policy, rnd loss 로깅), overflow 0.
+- 이전 boot075 eval **실성공률 0.0% 확정**(grasp 미점화). 이번 묶음으로 grasp 점화 시도.
+- 판정: `grasp_cube`>0 + **eval 실성공률 상승**(매시간 점검, 부트스트랩 없이)이 진짜 지표.
+- VRAM ~16-20GB(예산 32GB), patch overflow 0.
 
 ---
 
@@ -185,7 +195,9 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 | 항목 | 값 |
 |---|---|
 | 정책 | ActorCriticRecurrent, rnn_type lstm, hidden 256, layers 1, MLP [256,128], elu, obs_normalization on |
-| PPO | num_steps_per_env 48, learning_epochs 8, mini_batches 4, lr 3e-4(adaptive), entropy 0.02, gamma .99, lam .95, clip .2 |
+| PPO | num_steps_per_env 48, learning_epochs 8, mini_batches 4, lr 3e-4(adaptive), entropy 0.02, **gamma 0.997**, lam .95, clip .2 |
+| **탐색(RND)** | `--rnd` weight 0.5(×step_dt) linear→0, num_outputs 64, predictor/target [256,128], state/reward norm on, rnd_state=rl_policy |
+| **관측 차원** | rl_policy **64dim**(속도 포함): joint_pos6+target6+gripper_pos3+cube12+bowl3+rel12+gripper1 +joint_vel6+ee_vel3+cube_vel12 |
 | num_envs | 8192 (VRAM 32GB 예산) |
 | 속도 보상 | `time_penalty` weight -0.02(미완료 step당), `early_finish_bonus` weight 100(완료 시각 비례, 종료 1회) |
 | 단계 보상(T13 후) | reach 1, pregrasp 0.5(diff 0.045), **guided_lift 10**, grasp 1, **carry 8**, lift 2, transport 8, place_height 30, insert 80, release 10, task_success 200 |
