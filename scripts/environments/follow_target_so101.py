@@ -54,6 +54,9 @@ parser.add_argument("--controller", choices=["ik", "rmpflow"], default="ik",
                     help="ik=Lula IK+slew/deadband(정밀), rmpflow=RMPFlow(부드러움+충돌 회피)")
 parser.add_argument("--no_obstacles", action="store_true",
                     help="rmpflow 모드에서 큐브/그릇 obstacle 등록을 끔(raw 추종 비교용)")
+parser.add_argument("--tune", action="store_true",
+                    help="GUI 로 scene + 고정된 SO-101 만 띄우고 대기 — Lula Test Widget 으로 "
+                         "RMPFlow/디스크립터를 직접 튜닝할 때 사용(자체 컨트롤러는 구동 안 함)")
 parser.add_argument("--selftest", action="store_true",
                     help="헤드리스 자동 검증: target 을 몇 개 reachable 지점으로 옮기며 EE 추종 거리 확인")
 parser.add_argument("--selftest_tol", type=float, default=0.06,
@@ -331,16 +334,35 @@ def main() -> int:
 
     robot.set_joint_positions(np.zeros(n, dtype=np.float32))
 
+    set_camera_view(eye=np.asarray(args.view_eye), target=np.asarray(args.view_lookat))
+
+    # --tune: 컨트롤러를 구동하지 않고 GUI 만 띄워 대기. Lula Test Widget 이 RMPFlow 로
+    # 이 로봇을 잡아 튜닝한다(두 컨트롤러 충돌 방지). 베이스는 이미 fix_root_link 로 고정.
+    if args.tune:
+        return _run_tune(world)
+
     if args.controller == "rmpflow":
         follow_step, ee_pos_fn = _build_rmpflow_controller(robot, target)
     else:
         follow_step, ee_pos_fn = _build_ik_controller(robot, target)
 
-    set_camera_view(eye=np.asarray(args.view_eye), target=np.asarray(args.view_lookat))
-
     if args.selftest:
         return _run_selftest(world, robot, target, ee_pos_fn, follow_step)
     return _run_interactive(world, follow_step)
+
+
+def _run_tune(world) -> int:
+    """컨트롤러 없이 GUI 대기 (Lula Test Widget 튜닝용). headless 면 smoke 후 종료."""
+    log("[follow_target][tune] scene + 고정된 SO-101 준비됨. "
+        "Tools > Robotics > Lula Test Widget 으로 RMPFlow 를 튜닝하세요.")
+    if args.headless:  # smoke: 부팅·로딩만 확인하고 종료
+        for _ in range(60):
+            world.step(render=False)
+        log("[follow_target][tune] headless smoke OK")
+        return 0
+    while simulation_app.is_running():
+        world.step(render=True)
+    return 0
 
 
 def _run_interactive(world, follow_step) -> int:
