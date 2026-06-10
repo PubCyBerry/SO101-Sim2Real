@@ -61,6 +61,16 @@ Isaac Sim WebRTC Streaming Client 로 접속. (로컬 디스플레이가 있으�
 
 ## 2. Lula Test Widget — RMPFlow 튜닝
 
+> ⛔ **이 SO-101 에셋에선 위젯의 live follow(IK·RMPFlow)가 정렬되지 않는다.**
+> URDF(Lula 모델)의 base 프레임이 USD articulation root 와 **~90° Z 회전** 어긋나게 baked 돼 있다
+> (원점·zero-joint 측정: Lula FK gripper_frame_link=(0.39,0,0.23) 팔이 +X / 실제 USD jaw=(0.04,−0.30,0.29) 팔이 −Y).
+> `pick_cube_state_machine.py` 는 손으로 맞춘 `RMPFLOW_BASE`(쿼터니언 ~90°Z) + per-solve shift 로 보정하지만,
+> **위젯은 base pose 를 `articulation.get_world_pose()`(보정 없음)로만 잡아 이 90° 를 못 넣는다**(로봇을 회전 spawn 해도 시각·Lula 가 같이 돌아 상대 오차 불변). → EE frame 이 손끝에서 떨어지고 IK 가 `Failed to compute Inverse Kinematics`.
+>
+> **결론**: 위젯은 **`default_q` 편집(§3, Robot Description Editor — 프레임 무관)** 에만 쓰고,
+> **RMPFlow 게인은 yaml 편집 + `follow_target_so101.py --controller rmpflow` 헤드리스 검증**으로 튜닝한다
+> (그 스크립트는 보정된 `RMPFLOW_BASE` 를 써 Lula 가 USD 와 정렬된다). 아래 §2 절차는 frame 정합이 된 로봇(예: Franka)에서의 일반 흐름 참고용.
+
 ### 2.1 로드
 1. **▶ Play**.
 2. 메뉴 **`Tools > Robotics > Lula Test Widget`**.

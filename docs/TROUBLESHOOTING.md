@@ -2737,6 +2737,27 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac \
 ```
 → `OK — 4/4 ... (≤0.18m)`, `base_fixed=True`. obstacle 켠 인터랙티브 모드에서는 큐브 근처로 target 을 끌면 EE 가 거리를 두고 우회한다.
 
+## Lula Test Widget 에서 SO-101 EE frame 이 손끝과 ~90° 어긋남 / IK 계속 실패
+
+**현상**: GUI 의 `Tools > Robotics > Lula Test Widget` 으로 SO-101 을 따라가게 하면, `/Lula/end_effector` 프레임이 실제 로봇 손끝과 떨어진 곳에 뜨고 `Failed to compute Inverse Kinematics` 가 도배되며 로봇이 target 을 안 따라온다.
+
+```
+[Warning][isaacsim.robot_motion.lula_test_widget.controllers] Failed to compute Inverse Kinematics
+```
+
+### 원인
+
+URDF(Lula 가 읽는 모델)의 base 프레임이 SO-101 **USD articulation root 와 ~90° Z 회전** 어긋나게 baked 돼 있다(URDF→USD 변환 산물). 원점·zero-joint 측정: Lula FK `gripper_frame_link`=(0.39, 0, 0.23)(팔 +X) vs 실제 USD `jaw`=(0.04, −0.30, 0.29)(팔 −Y). `pick_cube_state_machine.py` 는 손으로 맞춘 `RMPFLOW_BASE`(쿼터니언 ~90°Z) + per-solve shift 로 이를 보정한다. **위젯은 base pose 를 `articulation.get_world_pose()`(보정 없음)로만 설정**해 이 90° 를 못 넣는다 — 로봇을 회전 spawn 해도 시각·Lula 가 같이 돌아 상대 오차는 불변이라 정렬 불가.
+
+### 해결 방법
+
+- 위젯의 live follow 는 이 에셋엔 못 쓴다. **`default_q` 편집은 Robot Description Editor 로**(관절값을 USD 에 직접 적용 — 프레임 무관), **RMPFlow 게인은 yaml 편집 + `follow_target_so101.py --controller rmpflow` 헤드리스 검증**으로 튜닝(스크립트는 보정된 `RMPFLOW_BASE` 사용). 자세한 절차는 `LULA_GUI_TUNING.md`.
+- 근본 해결은 URDF↔USD base 프레임을 일치시키는 에셋 재작업(미수행).
+
+### 확인 방법
+
+`/tmp/lula_fk_probe.py` 류로 원점·zero-joint 에서 `lula.compute_forward_kinematics("gripper_frame_link",[0]*5)` 와 USD `jaw` body world pose 를 비교 → +X vs −Y (~90°) 차이가 보이면 동일 원인.
+
 ## Isaac Sim headless 씬 author/검증 스크립트가 부팅 후 hang (단일 GPU 경합 / app.close 좀비)
 
 **현상**: `author_pick_cube_scene.py`(PhysxSchema 정식 API 라 `AppLauncher` headless 부팅 필요) 또는 `gym.make` 검증 스크립트를 headless 로 띄우면, GPU 배너·CUDA P2P 검증까지 로그가 찍힌 뒤 더 진행하지 않고 멈춘다. 프로세스는 살아 있고 GPU 메모리(수백 MB~수 GB)를 점유하지만 CPU 0~3% 로 idle. USD export 나 결과 파일은 멈추기 전에 기록되기도 한다.
