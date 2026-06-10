@@ -77,7 +77,10 @@ Isaac Sim WebRTC Streaming Client 로 접속. (로컬 디스플레이가 있으�
 > `RMPFLOW_BASE_*` 상수는 위젯 튜닝엔 불필요.
 
 ### 2.2 실행·관찰 (RmpFlow 패널)
-- ⚠ **버튼 주의**: "Follow Target" 버튼이 **두 곳**에 있다. RMPFlow 튜닝은 **`RmpFlow` 패널의 Follow Target**("Use RmpFlow to follow a target")을 쓴다. `Lula Kinematics Solver` 패널의 Follow Target 은 IK 점검용 — 도달 불가 시 `Failed to compute Inverse Kinematics` 를 뱉으며 로봇이 안 움직인다.
+- ⚠ **버튼 주의 — "Follow Target" 이 두 곳에 있다**:
+  - **`Lula Kinematics Solver` 패널의 Follow Target** = **정확(exact) IK**. 5-DOF SO-101 은 임의 자세를 못 풀어 `Failed to compute Inverse Kinematics` 를 도배하며 로봇이 안 따라온다 → **쓰지 말 것**.
+  - **`RmpFlow` 패널의 Follow Target** = **RMPFlow**(우리가 튜닝하는 것). base pose 를 잡고 5-DOF 를 best-effort 로 부드럽게 추종 → **이걸 쓴다.**
+  - 누르면 시나리오가 전환돼 IK 경고가 멈춘다. 단 이 버튼은 **벽 obstacle 을 ~(0.4,0,0.1) 에 하나 생성**한다(회피 테스트용, 정상).
 - ⚠ **target 이 멀리 생긴다**: 위젯은 target 을 항상 **world (0.5, 0, 0.5)** 에 만든다(`test_scenarios.py` 의 `_create_target`). SO-101 은 5-DOF 라 도달 반경이 ~0.35 m 뿐이라 (0.5,0,0.5)(원점에서 0.7 m)도 멀다. → Stage 에서 **`/World/Target` 선택 → Property > Transform > Translate 를 `(0.2, 0, 0.25)`** 정도(원점 로봇 기준 도달 범위)로 옮긴 뒤 드래그한다. (`--tune` 은 로봇을 원점에 둔다)
 - **`Follow Target`**(RmpFlow) → target 큐브 생성 → 위처럼 도달 범위로 옮기면 EE 가 추종.
 - **`Toggle Debugging Mode`** → **collision sphere 표시**. 떨림/자기충돌/반발 지점을 눈으로 확인.
