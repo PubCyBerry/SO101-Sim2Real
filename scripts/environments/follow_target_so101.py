@@ -30,12 +30,19 @@ SO-101 은 5-DOF arm 이라 full 6-DOF pose IK 불가 → 두 모드 모두 **po
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
 from isaaclab.app import AppLauncher
+
+# C 레벨 크래시(access violation 등)의 Python traceback 을 파일로 덤프.
+os.makedirs("outputs", exist_ok=True)
+_FH_FILE = open(os.path.abspath("outputs/follow_target_faulthandler.txt"), "w")
+faulthandler.enable(file=_FH_FILE)
 
 
 def _vec3(s: str) -> tuple[float, float, float]:
@@ -75,7 +82,15 @@ args = parser.parse_args()
 if args.selftest and not args.headless:
     args.headless = True
 
-app_launcher = AppLauncher(vars(args))
+# vars(args) 전체를 넘기면 view_eye/view_lookat 같은 tuple 커스텀 인자가
+# AppLauncher → carb 설정 경로로 전달되어 Windows에서 _prepare_ui access violation 발생.
+# AppLauncher가 실제로 사용하는 키만 필터링해서 전달한다.
+_LAUNCHER_KEYS = {
+    "headless", "livestream", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+app_launcher = AppLauncher(_launcher_args)
 simulation_app = app_launcher.app
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/PATH_B_DOCKER.md` | Docker 실기기 경로 |
 | `docs/PATH_C_ISAAC_SIM.md` | Isaac Sim 시뮬 경로 |
 | `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
+| `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
@@ -193,3 +194,14 @@ USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성
 
 - `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py::PEN_CUP_CENTER_XY` — `mdp.pen_in_cup` 종료 조건의 컵 기준점 (world frame)
 - `SCENE_OFFSET` 일괄 시프트로 해결 가능하면 author 스크립트 1회 재실행으로 USD 6개 모두 갱신
+
+### 5-DOF IK 공통 원칙 (sim·실기기)
+
+SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose(위치+방향 동시)를 만족 못 한다. **position 우선·orientation best-effort** 가 sim·실기기 공통 규약:
+
+- 실기기 MoveIt `kinematics.yaml`: `rotation_scale=0.02`, `orientation_threshold≈π`, `approximate: false` (도달 불가 타겟은 실패로, 근사해 반환 금지). 근거·시행착오는 `docs/REALDEVICE_GRASP_PIPELINE.md` §3.2.
+- sim `follow_target_so101.py`: Lula IK·RMPFlow 모두 `target_orientation=None`(position-only). 새 IK 경로를 추가할 때도 orientation 을 hard constraint 로 넣지 말 것.
+
+### sim 진입 스크립트 AppLauncher 인자 필터
+
+GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `pick_cube_state_machine.py`.

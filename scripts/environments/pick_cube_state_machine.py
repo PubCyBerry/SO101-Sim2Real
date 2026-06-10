@@ -8,9 +8,11 @@ scripted controller다. 큐브/그리퍼를 순간이동하지 않고, gripper t
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import math
 import multiprocessing
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -20,6 +22,11 @@ from enum import Enum
 from typing import Any, Callable
 
 from isaaclab.app import AppLauncher
+
+# C 레벨 크래시(access violation 등)의 Python traceback 을 파일로 덤프.
+os.makedirs("outputs", exist_ok=True)
+_FH_FILE = open(os.path.abspath("outputs/pick_cube_sm_faulthandler.txt"), "w")
+faulthandler.enable(file=_FH_FILE)
 
 
 if multiprocessing.get_start_method() != "spawn":
@@ -298,7 +305,15 @@ args.enable_cameras = args.dataset_dir is not None and not args.no_videos
 if args.num_envs != 1:
     raise ValueError("pick_cube_state_machine.py currently supports --num_envs=1 only.")
 
-launcher = AppLauncher(args)
+# 커스텀 인자(task/num_envs/dataset_dir 등)를 통째로 넘기면 AppLauncher → carb
+# 설정 경로로 전달되어 Windows에서 _prepare_ui access violation 위험.
+# AppLauncher가 실제로 사용하는 키만 필터링해서 전달한다.
+_LAUNCHER_KEYS = {
+    "headless", "livestream", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+launcher = AppLauncher(_launcher_args)
 simulation_app = launcher.app
 
 import gymnasium as gym  # noqa: E402
