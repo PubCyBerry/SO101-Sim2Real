@@ -13,6 +13,114 @@
 
 ---
 
+## 작업 인계 (2026-06-10 — PATH E grasp 디버깅: 진단 반전 + 위치정합 해결 ✅, 남은 건 접촉 물리(사용자 방향 결정 보류))
+
+직전 인계의 "gripper close 간헐 실패" 블로커를 라이브 디버깅하다 **진단이 뒤집혔다**. close 는 실패가
+아니라 **성공**(grip 매번 -0.16 완전닫힘)이고, 진짜 문제는 **grasp 접촉**(패드가 2.5cm 큐브를 못 뭄)이었다.
+근본원인 = `_grasp_point` 가 link **원점(pivot)** 을 써서 실제 패드와 7~8cm 어긋난 것. 이를 **실측 패드 기준**
+으로 재정의해 **위치 정합을 해결**(패드가 큐브 양옆을 정확히 감쌈)했으나, 그래도 grip 이 큐브를 못 물고
+끝까지 닫힌다(접촉 물리 = PATH C 가 강tilt-scoop 으로만 풀었던 11사이클 난제). **다음 방향은 사용자 결정 보류 중.**
+
+> ⚠ **인수인계 필수 3가지** (먼저 읽기):
+> 1. **`run_sm.sh` 는 워크트리에 없다.** 내가 만든 임시 SM 단발 실행 헬퍼 — 위치 = 호스트
+>    `/DISK1/so101-sim2real/work/ros2_build/run_sm.sh` = 컨테이너 `/build/run_sm.sh`. launch 띄우고
+>    `RESULT:` 대기 후 스택 자동 정리(orphan 방지). 로직은 전부 `pick_place_sm.py` 에 있음. (원하면 `scripts/sim/` 로 옮겨 git 포함.)
+> 2. **코드 변경 2파일 미커밋**(working tree): `ros2_ws/src/so101_cumotion_pick_place/so101_cumotion_pick_place/pick_place_sm.py`
+>    + `.../config/pick_place_params.yaml`. 아래 "변경 내역" 참조. (symlink-install 이라 colcon 재빌드 없이 launch 반영.)
+> 3. **headless bridge 가 살아있다**(호스트 PID 278427, `run_cube_desk_ros_bridge.sh --num_cubes 1`). 컨테이너 `so101_ros` up.
+>    **GUI bridge 는 디버깅에 쓰지 말 것**(아래 ⚠ 컨트롤러 race). 디버깅은 headless bridge 로.
+
+### 🎯 목표
+PATH E(cuMotion+ROS) cube_desk pick-and-place **State Machine 을 동작**시키기. (close 디버깅에서 출발했으나
+진단이 grasp 접촉으로 이동.) 사용자 방침: **"강tilt든 top-down이든 무관, pick-place 만 잘 되면 됨."**
+
+### ✅ 완료 / 확정한 것
+1. **진단 반전(4회 baseline b1~b4)**: close 명령(-0.16)이 매번 bridge 도달 + grip 매번 -0.16 **완전닫힘**.
+   → close 는 실패가 아님. 2.5cm 큐브가 패드 사이에 있었다면 -0.16 까지 못 닫힘(중간 stall). 즉 **패드가
+   큐브를 빗나가 헛닫힘**. CONTEXT 의 "grip 1.5 미닫힘" 프레이밍은 틀림.
+2. **근본원인(패드 기하)**: 기존 `_grasp_point` = `JAW_LINK`·`gripper_link` **link 원점(pivot/모터 위치)** 중점.
+   mesh AABB 측정(`.venv/bin/python3` STL 파싱)으로 확인 — moving_jaw 는 JAW_LINK 프레임에서 **-y 로 ~8.2cm
+   뻗은 손가락**, gripper_frame_link(TCP)은 gripper_link z≈-0.098 = **고정 finger tip** 근처. → 원점 중점은
+   실제 패드와 **7~8cm 어긋나** 큐브 위 2~4cm 헛집음(g5 등 gpt z=0.094 vs cube 0.049).
+3. **위치 정합 해결**: `_grasp_point` = **(고정 finger tip=TCP) + (moving jaw tip=`JAW_TIP_LOCAL`) 중점** 으로
+   재정의. tilt 제약 해제(사용자 방침) 후 **g15~17 = FK 3/3 성공, 실행된 grasp 중심이 큐브에서 0.7~1.2cm,
+   패드가 큐브 양옆을 감쌈**(g17: jaw_tip y=-0.110·fix_tip y=-0.130 사이에 cube y=-0.125, z≈0.045).
+4. **FK/IK/실행 정상 확인(selftest)**: 사용자 요청으로 "좌표 지정→EE 도달 측정" 루틴 추가. 4좌표 모두
+   **실행오차(plan↔exec) 7~9mm**, FK샘플오차 14~18mm(gate 0.04 탓). → **FK/IK·실행은 멀쩡.** 앞서 본
+   13cm·8cm 괴리는 FK/IK 가 아니라 ⬇ 컨트롤러 race 탓이었음.
+5. **⚠ 컨트롤러 spawn race 원인 규명**: GUI(렌더링) bridge 로 시스템 부하↑ 시, launch 의 spawner 들이
+   `load_controller`/`configure` 서비스 타임아웃으로 연쇄 실패(`Failed loading`/`already loaded↔no controller`).
+   → 팔이 계획대로 안 움직여 grasp 중심 13cm 괴리. **headless bridge(가벼움)에선 0 실패.** (b1~b4 정상,
+   g6~g8 GUI bridge 라 실패.)
+
+### 🔴 남은 블로커 — grasp 접촉 물리
+위치 정합(패드가 큐브 양옆)했는데도 **grip 이 -0.16 까지 완전히 닫히고 큐브 안 들림**(g15~17). 큐브는 안 움직임
+(=안 튕김). 즉 **2.5cm 큐브가 이 그리퍼의 닫힘 aperture 한계 근처**라 패드 표면이 큐브를 물지 못하고 닫힘.
+PATH C(in-process)는 같은 그리퍼·큐브로 4/4 성공했는데, 비결이 **"강tilt 로 moving jaw 를 큐브 옆/아래로
+퍼올리듯(scoop)"**(memory `path-e-cumotion-ros-status`/in-process SM 6차). 단순 top-down/center 정렬로는 안 뭄.
+
+### ⏭ 진행 예정 — 사용자 결정 보류 중 (AskUserQuestion 했으나 "추가 질문 후 결정" 으로 보류)
+사용자가 "큐브에 일정 거리 이상 가까이 접근 못 함" 을 관찰 → 구조 도식 설명 요청 → 이 문서 작성. 결정 대기.
+선택지(제시함):
+- **A. Sim grasp-assist(부착)** — close+큐브근접 시 bridge 에서 fixed joint 부착, open 시 해제. 위치 정합이
+  정확해 물리적 정당. pick-place 안정 완주. (사용자 1차엔 "물리" 택했으나 접촉 벽 확인 후 "어떻게 집든 무관" 으로 완화.)
+- **B. 강tilt-scoop 물리 재현(PATH C 방식)** — tilt 다시 강하게 + FK 점수를 moving jaw 가 큐브 아래로 가도록.
+  5-DOF ROS 에선 FK manifold 얇아 신뢰성 낮음(~15%).
+- **C. 큐브 크기 상향**(2.5→3.0cm 등, aperture 에 맞춤) — North Star 계약(2.5cm) 영향 확인 필요.
+- (추가 물리 레버: 느린 close / 마찰↑ / GRIPPER_CLOSED 덜 닫기 — 단 grip 이 끝까지 닫힘=접촉 자체가 없어 효과 제한적 추정.)
+
+### 📊 결과 데이터 (대표, headless bridge, `/build/sm_run_<tag>.log`)
+| tag | 의미 | FK grasp | 실행 grasp중심 vs cube | grip | 결과 |
+|---|---|---|---|---|---|
+| b1~b4 | baseline(원점 중점) | — | 중심 2~4cm 위(헛집음) | -0.16 완전닫힘 | 0/1 |
+| g15~17 | 패드중점+tilt해제 | 3/3 d 0.7~1.1cm | **0.7~1.2cm(정합 OK)** | -0.16 완전닫힘 | 0/1(접촉 실패) |
+| st1 | selftest(FK/IK검증) | — | 실행오차 7~9mm | — | FK/IK 정상 |
+- g13 진단: FK 실패 시 위치상 최근접 config 가 **tilt 1°(top-down)·near_d 1cm** → 강tilt 필터가 reachable
+  config 를 버리고 있었음(그래서 tilt 제약 해제함).
+
+### 🔧 변경 내역 (미커밋, 2파일)
+- **`pick_place_sm.py`**:
+  - `JAW_TIP_LOCAL=(0.0,-0.065,0.019)` 상수(moving jaw 패드 접점, JAW_LINK frame. mesh AABB 기반 추정 — 미세조정 여지).
+  - `_jaw_tip`/`_fix_tip` 헬퍼 + `_grasp_point`(두 tip 중점) / `_grasp_axis_vert`(두 tip 벡터) 재정의.
+  - `_diag_grasp` 로그 확장: `jaw_tip`·`fix_tip`·`gpt`(grasp중심)·cube.
+  - `_fk_sample_goal`: gate 를 stage 별 분리(grasp=fk_pos_gate, approach/transport=wide), **실패 시 near_d/tilt/axis
+    진단 로그** 추가, near-sample 추적.
+  - `_move_to`: 계획된 TCP/grasp중심을 `self._last_goal_tcp` 등에 저장(selftest 비교용), grasp/approach 는 goal_rs 도 CLOSED 기준.
+  - `selftest()` 메서드 + main 에 `selftest` 파라미터 분기.
+- **`pick_place_params.yaml`**: `grasp_z_offset` 0.012→**0.0**(중심을 큐브 중심에), `fk_pos_gate` 0.015→**0.025**,
+  `grasp_tilt_min` 45→**0.0**(top-down 허용), `grasp_axis_vert_max` 0.4→**0.6**, `selftest: false`(검증 시 true).
+
+### 🔑 진단 도구 (코드에 남김)
+- `DIAG grasp` 로그(jaw_tip/fix_tip/gpt/cube/grip/grip_cmd/axis_vert).
+- `FK[grasp] 실패` 시 near_d/tilt/axis 로그(reach 문제 vs 필터 문제 판별).
+- **selftest 모드**: yaml `selftest: true` → pick 대신 4좌표로 TCP 도달 측정(FK샘플오차/실행오차/전체오차 분리). 검증 후 false 로.
+
+### 🖥 환경 상태(세션 종료 시점)
+- headless bridge **살아있음**(호스트 PID 278427). 컨테이너 `so101_ros` **up**(24h). GPU idle.
+- 미커밋 2파일(위). 마지막 커밋 `487504b`.
+- 호스트 `isaacsim-mcp` 별개 서비스 — 건드리지 말 것.
+
+### ▶ 콜드 스타트(재현, headless 권장)
+1. **bridge**(호스트, 워크트리): `scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1` → `[bridge] ready` +
+   `gripper grip force: dof[5] kps=80.0` 대기. (이미 278427 떠 있으면 생략.)
+2. **SM 1회**(헬퍼): `docker exec so101_ros bash /build/run_sm.sh <tag> 1` → 끝에 `DIAG (tag)` 출력 + 스택 자동 정리.
+   - 코드 수정 시: symlink-install 이라 colcon 불요(파이썬). 깨끗하게 하려면 `colcon build --symlink-install
+     --base-paths /workspace/ros2_ws/src --packages-select so101_cumotion_pick_place` 1회.
+   - 로그: 컨테이너 `/build/sm_run_<tag>.log` = 호스트 `/DISK1/so101-sim2real/work/ros2_build/sm_run_<tag>.log`.
+3. **GUI 로 보려면**(컨트롤러 race 주의): bridge 를 `DISPLAY=:1 scripts/sim/run_cube_desk_ros_bridge.sh ...`(로컬
+   `:1` 데스크톱) 또는 `--livestream 2`(WebRTC). **단 GUI bridge 부하로 컨트롤러 spawn 이 깨질 수 있음** —
+   GUI 로 보려면 spawner 견고화(아래 주의) 선행 필요.
+
+### ⚠ 주의 (함정)
+- **GUI bridge 컨트롤러 race(미해결)**: 사용자가 GUI 로 watch 하려면 `follower_split.launch.py` 의 spawner 들에
+  `--controller-manager-timeout` 추가 / 순차화 필요. 지금은 headless 로만 안정.
+- **셸 `rtk` 래퍼 함정**: 호스트 `ps aux | grep ...` 가 dotfiles 의 `rtk` 함수에 먹혀 깨짐 → **`pgrep -af` 사용**.
+  `pkill -f`/`kill $(pgrep)` 는 자기 셸 매칭=자살 → **PID 직접 kill**. orphan 정리도 컨테이너서 PID 직접.
+- bridge↔컨테이너 RMW/transport(fastrtps/UDPv4) 일치 필수. GPU 서버 공유(학습 경합 주의).
+- `JAW_TIP_LOCAL` 은 mesh AABB 기반 **추정값** — 접촉이 끝내 안 되면 실제 패드 접점으로 미세조정 여지(닫힘 시 두 tip 간격 ~2cm 측정됨 vs 큐브 2.5cm).
+
+---
+
 ## 작업 인계 (2026-06-09 — PATH E grasp 물리: planning self-collision 해결 ✅ + grasp 정합 7메커니즘 확립, 남은 건 gripper close 간헐 실패)
 
 직전 인계의 "grasp 물리(jaw 가 큐브 못 감쌈)" 블로커를 11사이클 라이브 디버깅으로 깊이 규명했다.

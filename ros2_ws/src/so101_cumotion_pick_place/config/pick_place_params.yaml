@@ -7,12 +7,13 @@
 "/**":
   ros__parameters:
     num_cubes: 4
+    selftest: false             # FK/IK/실행 검증용(true 면 pick 대신 좌표 도달 측정). 검증 완료: 실행오차 7~9mm 정상.
     # grasp 기하 — FK 워크스페이스 스윕 기반(scripts/sim/probe_ik.py). 큐브(0.14,-0.125) 컬럼은
     # 모든 z 도달 가능하나 manifold 가 thin → height 를 도달 가능 LOW band 로 낮춰 sampler 부담↓.
     approach_height: 0.06        # 큐브 위 접근(z≈0.11, achievable tilt 27~36°)
-    grasp_z_offset: 0.012        # grasp 접점(두 손가락 중점) 목표 z = cz + 이 값. -0.006 은 FK 도달 실패
-                                 # (강tilt 로 중점을 큐브 높이까지 내리는 5-DOF config 희소). 0.012 가 도달+큐브
-                                 # 감쌈 균형점(손가락 끝이 큐브 옆, close 가 큐브 접촉). 미끄러짐은 grip force(bridge)로 해결.
+    grasp_z_offset: 0.0          # grasp 중심(두 패드 tip 중점) 목표 z = cz + 이 값. _grasp_point 를 실측
+                                 # 패드(JAW_TIP_LOCAL / TCP)로 재정의한 뒤로 0=큐브 중심 정렬이 정석.
+                                 # (이전 0.012 는 grasp 중심이 pivot 중점이라 패드가 큐브 위 ~2~4cm 헛집던 값.)
     grasp_tilt_deg: 60.0         # grasp 강tilt: jaw(두 손가락) 가 큐브 옆/아래로 내려가 감싸야 grip
                                  # 성립(in-process SM 검증). 후보 [60,45,75,0] 로 강tilt 우선 + 수직 보조.
     grasped_dz: 0.025            # 들림 판정(큐브 z 상승량). lift 가 작아 threshold 도 하향.
@@ -26,12 +27,16 @@
     # grasp/approach 단계는 TCP(gripper_frame_link) 대신 grasp 접점(두 손가락 midpoint)을 큐브에 맞춤
     # — TCP 만 맞추면 jaw 가 큐브 위에 남아 못 감싸던 블로커 해결.
     fk_samples: 40000            # random FK 샘플 수(in-process RobotState FK). 강tilt+정확 xy config 확보 위해 상향
-    fk_pos_gate: 0.015           # grasp/approach 샘플 채택 거리 gate(m). 좁혀 grasp 접점-큐브 xy 정합↑
+    fk_pos_gate: 0.025           # grasp 샘플 채택 거리 gate(m). 패드 기준 grasp 중심 재정의 + target
+                                 # 을 큐브 중심(낮음)으로 내린 뒤 feasible set(tilt45~95·axis수평·충돌없음)
+                                 # 이 희소해 0.015 면 FK 간헐 실패 → 0.025 로 넓히고 set_from_ik 정밀화로 보정.
     fk_pos_gate_transport: 0.04  # transport(lift/운반/배치) gate(m). 먼 target 도달성 위해 넓게(좁으면 lift 실패)
     ik_timeout: 0.5              # set_from_ik(정밀화) timeout(s). 5-DOF 정밀화 신뢰성 위해 상향
-    grasp_tilt_min: 45.0         # grasp/approach tilt 하한(deg). 이 미만(수직 top-down) 배제 — jaw 가
-                                 # 큐브 옆/아래로 가야 감쌈. 통과 config 중 접점-큐브 거리 최소 선택(xy 정합).
-    grasp_axis_vert_max: 0.4     # grasp axis(두 손가락 벌어짐 방향) 수직 성분 상한 [0,1]. 0=수평(큐브 옆면
+    grasp_tilt_min: 0.0          # grasp tilt 하한(deg). 0=제약 없음(top-down 포함 모든 자세 허용).
+                                 # 사용자 방침: 집는 자세 무관, pick-place 성공이 우선. g13 진단상 큐브에 가장
+                                 # 가까이 닿는 config 가 top-down(tilt~1°, d~1cm)이라 강tilt 강제는 reachable
+                                 # config 를 버리는 역효과였음 → 제약 해제 후 FK 가 min-d config 자유 선택.
+    grasp_axis_vert_max: 0.6     # grasp axis(두 손가락 벌어짐 방향) 수직 성분 상한 [0,1]. 0=수평(큐브 옆면
                                  # 잡음). 이 초과면 axis 수직→큐브 위아래 눌러 실패. grasp 단계만 적용.
     # 계획 라우팅(코드 상수): grasp=OMPL 우선(grasp_order), transport=cuMotion 우선(transport_order).
     gripper_dwell_s: 1.5         # 그리퍼 open/close 정착 대기(s)

@@ -40,8 +40,16 @@ PLANNING_GROUP = "manipulator"
 GRIPPER_GROUP = "gripper"
 JAW_LINK = "moving_jaw_so101_v1_link"  # 모터 jaw (Isaac USD body "jaw" 대응)
 FIX_LINK = "gripper_link"              # 고정 finger 마운트
-# grasp 접점(두 손가락 사이) = JAW_LINK·FIX_LINK 의 FK 중점 + grasp_z_offset(손가락 끝 보정).
-# (이전 JAW_GRASP_OFFSET=Isaac jaw-frame 추측값은 URDF frame 과 7cm 어긋나 폐기 — 실측 두 link 중점으로 대체.)
+# ── 실측 패드 기하 (mesh AABB + URDF visual origin 환산) ──────────────────────
+# 기존 코드는 grasp 접점을 JAW_LINK·FIX_LINK 의 link **원점**(=pivot) 중점으로 잡았는데,
+# 그 원점들은 실제 손가락 패드와 7~8cm 어긋나 grasp 가 큐브 위를 헛집었다(육안·DIAG 확인).
+#   - moving_jaw mesh: JAW_LINK 프레임에서 -y 로 ~8.2cm 뻗은 긴 손가락 → 패드는 -y 끝 부근.
+#   - gripper_frame_link(TCP): gripper_link z≈-0.098 = 고정 finger tip 근처(wrist_roll_follower
+#     mesh 끝 -0.104 와 일치) → TCP 를 고정 finger tip 으로 근사.
+# ⇒ 실제 grasp 중심 = (고정 finger tip=TCP) 와 (moving jaw tip) 의 중점. JAW_TIP_LOCAL 은
+#   moving jaw 패드 접점의 JAW_LINK-frame 좌표(작은 2.5cm 큐브가 닿는 지점, tip 보다 약간 안쪽).
+JAW_TIP_LOCAL = (0.0, -0.065, 0.019)
+BASE_FRAME = "base_link"  # bridge 가 base_link 기준 TF 로 물체 포즈 publish
 BASE_FRAME = "base_link"  # bridge 가 base_link 기준 TF 로 물체 포즈 publish
 GRIPPER_ACTION = "/follower/gripper_controller/gripper_cmd"
 JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"  # bridge 입력(TopicBasedSystem cmd) 진단용
@@ -137,17 +145,16 @@ class PickPlaceSM:
                 cur = scene.current_state
                 cur.update()
                 grip = float(cur.get_joint_group_positions(GRIPPER_GROUP)[0])
-                jaw = cur.get_pose(JAW_LINK).position           # 모터 jaw
-                fix = cur.get_pose("gripper_link").position      # 고정 finger 마운트
-                ee = cur.get_pose(EE_FRAME).position             # TCP (arm 추종 확인용 — FK ee_z 와 비교)
-                gpt = self._grasp_point(cur)                     # 계산 grasp 접점
+                jtip = self._jaw_tip(cur)                        # moving jaw 패드 접점(실측 오프셋)
+                ftip = self._fix_tip(cur)                        # 고정 finger 패드 ≈ TCP
+                gpt = self._grasp_point(cur)                     # grasp 중심(두 패드 중점)
                 axv = self._grasp_axis_vert(cur)                 # grasp axis 수직 비율(0 수평=좋음)
             cmd = self.store.last_grip_cmd
             self.logger.info(
                 f"DIAG grasp: grip={grip:.3f} grip_cmd={cmd if cmd is None else round(cmd, 3)} axis_vert={axv:.2f} "
-                f"jaw=({jaw.x:.3f},{jaw.y:.3f},{jaw.z:.3f}) "
-                f"fix=({fix.x:.3f},{fix.y:.3f},{fix.z:.3f}) gpt=({gpt[0]:.3f},{gpt[1]:.3f},{gpt[2]:.3f}) "
-                f"cube=({cx:.3f},{cy:.3f},{cz:.3f})"
+                f"jaw_tip=({jtip[0]:.3f},{jtip[1]:.3f},{jtip[2]:.3f}) "
+                f"fix_tip=({ftip[0]:.3f},{ftip[1]:.3f},{ftip[2]:.3f}) "
+                f"gpt=({gpt[0]:.3f},{gpt[1]:.3f},{gpt[2]:.3f}) cube=({cx:.3f},{cy:.3f},{cz:.3f})"
             )
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"DIAG grasp 진단 실패: {e}")
@@ -176,24 +183,30 @@ class PickPlaceSM:
             [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
         ])
 
-    def _grasp_point(self, rs) -> np.ndarray:
-        """현재 config 의 두 손가락 사이 grasp 접점(base_link frame) = moving_jaw·gripper_link FK 중점.
+    def _jaw_tip(self, rs) -> np.ndarray:
+        """moving jaw 패드 접점(base_link frame) = JAW_LINK FK 에 JAW_TIP_LOCAL 오프셋 적용.
+        JAW_LINK 원점은 pivot 이라 실제 손가락 패드(-y 로 ~7cm)와 멀다 → 패드 좌표로 환산."""
+        p = rs.get_pose(JAW_LINK)
+        base = np.array([p.position.x, p.position.y, p.position.z])
+        return base + self._quat_to_R(p.orientation) @ np.array(JAW_TIP_LOCAL)
 
-        ROS SM 이 gripper_frame_link(TCP)을 큐브에 맞추면 실제 손가락은 TCP 보다 위라 못 감싼다.
-        실측(DIAG)상 두 손가락 사이는 JAW_LINK·FIX_LINK 원점 중점에 가깝다 → 이 중점을 큐브에 맞춘다.
-        link 원점이 손가락 끝보다 위라, grasp_z_offset(양수)으로 중점을 큐브보다 약간 위에 둬 손가락
-        끝이 큐브 높이에 오게 한다(_move_to grasp target z = cz + grasp_z_offset).
-        """
-        jaw = rs.get_pose(JAW_LINK).position
-        fix = rs.get_pose(FIX_LINK).position
-        return np.array([(jaw.x + fix.x) / 2.0, (jaw.y + fix.y) / 2.0, (jaw.z + fix.z) / 2.0])
+    def _fix_tip(self, rs) -> np.ndarray:
+        """고정 finger 패드 접점 ≈ gripper_frame_link(TCP). TCP 가 고정 finger tip 근처라 근사로 사용."""
+        p = rs.get_pose(EE_FRAME).position
+        return np.array([p.x, p.y, p.z])
+
+    def _grasp_point(self, rs) -> np.ndarray:
+        """현재 config 의 grasp 중심(base_link frame) = 고정 finger tip(TCP) 와 moving jaw tip 의 중점.
+
+        이전엔 JAW_LINK·FIX_LINK link **원점**(pivot) 중점을 썼는데 실제 패드와 7~8cm 어긋나 큐브 위를
+        헛집었다(DIAG 확인). 실측 패드 좌표(JAW_TIP_LOCAL / TCP)로 두 패드 사이 중점을 잡아 큐브에 맞춘다.
+        grasp target z = cz + grasp_z_offset (이제 grasp 중심이 실제 패드라 offset≈0 으로 큐브 중심 정렬)."""
+        return (self._fix_tip(rs) + self._jaw_tip(rs)) / 2.0
 
     def _grasp_axis_vert(self, rs) -> float:
-        """grasp axis(두 손가락 jaw→fix 벡터)의 수직 성분 비율 [0,1]. 0=수평(큐브 옆면 잡음, 좋음),
+        """grasp axis(두 패드 tip 벡터)의 수직 성분 비율 [0,1]. 0=수평(큐브 옆면 잡음, 좋음),
         1=수직(큐브 위아래 누름, grasp 실패). 중점만 맞추면 axis 방향이 random 이라 이 제약이 필요."""
-        jaw = rs.get_pose(JAW_LINK).position
-        fix = rs.get_pose(FIX_LINK).position
-        axis = np.array([fix.x - jaw.x, fix.y - jaw.y, fix.z - jaw.z])
+        axis = self._fix_tip(rs) - self._jaw_tip(rs)
         n = float(np.linalg.norm(axis))
         return abs(axis[2]) / n if n > 1e-6 else 1.0
 
@@ -215,16 +228,21 @@ class PickPlaceSM:
         rs = self.sample_rs
         n = int(self.p.get("fk_samples", 12000))
         grasp_stage = stage in ("approach", "grasp")
-        # grasp 는 좁은 gate(xy 정합), transport(lift/운반/배치)는 넓은 gate(도달성). 좁은 gate 를
-        # transport 에 쓰면 먼 target 도달 config 를 못 찾아 "FK 도달 config 없음" 으로 lift 실패한다.
-        gate = float(self.p.get("fk_pos_gate", 0.05)) if grasp_stage \
-            else max(float(self.p.get("fk_pos_gate", 0.05)), float(self.p.get("fk_pos_gate_transport", 0.04)))
+        # gate(샘플 채택 거리): grasp(최종 하강)만 좁게(xy 정합), approach(큐브 위 hover)·transport
+        # (운반/배치)는 넓게(도달성). 좁은 gate 를 hover/운반에 쓰면 도달 config 를 못 찾아 실패한다.
+        # (grasp 중심을 실측 패드로 재정의한 뒤 manifold 가 이동 — approach 를 grasp 와 같은 좁은
+        #  gate 로 두면 "FK 도달 config 없음" 이 났다 → approach 는 transport gate 로 분리.)
+        wide_gate = max(float(self.p.get("fk_pos_gate", 0.05)), float(self.p.get("fk_pos_gate_transport", 0.04)))
+        gate = float(self.p.get("fk_pos_gate", 0.05)) if stage == "grasp" else wide_gate
         tilt_min = float(self.p.get("grasp_tilt_min", 45.0)) if grasp_stage else 0.0
         best_q = None
         best_ee = None
         best_pt = None
         best_d = 1e9
         best_score = 1e9
+        # 실패 진단: 필터(tilt/axis/collision) 무시 위치상 최근접 샘플 — gate 문제 vs reach 문제 구분.
+        near_d = 1e9
+        near_tilt = near_axis = -1.0
         for _ in range(n):
             rs.set_to_random_positions()
             if grasp_stage:
@@ -239,6 +257,10 @@ class PickPlaceSM:
             else:
                 pt = np.array([ee.position.x, ee.position.y, ee.position.z])
             d = float(np.linalg.norm(pt - target))
+            if grasp_stage and d < near_d:  # 위치상 최근접(필터 무시) 기록
+                near_d = d
+                near_tilt = self._tool_tilt(ee.orientation)
+                near_axis = self._grasp_axis_vert(rs)
             if d > gate:
                 continue
             tilt_deg = self._tool_tilt(ee.orientation)
@@ -263,6 +285,12 @@ class PickPlaceSM:
                 best_ee = ee
                 best_pt = pt
         if best_q is None:
+            if grasp_stage:
+                self.logger.warning(
+                    f"FK[{stage}] 실패: gate={gate:.3f} 내 통과 config 없음. 위치상 최근접(필터무시) "
+                    f"near_d={near_d:.4f} tilt={near_tilt:.0f}° axis_vert={near_axis:.2f} "
+                    f"(near_d>gate=reach 문제 / near_d<gate인데 실패=tilt·axis·collision 필터 문제)"
+                )
             return None
         if grasp_stage:
             self.logger.info(
@@ -316,7 +344,13 @@ class PickPlaceSM:
             return False
         goal_rs = RobotState(self.robot.get_robot_model())
         goal_rs.set_joint_group_positions(PLANNING_GROUP, goal_q)
+        if stage in ("approach", "grasp"):
+            goal_rs.set_joint_group_positions(GRIPPER_GROUP, [GRIPPER_CLOSED])
         goal_rs.update()
+        # 계획된 TCP/grasp중심 저장 — 실행 후 실제값과 비교해 FK-sample↔실행 충실도 진단(selftest).
+        _gp = goal_rs.get_pose(EE_FRAME).position
+        self._last_goal_tcp = (float(_gp.x), float(_gp.y), float(_gp.z))
+        self._last_goal_grasp_pt = tuple(float(v) for v in self._grasp_point(goal_rs))
         for params, label in planner_order:
             self.arm.set_start_state_to_current_state()
             self.arm.set_goal_state(robot_state=goal_rs)
@@ -400,6 +434,45 @@ class PickPlaceSM:
         in_z = self.p["bowl_z_lo"] <= dz <= self.p["bowl_z_hi"]
         return in_xy and in_z
 
+    def selftest(self) -> None:
+        """FK/IK/실행 체인 검증(사용자 요청). 알려진 좌표로 TCP 를 보내 실제 도달 위치를 측정한다.
+        분리 측정으로 어디가 깨졌는지 특정:
+          - planned_tcp(FK-sample+정밀화 goal 의 FK) vs target → FK-sample 정확도.
+          - actual_tcp(실행 후 실제 TCP) vs planned_tcp → **실행(컨트롤러) 충실도**(plan↔exec 괴리).
+          - actual_tcp vs target → 전체 오차.
+        큰 plan↔exec 오차면 FK/IK 가 아니라 trajectory 실행이 문제(컨트롤러/세팅)."""
+        targets = [
+            (0.15, -0.10, 0.15),
+            (0.18, -0.12, 0.13),
+            (0.15, -0.15, 0.11),
+            (0.20, -0.08, 0.14),
+        ]
+        self.logger.info("===== SELFTEST FK/IK/실행 검증 시작 (transport=TCP 목표) =====")
+        for (x, y, z) in targets:
+            self._last_goal_tcp = None
+            ok = self._move_to(x, y, z, tilt_candidates=[0.0, 20.0, 40.0],
+                               planner_order=self.transport_order, stage="transport")
+            time.sleep(1.5)  # 실행 정착 대기
+            with self.psm.read_only() as scene:
+                cur = scene.current_state
+                cur.update()
+                a = cur.get_pose(EE_FRAME).position
+            actual = (float(a.x), float(a.y), float(a.z))
+            planned = self._last_goal_tcp
+            tgt_err = math.dist(actual, (x, y, z)) * 1000.0
+            if planned is not None:
+                plan_acc = math.dist(planned, (x, y, z)) * 1000.0
+                exec_err = math.dist(actual, planned) * 1000.0
+                self.logger.info(
+                    f"SELFTEST target=({x:.3f},{y:.3f},{z:.3f}) plan_ok={ok} "
+                    f"planned_tcp=({planned[0]:.3f},{planned[1]:.3f},{planned[2]:.3f}) "
+                    f"actual_tcp=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f}) | "
+                    f"FK샘플오차={plan_acc:.0f}mm 실행오차(plan↔exec)={exec_err:.0f}mm 전체오차={tgt_err:.0f}mm"
+                )
+            else:
+                self.logger.warning(f"SELFTEST target=({x:.3f},{y:.3f},{z:.3f}) plan_ok={ok} (planned_tcp 없음)")
+        self.logger.info("===== SELFTEST 종료 =====")
+
     def run(self, num_cubes: int) -> None:
         # 근접순(로봇 base = base_link 원점)으로 정렬.
         order = sorted(range(min(num_cubes, len(self.store.cubes))),
@@ -434,6 +507,7 @@ def main() -> None:
         # max] 로 hard-filter 한 뒤 접점-큐브 거리(d) 최소를 골라 강tilt + xy 정합을 동시 확보.
         "fk_samples": 15000, "fk_pos_gate": 0.03, "fk_pos_gate_transport": 0.04, "ik_timeout": 0.5,
         "grasp_tilt_min": 45.0, "grasp_axis_vert_max": 0.4,
+        "selftest": False,  # true 면 pick 대신 FK/IK/실행 검증 루틴 실행.
     }
     params = {k: store.declare_parameter(k, v).value for k, v in defaults.items()}
     rclpy.logging.get_logger("pick_place_sm").info(
@@ -458,7 +532,10 @@ def main() -> None:
         time.sleep(0.2)
 
     sm = PickPlaceSM(robot, store, params)
-    sm.run(int(params["num_cubes"]))
+    if bool(params.get("selftest", False)):
+        sm.selftest()
+    else:
+        sm.run(int(params["num_cubes"]))
 
     rclpy.shutdown()
 
