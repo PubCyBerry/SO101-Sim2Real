@@ -490,9 +490,12 @@ class PickCubeRewardsCfg:
     )
 
     # Stage 2: 그리퍼 닫힘 + 큐브 근접 (sparse bonus, 미배치 큐브 한정)
+    # weight 2.0→0.5, diff_threshold 0.08→0.045 로 축소: "닫은 채 8cm 근접"만으로
+    # 보상을 받던 local optimum(정체 원인) 제거. 큐브를 실제로 감싸야(4.5cm 이내)
+    # 약한 보너스만 주고, 하류 guided_lift(8)/lift 가 grasp 를 견인하게 한다.
     pregrasp_cube = RewTerm(
         func=task_mdp.pregrasp_bonus,
-        weight=2.0,
+        weight=0.5,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -500,6 +503,7 @@ class PickCubeRewardsCfg:
             "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
+            "diff_threshold": 0.045,
         },
     )
 
@@ -756,6 +760,11 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
     terminations: PickCubeTerminationsCfg = PickCubeTerminationsCfg()
     events: PickCubeEventCfg = PickCubeEventCfg()
     dynamic_reset_gripper_effort_limit: bool = True
+    # 초기상태 grasp 부트스트랩(backward curriculum) — PickCubeEnv 가 읽는다.
+    # prob>0 이면 reset 시 해당 비율의 env 를 '큐브가 그리퍼에 잡힌 상태'로 시작.
+    grasp_bootstrap_prob: float = 0.0
+    grasp_bootstrap_close: float = -0.05   # 부트스트랩 시 gripper joint 닫힘 각(rad)
+    grasp_bootstrap_lift: float = 0.0      # grasp point z 에 더할 들어올림(m)
 
     def __post_init__(self) -> None:
         super().__post_init__()

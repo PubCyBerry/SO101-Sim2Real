@@ -76,6 +76,10 @@ parser.add_argument("--container_radius_scale", "--cup_radius_scale", dest="cont
                     help="그릇/컵 안 판정 반경 배율. --cup_radius_scale은 호환 alias.")
 parser.add_argument("--episode_length_s", type=float, default=None,
                     help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
+parser.add_argument("--grasp_bootstrap_prob", type=float, default=0.0,
+                    help="초기상태 grasp 부트스트랩 비율(0~1). reset 시 이 비율의 env 를 큐브-인-그리퍼로 시작.")
+parser.add_argument("--grasp_bootstrap_close", type=float, default=-0.15,
+                    help="부트스트랩 시 gripper 닫힘 각(rad). -0.15 가 30mm 큐브 held 0.94.")
 parser.add_argument("--resume_checkpoint", default=None,
                     help="이어학습 체크포인트 경로 (.pt). 설정 시 learn() 전 로드.")
 parser.add_argument("--resume_without_optimizer", action="store_true",
@@ -252,6 +256,10 @@ def main() -> None:
         _apply_task_curriculum(env_cfg, args)
         if args.episode_length_s is not None:
             env_cfg.episode_length_s = args.episode_length_s
+        # grasp 부트스트랩(backward curriculum) — PickCubeEnv 가 읽는다.
+        if hasattr(env_cfg, "grasp_bootstrap_prob"):
+            env_cfg.grasp_bootstrap_prob = args.grasp_bootstrap_prob
+            env_cfg.grasp_bootstrap_close = args.grasp_bootstrap_close
         env = gym.make(args.task, cfg=env_cfg)
 
         # rsl_rl VecEnv 래퍼
