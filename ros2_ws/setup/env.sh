@@ -19,12 +19,15 @@
 source /opt/ros/jazzy/setup.bash
 [ -f "$HOME/so101_ros2_ws/install/setup.bash" ] && source "$HOME/so101_ros2_ws/install/setup.bash"
 
+# ── RMW: FastDDS (rmw_fastrtps_cpp) ──────────────────────────────────────────
+# 2026-06-10 검증 결론: 카메라 921KB raw Image 는 FastDDS(SHM/localhost) 만 cross-process
+# 전달된다. CycloneDDS(lo unicast)는 MaxMessageSize/rmem 튜닝에도 이미지가 native·rosbridge
+# 양쪽 모두 0 전달(joint_states 같은 작은 msg 만 됨). 가이드 §6 도 raw 이미지엔 FastDDS 권장.
+#  ※ serial corruption(feetech checksum/desync)은 DDS 가 아니라 usbipd-win 의 USB/IP TCP 를
+#    Hyper-V 방화벽이 간섭한 것이 원인 — 방화벽 해제(2026-06-10)로 해결. DDS 선택과 무관.
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
-# ── (대안) CycloneDDS unicast localhost ──────────────────────────────────────
-# WSL2 lo 인터페이스에 MULTICAST 플래그가 없어 기본 multicast discovery 가 실패하므로
-# unicast localhost 로 강제한다. mirrored 네트워킹에서 Image cross-process 가 막히는
-# 한계가 있다(위 설명 참조).
+# ── (대안) CycloneDDS — 이미지 전달 불가로 비활성 ─────────────────────────────
 # export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 # _SO101_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # export CYCLONEDDS_URI="file://${_SO101_SETUP_DIR}/cyclonedds_localhost.xml"

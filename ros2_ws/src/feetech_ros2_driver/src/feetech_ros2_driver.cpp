@@ -262,17 +262,18 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
   std::vector<std::array<uint8_t, 4>> data;
   data.reserve(joint_ids_.size());
   if (auto result = communication_protocol_->sync_read(joint_ids_, SMS_STS_PRESENT_POSITION_L, &data); !result) {
-    // 일시적 USB-IP 지연 스파이크: 연속 실패가 임계치 미만이면 마지막 상태를 유지하고 cycle 을 skip 한다.
-    // 단일 read timeout 으로 전체 하드웨어/컨트롤러가 deactivate 되던 것을 방지한다.
+    // USB-IP(WSL2 mirrored) read timeout / 스트림 desync 대응:
+    //  1) 입력버퍼를 flush 해 desync 된 백로그를 버리고 다음 cycle 이 fresh 바이트로 재동기화하게 한다.
+    //  2) ERROR 를 반환하지 않는다 — 마지막 상태를 유지한 채 cycle 을 skip 한다.
+    //     (단일/연속 read 실패로 하드웨어+컨트롤러가 통째로 deactivate 되던 것을 원천 차단. ride-through.)
+    // 진짜 단선이면 명령이 모터에 닿지 않을 뿐 위험하지 않고, joint_states freshness 로 외부에서 감지 가능.
+    (void)communication_protocol_->flush_input();
     ++consecutive_read_failures_;
-    if (consecutive_read_failures_ < kMaxConsecutiveReadFailures) {
-      spdlog::warn("FeetechHardwareInterface::read transient failure {}/{} -> {}", consecutive_read_failures_,
-                   kMaxConsecutiveReadFailures, result.error());
-      return hardware_interface::return_type::OK;
+    if (consecutive_read_failures_ == 1 || consecutive_read_failures_ % 50 == 0) {
+      spdlog::warn("FeetechHardwareInterface::read transient failure (consecutive={}) -> {}",
+                   consecutive_read_failures_, result.error());
     }
-    spdlog::error("FeetechHardwareInterface::read -> {} ({} consecutive failures, deactivating)", result.error(),
-                  consecutive_read_failures_);
-    return hardware_interface::return_type::ERROR;
+    return hardware_interface::return_type::OK;
   }
   consecutive_read_failures_ = 0;
   ranges::for_each(data | ranges::views::enumerate, [&](const auto& values) {

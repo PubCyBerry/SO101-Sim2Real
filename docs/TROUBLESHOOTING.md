@@ -2449,7 +2449,7 @@ usbipd-win 의 USB/IP 는 polling 기반이라 serial round-trip 레이턴시가
 
 `feetech_ros2_driver` 와 컨트롤러 설정을 WSL2 레이턴시에 맞게 조정(이 레포에 반영):
 
-- `feetech_driver/include/feetech_driver/serial_port.hpp`: serial `timeout_` 5ms → **50ms**
+- `feetech_driver/include/feetech_driver/serial_port.hpp`: serial `timeout_` 5ms → **50ms → 250ms**
 - `feetech_ros2_driver/src/feetech_ros2_driver.cpp` `on_activate`: 초기 read 전 안정화 `sleep_for(150ms)` 추가
 - `so101_bringup/config/ros2_control/follower_split_controllers.yaml`: `update_rate` 100 → **50Hz**
 
@@ -2459,6 +2459,10 @@ colcon build --symlink-install --packages-select feetech_ros2_driver so101_bring
 ```
 
 네이티브 Linux(직결 USB)에서는 레이턴시가 작아 원래 값(5ms/100Hz) 복원 가능.
+
+**(2026-06-10) timeout 만으로는 부족 — read 실패 ride-through 가 정답**: timeout 을 250ms 까지 늘려도 USB-IP 지연/desync 스파이크가 가끔 초과해 단일 실패로 죽었다. 연속실패 임계(10/100) 방식도 burst 가 임계를 넘으면 죽음. **최종 수정**: `read()` 가 sync_read 실패 시 ① `communication_protocol_->flush_input()`(=`SerialPort::flashInputBuffer()` 노출, 입력버퍼 flush 로 desync 재동기화) ② **`return_type::OK` 를 항상 반환(마지막 상태 유지, 절대 deactivate 안 함)**. 진짜 단선은 joint_states freshness(stamp 갱신 멈춤)로 외부 감지. `feetech_ros2_driver.{hpp,cpp}` + `communication_protocol.hpp(flush_input)` 반영.
+
+**🔴 미해결 — 프레임 시프트 corruption**: 위 ride-through 로 deactivate 는 막았으나, USB-IP 링크가 수 분 내 품질 저하하면 read 가 **checksum 통과하지만 joint↔value 어긋난 값**(명령 안 한 gripper 가 -1.098 등)을 간헐 반환한다. joint_states 를 신뢰 못해 캘리브/closed-loop 가 불가. `usbipd detach 4-1 && usbipd attach --wsl --busid 4-1` 재연결로 ~1~2분 깨끗해지나 곧 재저하. 근본해결은 USB-IP/하드웨어 레벨(WSL mirrored→NAT 검토, update_rate 20Hz 로 트래픽↓, 팔을 네이티브 Linux 직결). 현재 미해결.
 
 ### 확인 방법
 
