@@ -2712,6 +2712,40 @@ IK 를 버리고 **`--controller_mode joint_fk`**(random-FK 로 joint target 직
   (grasp 품질 근본 한계). 즉 **1큐브 grasp 는 해결, 4큐브 신뢰 expert 는 미해결 blocker**.
 - 데모/비교용으로 Franka 7DOF(`pick_cube_franka_state_machine.py`, 4/4 ~30초)도 유지.
 
+### 후속 3 — 결정적 솔버(`--grasp_config_mode deterministic`)로 random-FK 분산 제거 (2026-06-11)
+
+random-FK 의 단일 grasp ~67% 분산을 **finite-difference DLS 결정적 솔버**로 교체해 해결.
+in-sim 가상 FK(joint state 임시 기록→`scene.update(0.0)`→body pose 읽기, random-FK 와 동일
+패턴) 위에서 Gauss-Newton 을 수렴시킨다 — 난수 없음, URDF/base 정합 오차 없음. grasp 단계는
+**tilt ladder**(전부 양수, 중간 tilt 우선)를 결정적 순서로 시도하고 scoop(이동 jaw 바닥·고정
+finger 아래)·**개방축↔큐브 면 정렬**(roll task)·수평 오차로 채점한다.
+
+**1큐브 DR-on 20ep: random_fk 85% → deterministic 90%** (동일 seed 비교, v6 구성). 에피소드
+최단 7.2초(그리퍼 2속: 이동 1.8 rad/s / close-on-cube 0.6 rad/s + dwell 단축).
+
+검증 과정에서 확정한 **함정 4가지** (전부 코드 주석에도 기록):
+
+1. **닫는 단계의 tilt 갈아타기 금지**: descend 와 grasp(닫기)가 각각 자유 재계산하면 닫는
+   도중 반대쪽 tilt 로 갈아타며 팔이 스윙해 큐브를 쳐낸다(5.5cm 비산 실측). descend 가 고른
+   tilt 를 grasp 에 잠그고, 잠긴 tilt 실패 시 자세 유지+닫기만 한다.
+2. **음수 tilt(base 쪽 기울임)는 항상 scoop 이 나쁨**: 이동 jaw 기하가 비대칭이라 tilt_pen
+   0.026~0.062 로 측정됨 — ladder 에서 제거.
+3. **깊은 안착 오프셋의 reach 상충**: grasp 목표 z 를 큐브 중심 아래로 내리면(-8mm/-4mm)
+   손가락이 깊이 물지만 reach 가장자리 실행 미달이 늘어 90%→80% 회귀. +5mm 유지가 최적.
+4. **가상 FK 의 책상 침투는 정상**: 가상 FK 엔 접촉 해소가 없어 좋은 scoop 계획도 손끝이
+   책상면보다 수 mm 아래다(실행 시 물리가 받침). 침투 필터를 -3mm 로 걸면 좋은 후보가 전멸해
+   성공률 0 근처로 추락 — 극단(-15mm)만 거른다.
+
+또한 **20ep sweep 의 ±2ep 는 GPU PhysX 비결정성 잡음**이다 — 같은 plan 으로 같은 spawn 이
+run 마다 성패가 뒤집힌다(marginal 접촉). 구성 비교는 메커니즘 근거 없이 ±10%p 이내 차이로
+판단하지 말 것. 남은 실패 모드는 reach 경계 spawn(base 수평 ~14cm 안쪽·x≥1.97 바깥)의
+기구학적 한계 — scatter 범위 조정(env 변경, 사용자 결정 필요)으로만 해소 가능.
+
+리뷰 영상: `--review_video_dir`(전용 뷰어 카메라, 에피소드별 `epNN_{ok,fail}.mp4`),
+`--review_pose_check`(구도 PNG 확인). 4큐브는 transport **경유점**(joint-space 보간이 호를
+그리며 가라앉아 그릇을 엎는 사고 차단)+`bowl_tipped` 추적 추가 — 수정판에서 첫 all-4 달성
+(구버전 평균 1.625/4, all-4 0/8).
+
 ### 확인 방법
 
 1큐브 grasp: `pick_cube_state_machine.py --controller_mode joint_fk --task
@@ -2719,6 +2753,10 @@ SimToReal-SO101-PickCube-v0 --active_objects 1 --object_radius_scale 0 --headles
 → 결과 JSON 의 `final_inside.Cube1=true`, `placed_and_released=true`. 4큐브 신뢰성은
 `--active_objects 4 --object_radius_scale 1 --num_episodes N` sweep 의 per-cube/all-4 로
 측정(현재 평균 1.5/4). DiffIK 진단(폐기)은 `diffik_grasp_diag.patch`(commit `12265e1` 대비)로 보존.
+
+결정적 솔버(후속 3): 위 명령에 `--grasp_config_mode deterministic` 추가 + `--num_episodes 20
+--object_radius_scale 1` sweep → JSON `all4_success_rate ≥ 0.9`, 실패 에피소드는 `fail_diag`
+(det_tilt_deg/det_pos_err_h_m/det_roll_err_deg/final_error_m)로 원인 추적.
 
 ---
 

@@ -13,6 +13,7 @@ import json
 import math
 import multiprocessing
 import os
+import re
 from pathlib import Path
 import shutil
 import sys
@@ -45,29 +46,43 @@ parser.add_argument("--container_radius_scale", type=float, default=1.0)
 # 모션 단계(approach/descend/lift/transport/place/retreat)의 *_steps 는 이제 상한(cap)이다.
 # 단계가 성공(목표 도달/그리퍼 전이 완료)하면 _phase 가 early-exit 하므로 5 rad/s 에서 보통
 # 훨씬 일찍 끝난다. settle/hold 류 대기는 사용자 요청대로 최소화했다.
-parser.add_argument("--settle_steps", type=int, default=30, help="reset 후 물리 안정화(큐브 정지) 대기")
+parser.add_argument("--settle_steps", type=int, default=12, help="reset 후 물리 안정화(큐브 정지) 대기")
 parser.add_argument("--approach_steps", type=int, default=120)
 parser.add_argument("--descend_steps", type=int, default=160)
 parser.add_argument("--close_steps", type=int, default=20)
 parser.add_argument(
     "--grasp_settle_steps",
     type=int,
-    default=20,
+    default=5,
     help="그리퍼가 닫힌 뒤 grip 이 큐브에 안정적으로 물릴 때까지의 추가 dwell(step).",
 )
 parser.add_argument("--lift_steps", type=int, default=120)
 parser.add_argument("--transport_steps", type=int, default=160)
 parser.add_argument("--place_steps", type=int, default=120)
-parser.add_argument("--open_steps", type=int, default=15)
-parser.add_argument("--final_settle_steps", type=int, default=8)
+parser.add_argument("--open_steps", type=int, default=4)
+parser.add_argument("--final_settle_steps", type=int, default=2)
 parser.add_argument("--retreat_steps", type=int, default=100)
 parser.add_argument("--idle_home_steps", type=int, default=30)
 parser.add_argument("--command_settle_steps", type=int, default=0)
 parser.add_argument("--max_grasp_attempts", type=int, default=3)
-parser.add_argument("--approach_height", type=float, default=0.14)
-parser.add_argument("--lift_height", type=float, default=0.12)
+parser.add_argument("--approach_height", type=float, default=0.10)
+parser.add_argument(
+    "--lift_height",
+    type=float,
+    default=0.08,
+    help="잡은 뒤 들어올리는 높이(m). 책상·주변 큐브(4cm)만 넘기면 충분 — 0.15 는 '번쩍' 과도 상승.",
+)
 parser.add_argument("--transport_height", type=float, default=0.12)
-parser.add_argument("--place_height", type=float, default=0.06)
+parser.add_argument(
+    "--place_height",
+    type=float,
+    default=0.12,
+    help=(
+        "그릇 root 기준 release 높이(m). transport_height 와 같게 두면 place_descend 가 사실상 "
+        "생략돼 이송 직후 바로 떨군다(그릇 테두리 ~5cm 위 ~7cm에서 낙하 — 그릇 내부가 미끄러워 "
+        "큐브가 바닥 중앙으로 모이고, 낮게 넣으면 그리퍼가 그릇을 건드린다)."
+    ),
+)
 parser.add_argument(
     "--stack_place_height_increment",
     type=float,
@@ -80,9 +95,9 @@ parser.add_argument(
     type=float,
     default=0.005,
     help=(
-        "Descend/grasp grasp-point 목표 z = 큐브 중심 + 이 값(m). 0 = 큐브 중심을 노린다. descend 는 "
-        "별도의 tight tolerance(--descend_tolerance)로 이 목표 가까이 눌러 내려가, grasp point 가 "
-        "큐브를 감싸는 높이에 오게 한다. 손가락은 grasp point 아래로 뻗어 바닥을 쓸듯 큐브를 잡는다."
+        "Descend/grasp grasp-point 목표 z = 큐브 중심 + 이 값(m). 음수(깊은 안착)를 시도했으나 "
+        "(-0.008→80%, -0.004→~80%) 목표를 낮출수록 reach 가장자리 실행 미달이 늘어 1큐브 신뢰성과 "
+        "상충 — 검증된 +0.005 로 유지한다. 그립 깊이는 scoop(틸트)·면 정렬이 보장한다."
     ),
 )
 parser.add_argument(
@@ -130,11 +145,20 @@ parser.add_argument(
 parser.add_argument(
     "--max_gripper_step_delta",
     type=float,
-    default=0.005,
+    default=0.02,
     help=(
-        "Max per-step gripper joint command change in radians. 그리퍼는 *천천히* 닫아야(≈0.15 rad/s) "
-        "큐브가 손가락 사이에 안착해 마찰로 잡힌다 — 5 rad/s(0.167)로 빠르게 닫으면 큐브를 못 쥐고 튕긴다. "
-        "팔(--max_arm_step_delta)은 5 rad/s 로 빠르게, 그리퍼만 느리게. (env velocity 한계 5 rad/s 내)"
+        "GRASP(close-on-cube) 단계 전용 그리퍼 per-step 한계(rad). 큐브를 무는 close 는 천천히 해야 "
+        "(0.02≈0.6 rad/s) 큐브가 손가락 사이에 안착해 마찰로 잡힌다 — 빠르게 닫으면 큐브를 쳐낸다. "
+        "그 외 단계(open/이동)는 --gripper_travel_step_delta 로 빠르게 움직인다."
+    ),
+)
+parser.add_argument(
+    "--gripper_travel_step_delta",
+    type=float,
+    default=0.06,
+    help=(
+        "GRASP 외 단계(open/descend 부분개방/release)의 그리퍼 per-step 한계(rad, ≈1.8 rad/s). "
+        "과거엔 전 구간 0.005 로 묶여 open 1.0 rad 에 6.7초가 걸려 팔이 단계 사이에 정지해 보였다."
     ),
 )
 parser.add_argument(
@@ -167,6 +191,18 @@ parser.add_argument(
         "내려가는(=tilt 강한) pose 를 선호하는 점수 가중치. 0=off(거리·연속성만). SO-101 그리퍼는 "
         "고정 finger 가 길어 약한 tilt 면 이동 jaw 가 큐브 위에 남아 grasp 실패 — 이 항이 검증된 강tilt "
         "grasp(이동 jaw 가 큐브 바닥까지) 를 결정적으로 선택하게 한다."
+    ),
+)
+parser.add_argument(
+    "--grasp_config_mode",
+    choices=["random_fk", "deterministic"],
+    default="random_fk",
+    help=(
+        "joint waypoint 계산 방식. random_fk(기본)=기존 random-FK 5000샘플(grasp 자세 '추첨', "
+        "단일 grasp ~67%%). deterministic=in-sim 가상 FK 위 finite-difference DLS — 난수 없이 "
+        "동일 큐브 pose → 동일 q_goal. grasp 단계는 tilt ladder(접근축 후보)를 결정적 순서로 "
+        "시도하고 scoop 점수(이동 jaw 가 바닥까지+고정 finger 아래)로 선택, 큐브 yaw 에 그리퍼 "
+        "개방축을 정렬한다. 수렴 실패 시 random_fk 로 자동 폴백. --controller_mode joint_fk 전용."
     ),
 )
 parser.add_argument("--seed", type=int, default=7)
@@ -295,15 +331,41 @@ parser.add_argument("--overwrite_dataset", action="store_true", help="Replace --
 parser.add_argument("--no_videos", action="store_true", help="Skip camera videos in the LeRobot dataset")
 parser.add_argument("--warmup_steps", type=int, default=5, help="Render warmup steps before recording starts")
 parser.add_argument("--gui", action="store_true", help="Open the Isaac GUI instead of forced headless mode")
+parser.add_argument(
+    "--review_video_dir",
+    type=Path,
+    default=None,
+    help=(
+        "에피소드별 리뷰 영상(mp4) 출력 디렉터리. 별도 뷰어 카메라(근거리 사선 부감)로 매 step "
+        "캡처해 30fps 실시간 영상을 만든다. sweep(--num_episodes>1) 에선 epNN_{ok,fail}.mp4 로 저장."
+    ),
+)
+parser.add_argument("--review_cam_eye", type=str, default="2.45,-0.40,1.10", help="뷰어 카메라 world 위치 x,y,z")
+parser.add_argument("--review_cam_target", type=str, default="1.78,-0.37,0.72", help="뷰어 카메라 look-at 지점 x,y,z")
+parser.add_argument("--review_cam_focal", type=float, default=18.0, help="뷰어 카메라 focal length (mm)")
+parser.add_argument(
+    "--review_pose_check",
+    action="store_true",
+    help="뷰어 카메라 정지 프레임 PNG(pose_check.png)만 저장하고 종료 — 구도 확인용.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = not args.gui
 if args.livestream < 0:
     args.livestream = 0
-args.enable_cameras = args.dataset_dir is not None and not args.no_videos
+args.enable_cameras = (args.dataset_dir is not None and not args.no_videos) or args.review_video_dir is not None
 
 if args.num_envs != 1:
     raise ValueError("pick_cube_state_machine.py currently supports --num_envs=1 only.")
+
+if args.review_pose_check and args.review_video_dir is None:
+    raise ValueError("--review_pose_check 는 --review_video_dir 와 함께 사용한다.")
+
+if args.grasp_config_mode == "deterministic" and args.controller_mode != "joint_fk":
+    raise ValueError(
+        "--grasp_config_mode deterministic 은 --controller_mode joint_fk 에서만 동작한다 "
+        "(다른 모드는 phase driver 가 waypoint 를 계산)."
+    )
 
 # 커스텀 인자(task/num_envs/dataset_dir 등)를 통째로 넘기면 AppLauncher → carb
 # 설정 경로로 전달되어 Windows에서 _prepare_ui access violation 위험.
@@ -339,7 +401,7 @@ import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 import torch  # noqa: E402
 
-if args.dataset_dir is not None and not args.no_videos:
+if (args.dataset_dir is not None and not args.no_videos) or args.review_video_dir is not None:
     import imageio.v2 as imageio  # noqa: E402
 
 import sim_to_real  # noqa: E402,F401
@@ -353,6 +415,10 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     apply_curriculum,
 )
 from sim_to_real.tasks.pick_pen import mdp as task_mdp  # noqa: E402
+from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (  # noqa: E402
+    _look_at_quat_world,
+    _pinhole_camera_cfg,
+)
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
 
 
@@ -361,8 +427,20 @@ ARM_DOF = 5
 # 0.76 과 다르다). bowl/cube z 는 reset 후 randomize 로 흔들리므로, 절대 상수 대신 가능하면
 # live root_pos_w 를 쓴다. 이 상수는 fallback·진단용.
 CUBE_DESK_TOP_Z = 0.705
-# 큐브 한 변 2.5cm → half-height. surface = cube_center_z - CUBE_HALF_Z.
+# (legacy fallback) 구 균일 2.5cm 큐브의 half-height. 현재 씬은 30/40mm 2종이라
+# 아래 CUBE_HALF_HEIGHTS 를 우선 사용한다. surface = cube_center_z - half.
 CUBE_HALF_Z = 0.0125
+# author_pick_cube_scene.py::CUBE_SCALES 와 동기 — Cube1/2=30mm, Cube3/4=40mm.
+CUBE_HALF_HEIGHTS = {
+    "Cube1": 0.015,
+    "Cube2": 0.015,
+    "Cube3": 0.020,
+    "Cube4": 0.020,
+}
+# 40mm 큐브는 기본 개방(1.0 rad)/descend 개방(0.5)으로는 폭이 빠듯하다. pick 관련
+# 단계에서만 큐브별로 더 벌린다(release/idle 은 args.gripper_open 유지). joint 상한 1.745.
+PICK_GRIPPER_OPEN_BY_CUBE = {"Cube3": 1.4, "Cube4": 1.4}
+DESCEND_GRIPPER_BY_CUBE = {"Cube3": 0.8, "Cube4": 0.8}
 JAW_GRASP_OFFSET = (-0.021, -0.070, 0.020)
 CONTROL_POINT_NAME = "gripper_jaw_midpoint"
 FPS = 30
@@ -1112,6 +1190,31 @@ def _action_to_record(env, action_tensor: torch.Tensor) -> np.ndarray:
     return _to_lerobot_units(action)
 
 
+def _camera_rgb_u8(cam) -> np.ndarray:
+    rgb = cam.data.output["rgb"][0].detach().cpu().numpy()
+    if rgb.shape[-1] == 4:
+        rgb = rgb[..., :3]
+    if rgb.dtype != np.uint8:
+        if np.issubdtype(rgb.dtype, np.floating):
+            rgb = np.clip(rgb, 0.0, 1.0) * 255.0
+        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(rgb)
+
+
+# 리뷰 영상 writer (열려 있으면 _step_env 가 매 step 뷰어 카메라 프레임을 append).
+_REVIEW_WRITER: Any | None = None
+
+# sim step 카운터 — 에피소드 소요시간(초 = steps / FPS) 측정용.
+_STEP_COUNTER: int = 0
+
+
+def _review_capture(env) -> None:
+    if _REVIEW_WRITER is None:
+        return
+    cam = env.unwrapped.scene["review_camera"]
+    _REVIEW_WRITER.append_data(_camera_rgb_u8(cam))
+
+
 def _capture_images(env) -> dict[str, np.ndarray]:
     images: dict[str, np.ndarray] = {}
     for key in CAMERA_KEYS:
@@ -1313,7 +1416,16 @@ def _diagnostic_pose(env) -> dict[str, Any]:
             for name in CUBE_NAMES[: args.active_objects]
         },
         "bowl_w": _round_list(scene[BOWL_NAME].data.root_pos_w[0]),
+        "bowl_quat_w": _round_list(scene[BOWL_NAME].data.root_quat_w[0]),
     }
+
+
+def _bowl_tipped(env, max_tilt_deg: float = 45.0) -> bool:
+    """그릇이 기울어졌는지(엎힘 감지). 그릇 local z축의 world z 성분으로 판정."""
+    quat = env.unwrapped.scene[BOWL_NAME].data.root_quat_w[0:1]
+    z_local = torch.tensor([[0.0, 0.0, 1.0]], device=quat.device, dtype=quat.dtype)
+    z_w = _quat_apply_wxyz(quat, z_local)[0]
+    return float(z_w[2].item()) < math.cos(math.radians(max_tilt_deg))
 
 
 def _grasp_point_jacobian(robot) -> torch.Tensor:
@@ -1338,7 +1450,11 @@ def _step_env(env, action: torch.Tensor, *, min_gripper_effort: float | None = N
             "so101leader",
             min_effort=args.min_gripper_effort if min_gripper_effort is None else min_gripper_effort,
         )
-    return env.step(action)
+    global _STEP_COUNTER
+    step_out = env.step(action)
+    _STEP_COUNTER += 1
+    _review_capture(env)
+    return step_out
 
 
 def _arm_limits(robot, device: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1357,6 +1473,17 @@ _ARM_STEP_OVERRIDE: float | None = None
 
 def _eff_arm_step() -> float:
     return abs(_ARM_STEP_OVERRIDE if _ARM_STEP_OVERRIDE is not None else args.max_arm_step_delta)
+
+
+# 그리퍼 step 한계 override. 기본(None) = travel(빠름). GRASP(close-on-cube) 단계에서만
+# _phase 가 args.max_gripper_step_delta(느림) 로 설정한다.
+_GRIPPER_STEP_OVERRIDE: float | None = None
+
+
+def _eff_gripper_step() -> float:
+    return abs(
+        _GRIPPER_STEP_OVERRIDE if _GRIPPER_STEP_OVERRIDE is not None else args.gripper_travel_step_delta
+    )
 
 
 def _joint_position_action(
@@ -1382,10 +1509,11 @@ def _joint_position_action(
         -arm_step,
         arm_step,
     )
+    gripper_step = _eff_gripper_step()
     gripper_delta = torch.clamp(
         torch.tensor(float(gripper_target), device=device, dtype=torch.float32) - command[5],
-        -abs(args.max_gripper_step_delta),
-        abs(args.max_gripper_step_delta),
+        -gripper_step,
+        gripper_step,
     )
 
     command[:ARM_DOF] = torch.minimum(torch.maximum(command[:ARM_DOF] + arm_delta, lower), upper)
@@ -1397,18 +1525,22 @@ def _slew_limited_step_count(command: torch.Tensor, q_goal: torch.Tensor, grippe
     arm_delta = float(torch.max(torch.abs(q_goal[:ARM_DOF] - command[:ARM_DOF])).item())
     gripper_delta = abs(float(gripper_target) - float(command[5].item()))
     arm_steps = math.ceil(arm_delta / max(_eff_arm_step(), 1e-6))
-    gripper_steps = math.ceil(gripper_delta / max(abs(args.max_gripper_step_delta), 1e-6))
+    gripper_steps = math.ceil(gripper_delta / max(_eff_gripper_step(), 1e-6))
     return max(arm_steps, gripper_steps) + max(0, args.command_settle_steps)
 
 
-def _gripper_transition_step_count(current: float, target: float) -> int:
-    return math.ceil(abs(float(target) - float(current)) / max(abs(args.max_gripper_step_delta), 1e-6))
+def _gripper_transition_step_count(current: float, target: float, step: float | None = None) -> int:
+    eff = abs(step) if step is not None else _eff_gripper_step()
+    return math.ceil(abs(float(target) - float(current)) / max(eff, 1e-6))
 
 
 def _grasp_phase_steps(command: torch.Tensor, target: float) -> int:
     # GRASP는 "닫기 + 대기" 상태다. slew limit 때문에 열린 상태에서 바로 80 step만
     # 주면 lift 중에야 완전히 닫힐 수 있어, 필요한 닫기 시간과 settle을 보장한다.
-    close_steps = _gripper_transition_step_count(float(command[5].item()), target)
+    # close-on-cube 는 느린 속도(max_gripper_step_delta)로 계산한다.
+    close_steps = _gripper_transition_step_count(
+        float(command[5].item()), target, step=args.max_gripper_step_delta
+    )
     return max(1, args.close_steps, close_steps + max(0, args.grasp_settle_steps))
 
 
@@ -1476,6 +1608,253 @@ def _ik_action(
     action[0, :ARM_DOF] = q_target
     action[0, 5] = float(gripper_target)
     return action, float(torch.linalg.norm(error).item())
+
+
+# ── 결정적 waypoint/grasp 솔버 (--grasp_config_mode deterministic) ──────────────
+# random-FK 5000샘플의 분산(단일 grasp ~67%)을 제거한다. in-sim 가상 FK(joint state
+# 임시 기록 → scene.update → body pose 읽기, random-FK 와 동일 패턴) 위에서
+# finite-difference Gauss-Newton(DLS) 을 수렴시킨다 — 난수 없음, 동일 입력 → 동일 출력.
+# URDF/base 정합 오차도 없다(실제 USD articulation 의 FK 를 그대로 쓰므로).
+# 전부 양수(base 반대쪽 기울임). 음수(base 쪽)는 이동 jaw 기하가 비대칭이라 scoop 이
+# 항상 나쁘고(tilt_pen 0.026~0.062 측정) 닫는 중 스윙 사고의 원인이라 제거했다.
+# 순서는 중간 tilt 우선 — 30/40mm 큐브는 극단 tilt(65~75°) 없이도 물린다(구 2.5cm 시절의
+# 강tilt 선호를 완화. 극단 tilt 는 reach 가장자리에서 실행오차·그릇 충돌 원인).
+_DET_TILT_LADDER_DEG = (45.0, 55.0, 35.0, 25.0, 65.0, 15.0, 75.0)
+_DET_FD_EPS = 1.0e-3
+_DET_STEP_CLAMP = 0.25
+_DET_DAMPING_SQ = 0.03 ** 2
+_DET_W_TILT = 0.05   # 접근축(tilt) residual 가중 — 위치(미터 단위)가 항상 우선
+_DET_W_ROLL = 0.08   # 개방축(큐브 yaw 정렬) residual 가중 — 0.03 은 너무 약해 모서리(마름모) 잡기 빈발
+_DET_SCOOP_WEIGHT = 0.25
+_DET_CONTINUITY_WEIGHT = 0.02
+_DET_ITERS_STAGE1 = 10   # grasp: 위치+tilt 수렴
+_DET_ITERS_STAGE2 = 14   # grasp: +개방축 정렬 수렴
+_DET_ITERS_POSONLY = 30  # 비grasp waypoint: 위치만
+
+_ATTEMPT_RE = re.compile(r"\.attempt(\d+)\.")
+
+
+def _attempt_variant_from_phase_name(name: str) -> int:
+    m = _ATTEMPT_RE.search(name)
+    return int(m.group(1)) - 1 if m else 0
+
+
+# descend 가 고른 tilt(deg). grasp(닫기) 단계는 이 tilt 로 잠가 재계산한다 — 자유 재계산이
+# 반대쪽 tilt 로 갈아타면 닫는 도중 팔이 스윙하며 큐브를 쳐낸다(ep9 진단).
+_LAST_DESCEND_TILT_DEG: float | None = None
+
+
+def _cube_yaw_w(env, cube_name: str) -> float:
+    q = env.unwrapped.scene[cube_name].data.root_quat_w[0]  # wxyz
+    w, x, y, z = (float(v) for v in q.tolist())
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _deterministic_solve_joint_target(
+    env,
+    target_grasp_point_w: torch.Tensor,
+    gripper_target: float,
+    device: str,
+    *,
+    grasp_mode: bool,
+    pos_gate: float,
+    cube_name: str | None = None,
+    variant: int = 0,
+    floor_z: float = CUBE_DESK_TOP_Z,
+    tilt_ladder: tuple[float, ...] | None = None,
+    level_axis: bool = False,
+) -> tuple[torch.Tensor | None, dict[str, Any]]:
+    """결정적 joint waypoint 솔버. 수렴 실패(gate 초과) 시 (None, diag) — 호출자가 random-FK 폴백.
+
+    grasp_mode: tilt ladder 의 각 후보 접근축으로 [위치(3) + tilt축(3·약)] DLS → 큐브 yaw 에
+    가장 가까운 개방축 후보를 골라 [+개방축(3·약)] 으로 정밀화. 후보 채점 = 위치오차 +
+    scoop 패널티(이동 jaw 가 바닥까지·고정 finger 아래 — 검증된 강tilt grasp 조건) + 연속성.
+    variant(=attempt-1) 가 ladder 를 회전시켜 재시도마다 다른 tilt 를 우선 탐색한다.
+    """
+    scene = env.unwrapped.scene
+    robot = scene["robot"]
+    env_ids = torch.tensor([0], device=device, dtype=torch.long)
+    saved_q = robot.data.joint_pos[:, :6].clone()
+    saved_v = robot.data.joint_vel[:, :6].clone()
+    current_arm = saved_q[0, :ARM_DOF].clone()
+    lower, upper = _arm_limits(robot, device)
+    lo = lower + 1.0e-3
+    hi = upper - 1.0e-3
+    target = target_grasp_point_w.to(device=device, dtype=torch.float32).reshape(3)
+    zero_vel = torch.zeros((1, 6), device=device)
+
+    def write_q(q_arm: torch.Tensor) -> None:
+        q = torch.zeros((1, 6), device=device)
+        q[0, :ARM_DOF] = q_arm
+        q[0, 5] = float(gripper_target)
+        robot.write_joint_state_to_sim(q, zero_vel, env_ids=env_ids)
+        scene.update(0.0)
+
+    def residual(q_arm: torch.Tensor, a_des: torch.Tensor | None, o_des: torch.Tensor | None) -> torch.Tensor:
+        write_q(q_arm)
+        parts = [target - _grasp_point_pos(robot)[0]]
+        if a_des is not None:
+            parts.append(_DET_W_TILT * (a_des - _approach_axis_world(robot)))
+        if o_des is not None:
+            parts.append(_DET_W_ROLL * (o_des - _gripper_open_axis_h(robot)))
+        return torch.cat(parts)
+
+    def solve(
+        q0: torch.Tensor, a_des: torch.Tensor | None, o_des: torch.Tensor | None, iters: int
+    ) -> torch.Tensor:
+        q = torch.minimum(torch.maximum(q0.clone(), lo), hi)
+        r = residual(q, a_des, o_des)
+        eye = torch.eye(ARM_DOF, device=device, dtype=torch.float32)
+        for _ in range(iters):
+            jac = torch.zeros((r.shape[0], ARM_DOF), device=device, dtype=torch.float32)
+            for j in range(ARM_DOF):
+                qp = q.clone()
+                stepped = min(float(q[j]) + _DET_FD_EPS, float(hi[j]))
+                if stepped - float(q[j]) < 1.0e-9:  # 상한에 붙음 → 반대 방향 FD
+                    stepped = float(q[j]) - _DET_FD_EPS
+                qp[j] = stepped
+                step = stepped - float(q[j])
+                jac[:, j] = (residual(qp, a_des, o_des) - r) / step
+            jtj = jac.T @ jac + _DET_DAMPING_SQ * eye
+            dq = -torch.linalg.solve(jtj, jac.T @ r)
+            dq = torch.clamp(dq, -_DET_STEP_CLAMP, _DET_STEP_CLAMP)
+            q = torch.minimum(torch.maximum(q + dq, lo), hi)
+            r = residual(q, a_des, o_des)
+            if (
+                float(torch.linalg.norm(r[:3]).item()) < 1.5e-3
+                and float(torch.max(torch.abs(dq)).item()) < 1.0e-4
+            ):
+                break
+        return q
+
+    diag: dict[str, Any] = {
+        "det_mode": "grasp" if grasp_mode else "waypoint",
+        "det_pos_gate": round(float(pos_gate), 5),
+    }
+    best: tuple[float, torch.Tensor, torch.Tensor, dict[str, Any]] | None = None  # (score, q, gp, info)
+
+    if not grasp_mode:
+        # 이송·place 단계는 손목을 지면과 평행(palm-down, 접근축 ↓)으로 유지한 채 이동
+        # — 큐브를 떨굴 때 수평 자세가 되도록(사용자 요청). best-effort(약가중) 라
+        # 위치가 항상 우선이고 도달 불가 시 자세는 양보된다.
+        a_level = (
+            torch.tensor([0.0, 0.0, -1.0], device=device, dtype=torch.float32)
+            if level_axis
+            else None
+        )
+        q = solve(current_arm, a_level, None, _DET_ITERS_POSONLY)
+        write_q(q)
+        gp = _grasp_point_pos(robot)[0].clone()
+        pos_err = float(torch.linalg.norm(target - gp).item())
+        if pos_err <= pos_gate:
+            best = (pos_err, q, gp, {"det_pos_err_m": round(pos_err, 5)})
+    else:
+        base_xy = robot.data.root_pos_w[0, :2]
+        r_h = target[:2] - base_xy
+        n = float(torch.linalg.norm(r_h).item())
+        r_hat = (
+            torch.tensor([1.0, 0.0], device=device, dtype=torch.float32)
+            if n < 1.0e-6
+            else (r_h / n).to(dtype=torch.float32)
+        )
+        if tilt_ladder is not None:
+            ladder = list(tilt_ladder)
+        else:
+            ladder = list(_DET_TILT_LADDER_DEG)
+            k = max(0, int(variant)) % len(ladder)
+            ladder = ladder[k:] + ladder[:k]
+        yaw = _cube_yaw_w(env, cube_name) if cube_name is not None else None
+        tried = 0
+        for tilt_deg in ladder:
+            tried += 1
+            t = math.radians(abs(tilt_deg))
+            sgn = 1.0 if tilt_deg >= 0.0 else -1.0
+            a_des = torch.tensor(
+                [
+                    sgn * math.sin(t) * float(r_hat[0]),
+                    sgn * math.sin(t) * float(r_hat[1]),
+                    -math.cos(t),
+                ],
+                device=device,
+                dtype=torch.float32,
+            )
+            a_des = a_des / torch.linalg.norm(a_des)
+            q1 = solve(current_arm, a_des, None, _DET_ITERS_STAGE1)
+            o_des: torch.Tensor | None = None
+            if yaw is not None:
+                write_q(q1)
+                o_now = _gripper_open_axis_h(robot)
+                best_dot = 0.0
+                for kk in range(4):
+                    ang = yaw + kk * (math.pi / 2.0)
+                    cand = torch.tensor(
+                        [math.cos(ang), math.sin(ang), 0.0], device=device, dtype=torch.float32
+                    )
+                    d = float(torch.dot(cand, o_now).item())
+                    if abs(d) > abs(best_dot):
+                        best_dot = d
+                        o_des = cand if d >= 0.0 else -cand
+            q2 = solve(q1, a_des, o_des, _DET_ITERS_STAGE2)
+            write_q(q2)
+            gp = _grasp_point_pos(robot)[0].clone()
+            pos_err = float(torch.linalg.norm(target - gp).item())
+            # 수평 오차는 별도 gate — 30mm 큐브에서 수평 7mm 이상 빗나가면 꼭지점 근처를
+            # 집게 된다(3D gate 1.1cm 만으로는 못 거름).
+            pos_err_h = float(torch.linalg.norm(target[:2] - gp[:2]).item())
+            jaw_z = _finger_min_z(robot, "jaw")
+            fix_z = _finger_min_z(robot, "gripper")
+            # 책상 *극단* 침투 필터: 가상 FK 엔 접촉 해소가 없어 좋은 scoop 계획도 손끝이
+            # 책상면보다 수 mm 아래로 들어가는 게 정상이다(실행 시 물리가 받침). 다만
+            # 15mm 이상 박히는 계획은 실행 시 팔이 책상에 걸려 멈춘다(v4 ep8: 27cm 미달).
+            if min(jaw_z, fix_z) < floor_z - 0.015:
+                continue
+            tilt_pen = max(0.0, jaw_z - floor_z) + max(0.0, jaw_z - fix_z)
+            continuity = float(torch.linalg.norm(q2 - current_arm).item())
+            # 개방축↔큐브 면 정렬 잔차(rad). 크면 모서리(마름모)를 집는다 — 점수에 반영해
+            # 정렬 나쁜 후보를 다음 ladder 후보에 밀리게 한다.
+            roll_err = 0.0
+            if o_des is not None:
+                o_now = _gripper_open_axis_h(robot)
+                roll_err = math.acos(max(-1.0, min(1.0, abs(float(torch.dot(o_now, o_des).item())))))
+            score = (
+                pos_err
+                + 1.0 * pos_err_h
+                + _DET_SCOOP_WEIGHT * tilt_pen
+                + _DET_CONTINUITY_WEIGHT * continuity
+                + 0.05 * roll_err
+            )
+            info = {
+                "det_tilt_deg": tilt_deg,
+                "det_pos_err_m": round(pos_err, 5),
+                "det_pos_err_h_m": round(pos_err_h, 5),
+                "det_tilt_pen": round(tilt_pen, 5),
+                "det_roll_err_deg": round(math.degrees(roll_err), 1),
+                "det_jaw_min_z": round(jaw_z, 5),
+                "det_fix_min_z": round(fix_z, 5),
+            }
+            if pos_err <= pos_gate and pos_err_h <= 0.007 and (best is None or score < best[0]):
+                best = (score, q2, gp, info)
+                # 위치 정합 + scoop + 면 정렬 모두 충분한 해 → 남은 후보 생략(결정적 순서라 재현 동일)
+                if pos_err <= pos_gate * 0.5 and tilt_pen <= 0.005 and roll_err <= math.radians(15.0):
+                    break
+        diag["det_candidates_tried"] = tried
+        if yaw is not None:
+            diag["det_cube_yaw_deg"] = round(math.degrees(yaw), 2)
+
+    robot.write_joint_state_to_sim(saved_q, saved_v, env_ids=env_ids)
+    scene.update(0.0)
+
+    if best is None:
+        diag["det_fallback"] = True
+        return None, diag
+    _score, q_best, gp_best, info = best
+    diag.update(info)
+    diag["det_fallback"] = False
+    # 기존 random-FK plan 키와 동일 의미의 필드(트레이스 소비자 호환).
+    diag["planned_error_m"] = info["det_pos_err_m"]
+    diag["planned_grasp_point_w"] = _round_list(gp_best)
+    diag["planned_joint_target"] = _round_list(q_best)
+    return q_best, diag
 
 
 def _fk_solve_joint_target(
@@ -1576,10 +1955,22 @@ def _cube_inside_bowl(env, cube_name: str, radius: float) -> bool:
     return bool(inside[0].item())
 
 
+def _cube_half_z(cube_name: str) -> float:
+    return CUBE_HALF_HEIGHTS.get(cube_name, CUBE_HALF_Z)
+
+
+def _pick_gripper_open(cube_name: str) -> float:
+    return max(float(args.gripper_open), PICK_GRIPPER_OPEN_BY_CUBE.get(cube_name, 0.0))
+
+
+def _pick_descend_gripper(cube_name: str) -> float:
+    return max(float(args.descend_gripper), DESCEND_GRIPPER_BY_CUBE.get(cube_name, 0.0))
+
+
 def _cube_lifted(env, cube_name: str, min_lift: float = 0.08) -> bool:
     cube = env.unwrapped.scene[cube_name]
-    # 책상에서 쉬는 큐브 중심 z ≈ CUBE_DESK_TOP_Z + CUBE_HALF_Z. 그보다 min_lift 이상 올라가면 잡힌 것.
-    rest_center_z = CUBE_DESK_TOP_Z + CUBE_HALF_Z
+    # 책상에서 쉬는 큐브 중심 z ≈ CUBE_DESK_TOP_Z + half(크기별). 그보다 min_lift 이상 올라가면 잡힌 것.
+    rest_center_z = CUBE_DESK_TOP_Z + _cube_half_z(cube_name)
     return bool((cube.data.root_pos_w[0, 2] > rest_center_z + min_lift).item())
 
 
@@ -1613,6 +2004,7 @@ def _phase(
     target_R_fn: Callable[[], Any] | None = None,
     success_fn: Callable[[], bool] | None = None,
     min_steps: int = 1,
+    grasp_cube_name: str | None = None,
 ) -> dict[str, Any]:
     """단계 실행. ``steps`` 는 상한이며, 목표 도달(또는 ``success_fn``) 시 즉시 종료(early-exit)한다.
 
@@ -1623,6 +2015,7 @@ def _phase(
     robot = env.unwrapped.scene["robot"]
     min_error = float("inf")
     final_error = float("inf")
+    final_error_h = float("inf")
     reached_step: int | None = None
     done_seen = False
     early_exit_step: int | None = None
@@ -1635,25 +2028,69 @@ def _phase(
     # descend/grasp 단계에서만 grasp tilt 점수항을 켜고(이동 jaw 를 큐브 바닥까지 내리는 pose 선호),
     # 팔 속도를 늦추며(큐브 쳐냄 방지), arm 이 tilted q_goal 에 도달할 때까지 완주(early-exit 로 tilt 잘림 방지).
     is_grasp_phase = (".descend" in name) or (".grasp" in name)
-    global _ARM_STEP_OVERRIDE
+    global _ARM_STEP_OVERRIDE, _GRIPPER_STEP_OVERRIDE
     _prev_arm_override = _ARM_STEP_OVERRIDE
+    _prev_gripper_override = _GRIPPER_STEP_OVERRIDE
     if is_grasp_phase and args.grasp_arm_step_delta > 0.0:
         _ARM_STEP_OVERRIDE = abs(args.grasp_arm_step_delta)
+    # close-on-cube(.grasp)만 느린 그리퍼 — 나머지 단계는 travel 속도로 빠르게.
+    if ".grasp" in name:
+        _GRIPPER_STEP_OVERRIDE = abs(args.max_gripper_step_delta)
     # tilt 는 descend 에서 완성해야 한다(arm 이 tilted q_goal 에 도달할 때까지 완주). grasp(닫기)
     # 단계까지 settle 을 강제하면 닫는 동안 arm 이 재계산된 자세로 움직여 큐브를 밀어내 grip 이 풀린다.
     require_arm_settled = (".descend" in name) and rmpflow_driver is None
     if rmpflow_driver is None:
-        q_goal, plan = _fk_solve_joint_target(
-            env,
-            target,
-            gripper_target,
-            device,
-            samples=args.fk_samples,
-            continuity_weight=args.continuity_weight,
-            seed_offset=len(trace) * 997,
-            grasp_tilt_weight=(args.grasp_tilt_weight if is_grasp_phase else 0.0),
-            floor_z=CUBE_DESK_TOP_Z,
-        )
+        global _LAST_DESCEND_TILT_DEG
+        q_goal = None
+        det_diag: dict[str, Any] = {}
+        is_close_phase = ".grasp" in name
+        if args.grasp_config_mode == "deterministic":
+            det_gate = (args.descend_tolerance if is_grasp_phase else args.target_tolerance) * 0.8
+            # 닫기 단계는 descend 가 고른 tilt 로 잠근다(반대쪽 tilt 로 갈아타며 스윙 방지).
+            locked_ladder: tuple[float, ...] | None = None
+            if is_close_phase and _LAST_DESCEND_TILT_DEG is not None:
+                locked_ladder = (_LAST_DESCEND_TILT_DEG,)
+            q_goal, det_diag = _deterministic_solve_joint_target(
+                env,
+                target,
+                gripper_target,
+                device,
+                grasp_mode=is_grasp_phase,
+                pos_gate=det_gate,
+                cube_name=grasp_cube_name,
+                variant=_attempt_variant_from_phase_name(name),
+                floor_z=CUBE_DESK_TOP_Z,
+                tilt_ladder=locked_ladder,
+                # 이송·place 단계는 손목 수평(palm-down) 유지 — 떨굴 때 수평 자세.
+                level_axis=any(
+                    token in name
+                    for token in (".transport_via", ".move_to_pre_place", ".place_descend")
+                ),
+            )
+            if ".descend" in name and q_goal is not None:
+                _LAST_DESCEND_TILT_DEG = det_diag.get("det_tilt_deg")
+        if q_goal is not None:
+            plan = det_diag
+        elif args.grasp_config_mode == "deterministic" and is_close_phase:
+            # 닫기 단계에서 잠긴 tilt 가 gate 를 못 넘으면 random-FK 로 갈아타지 않고
+            # (전혀 다른 자세로 스윙할 위험) 현재 자세를 유지한 채 그리퍼만 닫는다.
+            q_goal = command[:ARM_DOF].clone()
+            plan = {**det_diag, "det_grasp_hold_pose": True}
+        else:
+            # random_fk 모드 또는 deterministic gate 실패 폴백.
+            q_goal, plan = _fk_solve_joint_target(
+                env,
+                target,
+                gripper_target,
+                device,
+                samples=args.fk_samples,
+                continuity_weight=args.continuity_weight,
+                seed_offset=len(trace) * 997,
+                grasp_tilt_weight=(args.grasp_tilt_weight if is_grasp_phase else 0.0),
+                floor_z=CUBE_DESK_TOP_Z,
+            )
+            if det_diag:
+                plan.update(det_diag)
     else:
         q_goal, plan = rmpflow_driver.compute(target[0], _cur_R())
 
@@ -1677,6 +2114,19 @@ def _phase(
                 and not args.disable_jacobian_refine
                 and (step >= actual_steps // 2 or err <= max(0.08, args.target_tolerance * 3.0))
             )
+            # det descend 미세보정: 팔이 계획 자세(q_goal)에 도착했는데도 grasp point 가
+            # tolerance 밖이면(PD 처짐·접촉) 마지막 cm 를 폐루프 DLS 로 밀어넣는다.
+            if (
+                not use_refine
+                and args.grasp_config_mode == "deterministic"
+                and rmpflow_driver is None
+                and ".descend" in name
+                and not args.disable_jacobian_refine
+            ):
+                arm_at_goal = float(
+                    torch.max(torch.abs(command[:ARM_DOF] - q_goal[:ARM_DOF])).item()
+                ) <= 2.0e-3
+                use_refine = arm_at_goal and err > tolerance
         arm_target = q_goal
         if rmpflow_driver is not None:
             target = target_fn().to(device=device, dtype=torch.float32).reshape(1, 3)
@@ -1720,9 +2170,11 @@ def _phase(
         if recorder is not None:
             recorder.record(env, action)
         # 스텝 직후 위치로 오차 갱신(early-exit 판정용).
-        err_now = float(torch.linalg.norm(_grasp_point_pos(robot)[0] - target[0]).item())
+        err_vec = _grasp_point_pos(robot)[0] - target[0]
+        err_now = float(torch.linalg.norm(err_vec).item())
         min_error = min(min_error, err, err_now)
         final_error = err_now
+        final_error_h = float(torch.linalg.norm(err_vec[:2]).item())
         if bool(dones[0].item()):
             done_seen = True
         if err_now <= tolerance and reached_step is None:
@@ -1733,7 +2185,9 @@ def _phase(
             # grasp 단계는 arm 이 tilted q_goal 에 도달해야 tilt 가 실제 실행된다(제어점만 닿으면
             # 자세가 덜 기운 채 끊김). 그 외 단계는 위치 도달이면 충분.
             if require_arm_settled:
-                arm_settled = float(
+                # 미세보정(refine)이 이미 발동했다면 q_goal 도달 후 폐루프로 넘어간 것이므로
+                # tilt 는 실행 완료 — command↔q_goal 비교 대신 settled 로 본다.
+                arm_settled = refine_steps > 0 or float(
                     torch.max(torch.abs(command[:ARM_DOF] - q_goal[:ARM_DOF])).item()
                 ) <= 2.0e-3
             else:
@@ -1755,6 +2209,7 @@ def _phase(
         "early_exit_step": early_exit_step,
         "min_error_m": round(min_error, 5),
         "final_error_m": round(final_error, 5),
+        "final_error_h_m": round(final_error_h, 5),
         "done_seen": done_seen,
         "target_grasp_point_w": _round_list(target[0]),
         "grasp_point_w": _round_list(_grasp_point_pos(robot)[0]),
@@ -1765,6 +2220,7 @@ def _phase(
     }
     trace.append(stat)
     _ARM_STEP_OVERRIDE = _prev_arm_override
+    _GRIPPER_STEP_OVERRIDE = _prev_gripper_override
     return stat
 
 
@@ -2131,9 +2587,16 @@ def _run_diff_ik_state_machine(
                 tolerance=args.target_tolerance,
             )
             grasped = _cube_lifted(env, cube_name)
+            # seated 진단: grasp_feasibility 의 held 판정식(grasp point ↔ cube 거리).
+            grasp_hold_dist = float(
+                torch.linalg.norm(
+                    scene[cube_name].data.root_pos_w[0] - _grasp_point_pos(robot)[0]
+                ).item()
+            )
             trace.append({
                 "phase": f"{attempt_prefix}.lift_check",
                 "grasped": grasped,
+                "grasp_hold_dist_m": round(grasp_hold_dist, 5),
                 "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
                 "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
                 **_diagnostic_pose(env),
@@ -2321,6 +2784,9 @@ def _run_state_machine(
         cube_start = scene[cube_name].data.root_pos_w[0].clone()
         phase_prefix = cube_name.lower()
         bowl_offset_xy = _bowl_place_offset(device, placement_index)
+        # 40mm 큐브(Cube3/4)는 pick 단계 개방을 더 크게(아래 *_BY_CUBE 상수).
+        pick_open = _pick_gripper_open(cube_name)
+        pick_descend_gripper = _pick_descend_gripper(cube_name)
         grasped = False
         for attempt in range(1, max(1, args.max_grasp_attempts) + 1):
             attempt_prefix = f"{phase_prefix}.attempt{attempt}"
@@ -2336,7 +2802,7 @@ def _run_state_machine(
             _hold_joint_target(
                 env,
                 open_hold,
-                args.gripper_open,
+                pick_open,
                 args.open_steps,
                 command,
                 recorder,
@@ -2364,7 +2830,7 @@ def _run_state_machine(
                 device,
                 f"{attempt_prefix}.move_to_pre_pick",
                 _target_from_cube(env, cube_name, args.approach_height),
-                args.gripper_open,
+                pick_open,
                 args.approach_steps,
                 trace,
                 command,
@@ -2394,12 +2860,12 @@ def _run_state_machine(
             # 빠지지 않게). 큐브는 approach 동안 이미 안정화됐다.
             grasp_target = _target_pick(env, cube_name)().clone()
             # 강하: 동일 xy, grasp point 를 큐브 하부(≈바닥) 까지 top-down 으로 수직 강하.
-            _phase(
+            descend_stat = _phase(
                 env,
                 device,
                 f"{attempt_prefix}.descend",
                 _fixed_target(grasp_target),
-                args.descend_gripper,
+                pick_descend_gripper,
                 args.descend_steps,
                 trace,
                 command,
@@ -2408,7 +2874,36 @@ def _run_state_machine(
                 rmpflow_driver,
                 tolerance=args.descend_tolerance,
                 target_R_fn=_pick_R_fn(),
+                grasp_cube_name=cube_name,
             )
+            # 착좌 게이트(deterministic): descend 가 목표를 충분히 못 맞췄으면 헛닫지 않고,
+            # 큐브 *현재* 위치(밀렸을 수 있음) 기준으로 짧은 보정 descend 를 1회 더 한다.
+            if (
+                args.grasp_config_mode == "deterministic"
+                and rmpflow_driver is None
+                and (
+                    float(descend_stat.get("final_error_m", 0.0)) > args.descend_tolerance * 1.5
+                    # 수평으로 7mm 이상 빗나간 채 닫으면 꼭지점을 집는다 — 보정 후 닫기.
+                    or float(descend_stat.get("final_error_h_m", 0.0)) > 0.007
+                )
+            ):
+                grasp_target = _target_pick(env, cube_name)().clone()
+                _phase(
+                    env,
+                    device,
+                    f"{attempt_prefix}.descend_fix",
+                    _fixed_target(grasp_target),
+                    pick_descend_gripper,
+                    max(30, args.descend_steps // 2),
+                    trace,
+                    command,
+                    recorder,
+                    expert_recorder,
+                    rmpflow_driver,
+                    tolerance=args.descend_tolerance,
+                    target_R_fn=_pick_R_fn(),
+                    grasp_cube_name=cube_name,
+                )
             _append_fsm_event(
                 fsm_trace,
                 PickCubeFSMState.GRASP,
@@ -2420,7 +2915,7 @@ def _run_state_machine(
             # 잡기: 닫는 동안 top-down DLS 를 유지(고정 grasp_target)해 grasp point 를 큐브에 계속
             # 눌러붙인 채 그리퍼를 닫는다. 검증된 20260605 close 메커니즘(닫는 중 IK 지속)과 동일.
             grasp_min_steps = _gripper_transition_step_count(
-                float(command[5].item()), args.gripper_closed
+                float(command[5].item()), args.gripper_closed, step=args.max_gripper_step_delta
             ) + max(0, args.grasp_settle_steps)
             _phase(
                 env,
@@ -2437,6 +2932,7 @@ def _run_state_machine(
                 tolerance=args.target_tolerance,
                 target_R_fn=_pick_R_fn(),
                 min_steps=grasp_min_steps,
+                grasp_cube_name=cube_name,
             )
             _append_fsm_event(
                 fsm_trace,
@@ -2464,9 +2960,16 @@ def _run_state_machine(
                 target_R_fn=_pick_R_fn(),
             )
             grasped = _cube_lifted(env, cube_name)
+            # seated 진단: grasp_feasibility 의 held 판정식(grasp point ↔ cube 거리).
+            grasp_hold_dist = float(
+                torch.linalg.norm(
+                    scene[cube_name].data.root_pos_w[0] - _grasp_point_pos(robot)[0]
+                ).item()
+            )
             trace.append({
                 "phase": f"{attempt_prefix}.lift_check",
                 "grasped": grasped,
+                "grasp_hold_dist_m": round(grasp_hold_dist, 5),
                 "cube_w": _round_list(scene[cube_name].data.root_pos_w[0]),
                 "joint_pos": _round_list(robot.data.joint_pos[0, :6]),
                 **_diagnostic_pose(env),
@@ -2505,7 +3008,7 @@ def _run_state_machine(
                 device,
                 f"{attempt_prefix}.retry_lift",
                 _fixed_target(retry_up_target),
-                args.gripper_open,
+                pick_open,
                 args.lift_steps,
                 trace,
                 command,
@@ -2552,8 +3055,31 @@ def _run_state_machine(
             next_state=PickCubeFSMState.PLACE_DESCEND,
             reason="move_above_bowl_safe_height",
         )
-        # 수송: 그릇 위로 top-down(palm-down) 자세 유지하며 직선 이동. transport_height 를
-        # 낮춰(0.12) 동선을 짧게. ikpy 가 매 스텝 live bowl 위치를 추종해 cartesian 직진한다.
+        # 이송 경유점: joint-space 보간 경로가 호를 그리며 가라앉아 스윙 중 그릇을 칠 수
+        # 있다(ep4 영상에서 그릇 엎음 확인). 멀리 옮길 때는 중간 지점 상공을 먼저 거친다.
+        gp_now = _grasp_point_pos(robot)[0]
+        bowl_xy_now = scene[BOWL_NAME].data.root_pos_w[0, :2]
+        if float(torch.linalg.norm(gp_now[:2] - bowl_xy_now).item()) > 0.18:
+            via = gp_now.clone()
+            via[:2] = 0.5 * (gp_now[:2] + bowl_xy_now)
+            via[2] = _bowl_top_z(env) + args.transport_height + 0.02
+            _phase(
+                env,
+                device,
+                f"{phase_prefix}.transport_via",
+                _fixed_target(via),
+                args.gripper_closed,
+                max(30, args.transport_steps // 2),
+                trace,
+                command,
+                recorder,
+                expert_recorder,
+                rmpflow_driver,
+                tolerance=args.target_tolerance * 2.0,
+                target_R_fn=_topdown_R_fn(),
+            )
+        # 수송: 그릇 위로 top-down(palm-down) 자세 유지하며 직선 이동. ikpy 가 매 스텝
+        # live bowl 위치를 추종해 cartesian 직진한다.
         _phase(
             env,
             device,
@@ -2771,6 +3297,24 @@ def main() -> None:
         )
         if args.dataset_dir is not None and not args.no_videos:
             add_pick_cube_cameras(env_cfg.scene)
+        if args.review_video_dir is not None:
+            # 리뷰용 뷰어 카메라(근거리 사선 부감) 주입 — InteractiveScene 이
+            # scene_cfg.__dict__ 를 순회하므로 동적 속성이 센서로 등록된다.
+            review_eye = tuple(float(v) for v in args.review_cam_eye.split(","))
+            review_target = tuple(float(v) for v in args.review_cam_target.split(","))
+            setattr(
+                env_cfg.scene,
+                "review_camera",
+                _pinhole_camera_cfg(
+                    "{ENV_REGEX_NS}/ReviewCamera",
+                    review_eye,
+                    _look_at_quat_world(review_eye, review_target),
+                    args.review_cam_focal,
+                    focus_distance=0.8,
+                    clipping_range=(0.05, 6.0),
+                ),
+            )
+            args.review_video_dir.mkdir(parents=True, exist_ok=True)
 
         env = gym.make(args.task, cfg=env_cfg)
         env.reset()
@@ -2791,6 +3335,17 @@ def main() -> None:
             zero_action[0, 5] = args.gripper_open
         for _ in range(max(0, args.warmup_steps)):
             _step_env(env, zero_action)
+        if args.review_pose_check:
+            # 구도 확인: 렌더 안정화 후 정지 프레임만 저장하고 종료.
+            for _ in range(10):
+                _step_env(env, zero_action)
+            frame = _camera_rgb_u8(env.unwrapped.scene["review_camera"])
+            pose_path = args.review_video_dir / "pose_check.png"
+            imageio.imwrite(str(pose_path), frame)
+            print(f"[review] pose check saved: {pose_path}", flush=True)
+            env.close()
+            env = None
+            return
         active_names = CUBE_NAMES[: args.active_objects]
         if args.num_episodes > 1:
             # 신뢰성 sweep: 한 세션에서 N회 reset+SM. dataset/expert 기록은 비활성.
@@ -2807,17 +3362,52 @@ def main() -> None:
                     n: [round(float(c), 4) for c in _scene[n].data.root_pos_w[0, :2].tolist()]
                     for n in active_names
                 }
-                ep_result = _run_state_machine(env, device, active_names, None, None)
+                global _REVIEW_WRITER, _STEP_COUNTER
+                review_path: Path | None = None
+                if args.review_video_dir is not None:
+                    review_path = args.review_video_dir / f"ep{ep:02d}.mp4"
+                    _REVIEW_WRITER = imageio.get_writer(str(review_path), fps=FPS)
+                ep_steps_before = _STEP_COUNTER
+                try:
+                    ep_result = _run_state_machine(env, device, active_names, None, None)
+                finally:
+                    if _REVIEW_WRITER is not None:
+                        _REVIEW_WRITER.close()
+                        _REVIEW_WRITER = None
+                ep_duration_s = round((_STEP_COUNTER - ep_steps_before) / float(FPS), 2)
                 inside = ep_result.get("final_inside", {})
                 n_inside = int(sum(1 for v in inside.values() if v))
+                if review_path is not None and review_path.exists():
+                    suffix = "ok" if n_inside >= len(active_names) else "fail"
+                    final_path = review_path.with_name(f"ep{ep:02d}_{suffix}.mp4")
+                    review_path.rename(final_path)
+                    print(f"[review] saved {final_path}", flush=True)
+                # 실패 에피소드는 grasp 관련 phase 의 압축 진단을 남긴다(원인 추적용 —
+                # 전체 trace 는 sweep 에서 버리므로 여기서만 추출).
+                fail_diag: list[dict[str, Any]] | None = None
+                if n_inside < len(active_names):
+                    fail_diag = []
+                    _diag_keys = (
+                        "phase", "grasped", "grasp_hold_dist_m", "inside_bowl",
+                        "det_tilt_deg", "det_pos_err_m", "det_tilt_pen", "det_roll_err_deg",
+                        "det_fallback", "det_grasp_hold_pose", "jacobian_refine_steps",
+                        "planned_error_m", "final_error_m", "early_exit_step", "cube_w",
+                    )
+                    for entry in ep_result.get("trace", []):
+                        ph = entry.get("phase", "")
+                        if ph.endswith((".descend", ".grasp", ".lift_check", ".result")):
+                            fail_diag.append({k: entry[k] for k in _diag_keys if k in entry})
                 episodes.append({
                     "episode": ep,
                     "spawn_xy": spawn_xy,
+                    "duration_s": ep_duration_s,
+                    "bowl_tipped": _bowl_tipped(env),
                     "final_inside": inside,
                     "n_inside": n_inside,
                     "all_placed": bool(ep_result.get("placed_and_released", False)),
                     "bowl_w": ep_result.get("bowl_w"),
                     "cube_w": ep_result.get("cube_w"),
+                    "fail_diag": fail_diag,
                 })
                 print(f"[sweep] ep {ep}: n_inside={n_inside} inside={inside} spawn={spawn_xy}", flush=True)
             n_eps = len(episodes)
@@ -2836,6 +3426,7 @@ def main() -> None:
                 "object_radius_scale": args.object_radius_scale,
                 "container_angle_scale": args.container_angle_scale,
                 "controller_mode": args.controller_mode,
+                "grasp_config_mode": args.grasp_config_mode,
                 "grasp_pick_offset": args.grasp_pick_offset,
                 "grasp_lateral_offset": args.grasp_lateral_offset,
                 "grasp_tilt_weight": args.grasp_tilt_weight,
@@ -2912,7 +3503,13 @@ def main() -> None:
         else:
             controller_payload = {
                 **common_controller,
-                "type": "random_fk_waypoint_joint_position",
+                "type": (
+                    "deterministic_fd_dls_waypoint_joint_position"
+                    if args.grasp_config_mode == "deterministic"
+                    else "random_fk_waypoint_joint_position"
+                ),
+                "grasp_config_mode": args.grasp_config_mode,
+                "det_tilt_ladder_deg": list(_DET_TILT_LADDER_DEG),
                 "fk_samples": args.fk_samples,
                 "continuity_weight": args.continuity_weight,
                 "grasp_tilt_weight": args.grasp_tilt_weight,
