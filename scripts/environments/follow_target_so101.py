@@ -353,6 +353,12 @@ def main() -> int:
 
 def _run_tune(world) -> int:
     """컨트롤러 없이 GUI 대기 (Lula Test Widget 튜닝용). headless 면 smoke 후 종료."""
+    # 튜닝 UI 확장 활성화 — AppLauncher 앱엔 기본 비활성이라 Tools>Robotics 메뉴가 없다.
+    for ext in ("isaacsim.robot_motion.lula_test_widget", "isaacsim.robot_setup.xrdf_editor"):
+        try:
+            enable_extension(ext)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[follow_target][tune] 확장 '{ext}' 활성화 실패: {exc}")
     log("[follow_target][tune] scene + 고정된 SO-101 준비됨. "
         "Tools > Robotics > Lula Test Widget 으로 RMPFlow 를 튜닝하세요.")
     if args.headless:  # smoke: 부팅·로딩만 확인하고 종료
