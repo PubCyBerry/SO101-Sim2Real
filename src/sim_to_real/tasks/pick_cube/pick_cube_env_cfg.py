@@ -67,12 +67,14 @@ _BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
 # 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준
 # ---------------------------------------------------------------------------
 
-# 로봇 도달 범위 안쪽, 매트 경계(x:[1.50,2.36], y:[-0.52,-0.12])에서 마진 확보.
-# y 상한 -0.33: 그릇 기본 위치(y=-0.26)와의 충분한 이격 확보
-#   (그릇-큐브 최소 거리 0.18m는 randomize_cubes_scattered 의 min_bowl_sep 로 추가 보장).
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (1.60, 2.08)
-# y_lo = mat_back_edge(-0.52) + 50mm 여유 = -0.47 (로봇팔 도달이 어려운 매트 아래쪽 가장자리 회피)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.47, -0.33)
+# 로봇 SO-101 도달(reach) 범위 안쪽으로 제한. reach 매핑 sweep(1큐브 full-scatter 12 ep,
+# robot base=(1.84,-0.565))으로 가장자리 실패 편향을 측정해 보수화:
+#   · x 극단(≤1.61, ≥2.06)에서 grasp 실패 편향 → x_range 를 [1.66, 2.04] 로 (±0.20 안쪽).
+#   · y 매트 뒤 가장자리(≤-0.465, base 에 너무 가까워 arm 이 접혀 top-down 자세 불리) 실패 →
+#     y_lo 를 -0.46 으로. y 상한 -0.345 는 그릇(y=-0.26)과 이격(min_bowl_sep 추가 보장).
+# (가장자리 외 실패는 reach 가 아니라 joint_fk random-FK 의 marginal grasp 분산임 — CONTEXT 참고.)
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (1.66, 2.04)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.46, -0.345)
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
