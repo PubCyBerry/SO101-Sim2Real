@@ -76,7 +76,9 @@ Isaac Sim WebRTC Streaming Client 로 접속. (로컬 디스플레이가 있으�
 > `RMPFLOW_BASE_*` 상수는 위젯 튜닝엔 불필요.
 
 ### 2.2 실행·관찰 (RmpFlow 패널)
-- **`Follow Target`** → target 큐브 생성 → 기즈모로 드래그하면 EE 가 추종.
+- ⚠ **버튼 주의**: "Follow Target" 버튼이 **두 곳**에 있다. RMPFlow 튜닝은 **`RmpFlow` 패널의 Follow Target**("Use RmpFlow to follow a target")을 쓴다. `Lula Kinematics Solver` 패널의 Follow Target 은 IK 점검용 — 도달 불가 시 `Failed to compute Inverse Kinematics` 를 뱉으며 로봇이 안 움직인다.
+- ⚠ **target 이 멀리 생긴다**: 위젯은 target 을 항상 **world (0.5, 0, 0.5)** 에 만든다(`test_scenarios.py` 의 `_create_target`). SO-101 은 cube_desk 에서 world ~(1.84, -0.565, 0.67) 에 있어 **이 기본 target 은 도달 범위(대략 x 1.6~2.0 / y -0.6~-0.25 / z 0.7~1.0) 밖**이다. → Stage 에서 **`/World/Target` 선택 → Property > Transform > Translate 를 `(1.80, -0.42, 0.85)`** 같은 도달 지점으로 옮긴 뒤 드래그한다.
+- **`Follow Target`**(RmpFlow) → target 큐브 생성 → 위처럼 도달 범위로 옮기면 EE 가 추종.
 - **`Toggle Debugging Mode`** → **collision sphere 표시**. 떨림/자기충돌/반발 지점을 눈으로 확인.
 - **Sinusoidal Target** (frequency·radius·height 슬라이더) → 자동 궤적 추종으로 지연·떨림 정량 관찰.
 
