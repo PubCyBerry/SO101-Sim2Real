@@ -181,8 +181,9 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
     policy_cfg = {
         "class_name": "ActorCritic",
         "init_noise_std": args.init_noise_std,
-        "actor_hidden_dims": [256, 128] if args.recurrent else [128, 128],
-        "critic_hidden_dims": [256, 128] if args.recurrent else [128, 128],
+        # MLP/LSTM 공통 [256,128] — near-MDP 87dim obs 에 충분 용량(MLP 도 LSTM 과 동등 비교).
+        "actor_hidden_dims": [256, 128],
+        "critic_hidden_dims": [256, 128],
         "activation": "elu",
         "actor_obs_normalization": args.obs_normalization,
         "critic_obs_normalization": args.obs_normalization,

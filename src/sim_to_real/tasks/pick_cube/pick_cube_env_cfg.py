@@ -682,7 +682,7 @@ class PickCubeRewardsCfg:
     # place 정밀도 부족(v6 over_bowl 0.86→placed 0.10)의 핵심 레버.
     place_height_cube = RewTerm(
         func=task_mdp.place_height_reward,
-        weight=30.0,
+        weight=20.0,  # v8: 30→20 reward 스케일 재조정(value target 분산↓)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -698,7 +698,7 @@ class PickCubeRewardsCfg:
     # Stage 5: 그릇 안 삽입 — 그리퍼 조건 없음 (밀집, 큐브 수 비례)
     insert_cube = RewTerm(
         func=task_mdp.insert_reward,
-        weight=80.0,
+        weight=40.0,  # v8: 80→40 reward 스케일 재조정
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -762,7 +762,7 @@ class PickCubeRewardsCfg:
     # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
     task_success = RewTerm(
         func=task_mdp.task_success_bonus,
-        weight=200.0,
+        weight=50.0,  # v8: 200→50 reward 스케일 재조정(최대 value target 200→50, 안정성)
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -787,12 +787,13 @@ class PickCubeRewardsCfg:
 
     # 속도 형상화 — 느린 정책 페널티 + 빠른 성공 보너스.
     # reward hacking 아님: 성공 반경/grasp 물리 불변, "시간"만 형상화한다.
-    # 스케일: 에피소드 ≈900 step. time_penalty 누적 최대 -18(전구간 미완료) →
-    #   insert(80)/success(200) 대비 작아 탐색 억제 X. early_finish 는 매 step
-    #   남은시간비율을 더해 일찍 완료·유지할수록 누적 이득이 커진다.
+    # v8: success 200→50·early_finish 100→30 압축에 맞춰 time_penalty 도 비례 축소
+    #   (-0.02→-0.006). 시간 형상화(±)와 성공 보상의 상대 비율 유지 — 성공 압축 후
+    #   "빨리 끝내기"가 성공보다 과해지는 것 방지. 행동 교정 페널티(bowl_disturb/
+    #   cube_predisturb/smoothness)는 절대값 작고 상대 비율이 곧 교정 의도라 유지.
     time_penalty = RewTerm(
         func=task_mdp.time_penalty,
-        weight=-0.02,
+        weight=-0.006,
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -805,7 +806,7 @@ class PickCubeRewardsCfg:
     # 터미널 보너스로 동작한다. 완료 시각에 따라 ~100(즉시)→~17(25s) 차등.
     early_finish_bonus = RewTerm(
         func=task_mdp.early_finish_bonus,
-        weight=100.0,
+        weight=30.0,  # v8: 100→30 reward 스케일 재조정
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,

@@ -13,7 +13,7 @@
 
 ---
 
-## 작업 인계 (2026-06-11 — PickCube LSTM(PPO) RL: v7 smoothness + place 정밀도)
+## 작업 인계 (2026-06-11 — PickCube RL: v8 MLP + reward 재조정 + epochs↓)
 
 > 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T25 전체 시행착오). 여기는 인계 요약만.
 
@@ -21,7 +21,7 @@
 - **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.
 - **✅ grasp 해결(v4 점화 + v6 신뢰성)**: scratch.grasp/lift/over_bowl **0.85~0.89** 안정. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+slew 2.5+RND grasp_focus(v4) + **cube_predisturb 패널티(-3)·cube_lost 추락 종료**(v6, 큐브 변위 -0.40→-0.08·추락 6.9%→3.4%).
 - **남은 핵심 문제 = place 정밀도(v7 개입)**: grasp 후 `over_bowl 0.86 → placed 0.10`(전이 12%). 진단 = release valley(안 열어서) 아니라 **정밀도(열어도 그릇 안 정확히 안 들어감)**. 영상서 2가지 비정상: ① 큐브 든 채 **위아래 진동(jitter)**(smoothness 페널티 -1e-4 사실상 0) ② 그릇 위 **hover**(over_bowl_drop이 '살짝 열고 버티기' 캠핑 보상 + bowl_disturb 위축).
-- **현재 학습 중**: run `lstm256_stage1_grasp_v7`(fresh), 로그 `train_grasp_v7.log`. **num_envs 16384**(VRAM~29GB). v7 개입(T25, 모두 보상 param·obs 87dim 불변): **action_rate/joint_vel -1e-4→-1e-3**(jitter 억제, sim2real 필수), **over_bowl_drop close_ref 0.2→0.4+xy_range 0.10→0.06**(살짝열기 캠핑 차단+그릇중심 정밀), **place_height xy_range 0.18→0.08**(중심 정렬), **bowl_disturb -5→-3**(접근 위축 완화). 나머지 v4~v6 동일.
+- **현재 학습 중**: run `mlp_stage1_grasp_v8`(fresh, **MLP**), 로그 `train_grasp_v8.log`. **num_envs 16384**. v8 개입(T26): **① reward 스케일 재조정**(rsl_rl은 extrinsic reward norm 미지원 → value target 분산↓ 위해 큰 항 압축: task_success 200→50·early_finish 100→30·insert 80→40·place_height 30→20·time_penalty -0.02→-0.006. 행동 교정 페널티 bowl_disturb/cube_predisturb/smoothness는 유지) **② epochs 10→6**(속도) **③ MLP 전환**(`--recurrent` 제거, hidden [256,128]. near-MDP라 LSTM 이득 작음, 요구사항서 벗어남=사용자 결정. sim2real 부분관측 단계엔 recurrent 재도입). v7 개입(smoothness·place 정밀도·그릇/큐브 패널티) 유지.
 - **obs 87dim**: joint·grasp point·큐브·그릇 pos+rel + 속도 + 큐브 yaw/크기·ee quat·**그릇 quat**(`include_container_orientation`). near-MDP → MLP도 가능하나 LSTM 유지(요구사항+sim2real 부분관측 연속성).
 - **16384 핵심**: PhysX 64K 머티리얼 한도 → 큐브 CubeFriction scene.usd 공유 통합(env당 6→3). 상세 `docs/TROUBLESHOOTING.md`.
 - **모니터(cron, 세션 독립)**: `scripts/reinforcement_learning/cron_monitor_v4.sh` crontab `*/30` 자동 점검. 최신 run 자동 탐색 → 최신 ckpt `monitor_eval.py`(scratch/full/pre 집계 + 16-env 비디오). 결과 `<run>/monitor_history/history.jsonl`, 비디오 `video_<ts>_model_N.mp4`. cron 로그 `logs/cron_monitor_v4.cron.log`. 진짜 지표 = **scratch 그룹**. 끄기 `crontab -l|grep -vF cron_monitor_v4.sh|crontab -`.

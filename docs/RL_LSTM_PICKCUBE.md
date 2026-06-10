@@ -225,6 +225,15 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
   - run `lstm256_stage1_grasp_v7`, 로그 `train_grasp_v7.log`.
 - **판정**: ① jitter 감소(action_rate 페널티 절대값↓, 영상 매끄러움) ② over_bowl→placed 전이가 v6 0.12 넘어 상승(정밀도 해소). scratch.success→0.80.
 
+### T26. 🔧 학습 속도·안정성 묶음 — reward 스케일 재조정 + epochs↓ + MLP (v8, fresh)
+- **배경**: 웹 검색(2025~2026 실사례, Isaac Lab/RSL-RL/PPO 안정성)으로 속도·안정성 레버 정리 → 우리 병목은 속도 아닌 수렴이라 안정성·보상설계 우선. 사용자 지시로 3종 적용.
+- **① reward 스케일 재조정(정규화)**: rsl_rl PPO는 advantage norm만 지원, **extrinsic reward/returns normalization 없음**(`ppo.py` 확인). 보상 weight 1~200 광범위 → value target 분산 큼(불안정). 큰 sparse 항 압축으로 value target 분산↓: **task_success 200→50, early_finish 100→30, insert 80→40, place_height 30→20**. 시간 형상화 쌍 일관: **time_penalty -0.02→-0.006**(success 압축에 비례, "빨리 끝내기"가 성공 압도 방지). **행동 교정 페널티(bowl_disturb/cube_predisturb/action_rate/joint_vel)는 유지** — 절대값 작아 분산 주범 아니고 상대 비율이 곧 교정 의도(흔들기/교란 억제).
+- **② epochs 단축**: num_learning_epochs **10→6**. iter 속도↑(sample efficiency 약간 희생). MLP라 BPTT 없어 부담 적음.
+- **③ MLP 전환**: `--recurrent` 제거 → feedforward ActorCritic. obs 87dim near-MDP(완전관측)라 LSTM 메모리 이득 작음. hidden **[256,128]** 통일(train.py, MLP도 LSTM과 동등 용량). **요구사항(LSTM)에서 벗어남 — 사용자 결정**. sim2real 부분관측 단계에선 recurrent 재도입 필요할 수 있음(현 단계는 privileged state라 MLP 적합).
+- **cron 수정**: monitor_eval 호출에서 `--recurrent --rnn_*` 제거(MLP ckpt 로드). `--obs_normalization`만 유지.
+- run `mlp_stage1_grasp_v8`, 로그 `train_grasp_v8.log`. 나머지 v7 동일(smoothness·place 정밀도·그릇/큐브 패널티·RND·부트스트랩·gamma 0.997).
+- **판정**: ① value_function loss 안정·수렴 속도(MLP가 LSTM 대비) ② grasp 재점화·place 전이가 v6/v7 수준 이상 ③ jitter. MLP가 LSTM보다 못하면 LSTM 복귀(아키텍처 A/B 비교 겸).
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)

@@ -58,8 +58,7 @@ echo "[$(date -Is)] 점검 시작: $MODEL_TAG (run=$(basename "$RUN"))"
 # ── monitor_eval 실행 (비디오 녹화 포함) ───────────────────────
 set +e
 OMNI_KIT_ACCEPT_EULA=YES PYTHONPATH="$WORKTREE/src" "$PY" \
-  scripts/reinforcement_learning/monitor_eval.py --recurrent --rnn_hidden_dim 256 \
-  --rnn_num_layers 1 --obs_normalization --checkpoint "$CKPT" \
+  scripts/reinforcement_learning/monitor_eval.py --obs_normalization --checkpoint "$CKPT" \
   --num_envs 16 --num_episodes 48 --max_steps 5000 --active_objects 1 \
   --bootstrap_prob 0.6 --pregrasp_frac 0.5 --video --video_length 450 --device cuda:0 \
   > "$EVAL_LOG" 2>&1
