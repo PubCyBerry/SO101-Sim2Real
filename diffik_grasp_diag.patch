@@ -1,0 +1,205 @@
+diff --git a/scripts/environments/pick_cube_state_machine.py b/scripts/environments/pick_cube_state_machine.py
+index fdc72d0..5e5003b 100644
+--- a/scripts/environments/pick_cube_state_machine.py
++++ b/scripts/environments/pick_cube_state_machine.py
+@@ -112,6 +112,14 @@ parser.add_argument("--settle_steps", type=int, default=20)
+ # 높이/오프셋 (m)
+ parser.add_argument("--approach_height", type=float, default=0.10, help="큐브 위 접근 높이")
+ parser.add_argument("--grasp_z_offset", type=float, default=0.0, help="grasp 시 큐브 중심 기준 tip z 오프셋")
++parser.add_argument("--grasp_z_gain", type=float, default=0.5,
++                    help="descend 시 z over-drive 게인. 약하면(0.5) ee_z 도달 부족으로 손가락이 큐브 "
++                         "위에 머물러 jaw 가 큐브 윗면을 쳐 튕김. 1.0~1.5 로 키워 손가락을 큐브 측면 깊이로.")
++parser.add_argument("--grasp_lateral", type=float, default=0.0,
++                    help="비대칭 보정(m): ee 목표를 갭축(gripper-local +Y = jaw 회전 방향)으로 lateral "
++                         "이동해 큐브를 고정 finger(반대편)에 밀착. SO-101 은 jaw 만 회전하는 비대칭 "
++                         "그리퍼라, 큐브가 갭 정중앙이면 jaw 가 닫히며 큐브를 고정 finger 너머로 쳐낸다. "
++                         "양수=ee 를 jaw 쪽으로(큐브는 고정 finger 쪽). 0.01~0.02 시도, 부호도 sweep.")
+ parser.add_argument("--lift_height", type=float, default=0.10, help="책상 윗면 기준 들어올림")
+ parser.add_argument("--transport_height", type=float, default=0.12, help="그릇 위 운반 높이")
+ parser.add_argument("--place_height", type=float, default=0.05, help="그릇 바닥 기준 release 높이")
+@@ -133,6 +141,14 @@ parser.add_argument("--arm_stiffness", type=float, default=0.0,
+                     help="arm joint PD stiffness override. 0=env 기본(soft PD 17.8) 유지. "
+                          "ee 가 target 을 못 따라가면 80~300 으로 상향.")
+ parser.add_argument("--arm_damping", type=float, default=0.0, help="arm joint PD damping override(0=기본).")
++# 단계별 arm PD (런타임 전환). 진단으로 확정: soft PD(17.8) 는 ee 가 큐브 중심에서 ~2cm 빗나가
++# (정상상태 오차) 큐브가 갭 가장자리에 걸려 닫을 때 밀림. stiff PD(120) 는 ee 를 0.4cm 로 정밀
++# 도달시키나, 닫을 때 단단한 팔이 큐브를 쳐내 비산. → approach/descend/lift 는 stiff(정밀 도달),
++# close 단계만 soft(부드러운 접촉)로 낮춰 큐브를 쳐내지 않게 한다.
++parser.add_argument("--descend_stiffness", type=float, default=120.0,
++                    help="approach/descend/lift 단계 arm stiffness(런타임). 0=전환 안 함. ee 정밀 도달용.")
++parser.add_argument("--grasp_stiffness", type=float, default=25.0,
++                    help="grasp close 단계 arm stiffness(런타임). 큐브 비산 방지로 낮게. 0=전환 안 함.")
+ # GUI 초기 뷰 — 작업영역(큐브·그리퍼)을 가깝게 측면에서 보는 각도.
+ parser.add_argument("--view_eye", type=_vec3, default=(2.30, -0.72, 0.95))
+ parser.add_argument("--view_lookat", type=_vec3, default=(1.80, -0.43, 0.75))
+@@ -260,8 +276,21 @@ class So101PickPlaceSM:
+         # 두 손가락 body(감쌈 진단용).
+         self._jaw_idx = self.robot.find_bodies("jaw")[0][0]
+         self._gripper_jid = self.robot.data.joint_names.index("gripper")
++        # 단계별 PD 전환용 arm joint 인덱스.
++        self._arm_jids = self.robot.find_joints(SO101_ARM_JOINTS)[0]
+         self.home_pos = torch.tensor([1.84, -0.40, CUBE_DESK_TOP_Z + 0.14], device=self.device)
+ 
++    def _set_arm_pd(self, stiffness: float) -> None:
++        """arm joint PD 를 런타임 전환. descend=stiff(ee 정밀 도달) / close=soft(부드러운 접촉).
++        damping 은 stiffness 비례(0.06배, 최소 env 기본 0.6)로 자동 — 과소댐핑 진동 방지."""
++        if stiffness <= 0:
++            return
++        n = len(self._arm_jids)
++        k = torch.full((1, n), float(stiffness), device=self.device)
++        d = torch.full((1, n), max(0.6, float(stiffness) * 0.06), device=self.device)
++        self.robot.write_joint_stiffness_to_sim(k, joint_ids=self._arm_jids)
++        self.robot.write_joint_damping_to_sim(d, joint_ids=self._arm_jids)
++
+     # --- 상태 스캔 ---
+     def scan(self) -> dict[str, torch.Tensor]:
+         names = list(CUBE_NAMES) + [BOWL_NAME]
+@@ -270,12 +299,31 @@ class So101PickPlaceSM:
+     def obj_pos(self, name: str) -> torch.Tensor:
+         return self.scene[name].data.root_pos_w[0, :3].clone()
+ 
++    def _obj_yaw(self, name: str) -> float:
++        """큐브 root quaternion(wxyz) 에서 world yaw(rad) — 갭 정렬 진단용."""
++        q = self.scene[name].data.root_quat_w[0]
++        w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
++        return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
++
+     def ee_pos(self) -> torch.Tensor:
+         """IK 작업점(grasp 접점)의 현재 world 위치."""
+         bp = self.robot.data.body_pos_w[0, self.ee_body_idx]
+         bq = self.robot.data.body_quat_w[0, self.ee_body_idx]
+         return bp + quat_apply(bq.unsqueeze(0), self.ee_offset.unsqueeze(0)).squeeze(0)
+ 
++    def _lateral_offset(self) -> torch.Tensor:
++        """비대칭 보정 lateral 벡터(world xy, 길이 grasp_lateral). **gripper-local X 축**의 world
++        투영 방향. 밀림 분해로 확인: 닫을 때 큐브 밀림이 거의 전부 local X 성분(=jaw 회전 호 방향)
++        이고 갭축(local Y)·접근축(local Z) 성분은 미미하다. ee 목표를 이 방향으로 옮기면 큐브가
++        jaw 푸시 시작점 반대(고정 finger 쪽)에 놓여, 닫을 때 jaw 가 큐브를 갭 안으로 눌러 고정한다."""
++        if args.grasp_lateral == 0.0:
++            return torch.zeros(2, device=self.device)
++        gq = self.robot.data.body_quat_w[0, self.ee_body_idx]
++        axis = quat_apply(gq.unsqueeze(0), torch.tensor([[1.0, 0.0, 0.0]], device=self.device)).squeeze(0)
++        v = axis[:2]
++        v = v / (torch.linalg.norm(v) + 1e-6)
++        return v * args.grasp_lateral
++
+     # --- 조건 체크 ---
+     def reached(self, target_pos_w: torch.Tensor, tol: float) -> bool:
+         return torch.linalg.norm(self.ee_pos() - target_pos_w).item() < tol
+@@ -347,16 +395,24 @@ class So101PickPlaceSM:
+                 return False
+             cb = self.obj_pos(cube_name)
+             ee = self.ee_pos()
++            lat = self._lateral_offset()  # 비대칭 보정(0 이면 영벡터)
++            aim_x = cb[0].item() + float(lat[0])
++            aim_y = cb[1].item() + float(lat[1])
+             tgt_z = cb[2].item() + args.grasp_z_offset
+             tgt = cb.clone()
+-            # xy 는 강 over-drive(게인 1.0)로 정렬 우선(grasp 핵심), z 는 약(0.5)으로 xy 덜 희생.
+-            tgt[0] = 2.0 * cb[0] - ee[0]
+-            tgt[1] = 2.0 * cb[1] - ee[1]
+-            tgt[2] = tgt_z + 0.5 * (tgt_z - ee[2].item())
++            # xy 는 강 over-drive(게인 1.0)로 (큐브+lateral) 목표 정렬, z 는 grasp_z_gain over-drive.
++            # z 게인이 약하면 손가락이 큐브 위에 머물러(도달 부족) jaw 가 큐브 윗면을 쳐서 튕김 →
++            # z 게인을 키워 손가락 끝을 큐브 측면 깊이로 내려 측면 grasp.
++            tgt[0] = 2.0 * aim_x - ee[0]
++            tgt[1] = 2.0 * aim_y - ee[1]
++            tgt[2] = tgt_z + args.grasp_z_gain * (tgt_z - ee[2].item())
+             self._act(tgt, tilt_deg, True)
+             ee2 = self.ee_pos()
+             cb2 = self.obj_pos(cube_name)
+-            if (torch.linalg.norm(ee2[:2] - cb2[:2]).item() < tol
++            lat2 = self._lateral_offset()
++            dx = ee2[0].item() - (cb2[0].item() + float(lat2[0]))
++            dy = ee2[1].item() - (cb2[1].item() + float(lat2[1]))
++            if ((dx * dx + dy * dy) ** 0.5 < tol
+                     and abs(ee2[2].item() - (cb2[2].item() + args.grasp_z_offset)) < tol):
+                 return True
+         return False
+@@ -386,6 +442,8 @@ class So101PickPlaceSM:
+         coarse, fine = args.coarse_tol, args.reach_tol
+         gtilt, ctilt = args.grasp_tilt_deg, args.carry_tilt_deg
+ 
++        # approach/descend 는 stiff PD 로 ee 를 큐브 중심에 정밀 도달(soft PD 는 ~2cm 잔차).
++        self._set_arm_pd(args.descend_stiffness)
+         # 1) 큐브 상공 접근 (grasp tilt 자세, 그리퍼 열림)
+         r1 = self.move_to(lambda: self._above(self.obj_pos(cube_name), args.approach_height), gtilt, True, coarse)
+         # 2) grasp 높이 하강 (closed-loop 보정 옵션)
+@@ -396,25 +454,47 @@ class So101PickPlaceSM:
+         ee = self.ee_pos()
+         cp = self.obj_pos(cube_name)
+         jaw = self.robot.data.body_pos_w[0, self._jaw_idx]
++        gp = self.robot.data.body_pos_w[0, self.ee_body_idx]  # gripper body 원점(고정 finger 기준)
+         gq = self.robot.data.body_quat_w[0, self.ee_body_idx]
+-        # gripper-local -Z(손가락 방향) 의 world 벡터 — grasp 접근축 진단.
++        # gripper-local -Z(손가락 접근축)·+Y(손가락 갭축) 의 world 벡터 — 접근축/갭 정렬 진단.
+         fwd = quat_apply(gq.unsqueeze(0), torch.tensor([[0.0, 0.0, -1.0]], device=self.device)).squeeze(0)
++        gap = quat_apply(gq.unsqueeze(0), torch.tensor([[0.0, 1.0, 0.0]], device=self.device)).squeeze(0)
++        cube_yaw = self._obj_yaw(cube_name)
++        gap_yaw = math.atan2(float(gap[1]), float(gap[0]))
++        # 갭축 world-xy 방향과 큐브 면(yaw) 의 어긋남(°). 큐브 90° 대칭이라 [0,45] 로 접음.
++        misalign = math.degrees(abs(gap_yaw - cube_yaw)) % 90.0
++        misalign = min(misalign, 90.0 - misalign)
+         log(f"[SM]   {cube_name} descend reached={r2}(app={r1}) "
+             f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f}) cube=({cp[0]:.3f},{cp[1]:.3f},{cp[2]:.3f}) "
+-            f"jaw=({jaw[0]:.3f},{jaw[1]:.3f},{jaw[2]:.3f}) "
+-            f"gquat=({gq[0]:.3f},{gq[1]:.3f},{gq[2]:.3f},{gq[3]:.3f}) "
+-            f"fingerdir=({fwd[0]:.2f},{fwd[1]:.2f},{fwd[2]:.2f})")
+-        # grasp 시점 위치 캡처(이후 잡힌 큐브가 따라오므로 고정 목표 사용)
++            f"gbody=({gp[0]:.3f},{gp[1]:.3f},{gp[2]:.3f}) jaw=({jaw[0]:.3f},{jaw[1]:.3f},{jaw[2]:.3f}) "
++            f"fingerdir=({fwd[0]:.2f},{fwd[1]:.2f},{fwd[2]:.2f}) gapdir=({gap[0]:.2f},{gap[1]:.2f},{gap[2]:.2f}) "
++            f"cube_yaw={math.degrees(cube_yaw):.1f} gap_misalign={misalign:.1f}deg")
++        # grasp 시점 위치 캡처(이후 잡힌 큐브가 따라오므로 고정 목표 사용). 비대칭 lateral 포함.
++        lat = self._lateral_offset()
+         grasp_xy = self.obj_pos(cube_name)[:2].clone()
++        grasp_xy[0] = grasp_xy[0] + lat[0]
++        grasp_xy[1] = grasp_xy[1] + lat[1]
+         grasp_z = self.obj_pos(cube_name)[2].item()
+         grasp_target = self._xyz(grasp_xy, grasp_z + args.grasp_z_offset)
+-        # 3) 그리퍼 닫고 정착 (자세 유지)
+-        self.hold(grasp_target, gtilt, False, args.grasp_dwell)
+-        ca = self.obj_pos(cube_name)
+-        gj = self.robot.data.joint_pos[0, self._gripper_jid].item()
+-        jaw2 = self.robot.data.body_pos_w[0, self._jaw_idx]
+-        log(f"[SM]   after-close cube=({ca[0]:.3f},{ca[1]:.3f},{ca[2]:.3f}) "
+-            f"gripper_joint={gj:.3f} jaw=({jaw2[0]:.3f},{jaw2[1]:.3f},{jaw2[2]:.3f})")
++        # 3) 그리퍼 닫고 정착 — close 는 soft PD 로 낮춰 큐브를 쳐내지 않게 한다. ee 자세/위치는
++        # grasp_target 에 **고정**한다. (close 중 ee 를 큐브에 over-drive 추종하면 큐브가 밀릴 때
++        # ee 가 쫓아가 더 밀어내는 악순환으로 큐브가 18cm 비산 — 검증으로 확인됨.)
++        self._set_arm_pd(args.grasp_stiffness)
++        cube0 = self.obj_pos(cube_name).clone()
++        for k in range(args.grasp_dwell):
++            if not simulation_app.is_running():
++                break
++            self._act(grasp_target, gtilt, False)
++            if k % 10 == 0 or k == args.grasp_dwell - 1:
++                cc = self.obj_pos(cube_name)
++                d = cc - cube0
++                gjj = self.robot.data.joint_pos[0, self._gripper_jid].item()
++                jw = self.robot.data.body_pos_w[0, self._jaw_idx]
++                log(f"[SM]   close[{k:02d}] cube=({cc[0]:.3f},{cc[1]:.3f},{cc[2]:.3f}) "
++                    f"dcube=({d[0]:+.3f},{d[1]:+.3f},{d[2]:+.3f}) gj={gjj:.3f} "
++                    f"jaw=({jw[0]:.3f},{jw[1]:.3f},{jw[2]:.3f})")
++        # lift 전 stiff 복귀(큐브 든 채 정밀 운반).
++        self._set_arm_pd(args.descend_stiffness)
+         # 4) 들어올림 (carry tilt)
+         self.move_to(lambda: self._xyz(grasp_xy, CUBE_DESK_TOP_Z + args.lift_height), ctilt, False, coarse)
+         if not self.grasped(cube_name):
+@@ -436,9 +516,14 @@ class So101PickPlaceSM:
+         self.hold(self.home_pos, args.carry_tilt_deg, True, args.settle_steps)
+         ordered = self.order_by_proximity(active_cubes)
+         log(f"[SM] pick order (robot 근접순): {ordered}")
+-        for i, cube in enumerate(ordered):
+-            log(f"[SM] pick-and-place: {cube} (placed so far={i})")
+-            self.pick_and_place(cube, i)
++        # grasp 성공(lift 통과+place)한 큐브만 추적 — n_placed(stack 높이)·최종 평가에 사용.
++        self._success: set[str] = set()
++        n_done = 0
++        for cube in ordered:
++            log(f"[SM] pick-and-place: {cube} (placed so far={n_done})")
++            if self.pick_and_place(cube, n_done):
++                self._success.add(cube)
++                n_done += 1
+         self.hold(self.home_pos, args.carry_tilt_deg, True, args.settle_steps)
+         log("[SM] all cubes processed.")
+         self._report(active_cubes)

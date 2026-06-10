@@ -2573,19 +2573,49 @@ IK 로도 동시에 못 맞춘다:
 midpoint ee) — 모두 이 중첩을 못 넘었다. (반면 Franka 7DOF 는 yaw 가 독립이고 full pose IK 가
 가능해 한 번에 grasp.)
 
-### 해결 방법 (현재 권장)
+### 후속 1 — in-sim DifferentialIK 18회 진단 (2026-06-09): 위 오차는 풀렸으나 grip 은 불가
 
-- **데모는 Franka 7DOF**(`pick_cube_franka_state_machine.py`)를 쓴다 — DR 상태 4/4, ~30초.
-- SO-101 을 끝까지 가려면: GUI 로 grasp 순간을 보며 정합/offset 을 시각 보정하거나, RMPFlow
-  (자세 포함 trajectory) + `gripper_frame_link` 정합 정밀화가 필요(headless 수치 반복으론 수렴 더딤).
-- ROS2 + MoveIt2 는 호스트에 ROS2 미설치(`/opt/ros` 없음)라 대규모 인프라 필요 → 동일 목적의
-  Isaac Sim 내장 Lula 로 대체(ROS2 불필요). Lula IK 자체는 정상 동작(err 0).
+외부 Lula 를 버리고 Isaac Lab **in-sim `DifferentialIKAction`**(env `SimToReal-SO101-PickCube-IK-v0`)
+으로 재작성해 18회 headless 진단했다. 위 "정합"·"제어점" 오차는 in-sim IK(제어점=도달점 동일)로
+원천 제거됐고, 세부 실패도 데이터로 순차 해결:
+
+- **갭 roll 정렬은 원인 아님**(gap_misalign 1~6°, 기각).
+- **ee 도달**: position-only + 단계별 arm stiffness(descend 120, soft PD 정상상태 오차 제거)로
+  3.2cm → **0.4cm**.
+- **수평 밀림**: 닫을 때 큐브 밀림을 gripper-local 축으로 분해하니 거의 전부 **X축(jaw 회전 호
+  방향)** 성분 → 그 축으로 lateral 보정해 4.4cm → **1.3cm**. (closed-loop close 는 ee 가 큐브를
+  쫓아가 18cm 비산 → 역효과, 고정 hold 가 정답.)
+- **z 튐**: descend z over-drive 게인 1.2~1.5 로 손가락을 큐브 측면 깊이로 내려 해소.
+
+그러나 **grip 자체는 5DOF DiffIK 로 불가**임이 확정: **강 tilt(jaw 를 큐브 측면으로) + ee 도달을
+동시에 못 푼다**. position-only=수직(jaw 가 큐브 위 8cm 에 떠 손가락이 큐브에 안 닿음→안 들림),
+pose tilt=강 tilt 시 ee 가 멀어짐(tilt20→ee1.2cm·jaw위, tilt30→ee4.5cm, tilt35→자세붕괴,
+`--ik_lambda`↓는 DLS 불안정). env action space 가 부팅 시 고정이라 descend(position)/close(pose)
+모드 혼용도 불가.
+
+### 후속 2 — joint_fk (in-sim FK 샘플링) 로 1큐브 grasp 해결 (2026-06-10)
+
+IK 를 버리고 **`--controller_mode joint_fk`**(random-FK 로 joint target 직접 샘플링)로 가면 IK 가
+못 만드는 강 tilt 자세를 직접 탐색해 grip 이 성립한다. **1큐브 DR-off 1/1 성공**(DiffIK 18회 0/1
+대비). 복원 소스 = 커밋 `62303d9`(env `SimToReal-SO101-PickCube-v0`, joint-space
+`SlewLimitedJointPositionAction`; `94780bd` DiffIK 재작성에서 제거됐던 것).
+
+- **4큐브 full-DR 은 평균 1.5/4 (all-4 ~0%) — 별도 blocker**. reach 매핑(1큐브 12 ep, spawn 위치
+  로깅) 결과 실패는 robot base 거리와 무관(먼 0.30m 성공, 가까운 0.11m 실패)해 "reach 불가
+  스폰"이 아니라 **random-FK 의 marginal grasp(단일 ~67%) + 4큐브 상호작용**(나중 큐브 approach 가
+  기존 큐브/그릇을 침)이 주 원인. scatter range 를 reach 안쪽으로 제한
+  (`_CUBE_SCATTER_X_RANGE`=[1.66,2.04], `_CUBE_SCATTER_Y_RANGE`=[-0.46,-0.345])하고
+  `--object_order far_base_first`(base 에서 먼 큐브 먼저)를 적용해도 1.5/4 로 개선되지 않았다
+  (grasp 품질 근본 한계). 즉 **1큐브 grasp 는 해결, 4큐브 신뢰 expert 는 미해결 blocker**.
+- 데모/비교용으로 Franka 7DOF(`pick_cube_franka_state_machine.py`, 4/4 ~30초)도 유지.
 
 ### 확인 방법
 
-`pick_cube_state_machine.py --active_objects 1 --object_radius_scale 0` 로 단일 큐브 진단.
-descend 로그의 `ee`(grasp 접점)·`jaw`/`gripper`(USD 손가락 body)·`cube` 를 비교해 손가락이
-큐브 xy 를 사이에 두고 z 가 큐브 높이면 grasp 가능. 빗나가면 위 3중 오차.
+1큐브 grasp: `pick_cube_state_machine.py --controller_mode joint_fk --task
+SimToReal-SO101-PickCube-v0 --active_objects 1 --object_radius_scale 0 --headless --no_videos`
+→ 결과 JSON 의 `final_inside.Cube1=true`, `placed_and_released=true`. 4큐브 신뢰성은
+`--active_objects 4 --object_radius_scale 1 --num_episodes N` sweep 의 per-cube/all-4 로
+측정(현재 평균 1.5/4). DiffIK 진단(폐기)은 `diffik_grasp_diag.patch`(commit `12265e1` 대비)로 보존.
 
 ---
 
