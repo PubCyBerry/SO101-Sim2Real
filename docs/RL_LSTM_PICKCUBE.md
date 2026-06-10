@@ -57,6 +57,8 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 15c7c71 feat: 비디오 녹화(--video) + 8192env 버퍼 상향
 0a46503 feat: 비디오 녹화 학습→eval 이동(8192 뷰포트 렌더가 학습 지연)
 4e63bf2 fix: 비디오 뷰포트 카메라 정면 뷰 고정
+06ce08e docs: 본 세션 기록 문서
+29857af tune: 부트스트랩 큐브 놓침 방지 — gripper offset 0.80→0.20, carry/guided_lift 가중↑, bootstrap_prob 0.5→0.75
 ```
 
 ---
@@ -119,6 +121,14 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 ### T12. 학습-중 뷰포트 녹화가 너무 느림
 - 8192-env 뷰포트 렌더로 iter 47s/ETA 19.6h. → **비디오를 eval(소수 env)로 이동**, 학습 런은 녹화 없이 iter 17.8s/ETA 7.4h.
 
+### T13. success ~0.13 정체 진단 → 부트스트랩 큐브 놓침 수정
+- 추이(boot8192, 199 iter): success 0→0.10(50 iter 급상승) 후 **0.13 부근 평탄(log 포화)**. `grasp_cube`≈0 전 구간. ep length ~800(감소 X).
+- 분석: success 0.13 ≈ 부트스트랩 env(0.5) × 하류성공 ~26% + 정상 env(0.5) × ~0. **정상-env grasp 미점화**.
+  ⚠️ 0.13 은 부트스트랩 inflated — **부트스트랩 없는 eval 실성공률은 ~0% 예상**.
+- 근본 원인: **gripper offset 0.80 → do-nothing(action≈0) target 0.80 = 활짝 열림** → 부트스트랩으로 잡고 시작해도 정책이 곧 손 벌려 놓침(하류 학습 저해, 하류성공 26%에 그침).
+- 수정(커밋 `29857af`): **gripper offset 0.80→0.20**(do-nothing 닫힘쪽 유지, open 1.20 까지 grasp 가능), **carry_cube 4→8 / guided_lift 8→10**(hold 강화), **bootstrap_prob 0.5→0.75**.
+- 판정 지표: (1) training success 가 0.13 정체 깨고 0.3~0.6 상승 = 하류 정상화. (2) `grasp_cube`>0 = 정상-env grasp 점화(eval 상승 전제).
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)
@@ -152,10 +162,11 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ---
 
-## 7. 현재 진행 (2026-06-10 세션 종료 시점)
+## 7. 현재 진행 (2026-06-10 세션, T13 수정 적용 후)
 
-- **학습 중**: stage-1(단일 큐브), LSTM(hidden 256, 1층)+PPO, **num_envs 8192**, grasp_bootstrap_prob 0.5/close -0.15, entropy 0.02, adaptive LR. 로그 `train_boot.log`, ETA ~7.4h.
-- 지표(약 127 iter, 50M steps): **success termination ~0.12**(부트스트랩 포함), guided_lift 상승 중, grasp_cube 아직 낮음(정상-env 본격 grasp 대기).
+- **학습 중**: stage-1(단일 큐브), LSTM(hidden 256, 1층)+PPO, **num_envs 8192**, **grasp_bootstrap_prob 0.75**/close -0.15, **gripper offset 0.20**, carry 8/guided_lift 10, entropy 0.02, adaptive LR. 로그 `train_boot2.log`, ETA ~7h.
+- 직전 run(boot8192, offset 0.80) 지표: success 0.13 에서 정체 + grasp_cube≈0 → T13 진단·수정 후 재시작.
+- 판정 대기: training success 가 0.13 정체를 깨는지 + grasp_cube>0 점화 여부. 부트스트랩 없는 **eval 실성공률**(매시간 점검)이 진짜 지표.
 - VRAM ~16-20GB(예산 32GB 내), patch overflow 0.
 
 ---
@@ -177,8 +188,9 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 | PPO | num_steps_per_env 48, learning_epochs 8, mini_batches 4, lr 3e-4(adaptive), entropy 0.02, gamma .99, lam .95, clip .2 |
 | num_envs | 8192 (VRAM 32GB 예산) |
 | 속도 보상 | `time_penalty` weight -0.02(미완료 step당), `early_finish_bonus` weight 100(완료 시각 비례, 종료 1회) |
-| 부트스트랩 | prob 0.5, close -0.15(held 0.94), grasp point=default 자세 jaw·gripper 중점 캐시 |
-| gripper | init/offset 0.80(open-start+full range), open>0.6 / close<0.5(<0.26 강) |
+| 단계 보상(T13 후) | reach 1, pregrasp 0.5(diff 0.045), **guided_lift 10**, grasp 1, **carry 8**, lift 2, transport 8, place_height 30, insert 80, release 10, task_success 200 |
+| 부트스트랩 | **prob 0.75**, close -0.15(held 0.94), grasp point=default 자세 jaw·gripper 중점 캐시 |
+| gripper | **init/offset 0.20**(do-nothing 닫힘쪽 유지로 잡은 큐브 안 놓침, open 1.20 까지), open>0.6 / close<0.5(<0.26 강) |
 | 큐브 DR | scatter x[1.60,2.08] y[-0.47,-0.33] yaw±30°(도달 검증 max 0.333m<0.44), 마찰/질량 startup DR, rl_state GaussianNoise σ0.005 |
 | GPU 버퍼 | gpu_max_rigid_patch_count 10·2¹⁶, aggregate 512k, collision_stack 2²⁸ |
 | viewer(영상) | eye (1.90,0.95,0.98) lookat (1.85,-0.32,0.76) res 1280×720 |
@@ -196,10 +208,11 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ---
 
-## 11. 미해결 / 리스크
+## 11. 미해결 / 리스크 / 전망
 
-- 정상-env 의 **처음부터 grasp 획득**이 부트스트랩 value 전파만으로 충분히 학습될지 미확정(eval 성공률로 판정 중).
-- 커리큘럼 1→4 확장 시 큐브 수 증가로 난이도 급상승 가능(부트스트랩은 첫 큐브만 잡힌 채 시작).
-- sim2real: 현재 DR(포즈/마찰/질량/관측노이즈)에 actuator gain·joint friction 미포함(예정).
+- **정상-env grasp 점화**가 핵심 미확정. 부트스트랩 value 전파 + hold 수정(T13)으로 유도 시도 중. `grasp_cube`>0 가 leading indicator. 안 켜지면 추가 레버: grasp-point↔cube dense 정렬 보상, bootstrap_prob annealing, grasp 허용오차 점진 축소.
+- **곡선 전망**: manipulation RL 은 보통 sigmoid/계단(grasp "클릭" 시 급상승). 현재는 클릭 전 log 포화(~0.13). 개입으로 클릭 유도 필요.
+- **4큐브 ≥0.90 의 산술적 벽**: 한 에피소드 4개 순차 → success ≈ (큐브당 성공)⁴. 0.90 하려면 **큐브당 ~97.4%** 필요. 단일 큐브를 거의 완벽히 해야 가능 — 매우 도전적.
+- sim2real: 현재 DR(포즈/마찰/질량/관측노이즈)에 actuator gain·joint friction 미포함(예정, gear_assembly 핵심).
 - 정밀 grasp 가 끝내 부족하면 모방학습(SmolVLA/GR00T, 레포 본래 경로) 또는 planning(cuMotion, PATH E) 병행 검토.
 </content>
