@@ -19,6 +19,7 @@
 - **완료**: SO101Kinematics(해석적 FK/IK, URDF 유도 + sim 실측 캘리브레이션 max err 1.5mm) / `--calibrate` 진단 모드(FK 검증·하강한계·roll 영점·접근축 sweep) / per-env 병렬 FSM(SETTLE→APPROACH→PRE_GRASP→DESCEND→SLIDE→GRASP→LIFT→TRANSPORT→LOWER→RELEASE→RETREAT) / Franka SM 동급 CLI.
 - **검증**: 고정 spawn 1env 4큐브 **4/4**, DR full 2env **3/4+3/4=6/8** (실패=reach 경계 spawn, 기구학 한계). 영상 `docs/so101_pick_place-step-0.mp4`.
 - **핵심 해결책** (상세는 memory `pickcube-analytic-ik-sm-v3`): ① USD root↔URDF base frame 정합(yaw −90°+오프셋, 캘리 fit) ② 중력 처짐 적분 보상(q_bias) ③ 하강 z-ramp(수직 직선 경로 — joint 보간 찌르기 방지) ④ **side-approach**(닫힘축 base쪽 3.5cm 비켜 하강 후 수평 SLIDE — 사용자 제안, fixed finger 가 base-반대쪽이라 방향 중요).
+- **후속 개선 (같은 날)**: ① 속도 — 4큐브 86초→24초 (전 구간 Cartesian ramp 화: descend 0.15/slide 0.10/lift 0.40/transport 0.50/lower 0.25 m/s, dwell 축소, RETREAT z-ramp 즉시 전이; 운반 "내던지기"는 TRANSPORT 수평 직선 ramp 로 해결). ② 그릇 끼임 방지 — roll 0/±90/180° 대안 grasp 후보 중 그릇 먼 쪽 채택(`--bowl_clear` 0.12, 큐브 90° 대칭 이용). 함정: 후보 기준을 q_cmd 의 q5 로 계산하면 이전 roll_offset 자기참조로 진동("딱다구리") — fold_45 독립 재계산 + side_pick 1회 확정으로 해결. 강제 트리거(0.30) 4/4 + 기본 4/4 + DR 6/8 검증.
 - **남은 일**: reach 경계 spawn 실패(DR ~25%) — pregrasp IK 실패 시 비킴 방향 대체 시도 같은 폴백 미구현. 20ep 통계 sweep 미실시(PhysX 잡음 ±2ep 감안). 커밋 미실시.
 - **실행**: `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/pick_cube_state_machine.py --num_envs 1 --active_objects 4 --headless [--video]`
 

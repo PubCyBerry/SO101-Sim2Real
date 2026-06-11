@@ -126,6 +126,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(top/wrist/front 3단 수직 분할 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
+| `environments/pick_cube_state_machine.py` | SO-101 해석적(closed-form) IK + joint position action 만으로 PickCube pick-and-place (Lula/DiffIK 미사용). side-approach grasp(닫힘축 base쪽 비킴 하강→수평 SLIDE), `--calibrate` 기구학 진단 모드. 고정 spawn 4/4 · DR full 6/8. 함정·해결책은 `docs/TROUBLESHOOTING.md` §SO-101 해석적 FK·§하강 grasp 참조 |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
 | `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽 |
 | `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |

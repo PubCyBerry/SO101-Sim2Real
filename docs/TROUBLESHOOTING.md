@@ -3492,3 +3492,80 @@ goal 을 **JOINT config** 로 준다(5-DOF-aware). `scripts/sim/probe_ik.py`(`/c
 `OMPL OK → (x,y,z) q=[...]` 로 approach→grasp→lift 가 전부 plan+exec. `Unable to sample`/
 `INVERSE_KINEMATICS_FAILURE` 0건. ※ grasp 가 큐브를 실제로 쥐는지(grip 물리)는 별개 과제 —
 moving_jaw 가 큐브를 감싸도록 강tilt·그리퍼 close·위치정확도 튜닝 필요(§PATH_E 6).
+
+## Isaac Lab SO-101 해석적 FK 가 시뮬 실측과 ~50cm 어긋남 (USD root↔URDF base frame 불일치)
+
+### 현상
+
+URDF(so_arm101.urdf) joint origin 으로 유도한 closed-form FK 의 TCP 예측이 시뮬 실측
+(`robot.data.body_pos_w["gripper"]` + grasp offset)과 위치·방향 모두 크게 어긋남.
+
+### 오류 메시지
+
+```
+[CALIB] zero  pred=(+0.3941,-0.0000,+0.2071)  meas=(-0.0204,+0.3784,+0.2396)  err=562.2mm
+[CALIB] max err = 579.6mm  (FAIL — 상수/부호 재보정 필요)
+```
+
+### 원인
+
+두 frame 변환이 누락됨:
+1. `PickCubeEnvCfg` robot root rot `(0,0,0,1)`(wxyz) = **yaw 180°** — world→base 변환에서
+   위치 차만 빼면 회전이 무시된다.
+2. `so101_follower.usd` 의 root body frame 자체가 URDF base_link 와 다름 —
+   **yaw −90° 회전 + 원점 시프트 (0.0204, 0.0157, 0.0325 m)** (USD 변환 시 발생).
+
+### 해결 방법
+
+`pick_cube_state_machine.py` 의 `_world_to_base()`: root quat yaw 역회전 후
+실측 fit 상수(BASE_XY_OFFSET/BASE_Z_OFFSET/BASE_YAW_OFFSET=+90°)로 URDF base frame 으로
+환산. fit 은 `--calibrate` 모드의 8개 자세 FK 비교에서 잔차 최소화로 결정.
+
+### 확인 방법
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
+    scripts/environments/pick_cube_state_machine.py --calibrate --headless
+# [CALIB] max err = 1.5mm  (OK (<5mm))
+```
+
+## Isaac Lab SO-101 SM 하강 grasp 에서 큐브를 찌르고 밀어냄 (joint 보간 호 운동 + fixed finger 간섭)
+
+### 현상
+
+top-down grasp 하강 중 손끝이 큐브 윗면/측면을 찍어 큐브가 밀리고(drift retry 연쇄),
+어쩌다 잡혀도 비비다 들어가는 식. TCP 가 목표보다 8~26mm 위에서 정지.
+
+### 오류 메시지
+
+```
+[SM] env0 Cube1: 하강 중 큐브 밀림 — retry 3/3
+[SM] env0 Cube4: grasp 진입 — ... err_z=25.7mm pitch=-90° timeout=True
+```
+
+### 원인
+
+복합 3건 (캘리브레이션·영상·"밀린 방향 vs 닫힘축 각도" 진단으로 분리):
+1. **joint 공간 보간**: IK 1회 + slew 이동은 TCP 가 호를 그려 수평 성분으로 큐브를 침.
+2. **PD 중력 처짐**: stiffness 17.8 의 정적 오차(lift ~0.14rad)로 TCP 가 목표 위에서 평형.
+3. **fixed finger 간섭**: TCP(gripper_frame=닫힘 중점)에서 닫힘축 base-반대쪽 ~15mm 에
+   fixed finger 가 있어, 30mm 큐브 면 위치와 정확히 겹침 — 수직 하강은 구조적으로 긁음.
+
+### 해결 방법
+
+1. z-ramp: 하강/상승/운반을 매 step Cartesian 직선 ramp 로 (joint 보간 호 제거).
+2. 적분 보상: `q_bias += KI*(q_cmd - q_now)` (KI 0.06, clip ±0.35) 를 action 에 가산.
+   ※ 목표 z 를 overshoot 으로 더 내리는 방식은 접촉 후에도 밀어붙여 큐브를 밀어냄 — 금지.
+3. **side-approach**: 닫힘축의 **base 쪽**으로 3.5cm 비켜 수직 하강 후 수평 SLIDE 로
+   큐브를 손가락 사이에 진입시키고 close. 비킴 방향이 base-반대쪽이면 slide 중
+   fixed finger 가 선두로 면을 밀고 다님(err_xy ≈ slide_stop+15mm 로 판별 가능).
+   비킨 지점이 그릇 테두리(중심 0.12m 이내)와 겹치면 그릇이 더 먼 부호로 전환.
+
+### 확인 방법
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
+    scripts/environments/pick_cube_state_machine.py \
+    --num_envs 1 --active_objects 4 --object_radius_scale 0 --headless --seed 42
+# [SM] env0 RESULT: 4/4 cubes in bowl.  (DR full 2env 는 6/8 — reach 경계 spawn 한계)
+```
