@@ -1123,17 +1123,39 @@ class SO101PickPlaceSM:
             bx, by = bx - off_x, by - off_y
             fx, fy = self.move_from[e]
             dist = math.hypot(bx - fx, by - fy)
+            # pitch·roll 을 운반 진행률에 맞춰 동시 점진 보간 — ik_reach 가 그릇
+            # 앞에서 pitch 를 단번에 완화(-90→-40°)하면 slew 풀속도 재배향으로
+            # 팔이 위로 휘둘렸다 그릇에 떨어진다(슬램덩크). roll 90°(release 자세,
+            # 사용자 지정)도 운반 중에 함께 돌린다.
+            if self.rot_pitch0[e] is None:
+                pitch_start = self.last_pitch[e]
+                goal = self.kin.ik_reach(
+                    self._to_base(torch.tensor([bx, by, self._safe_z_w(e)],
+                                               device=self.device), e), 0.0)
+                pitch_goal = goal[1] if goal is not None else pitch_start
+                q5_now = self.q_cmd[e][4]
+                roll_sign = 1.0 if (q5_now + math.pi / 2
+                                    <= SO101Kinematics.JOINT_LIMITS[4][1]) else -1.0
+                self.rot_pitch0[e] = (pitch_start, pitch_goal, roll_sign)
+            pitch_start, pitch_goal, roll_sign = self.rot_pitch0[e]
             self.slide_s[e] = min(dist, self.slide_s[e] + args.transport_speed / 30.0)
             frac = 1.0 if dist < 1e-6 else self.slide_s[e] / dist
+            pitch_now = pitch_start + (pitch_goal - pitch_start) * frac
+            roll_now = roll_sign * (math.pi / 2) * frac
             target = (fx + (bx - fx) * frac,
                       fy + (by - fy) * frac, self._safe_z_w(e))
-            if not self._solve(e, target, 0.0):
-                # 그릇이 반경 밖이면 복구 불가 — 큐브를 들고 있으니 즉시 종료 처리
-                log(f"[SM] env{e}: 그릇 IK 실패 {target} — 작업 중단")
-                self._advance_cube(e)
-                return self.q_cmd[e], self._open_cmd(cube)
+            if not self._solve_fixed_pitch(e, target, 0.0, pitch_now,
+                                           roll_offset=roll_now):
+                # 보간 자세 일시 불가 — 이전 자세 유지하며 ramp 계속
+                if self.phase_steps[e] % 60 == 1:
+                    log(f"[SM] env{e}: TRANSPORT IK 일시 실패 (frac={frac:.2f})")
+                if timeout:
+                    log(f"[SM] env{e}: 그릇 IK 실패 — 작업 중단")
+                    self._advance_cube(e)
+                return self.q_cmd[e], args.gripper_close
             ramp_done = self.slide_s[e] >= dist - 1e-6
             if (ramp_done and self._converged(e, tol)) or timeout:
+                self.rot_pitch0[e]  = None
                 self.slide_s[e]     = 0.0
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
@@ -1145,21 +1167,10 @@ class SO101PickPlaceSM:
         # 닫힘축이 접근축 주위로 90° 돌아 jaw 가 옆으로 열림 → 퍼올림 방지.
         # 하강도 하지 않는다 — 안전 고도에서 그대로 떨굼.
         if ph == Phase.LOWER:
-            if self.rot_pitch0[e] is None:
-                # 진입 시 1회: (시작 q5, 목표 q5=+90°, limit 밖이면 -90°) 고정
-                q5_start = self.q_cmd[e][4]
-                q5_goal = q5_start + math.pi / 2
-                if q5_goal > SO101Kinematics.JOINT_LIMITS[4][1]:
-                    q5_goal = q5_start - math.pi / 2
-                self.rot_pitch0[e] = (q5_start, q5_goal)
-                self.dwell_count[e] = 0
-            rot_t = min(1.0, self.dwell_count[e] / 10.0)
+            # 회전은 TRANSPORT 에서 이미 완료 — 여기선 정착 확인만 (짧은 dwell)
             self.dwell_count[e] += 1
-            q5_start, q5_goal = self.rot_pitch0[e]
-            # q_cmd 의 q5 만 보간 — 나머지 joint 동결
-            self.q_cmd[e] = list(self.q_cmd[e])
-            self.q_cmd[e][4] = q5_start + (q5_goal - q5_start) * rot_t
-            if (rot_t >= 1.0 and self._converged(e, tol)) or timeout:
+            rot_t = 1.0
+            if (self.dwell_count[e] >= 5 and self._converged(e, tol)) or timeout:
                 self.rot_pitch0[e]  = None
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
