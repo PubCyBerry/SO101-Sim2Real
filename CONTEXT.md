@@ -13,7 +13,7 @@
 
 ---
 
-## 작업 인계 (2026-06-11 — PickCube RL: v9 LSTM 복귀 + reward 재조정)
+## 작업 인계 (2026-06-11 — PickCube RL: v10 reward 재설계(hover 차단))
 
 > 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T25 전체 시행착오). 여기는 인계 요약만.
 
@@ -21,7 +21,7 @@
 - **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.
 - **✅ grasp 해결(v4 점화 + v6 신뢰성)**: scratch.grasp/lift/over_bowl **0.85~0.89** 안정. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+slew 2.5+RND grasp_focus(v4) + **cube_predisturb 패널티(-3)·cube_lost 추락 종료**(v6, 큐브 변위 -0.40→-0.08·추락 6.9%→3.4%).
 - **남은 핵심 문제 = place 정밀도(v7 개입)**: grasp 후 `over_bowl 0.86 → placed 0.10`(전이 12%). 진단 = release valley(안 열어서) 아니라 **정밀도(열어도 그릇 안 정확히 안 들어감)**. 영상서 2가지 비정상: ① 큐브 든 채 **위아래 진동(jitter)**(smoothness 페널티 -1e-4 사실상 0) ② 그릇 위 **hover**(over_bowl_drop이 '살짝 열고 버티기' 캠핑 보상 + bowl_disturb 위축).
-- **현재 학습 중**: run `lstm256_stage1_grasp_v9`(fresh, **LSTM 256,1**), 로그 `train_grasp_v9.log`. **num_envs 16384**, epochs 10, ETA~10h. **v8 MLP는 발산 폐기**(action std 0.5→55 폭발, MLP가 entropy 0.02에 민감; cube_lost 20.9%) → 사용자 결정 LSTM 복귀. **v9 = v7(검증된 LSTM) + v8 reward 재조정 유지**(발산 원인은 MLP지 reward 아님). reward 재조정(T26): task_success 200→50·early_finish 100→30·insert 80→40·place_height 30→20·time_penalty -0.02→-0.006(value target 분산↓), 행동 교정 페널티는 유지. v7 개입(smoothness action_rate/joint_vel -1e-3·place 정밀도 xy 0.06/0.08·그릇/큐브 패널티) + v4~v6(grasp 점화·신뢰성) 전부 유지.
+- **현재 학습 중**: run `lstm256_stage1_grasp_v10`(fresh, **LSTM 256,1**), 로그 `train_grasp_v10.log`. **num_envs 16384**, epochs 10. **reward 설계 결함 수정(T28)**: 기존엔 dense 유지 보상(hover 시 ~26/step) > terminal 완료(1회 80) → **잡고 그릇 위 hover가 완료보다 value 큼**(영상 hover·over_bowl→placed 12% 정체의 근본). v8 압축이 이를 악화. **v10 재균형**: terminal↑(task_success 50→**200**·early_finish 30→**100**·time_penalty -0.006→**-0.02**) + dense 유지↓(guided_lift 10→6·carry 8→3·transport 8→4·place_height 20→12·insert 40→20). grasp 단계(reach/align/close/contact) 보존=점화 유지, place 가이드(over_bowl_drop/release) 유지. **한계**: 재균형이라 무한 hover는 이론상 여전히 이김 — 완전차단은 potential-based shaping(보류, 그래도 hover면 도입). v9(LSTM) 진행 중 중단(grasp 0.48@model200 점화 빨랐음, reward 바뀌어 fresh).
 - **obs 87dim**: joint·grasp point·큐브·그릇 pos+rel + 속도 + 큐브 yaw/크기·ee quat·**그릇 quat**(`include_container_orientation`). near-MDP → MLP도 가능하나 LSTM 유지(요구사항+sim2real 부분관측 연속성).
 - **16384 핵심**: PhysX 64K 머티리얼 한도 → 큐브 CubeFriction scene.usd 공유 통합(env당 6→3). 상세 `docs/TROUBLESHOOTING.md`.
 - **모니터(cron, 세션 독립)**: `scripts/reinforcement_learning/cron_monitor_v4.sh` crontab `*/30` 자동 점검. 최신 run 자동 탐색 → 최신 ckpt `monitor_eval.py`(scratch/full/pre 집계 + 16-env 비디오). 결과 `<run>/monitor_history/history.jsonl`, 비디오 `video_<ts>_model_N.mp4`. cron 로그 `logs/cron_monitor_v4.cron.log`. 진짜 지표 = **scratch 그룹**. 끄기 `crontab -l|grep -vF cron_monitor_v4.sh|crontab -`.

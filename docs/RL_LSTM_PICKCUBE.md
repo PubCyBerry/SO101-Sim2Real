@@ -240,6 +240,18 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - **결정(사용자): LSTM 복귀**. run `lstm256_stage1_grasp_v9` — LSTM(256,1)+epochs 10(v7 동일) + **v8 reward 재조정 유지**(발산 원인은 MLP지 reward 아님, 압축은 value 안정 이득). cron도 `--recurrent` 복구. 즉 v9 = v7(검증된 LSTM) + reward 스케일 재조정.
 - **교훈**: ① 아키텍처 변경 시 train/monitor/eval 등 **policy_cfg를 구성하는 모든 스크립트 동기화**. ② near-MDP라도 MLP가 entropy 설정에 민감해 발산 가능 — MLP 쓰려면 entropy_coef↓ 필요(미검증). LSTM이 이 task엔 더 안정적(요구사항과도 합치).
 
+### T28. ⚠️ reward 설계 결함 진단 → 재설계 (v10): 완료 < 유지 = hover로 샘
+- **사용자 질문**: pick-place 완료 시 value 최대인가, 아니면 다른 행동이 더 커서 새나?
+- **진단: 샌다.** 대부분 보상이 **dense(매 step) + 절대 상태 기반** → 특정 상태를 *유지*하면 매 step 누적. 반면 완료는 **terminal(1회성)**. hover(잡고 그릇 위) value/step ≈ transport 8 + carry 8 + place_height ~10 = **~26/step**, time_penalty -0.006은 무시 가능. 완료 terminal = success 50 + early_finish ~30 = **80(1회)**. → **3 step만 hover해도 완료와 맞먹고, 그 이상은 hover가 이긴다**(수백 step 누적). 정책이 완료를 회피하고 보상 큰 중간 상태를 유지하는 게 value 최대화상 합리적 = 영상 hover의 근본 원인. v6~v9 over_bowl→placed 12% 정체의 구조적 이유.
+- **아이러니**: v8 reward 압축(success 200→50, time_penalty -0.02→-0.006)이 terminal:dense 균형을 깨 **hover를 악화**시켰다(value 분산은 줄였으나).
+- **v10 재설계(weight 재균형, grasp 단계 보존)**: 완료(terminal)가 dense 누적을 압도하게 + 유지(dense) 축소.
+  - terminal ↑: **task_success 50→200, early_finish 30→100, time_penalty -0.006→-0.02**(완료 강제·버티기 비용).
+  - dense 유지 ↓: **guided_lift 10→6, carry 8→3, transport 8→4, place_height 20→12, insert 40→20**.
+  - hover value/step ≈ 13으로 축소, terminal 300 → 23 step에서야 맞먹음(이전 3 step). 완료가 강하게 유리해짐.
+  - grasp 단계(reach 1/align 1/close 3/contact 2/pregrasp 0.2/grasp 1) 보존 = grasp 점화 유지. place 가이드(over_bowl_drop 12/release 10) 유지.
+- **한계(정직)**: weight 재균형이라 dense가 남아있어 **이론상 무한 hover는 여전히 이김**. 완전 차단은 **potential-based reward shaping**(F=γΦ(s')-Φ(s), 유지=0, optimal policy 보존, Ng 1999) 필요 — grasp 점화 리스크+큰 작업이라 보류. v10 재균형으로 보고 그래도 hover면 PBRS 도입.
+- run `lstm256_stage1_grasp_v10`(LSTM, fresh). 판정: over_bowl→placed 전이↑ + hover 영상 감소 + 완료(success) 추이.
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)

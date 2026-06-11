@@ -618,7 +618,7 @@ class PickCubeRewardsCfg:
 
     guided_lift_cube = RewTerm(
         func=task_mdp.guided_lift_reward,
-        weight=10.0,
+        weight=6.0,  # v10: 10→6 dense 유지 축소(hover 매력↓)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -646,7 +646,7 @@ class PickCubeRewardsCfg:
     # weight 4→8: 부트스트랩 큐브를 "잡은 채 유지"하도록 강한 유인(놓치면 보상 급감).
     carry_cube = RewTerm(
         func=task_mdp.carry_pen,
-        weight=8.0,
+        weight=3.0,  # v10: 8→3 잡고-버티기 매력↓(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -669,7 +669,7 @@ class PickCubeRewardsCfg:
     # Stage 4: 들어올린 큐브의 XY → 그릇 접근 (밀집)
     transport_cube = RewTerm(
         func=task_mdp.transport_reward,
-        weight=8.0,
+        weight=4.0,  # v10: 8→4 그릇 위 hover 매력↓
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -682,7 +682,7 @@ class PickCubeRewardsCfg:
     # place 정밀도 부족(v6 over_bowl 0.86→placed 0.10)의 핵심 레버.
     place_height_cube = RewTerm(
         func=task_mdp.place_height_reward,
-        weight=20.0,  # v8: 30→20 reward 스케일 재조정(value target 분산↓)
+        weight=12.0,  # v10: 20→12 dense 유지 축소(hover 매력↓)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -698,7 +698,7 @@ class PickCubeRewardsCfg:
     # Stage 5: 그릇 안 삽입 — 그리퍼 조건 없음 (밀집, 큐브 수 비례)
     insert_cube = RewTerm(
         func=task_mdp.insert_reward,
-        weight=40.0,  # v8: 80→40 reward 스케일 재조정
+        weight=20.0,  # v10: 40→20 그릇 안 유지 보상 축소
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -762,7 +762,7 @@ class PickCubeRewardsCfg:
     # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
     task_success = RewTerm(
         func=task_mdp.task_success_bonus,
-        weight=50.0,  # v8: 200→50 reward 스케일 재조정(최대 value target 200→50, 안정성)
+        weight=200.0,  # v10: 50→200 복원·강화 — 완료(terminal)가 value 최대가 되게(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -793,7 +793,7 @@ class PickCubeRewardsCfg:
     #   cube_predisturb/smoothness)는 절대값 작고 상대 비율이 곧 교정 의도라 유지.
     time_penalty = RewTerm(
         func=task_mdp.time_penalty,
-        weight=-0.006,
+        weight=-0.02,  # v10: -0.006→-0.02 복원 — 버티기 시간 비용(hover 차단)
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -806,7 +806,7 @@ class PickCubeRewardsCfg:
     # 터미널 보너스로 동작한다. 완료 시각에 따라 ~100(즉시)→~17(25s) 차등.
     early_finish_bonus = RewTerm(
         func=task_mdp.early_finish_bonus,
-        weight=30.0,  # v8: 100→30 reward 스케일 재조정
+        weight=100.0,  # v10: 30→100 복원 — 빨리 완료 강제(hover 차단)
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
