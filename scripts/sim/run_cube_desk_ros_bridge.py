@@ -351,16 +351,61 @@ def main() -> None:
     print(f"[bridge] gripper grip force: dof[{gi}] kps={GRIPPER_STIFFNESS} (arm kps={DRIVE_STIFFNESS})", flush=True)
     robot.get_articulation_controller().set_gains(kps=kps, kds=kds)
 
-    # 선택적 DR — scatter 범위에서 활성 큐브 위치 무작위화(간단 jitter).
-    if args.dr:
-        for name in active_cubes:
-            cube = SingleRigidPrim(f"{SCENE_PRIM}/{name}")
-            cube.initialize()
-            pos, quat = cube.get_world_pose()
+    # 큐브 rigid prim 핸들 캐시 (DR·R/N 리셋에서 재사용).
+    cube_handles: dict[str, SingleRigidPrim] = {}
+    for name in active_cubes:
+        h = SingleRigidPrim(f"{SCENE_PRIM}/{name}")
+        h.initialize()
+        cube_handles[name] = h
+    home_q = np.zeros(n_dof, dtype=np.float32)
+
+    def randomize_cubes() -> None:
+        """활성 큐브를 scatter 범위로 무작위 재배치 + 속도 0 (DR)."""
+        for h in cube_handles.values():
+            pos, quat = h.get_world_pose()
             pos = np.asarray(pos, dtype=np.float32).copy()
             pos[0] = float(np.random.uniform(*_CUBE_SCATTER_X_RANGE))
             pos[1] = float(np.random.uniform(*_CUBE_SCATTER_Y_RANGE))
-            cube.set_world_pose(position=pos, orientation=quat)
+            h.set_world_pose(position=pos, orientation=quat)
+            try:
+                h.set_linear_velocity(np.zeros(3, dtype=np.float32))
+                h.set_angular_velocity(np.zeros(3, dtype=np.float32))
+            except Exception:
+                pass
+
+    def reset_scene() -> None:
+        """장면 초기화 + DR — 큐브 재배치 후 팔 home(0)으로. 직후 VLA 명령이 다시 구동한다."""
+        randomize_cubes()
+        try:
+            robot.set_joint_positions(home_q)
+            robot.set_joint_velocities(home_q)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] arm home reset 실패: {exc}", flush=True)
+        print("[bridge] scene reset + DR", flush=True)
+
+    if args.dr:
+        randomize_cubes()
+
+    # 키보드 R/N → 장면 초기화 + DR (teleop 과 동일 키). GUI 모드에서만.
+    should_reset = {"flag": False}
+    kbd_sub = None
+    if not args.headless:
+        try:
+            import carb  # noqa: PLC0415
+            import omni.appwindow  # noqa: PLC0415
+
+            _inp = carb.input.acquire_input_interface()
+            _kbd = omni.appwindow.get_default_app_window().get_keyboard()
+
+            def _on_kbd(event, *_a):
+                if event.type == carb.input.KeyboardEventType.KEY_PRESS and event.input.name in ("R", "N"):
+                    should_reset["flag"] = True
+                return True
+
+            kbd_sub = _inp.subscribe_to_keyboard_events(_kbd, _on_kbd)
+            print("[bridge] keyboard: R 또는 N = 장면 초기화 + DR", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] keyboard sub 실패(리셋 키 비활성): {exc}", flush=True)
 
     print(f"[bridge] ready. cubes={active_cubes}  dof={n_dof}", flush=True)
     cam_topics = " / ".join(t for _, t, _ in camera_specs) if camera_specs else "(none)"
@@ -370,6 +415,9 @@ def main() -> None:
 
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
     while simulation_app.is_running():
+        if should_reset["flag"]:
+            should_reset["flag"] = False
+            reset_scene()
         world.step(render=True)
 
 
