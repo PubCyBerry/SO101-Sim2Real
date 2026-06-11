@@ -245,6 +245,40 @@ services:
     stdin_open: true
     tty: true
 
+  # ── VLA 추론 ROS 노드 (sim) ───────────────────────────────────────────
+  # 상주 Isaac Sim bridge(호스트: scripts/sim/run_cube_desk_ros_bridge.sh)가 publish 하는
+  # /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 policy-server(gRPC)로
+  # VLA 추론하고 /isaac_joint_commands 를 publish 한다. cuMotion/MoveIt 미경유(joint 직접).
+  #
+  # 전제: ① policy-server 기동, ② 호스트에서 bridge 상주.
+  # 실행: docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
+  #   실기기 전환: command 로 launch arg override —
+  #   ["bash","/workspace/docker/vla-ros-entrypoint.sh","ros2","launch","so101_vla_policy",
+  #    "vla_policy.launch.py","use_shim:=true","joint_states_topic:=/follower/joint_states"]
+  vla-ros:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vla_ros
+    image: so101-vla-ros:jazzy
+    container_name: so101_vla_ros
+    restart: "no"
+    # host↔container DDS: bridge 와 동일 fastrtps + UDPv4 (cross-UID SHM 회피).
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION:         rmw_fastrtps_cpp
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+    # 정책 파라미터는 policy-server 와 동일한 .env + 모델 프로필에서 읽는다.
+    env_file:
+      - ../.env
+      - ../env/${POLICY_PROFILE:-smolvla}.env
+    # repo 전체 마운트(/workspace): ros2_ws 빌드 + .env/env + so101_vla_policy 소스.
+    volumes:
+      - ..:/workspace
+    entrypoint: ["bash", "/workspace/docker/vla-ros-entrypoint.sh"]
+    stdin_open: true
+    tty: true
+
 # ── 공유 볼륨 ──────────────────────────────────────────────────────────────
 volumes:
   hf_cache:

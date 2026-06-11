@@ -55,6 +55,11 @@ parser = argparse.ArgumentParser(description="cube_desk Isaac Sim ROS 2 bridge")
 parser.add_argument("--num_cubes", type=int, default=4, choices=[1, 2, 3, 4])
 parser.add_argument("--dr", action="store_true", help="큐브 위치를 scatter 범위로 무작위화")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument(
+    "--no_cameras",
+    action="store_true",
+    help="top/wrist/front 카메라 ROS publish 비활성화 (기본은 publish — VLA obs 용).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -78,9 +83,15 @@ enable_extension("omni.graph.action")
 enable_extension("omni.graph.nodes")
 enable_extension("isaacsim.core.nodes")
 enable_extension("isaacsim.ros2.bridge")
+if not args.no_cameras:
+    # 카메라 render product 생성에 replicator 필요.
+    enable_extension("omni.replicator.core")
 
 import omni.graph.core as og  # noqa: E402
+import torch  # noqa: E402  (world→opengl quat 변환용)
 from pxr import Gf, UsdGeom  # noqa: E402
+
+from isaaclab.utils.math import convert_camera_frame_orientation_convention  # noqa: E402
 
 import isaaclab.sim.schemas as schemas  # noqa: E402 (순수 USD authoring — 시뮬 파이프라인 무관)
 from isaaclab.sim.schemas import ArticulationRootPropertiesCfg  # noqa: E402
@@ -92,8 +103,17 @@ from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_USD_PATH, ROBOT_USD_PA
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     _CUBE_SCATTER_X_RANGE,
     _CUBE_SCATTER_Y_RANGE,
+    _FRONT_CAM_LOCAL_POS,
+    _FRONT_CAM_LOCAL_ROT,
+    _FRONT_CAMERA_FOCAL,
     _ROBOT_POS,
     _ROBOT_ROT,
+    _TOP_CAMERA_FOCAL,
+    _TOP_CAMERA_POS,
+    _TOP_CAMERA_ROT,
+    _WRIST_CAM_LOCAL_POS,
+    _WRIST_CAM_LOCAL_ROT,
+    _WRIST_CAMERA_FOCAL,
 )
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
@@ -103,6 +123,24 @@ ROBOT_PRIM = "/World/Robot"  # fix_root_link 후 articulation root 가 이 prim 
 BASE_LINK_PRIM = f"{ROBOT_PRIM}/base/base_link"  # TF parent frame "base_link" 용 Xform.
 JOINT_STATES_TOPIC = "/isaac_joint_states"
 JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"
+
+# VLA obs 카메라 — gym PickCube 와 동일 prim 경로/포즈/focal(teleop 튜너 보정값 재사용).
+# top=world 고정, wrist=gripper 링크 자식, front=shoulder 링크 자식.
+# pick_cube_env_cfg 의 _pinhole_camera_cfg 와 동일: horizontal_aperture=20.955, 640×480.
+_CAM_W, _CAM_H = 640, 480
+_CAM_HORIZ_APERTURE = 20.955
+# (prim_path, parent_local?, pos, rot_world_wxyz, focal, topic, frame_id)
+CAMERA_SPECS = [
+    ("/World/TopCamera",
+     _TOP_CAMERA_POS, _TOP_CAMERA_ROT, _TOP_CAMERA_FOCAL,
+     "/camera/top/image_raw", "top_camera_optical_frame"),
+    (f"{ROBOT_PRIM}/gripper/WristCamera",
+     _WRIST_CAM_LOCAL_POS, _WRIST_CAM_LOCAL_ROT, _WRIST_CAMERA_FOCAL,
+     "/camera/wrist/image_raw", "wrist_camera_optical_frame"),
+    (f"{ROBOT_PRIM}/shoulder/FrontCamera",
+     _FRONT_CAM_LOCAL_POS, _FRONT_CAM_LOCAL_ROT, _FRONT_CAMERA_FOCAL,
+     "/camera/front/image_raw", "front_camera_optical_frame"),
+]
 
 # Isaac Lab PickCubeEnvCfg 의 검증된 actuator gain (leisaac SO101_FOLLOWER_CFG).
 DRIVE_STIFFNESS = 17.8
@@ -137,52 +175,110 @@ def _set_local_pose(prim, pos: tuple[float, float, float], quat_wxyz: tuple[floa
         orient_op.Set(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
 
 
-def build_ros_graph(object_prims: list[str]):
+def _create_camera_prim(stage, prim_path, pos, rot_world_wxyz, focal):
+    """USD Camera prim 생성 + 포즈(world→opengl 변환)·focal·aperture 설정.
+
+    gym TiledCamera 의 offset(convention="world") 와 동일 view 를 내려면 world-convention
+    quat 을 USD(opengl) 컨벤션으로 변환해 prim local orient 로 author 한다. parent 가 link
+    (wrist/front)면 그 link frame 기준 local, top 은 /World(=world) 기준.
+    """
+    cam = UsdGeom.Camera.Define(stage, prim_path)
+    cam.GetFocalLengthAttr().Set(float(focal))
+    cam.GetHorizontalApertureAttr().Set(float(_CAM_HORIZ_APERTURE))
+    cam.GetVerticalApertureAttr().Set(float(_CAM_HORIZ_APERTURE) * _CAM_H / _CAM_W)
+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 6.0))
+
+    q = torch.tensor([[float(c) for c in rot_world_wxyz]], dtype=torch.float32)
+    w, x, y, z = convert_camera_frame_orientation_convention(q, origin="world", target="opengl")[0].tolist()
+
+    xf = UsdGeom.Xformable(cam.GetPrim())
+    xf.ClearXformOpOrder()
+    xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*[float(v) for v in pos]))
+    xf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(float(w), Gf.Vec3d(float(x), float(y), float(z))))
+
+
+def setup_cameras(stage) -> list[tuple[str, str, str]]:
+    """CAMERA_SPECS 의 카메라 prim + render product 를 만들고 (rp_path, topic, frame_id) 리스트 반환.
+
+    parent link prim 이 없으면(이름 불일치) 경고하고 그 카메라를 건너뛴다.
+    """
+    import omni.replicator.core as rep
+
+    specs: list[tuple[str, str, str]] = []
+    for prim_path, pos, rot, focal, topic, frame_id in CAMERA_SPECS:
+        parent_path = prim_path.rsplit("/", 1)[0]
+        if not stage.GetPrimAtPath(parent_path).IsValid():
+            print(f"[bridge] WARN: camera parent prim 없음 {parent_path} → {topic} 건너뜀", flush=True)
+            continue
+        _create_camera_prim(stage, prim_path, pos, rot, focal)
+        rp = rep.create.render_product(prim_path, (_CAM_W, _CAM_H))
+        specs.append((rp.path, topic, frame_id))
+        print(f"[bridge] camera {prim_path} → {topic} (focal={focal})", flush=True)
+    return specs
+
+
+def build_ros_graph(object_prims: list[str], camera_specs: list[tuple[str, str, str]] | None = None):
     """JointState pub/sub + Clock + 물체 TF OmniGraph (ROS 2 bridge, C++ only — rclpy 불필요).
 
     World 가 timeline 을 play 하므로 OnPlaybackTick 이 매 프레임 fire 한다(A안의 OnTick+
     수동 evaluate_sync 불필요). 물체 TF 는 parent=base_link Xform 기준으로 publish 한다.
     """
+    create_nodes = [
+        ("OnTick", "omni.graph.action.OnPlaybackTick"),
+        ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+        ("Context", "isaacsim.ros2.bridge.ROS2Context"),
+        ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+        ("PublishJointState", "isaacsim.ros2.bridge.ROS2PublishJointState"),
+        ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
+        ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
+        ("PublishObjectTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+    ]
+    connect = [
+        ("OnTick.outputs:tick", "PublishClock.inputs:execIn"),
+        ("OnTick.outputs:tick", "PublishJointState.inputs:execIn"),
+        ("OnTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
+        ("OnTick.outputs:tick", "ArticulationController.inputs:execIn"),
+        ("OnTick.outputs:tick", "PublishObjectTF.inputs:execIn"),
+        ("Context.outputs:context", "PublishClock.inputs:context"),
+        ("Context.outputs:context", "PublishJointState.inputs:context"),
+        ("Context.outputs:context", "SubscribeJointState.inputs:context"),
+        ("Context.outputs:context", "PublishObjectTF.inputs:context"),
+        ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+        ("ReadSimTime.outputs:simulationTime", "PublishJointState.inputs:timeStamp"),
+        ("ReadSimTime.outputs:simulationTime", "PublishObjectTF.inputs:timeStamp"),
+        ("SubscribeJointState.outputs:jointNames", "ArticulationController.inputs:jointNames"),
+        ("SubscribeJointState.outputs:positionCommand", "ArticulationController.inputs:positionCommand"),
+    ]
+    set_values = [
+        ("PublishJointState.inputs:topicName", JOINT_STATES_TOPIC),
+        ("PublishJointState.inputs:targetPrim", [ROBOT_PRIM]),
+        ("SubscribeJointState.inputs:topicName", JOINT_COMMANDS_TOPIC),
+        ("ArticulationController.inputs:targetPrim", [ROBOT_PRIM]),
+        ("PublishObjectTF.inputs:parentPrim", [BASE_LINK_PRIM]),
+        ("PublishObjectTF.inputs:targetPrims", object_prims),
+    ]
+
+    # 카메라 publish 노드 — render product 당 ROS2CameraHelper(type=rgb) 하나.
+    for i, (rp_path, topic, frame_id) in enumerate(camera_specs or []):
+        node = f"CameraHelper{i}"
+        create_nodes.append((node, "isaacsim.ros2.bridge.ROS2CameraHelper"))
+        connect += [
+            ("OnTick.outputs:tick", f"{node}.inputs:execIn"),
+            ("Context.outputs:context", f"{node}.inputs:context"),
+        ]
+        set_values += [
+            (f"{node}.inputs:renderProductPath", rp_path),
+            (f"{node}.inputs:topicName", topic),
+            (f"{node}.inputs:frameId", frame_id),
+            (f"{node}.inputs:type", "rgb"),
+        ]
+
     graph, _, _, _ = og.Controller.edit(
         {"graph_path": "/ROSBridge", "evaluator_name": "execution"},
         {
-            og.Controller.Keys.CREATE_NODES: [
-                ("OnTick", "omni.graph.action.OnPlaybackTick"),
-                ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-                ("Context", "isaacsim.ros2.bridge.ROS2Context"),
-                ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
-                ("PublishJointState", "isaacsim.ros2.bridge.ROS2PublishJointState"),
-                ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
-                ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
-                ("PublishObjectTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
-            ],
-            og.Controller.Keys.CONNECT: [
-                ("OnTick.outputs:tick", "PublishClock.inputs:execIn"),
-                ("OnTick.outputs:tick", "PublishJointState.inputs:execIn"),
-                ("OnTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
-                ("OnTick.outputs:tick", "ArticulationController.inputs:execIn"),
-                ("OnTick.outputs:tick", "PublishObjectTF.inputs:execIn"),
-                ("Context.outputs:context", "PublishClock.inputs:context"),
-                ("Context.outputs:context", "PublishJointState.inputs:context"),
-                ("Context.outputs:context", "SubscribeJointState.inputs:context"),
-                ("Context.outputs:context", "PublishObjectTF.inputs:context"),
-                ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
-                ("ReadSimTime.outputs:simulationTime", "PublishJointState.inputs:timeStamp"),
-                ("ReadSimTime.outputs:simulationTime", "PublishObjectTF.inputs:timeStamp"),
-                ("SubscribeJointState.outputs:jointNames", "ArticulationController.inputs:jointNames"),
-                (
-                    "SubscribeJointState.outputs:positionCommand",
-                    "ArticulationController.inputs:positionCommand",
-                ),
-            ],
-            og.Controller.Keys.SET_VALUES: [
-                ("PublishJointState.inputs:topicName", JOINT_STATES_TOPIC),
-                ("PublishJointState.inputs:targetPrim", [ROBOT_PRIM]),
-                ("SubscribeJointState.inputs:topicName", JOINT_COMMANDS_TOPIC),
-                ("ArticulationController.inputs:targetPrim", [ROBOT_PRIM]),
-                ("PublishObjectTF.inputs:parentPrim", [BASE_LINK_PRIM]),
-                ("PublishObjectTF.inputs:targetPrims", object_prims),
-            ],
+            og.Controller.Keys.CREATE_NODES: create_nodes,
+            og.Controller.Keys.CONNECT: connect,
+            og.Controller.Keys.SET_VALUES: set_values,
         },
     )
     return graph
@@ -230,9 +326,14 @@ def main() -> None:
     robot = SingleArticulation(ROBOT_PRIM, name="so101_follower")
     world.scene.add(robot)
 
+    # VLA obs 카메라 — prim + render product 생성(robot/scene prim 이 stage 에 있은 뒤).
+    camera_specs: list[tuple[str, str, str]] = []
+    if not args.no_cameras:
+        camera_specs = setup_cameras(world.stage)
+
     # OmniGraph 는 reset(=play) 전 timeline 정지 상태에서 생성한다(그래프 wrap + OnPlaybackTick
     # 등록). 노드는 prim 경로만 참조하므로 prim 이 존재하면 된다.
-    ros_graph = build_ros_graph(object_prims)
+    ros_graph = build_ros_graph(object_prims, camera_specs)
 
     # reset: 물리 뷰 초기화 + timeline play → OnPlaybackTick 시작.
     world.reset()
@@ -262,8 +363,10 @@ def main() -> None:
             cube.set_world_pose(position=pos, orientation=quat)
 
     print(f"[bridge] ready. cubes={active_cubes}  dof={n_dof}", flush=True)
+    cam_topics = " / ".join(t for _, t, _ in camera_specs) if camera_specs else "(none)"
     print(f"[bridge] topics: {JOINT_STATES_TOPIC} / {JOINT_COMMANDS_TOPIC} / /clock / /tf"
           f"  (TF base_link→{active_cubes + [BOWL_NAME]})", flush=True)
+    print(f"[bridge] camera topics: {cam_topics}", flush=True)
 
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
     while simulation_app.is_running():

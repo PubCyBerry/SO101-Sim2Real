@@ -13,6 +13,19 @@
 
 ---
 
+## 작업 인계 (2026-06-11 — Sim VLA 추론: ROS 2 경로 / 코드 완료·실행 검증 대기)
+
+- **목표**: Isaac Sim SO-101 팔을 학습 VLA(SmolVLA/ACT, Docker `policy-server` gRPC)로 구동. transport **ROS 2** 확정(ZMQ 초안 폐기). 계획서: `~/.claude/plans/scripts-environments-teleoperation-tele-jolly-firefly.md`. 상세 문서: `docs/PATH_E_CUMOTION_ROS.md` §7.
+- **아키텍처(3 프로세스)**: ① 호스트 isaac venv `run_cube_desk_ros_bridge.py` 상주(joint_states/clock/tf **+ 신규 카메라 3대** publish, `/isaac_joint_commands` sub→ArticulationController 직접 적용) ② `vla-ros` 컨테이너 `so101_vla_policy` 노드(obs sub→policy-server gRPC→`/isaac_joint_commands` pub) ③ Docker policy-server. cuMotion/MoveIt 미경유.
+- **🔑 환경 사실**: 서버 konan147 엔 **ROS 미설치**(`/opt/ros` 없음) — Isaac Sim 은 **번들 jazzy lib** 로 publish(호스트 ROS 불필요). **런타임 분리** rclpy(py3.12) ↔ lerobot(py3.11 venv) → VLA 노드는 별도 py3.12 컨테이너(`Dockerfile.vla_ros`)에서 lerobot pip 설치. 전처리(rename/resize/normalize)는 서버측, 클라는 raw obs 만.
+- **단위 계약**: state/action LeRobot 단위(arm deg / gripper [0,100]×31.75) ↔ sim rad. `so101_vla_policy/units.py`(vendored, `scripts/sim/lerobot_units.py` 미러). SmolVLA rename `top→camera1` 등은 env/smolvla.env `RENAME_MAP`.
+- **변경/신규 파일**: ① `scripts/sim/lerobot_units.py`(유지·공용 변환) ② `scripts/sim/rollout_to_lerobot.py`(import 교체, 유지) ③ `scripts/sim/run_cube_desk_ros_bridge.py`(**카메라 publish 추가** — USD Camera prim world→opengl 변환 + render product + ROS2CameraHelper, `--no_cameras` 토글) ④ `ros2_ws/src/so101_vla_policy/`(신규 pkg: vla_policy_node + joint_command_to_trajectory shim + units + launch/config) ⑤ `docker/Dockerfile.vla_ros` + `vla-ros-entrypoint.sh` + compose `vla-ros` 서비스 ⑥ docs PATH_C §6(포인터)·PATH_E §7. **teleop_se3_agent.py 는 완전 원복**(ZMQ 초안 삭제).
+- **검증 완료(코드 레벨)**: 전체 ast parse·compose yaml·entrypoint sh OK. units 라운드트립 정확(gripper 100°↔1.745rad). bridge convert helper/카메라 상수 import 확인(post-boot). gRPC 프리미티브 import OK.
+- **남은 일(사용자/GPU+Docker)**: ① `Dockerfile.vla_ros` **빌드 미검증**(py3.12 lerobot+torch-cpu+numpy<2 resolve, cv_bridge ABI) ② bridge 카메라 런타임(robot USD link prim `gripper`/`shoulder` 존재·convention view) — Isaac 부팅 필요 ③ 풀 파이프라인: PATH_E §7.4 ①②③ 순. ④ action sink shim(`joint_command_to_trajectory`)은 실기기 controller 이름 param 정합 필요(scaffold).
+- **리스크**: numpy ABI(cv_bridge↔torch, `numpy<2` 핀), `${HF_USER}` 미보간 시 param 지정, GetActions 빈 chunk timeout 재시도, pickle 0.4.4↔0.5.1(실기기 검증됨).
+
+---
+
 ## 작업 인계 (2026-06-10 — 실기기 grasp 파이프라인: feetech deactivate 근본해결 + 제어 파이프라인 동작 / 진행중)
 
 - **목표**: scripted-expert(top 호모그래피 + IK + wrist visual servo)로 SO-101 큐브 grasp 데모 자율 생성 → LeRobot v3.0 녹화. 범위=캘리브→grasp→녹화(유저 확정). 계획서: `~/.claude/plans/context-md-dynamic-meadow.md`.

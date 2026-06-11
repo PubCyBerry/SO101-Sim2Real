@@ -13,6 +13,7 @@ Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0`(펜→펜컵) · `SimToReal-SO101
 - [3. 디렉토리 구조 (시뮬 관련)](#3-디렉토리-구조-시뮬-관련)
 - [4. 펜 씬 (Pen Scene)](#4-펜-씬-pen-scene)
 - [5. 텔레오퍼레이션 및 레코드](#5-텔레오퍼레이션-및-레코드)
+- [6. policy-server VLA 추론 (Sim)](#6-policy-server-vla-추론-sim)
 
 ---
 
@@ -266,3 +267,16 @@ uv run lerobot-dataset-viz `
     --episode-index 0 `
     --mode local
 ```
+
+---
+
+## 6. policy-server VLA 추론 (Sim)
+
+학습된 VLA(SmolVLA/ACT)를 sim 에서 돌리는 경로는 **ROS 2** 로 구현돼 PATH E 문서로
+이전했다 → [`docs/PATH_E_CUMOTION_ROS.md` §7 VLA 추론 (ROS)](PATH_E_CUMOTION_ROS.md).
+
+요약: 상주 Isaac Sim bridge(`scripts/sim/run_cube_desk_ros_bridge.py`)가
+`/isaac_joint_states` + `/camera/{top,wrist,front}/image_raw` 를 publish → 경량
+`vla-ros` 컨테이너의 `so101_vla_policy` 노드가 policy-server(gRPC)로 추론 →
+`/isaac_joint_commands` publish. Isaac 부팅 비용과 추론 클라를 분리하고, 실기기 ROS
+제어와 동일 토픽 인터페이스를 쓴다.

@@ -158,3 +158,155 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 | **프레임** | MoveIt virtual_joint(world→base_link)=identity → 모든 포즈를 base_link frame 으로 통일. bridge 가 robot base 기준으로 빼서 publish |
 
 새 종류 에러를 해결하면 `docs/TROUBLESHOOTING.md` 에 기록(운영 규칙).
+
+---
+
+## 7. VLA 추론 (ROS)
+
+학습된 VLA(SmolVLA/ACT, Docker `policy-server`)로 sim SO-101 팔을 구동한다. cuMotion/MoveIt
+은 쓰지 않고(VLA 가 joint target 을 직접 냄), §1 의 Isaac↔ROS 토픽 계약을 그대로 재사용한다.
+
+### 7.1 아키텍처 (3 프로세스)
+
+```
+[호스트 server, isaac venv py3.11]              [vla-ros 컨테이너 py3.12]          [Docker policy-server]
+ run_cube_desk_ros_bridge.py (상주)              so101_vla_policy 노드               lerobot 0.5.1 (gRPC)
+  · joint_states/clock/tf (기존)        ── /isaac_joint_states ──▶  obs 수집
+  · +카메라 3대 publish (신규)          ── /camera/{top,wrist,front}/image_raw ──▶  state rad→LeRobot deg
+    OmniGraph ROS2CameraHelper                                       이미지 cv_bridge(rgb8)
+  · ArticulationController              ◀── /isaac_joint_commands ──  VLA gRPC ──▶◀── action chunk
+    (joint cmd 직접 적용)                                            action(LeRobot)→rad → publish
+  (번들 jazzy lib, 호스트 ROS 불필요)    UDPv4 fastrtps, network host
+```
+
+- **부팅 분리**: Isaac Sim 은 한 번 띄워 상주(부팅 느림). 추론 클라(컨테이너)는 재시작 가벼움.
+- **단위 책임**: bridge·ArticulationController 는 sim rad. LeRobot 단위 변환(arm deg/그리퍼[0,100])과
+  VLA gRPC 는 `so101_vla_policy` 노드가 전담. 전처리(rename/resize/normalize/추론)는 policy-server.
+- **런타임 분리**: rclpy(Jazzy=py3.12) ↔ lerobot(uv venv=py3.11, Isaac 핀). 그래서 VLA 노드는
+  **별도 py3.12 컨테이너**(`Dockerfile.vla_ros`)에서 lerobot 을 pip 설치해 돈다.
+
+### 7.2 토픽 계약
+
+| 토픽 | 타입 | 방향 | 내용 |
+|---|---|---|---|
+| `/isaac_joint_states` | sensor_msgs/JointState | bridge→노드 | 6관절 rad (name 기준 SO101 순 재정렬) |
+| `/camera/{top,wrist,front}/image_raw` | sensor_msgs/Image | bridge→노드 | rgb8 480×640 (gym 과 동일 포즈/focal) |
+| `/isaac_joint_commands` | sensor_msgs/JointState | 노드→bridge | 6관절 target rad (name=SO101 순) |
+
+### 7.3 설치 내역 (`docker/Dockerfile.vla_ros`)
+
+호스트는 건드리지 않는다 — 모두 컨테이너 격리. base `ros:jazzy-ros-base`.
+
+- **apt**: `ros-jazzy-cv-bridge`(이미지 디코드), `ros-jazzy-rmw-fastrtps-cpp`(DDS),
+  `python3-pip`, `python3-colcon-common-extensions`, `git`.
+- **pip(py3.12, `--break-system-packages`)**: `torch`(CPU 휠 — 추론은 서버라 GPU 불필요),
+  `lerobot==0.4.4`(gRPC pickle 클래스 — server 0.5.1 과 호환), `grpcio`, `protobuf`,
+  `python-dotenv`, `numpy<2`(cv_bridge ABI 보호).
+- DDS: `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` + `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`(host↔container
+  cross-UID SHM 회피, §1·`run_cube_desk_ros_bridge.sh` 와 동일).
+- compose 서비스 `vla-ros`: `network_mode/ipc: host`, repo 를 `/workspace` 로 마운트,
+  `.env`+`env/<POLICY_PROFILE>.env` env_file 주입. 진입점 `docker/vla-ros-entrypoint.sh`
+  가 `so101_vla_policy` colcon build → `ros2 launch`.
+
+### 7.4 실행 순서
+
+```bash
+# ① policy-server (메인 루트). POLICY_PROFILE=smolvla|act, POLICY_REPO_ID=fine-tuned 확인.
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+
+# ② Isaac Sim bridge 상주 (호스트, 카메라 publish 포함 — 기본 on)
+scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1
+
+# ③ VLA 추론 노드 (컨테이너). .env 의 정책 파라미터 자동 사용.
+docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
+```
+
+- 정책 파라미터(`POLICY_SERVER_ADDRESS`/`POLICY_TYPE`/`POLICY_REPO_ID`/`ACTIONS_PER_CHUNK`/
+  `TASK`/`RENAME_MAP`/`POLICY_DEVICE`/`CHUNK_SIZE_THRESHOLD`)는 실기기 policy-client 와 **동일한**
+  `.env`+프로필에서 읽음. ROS param override 가능(`config/vla_policy.yaml`).
+- **실기기 전환**: 같은 노드를 토픽 remap + action sink shim 으로 재사용 —
+  launch 에 `use_shim:=true joint_states_topic:=/follower/joint_states` 전달. shim
+  (`joint_command_to_trajectory`)이 `/isaac_joint_commands`(JointState)→ arm
+  FollowJointTrajectory + gripper GripperCommand 액션으로 변환(실기기 controller 이름은 param 으로 맞춤).
+
+### 7.5 검증
+
+1. **카메라 토픽**: bridge 상주 후 `ros2 topic hz /camera/top/image_raw`(~30Hz),
+   `ros2 topic echo --once /camera/top/image_raw`(width 640 height 480 encoding rgb8).
+2. **노드 단독**(policy-server 없이): `/isaac_joint_states`+이미지 수신, `/isaac_joint_commands` 형식.
+3. **단위 라운드트립**: `so101_vla_policy/units.py` `from_lerobot_units(to_lerobot_units(x))≈x`
+   (검증 완료, gripper 100°↔1.745rad).
+4. **풀 파이프라인**: ①②③ → 상주 Isaac 창에서 팔이 추론 action 으로 구동.
+
+### 7.6 알려진 함정
+
+| 함정 | 메모 |
+|---|---|
+| **카메라 prim 부착** | bridge robot USD link prim 명(`gripper`/`shoulder`)이 gym 과 같다고 가정. 다르면 `[bridge] WARN: camera parent prim 없음` 후 skip → prim 경로 수정 |
+| **numpy ABI** | cv_bridge(apt)=system numpy 1.26 빌드. lerobot/torch 가 numpy 2.x 로 올리면 import 깨짐 → `numpy<2` 핀(Dockerfile 반영) |
+| **pickle 호환** | client lerobot 0.4.4 ↔ server 0.5.1 (실기기 policy-client 경로 검증). lerobot 버전 변경 시 재확인 |
+| **${HF_USER} 미보간** | host 에서 `POLICY_REPO_ID=${HF_USER}/…` 미해결 시 노드 경고 → param `pretrained_name_or_path` 지정 |
+| **카메라 convention** | gym TiledCamera offset(convention="world")와 동일 view 위해 bridge 가 world→opengl 변환 후 USD prim author |
+
+### 7.7 실기기 배포
+
+같은 `so101_vla_policy` 노드를 **코드 변경 없이** 실기기에 재사용한다. sim 과 차이는
+obs 토픽 remap + **action sink shim**(joint target → controller 액션) 둘뿐이다. 실기기
+카메라는 `cv2_camera_publisher.py` 가 이미 `/camera/{top,wrist,front}/image_raw` 로
+publish 하므로 토픽 이름이 그대로 맞는다.
+
+```
+실기기 ROS(PATH D)                              vla-ros / VLA 노드                policy-server
+ feetech_ros2_driver → /follower/joint_states ─▶  obs 수집                          (gRPC, fine-tuned)
+ cv2_camera_publisher → /camera/*/image_raw ───▶  state(rad→deg)·이미지 ──gRPC──▶
+ arm_trajectory_controller (FollowJointTrajectory) ◀── shim ◀── /isaac_joint_commands ◀── action chunk
+ gripper_controller (GripperCommand)             ◀──┘ (JointState→액션 변환)
+```
+
+**실행 순서**
+
+```bash
+# ① 실기기 ROS 스택 (PATH D — 실기기 머신/WSL2)
+ros2 launch so101_bringup follower_split.launch.py     # feetech 드라이버 + arm/gripper 컨트롤러
+ros2 launch so101_bringup cameras_cv2.launch.py        # /camera/{top,wrist,front}/image_raw
+
+# ② policy-server (동일, fine-tuned 모델)
+docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+
+# ③ VLA 노드 + action sink shim — obs remap + 실기기 컨트롤러 액션 이름 지정
+ros2 launch so101_vla_policy vla_policy.launch.py \
+    use_shim:=true \
+    joint_states_topic:=/follower/joint_states
+#   shim 컨트롤러 이름이 다르면 config/vla_policy.yaml 또는 -p 로:
+#     arm_action:=/follower/arm_trajectory_controller/follow_joint_trajectory
+#     gripper_action:=/follower/gripper_controller/gripper_cmd
+```
+
+> `vla-ros` 컨테이너로 띄울 경우 entrypoint 에 위 `ros2 launch … use_shim:=true …` 인자를
+> compose `command` 로 넘긴다. 단 컨테이너가 실기기 ROS 그래프에 도달하려면 동일 DDS
+> domain·네트워크여야 한다(머신이 다르면 `ROS_DOMAIN_ID`/디스커버리 정합).
+
+**sim ↔ real 차이 한눈에**
+
+| 항목 | sim | real |
+|---|---|---|
+| joint state | `/isaac_joint_states` | `/follower/joint_states` (remap) |
+| 카메라 | bridge OmniGraph publish | `cv2_camera_publisher` (토픽 동일) |
+| action sink | `/isaac_joint_commands`→ArticulationController 직접 | **shim**→FollowJointTrajectory + GripperCommand 액션 |
+| 실행 | `up vla-ros` (기본) | `use_shim:=true` + remap |
+
+**검증 필요 / 주의**
+
+| 항목 | 확인 |
+|---|---|
+| joint 단위 | feetech 드라이버 joint_states = rad 가정(`to_lerobot_units` 전제). 그리퍼 [0,100] 매핑 재확인 |
+| 이미지 encoding | 실기기 bgr8 → 노드가 `rgb8` 요청, cv_bridge 자동 변환 (OK) |
+| shim 컨트롤러 이름 | 실기기 `so101_bringup` controller 설정과 정확히 일치(기본값=PATH D/E 관례) |
+| 네트워크/DDS | 실기기 ROS(WSL2)와 VLA 노드 같은 domain·도달 가능. UDPv4 디스커버리 |
+| 안전 | 노드 `clamp_joint_rad` + shim throttle(`max_rate`). 첫 구동 저속·근접감시 |
+
+> 참고: 실기기엔 ROS 없는 VLA 경로(`docker policy-client`, feetech serial 직결)가 이미
+> 동작한다(더 간단). 이 ROS 경로의 이점은 sim·real **동일 토픽 인터페이스** + 향후
+> MoveIt/cuMotion(§1~6) 통합 가능성이다.
+
+새 종류 에러를 해결하면 `docs/TROUBLESHOOTING.md` 에 기록(운영 규칙).

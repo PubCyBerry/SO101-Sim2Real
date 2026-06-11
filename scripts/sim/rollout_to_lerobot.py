@@ -20,7 +20,6 @@ if multiprocessing.get_start_method() != "spawn":
 
 import argparse
 import json
-import math
 import shutil
 import sys
 import traceback
@@ -31,28 +30,23 @@ from typing import Any
 from isaaclab.app import AppLauncher
 
 
+# 단위/카메라 변환 상수·헬퍼는 lerobot_units 공용 모듈 (같은 디렉터리, AppLauncher 무의존).
+from lerobot_units import (  # noqa: E402
+    CAMERA_KEYS,
+    CAMERA_SCENE_NAMES,
+    FPS,
+    GRIPPER_LEROBOT_SCALE,  # noqa: F401  (하위 호환 재노출)
+    IMAGE_CHANNELS,
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    JOINT_FEATURE_NAMES,
+    read_camera_rgb_u8,
+    to_lerobot_units as _to_lerobot_units,
+)
+
 TASK_ID = "TC.1"
 PEN_TASK_NAME = "pick up the pen and place it in the holder"
 CUBE_TASK_NAME = "pick up the cube and place it in the bowl"
-FPS = 30
-IMAGE_HEIGHT = 480
-IMAGE_WIDTH = 640
-IMAGE_CHANNELS = 3
-CAMERA_KEYS = ("top", "wrist", "front")
-CAMERA_SCENE_NAMES = {
-    "top": "top_camera",
-    "wrist": "wrist_camera",
-    "front": "front_camera",
-}
-JOINT_FEATURE_NAMES = [
-    "shoulder_pan.pos",
-    "shoulder_lift.pos",
-    "elbow_flex.pos",
-    "wrist_flex.pos",
-    "wrist_roll.pos",
-    "gripper.pos",
-]
-GRIPPER_LEROBOT_SCALE = 31.75
 
 
 parser = argparse.ArgumentParser(description="TC.1 rollout-to-LeRobot-v3 recorder")
@@ -280,14 +274,6 @@ def _prepare_output_dir(path: Path, overwrite: bool) -> None:
         (resolved / "videos" / f"observation.images.{cam}" / "chunk-000").mkdir(parents=True, exist_ok=True)
 
 
-def _to_lerobot_units(values_rad: np.ndarray) -> np.ndarray:
-    """Convert Isaac joint radians to the real LeRobot SO-101 convention."""
-    values = np.asarray(values_rad, dtype=np.float32).copy()
-    values[:5] = values[:5] * (180.0 / math.pi)
-    values[5] = values[5] * GRIPPER_LEROBOT_SCALE
-    return values.astype(np.float32)
-
-
 def _read_joint_state(raw_env) -> np.ndarray:
     robot = raw_env.unwrapped.scene["robot"]
     return _to_lerobot_units(robot.data.joint_pos[0].detach().cpu().numpy())
@@ -299,22 +285,7 @@ def _action_to_record(action_tensor: torch.Tensor) -> np.ndarray:
 
 
 def _capture_images(raw_env) -> dict[str, np.ndarray]:
-    images: dict[str, np.ndarray] = {}
-    for key in CAMERA_KEYS:
-        cam = raw_env.unwrapped.scene[CAMERA_SCENE_NAMES[key]]
-        rgb = cam.data.output["rgb"][0].detach().cpu().numpy()
-        if rgb.shape[-1] == 4:
-            rgb = rgb[..., :3]
-        if rgb.dtype != np.uint8:
-            if np.issubdtype(rgb.dtype, np.floating):
-                rgb = np.clip(rgb, 0.0, 1.0) * 255.0
-            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-        image = np.ascontiguousarray(rgb)
-        expected_shape = (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS)
-        if image.shape != expected_shape:
-            raise ValueError(f"{key} image shape {image.shape}, expected {expected_shape}")
-        images[key] = image
-    return images
+    return {key: read_camera_rgb_u8(raw_env, CAMERA_SCENE_NAMES[key]) for key in CAMERA_KEYS}
 
 
 def _open_video_writers(root: Path) -> dict[str, Any]:

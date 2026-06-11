@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>so101_vla_policy</name>
+  <version>0.1.0</version>
+  <description>
+    SO-101 VLA 추론 ROS 2 노드 (sim VLA eval). Isaac Sim bridge 가 publish 하는
+    /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 LeRobot
+    async-inference policy-server(gRPC, SmolVLA/ACT)로 추론하고 6관절 joint target
+    을 /isaac_joint_commands 로 publish 한다. 실기기 전환 시 action sink shim 으로
+    trajectory controller 에 연결한다.
+  </description>
+  <maintainer email="taehun.kim@konantech.com">taehun.kim</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <!-- lerobot / grpcio / python-dotenv 는 pip(py3.12, Dockerfile.vla_ros)로 설치 — rosdep 비대상 -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
