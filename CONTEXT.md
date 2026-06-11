@@ -13,7 +13,16 @@
 
 ---
 
-## 작업 인계 (2026-06-11 후속 — 셀프피드백 루프: v8 65% 회귀 진단→v10 게이트 수정 85%(영상), 4큐브 정렬게이트 v12 검증중)
+## 작업 인계 (2026-06-11 최신 — 해석적 IK SM v3 전면 재작성: side-approach grasp, 고정 4/4·DR 6/8)
+
+- **목표**: `scripts/environments/pick_cube_state_machine.py` 를 v1/v2 초안 기반으로 전면 재작성 — closed-form IK + joint position action (Lula/DiffIK·기존 SM 구조 미사용, 사용자 제약).
+- **완료**: SO101Kinematics(해석적 FK/IK, URDF 유도 + sim 실측 캘리브레이션 max err 1.5mm) / `--calibrate` 진단 모드(FK 검증·하강한계·roll 영점·접근축 sweep) / per-env 병렬 FSM(SETTLE→APPROACH→PRE_GRASP→DESCEND→SLIDE→GRASP→LIFT→TRANSPORT→LOWER→RELEASE→RETREAT) / Franka SM 동급 CLI.
+- **검증**: 고정 spawn 1env 4큐브 **4/4**, DR full 2env **3/4+3/4=6/8** (실패=reach 경계 spawn, 기구학 한계). 영상 `docs/so101_pick_place-step-0.mp4`.
+- **핵심 해결책** (상세는 memory `pickcube-analytic-ik-sm-v3`): ① USD root↔URDF base frame 정합(yaw −90°+오프셋, 캘리 fit) ② 중력 처짐 적분 보상(q_bias) ③ 하강 z-ramp(수직 직선 경로 — joint 보간 찌르기 방지) ④ **side-approach**(닫힘축 base쪽 3.5cm 비켜 하강 후 수평 SLIDE — 사용자 제안, fixed finger 가 base-반대쪽이라 방향 중요).
+- **남은 일**: reach 경계 spawn 실패(DR ~25%) — pregrasp IK 실패 시 비킴 방향 대체 시도 같은 폴백 미구현. 20ep 통계 sweep 미실시(PhysX 잡음 ±2ep 감안). 커밋 미실시.
+- **실행**: `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/pick_cube_state_machine.py --num_envs 1 --active_objects 4 --headless [--video]`
+
+## (이전) 작업 인계 (2026-06-11 후속 — 셀프피드백 루프: v8 65% 회귀 진단→v10 게이트 수정 85%(영상), 4큐브 정렬게이트 v12 검증중)
 
 - **목표(사용자)**: 알고리즘 셀프피드백 반복 개선 — 만족 수준까지. **매 이터레이션 영상 필수**(사용자 피드백용 + ffmpeg 키프레임 셀프리뷰). 목표 1큐브 ≥90% 유지, 4큐브 1차 mean ≥3.5/4 + all-4 ≥50%, 2차 all-4 ≥75%.
 - **버전사(이번 세션, 전부 20ep 1큐브 기준)**: v8(방향분해 ⊥×2.0) **65% 회귀 확정** — ① 저tilt(15°) 후보가 err_perp 작아 승리→scoop 부족 헛닫기(ep2/8/10) ② descend_fix 자유 재계산이 다른 tilt 로 스윙→큐브 0.57m 비산(ep4/12/13). → v9(채점 v6 복원+fix tilt 잠금+hold 폴백) **35% 폭락** — 진범은 별개: **lift 게이트 마진 0**(`_cube_lifted` min_lift 0.08 = lift 명령 0.08) 으로 쥔 큐브(hold 1~2cm)가 +6~7cm 에 머물면 false 판정→멀쩡한 grasp 버리고 재시도하다 떨굼(실패 13ep 중 10ep). v9-novid 40% 로 영상 가설 기각. → **v10 = min_lift 0.05** → **85%(영상 ON, 역대 영상 run 최고 — v6 영상 80%)**. 실패 3ep: ep2(저tilt 헛닫기), ep8(아래), ep16(잡고 운반 중 그릇 밖 낙하).
@@ -56,16 +65,18 @@
 
 ---
 
-## 작업 인계 (2026-06-11 — Sim VLA 추론: ROS 2 경로 / 코드 완료·실행 검증 대기)
+## 작업 인계 (2026-06-11 — Sim VLA 추론: ROS 2 경로 / ✅ 파이프라인 동작 확인)
 
-- **목표**: Isaac Sim SO-101 팔을 학습 VLA(SmolVLA/ACT, Docker `policy-server` gRPC)로 구동. transport **ROS 2** 확정(ZMQ 초안 폐기). 계획서: `~/.claude/plans/scripts-environments-teleoperation-tele-jolly-firefly.md`. 상세 문서: `docs/PATH_E_CUMOTION_ROS.md` §7.
-- **아키텍처(3 프로세스)**: ① 호스트 isaac venv `run_cube_desk_ros_bridge.py` 상주(joint_states/clock/tf **+ 신규 카메라 3대** publish, `/isaac_joint_commands` sub→ArticulationController 직접 적용) ② `vla-ros` 컨테이너 `so101_vla_policy` 노드(obs sub→policy-server gRPC→`/isaac_joint_commands` pub) ③ Docker policy-server. cuMotion/MoveIt 미경유.
-- **🔑 환경 사실**: 서버 konan147 엔 **ROS 미설치**(`/opt/ros` 없음) — Isaac Sim 은 **번들 jazzy lib** 로 publish(호스트 ROS 불필요). **런타임 분리** rclpy(py3.12) ↔ lerobot(py3.11 venv) → VLA 노드는 별도 py3.12 컨테이너(`Dockerfile.vla_ros`)에서 lerobot pip 설치. 전처리(rename/resize/normalize)는 서버측, 클라는 raw obs 만.
-- **단위 계약**: state/action LeRobot 단위(arm deg / gripper [0,100]×31.75) ↔ sim rad. `so101_vla_policy/units.py`(vendored, `scripts/sim/lerobot_units.py` 미러). SmolVLA rename `top→camera1` 등은 env/smolvla.env `RENAME_MAP`.
-- **변경/신규 파일**: ① `scripts/sim/lerobot_units.py`(유지·공용 변환) ② `scripts/sim/rollout_to_lerobot.py`(import 교체, 유지) ③ `scripts/sim/run_cube_desk_ros_bridge.py`(**카메라 publish 추가** — USD Camera prim world→opengl 변환 + render product + ROS2CameraHelper, `--no_cameras` 토글) ④ `ros2_ws/src/so101_vla_policy/`(신규 pkg: vla_policy_node + joint_command_to_trajectory shim + units + launch/config) ⑤ `docker/Dockerfile.vla_ros` + `vla-ros-entrypoint.sh` + compose `vla-ros` 서비스 ⑥ docs PATH_C §6(포인터)·PATH_E §7. **teleop_se3_agent.py 는 완전 원복**(ZMQ 초안 삭제).
-- **검증 완료(코드 레벨)**: 전체 ast parse·compose yaml·entrypoint sh OK. units 라운드트립 정확(gripper 100°↔1.745rad). bridge convert helper/카메라 상수 import 확인(post-boot). gRPC 프리미티브 import OK.
-- **남은 일(사용자/GPU+Docker)**: ① `Dockerfile.vla_ros` **빌드 미검증**(py3.12 lerobot+torch-cpu+numpy<2 resolve, cv_bridge ABI) ② bridge 카메라 런타임(robot USD link prim `gripper`/`shoulder` 존재·convention view) — Isaac 부팅 필요 ③ 풀 파이프라인: PATH_E §7.4 ①②③ 순. ④ action sink shim(`joint_command_to_trajectory`)은 실기기 controller 이름 param 정합 필요(scaffold).
-- **리스크**: numpy ABI(cv_bridge↔torch, `numpy<2` 핀), `${HF_USER}` 미보간 시 param 지정, GetActions 빈 chunk timeout 재시도, pickle 0.4.4↔0.5.1(실기기 검증됨).
+- **목표**: Isaac Sim SO-101 팔을 학습 VLA(ACT/SmolVLA/GR00T, Docker `policy-server` gRPC)로 구동. transport **ROS 2**. 계획서: `~/.claude/plans/scripts-environments-teleoperation-tele-jolly-firefly.md`. 상세: `docs/PATH_E_CUMOTION_ROS.md` §7. **전부 main 직접 작업**(worktree `worktree-sim-to-real` 머지 완료, 종료 예정).
+- **아키텍처(3 프로세스)**: ① 호스트 isaac venv `run_cube_desk_ros_bridge.py` 상주(joint_states/clock/tf + 카메라 3대 publish, `/isaac_joint_commands` sub→ArticulationController 직접) ② `vla-ros` 컨테이너 `so101_vla_policy` 노드(obs→policy-server gRPC→`/isaac_joint_commands`) ③ Docker policy-server. cuMotion/MoveIt 미경유.
+- **🔑 환경 사실**: 서버 konan147 ROS 미설치 — Isaac 은 번들 jazzy lib 로 publish. 런타임 분리 rclpy(py3.12) ↔ lerobot(py3.11). 전처리(resize/normalize)·rename 적용지점이 서버 `raw_observation_to_observation` resize(`policy.config.image_features[key]`)인데 이게 preprocessor rename **이전** → **rename 을 클라가 직접** 적용(features·obs 키를 policy 키로, server rename_map 비움).
+- **✅ 동작 확인(2026-06-11)**: 빌드 성공 → ACT·SmolVLA 둘 다 서버 추론 정상·**팔 움직임 확인**. 서버 KeyError 해소.
+- **🔑 핵심 수정 4건(빌드/런 디버깅)**: ① 실 lerobot pip resolve 폭발(transformers/datasets 체인) → **vendored mini-lerobot shim**(`ros2_ws/src/so101_vla_policy/vendor/lerobot/`: helpers dataclass + transport pb2 복사 + utils 재구현), Dockerfile 은 torch-cpu+grpcio+protobuf>=6.31+dotenv+numpy<2 만. 실 lerobot 0.4.4 와 양방향 pickle 호환 검증. ② entrypoint `set -u` ↔ ROS setup.bash 충돌 → `-u` 제거. ③ SmolVLA camera key — 클라가 features·obs 를 camera1/2/3 으로(RENAME_MAP 기반), server rename_map 비움. ④ LEROBOT_FEATURES 하드코딩(SO101Follower import 제거).
+- **모델 프로필 스왑**: `.env POLICY_PROFILE` 한 줄 → env/<profile>.env(TYPE/REPO_ID/CHUNK/RENAME_MAP) 가 클라 통해 주입. ACT✓ SmolVLA✓. GR00T 미검증(RENAME_MAP 비어 top/wrist/front, chunk16, REPO_ID=로컬 체크포인트 경로 — policy-server 컨테이너에 마운트 필요, embodiment 는 체크포인트 baked).
+- **신규 기능**: bridge **R/N 키 = 장면 초기화 + DR**(큐브 scatter 재배치 + 팔 home; teleop 동일 키). front 카메라 **전방 +2cm**(`_FRONT_CAM_LOCAL_POS` 0.030→0.050; 뒤로 가면 0.010, gym·bridge 공용).
+- **⚠ 진행 예정(미해결)**: **sim 렌더 뷰 차이** — bridge GUI(파란 타일·강한 그림자) vs teleop(회색·평탄). 원인=ground asset(isaacsim default vs Isaac Lab) + render/exposure(pure World vs ManagerBasedRLEnv). **GUI viewport ≠ obs 카메라**(별도 render product) → 우선 `/camera/*` 프레임 vs teleop `c`-캡처 비교, 다르면 ground+조명+render 정렬. 상세 `PATH_E §7.8`. front 카메라 위치도 +2cm 후 재확인 대기.
+- **커밋**: main `2984da4`(merge)→`e85d6b0`(vendored)→`03b2e7b`(-u)→`f608d4c`(rename)→`1c729d2`(R/N+DR)→ front cam/docs(이번). 사용자 미커밋 작업(`docker-compose.yaml` RTC 토글·`pick_cube_state_machine.py` 리팩터·step-0.mp4) 보존.
+- **참고 자료**: `ref_repos/isaac_ros_manipulation`(NVIDIA, ur_dnn_policy 3노드 패턴 참고), `docs/PATH_E §7`(전체), 0.5.1 서버 소스(`docker run policy-server:0.5.1`).
 
 ---
 

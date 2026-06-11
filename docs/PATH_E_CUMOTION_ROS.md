@@ -313,4 +313,30 @@ ros2 launch so101_vla_policy vla_policy.launch.py \
 > 동작한다(더 간단). 이 ROS 경로의 이점은 sim·real **동일 토픽 인터페이스** + 향후
 > MoveIt/cuMotion(§1~6) 통합 가능성이다.
 
+### 7.8 sim 렌더 뷰 차이 (bridge vs teleop) — ⚠ 미해결
+
+**현상**: bridge 로 띄운 Isaac Sim GUI 가 teleop(gym) 화면과 다르다.
+
+| 요소 | bridge (현재) | teleop (gym, 기준) |
+|---|---|---|
+| 바닥 | 파란 타일 그리드 | 회색 그리드 |
+| 조명 | KeyLight 강한 그림자·고대비(풀 RTX) | 평탄·밝음·그림자 약함 |
+
+**원인**:
+- 바닥 = bridge `isaacsim.core.api.World.scene.add_default_ground_plane()`(파란 타일) vs teleop Isaac Lab `GroundPlaneCfg`(회색). ground asset 자체가 다름.
+- 조명/명암 = bridge 는 순수 `isaacsim.core.World` 기본 render, teleop 은 Isaac Lab `ManagerBasedRLEnv` render 프리셋. **같은 cube_desk DomeLight/KeyLight USD** 인데 exposure/tonemap 차이로 bridge 만 KeyLight 하드 그림자가 드러남.
+- bridge 가 순수 World 를 쓰는 이유 = Isaac Lab GPU fabric ↔ OmniGraph view 충돌(device -1) 회피(§구현노트 B안).
+
+**핵심 구분**: 바뀐 건 **GUI Perspective viewport**. VLA 가 보는 **obs 카메라(top/wrist/front)는 별도 render product** 라 GUI 와 별개다. 따라서 우선순위:
+1. obs 프레임이 실제로 다른지 확인 — `/camera/{top,wrist,front}/image_raw` 캡처 vs teleop `c`-키 캡처(`outputs/captured_images`) 비교.
+2. obs 가 같으면 GUI 차이는 무시 가능(미관).
+3. obs 가 다르면 **sim 분포 shift** → 정렬 필요.
+
+**정렬 계획(obs 차이 확인 시, 미착수)**:
+- ground plane 을 teleop 과 동일(회색 Isaac Lab `GroundPlaneCfg`)로 교체 or 제거.
+- 조명/exposure/render mode 를 gym env 프리셋에 맞춤(`env_cfg.sim.render` 상당값을 bridge World render 설정에 반영).
+- front 카메라 포즈는 `_FRONT_CAM_LOCAL_POS`(현재 전방 +2cm 적용) 공용 상수 — bridge·gym 동시 반영.
+
+**상태**: 미해결. obs 프레임 비교 결과 대기 → 차이 시 정렬 작업 착수.
+
 새 종류 에러를 해결하면 `docs/TROUBLESHOOTING.md` 에 기록(운영 규칙).
