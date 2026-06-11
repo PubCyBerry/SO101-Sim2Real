@@ -13,6 +13,20 @@
 
 ---
 
+## 작업 인계 (2026-06-11 후속 — 셀프피드백 루프: v8 65% 회귀 진단→v10 게이트 수정 85%(영상), 4큐브 정렬게이트 v12 검증중)
+
+- **목표(사용자)**: 알고리즘 셀프피드백 반복 개선 — 만족 수준까지. **매 이터레이션 영상 필수**(사용자 피드백용 + ffmpeg 키프레임 셀프리뷰). 목표 1큐브 ≥90% 유지, 4큐브 1차 mean ≥3.5/4 + all-4 ≥50%, 2차 all-4 ≥75%.
+- **버전사(이번 세션, 전부 20ep 1큐브 기준)**: v8(방향분해 ⊥×2.0) **65% 회귀 확정** — ① 저tilt(15°) 후보가 err_perp 작아 승리→scoop 부족 헛닫기(ep2/8/10) ② descend_fix 자유 재계산이 다른 tilt 로 스윙→큐브 0.57m 비산(ep4/12/13). → v9(채점 v6 복원+fix tilt 잠금+hold 폴백) **35% 폭락** — 진범은 별개: **lift 게이트 마진 0**(`_cube_lifted` min_lift 0.08 = lift 명령 0.08) 으로 쥔 큐브(hold 1~2cm)가 +6~7cm 에 머물면 false 판정→멀쩡한 grasp 버리고 재시도하다 떨굼(실패 13ep 중 10ep). v9-novid 40% 로 영상 가설 기각. → **v10 = min_lift 0.05** → **85%(영상 ON, 역대 영상 run 최고 — v6 영상 80%)**. 실패 3ep: ep2(저tilt 헛닫기), ep8(아래), ep16(잡고 운반 중 그릇 밖 낙하).
+- **4큐브(v10, 8ep 영상)**: all-4 2/8(25%), mean 2.625/4(구버전 1.625 대비 +1.0). per-cube Cube1 87.5/Cube2 62.5/Cube3 62.5/Cube4 50. 주 실패 = **어긋난 채 닫기**(실패 attempt 닫기 시점 grasp point 오차 평균 2.1cm) → 헛닫기+닫는 손가락이 큐브를 2~7cm 밀어 다음 시도 악화→fail-fast 이탈(영상 ep3: 큐브 2개가 베이스 옆·책상 밖으로 표류). "쥐고 게이트 미달" 패턴은 0건(게이트 수정 유효).
+- **v11(--grasp_arm_step_delta 0.05 감속) 기각**: 1큐브 75%(-10%p), 4큐브 ep0~4 all-4 0/5. 느린 접근이 접촉 시간만 늘림, ep4 0.71m 비산 재발.
+- **v12(검증중, PID 2019120/2019121)**: **닫기 전 정렬 게이트** `--grasp_misalign_gate 0.02` — 닫기 직전 grasp point↔큐브 오차 > 2cm 면 닫지 않고 attempt 포기(마지막 attempt 제외). 큐브를 안 건드려 재시도가 깨끗. + fail_diag 에 descend_fix/skip_close/abort phase·pre_close_err_m 추가. 결과: `outputs/det_v12_{4cube_8ep,1cube_20ep}.json`.
+- **결정적 실패 ep8**(spawn [1.797,-0.450], v8/v10/v11 공통 실패): jacobian refine 폭주(35~78step, ferr 0.02~0.25)·v10 attempt2 는 쥐고도(hold 1.0cm) lift 가 +0.7cm 만 상승. 미해결 — 단일 ep 라 우선순위 낮음.
+- **영상**: `outputs/review_videos_v9/`(35% run), `review_videos_v10/`(85%, 20ep), `review_videos_4cube_v10/`(8ep), `review_videos_4cube_v11/`(기각 run ep0~6), `review_videos_4cube_v12/`(생성중). 키프레임 셀프리뷰 = `ffmpeg -vf "select='not(mod(n,30))'" + Read`.
+- **함정(이번 세션 신규)**: ① grep 출력이 dotfiles wrapper 로 변형됨 — awk/raw tail 사용 ② v7b sweep 이 ep10 에서 28분 무한정체(CPU 108%, fail-fast 부재 코드) → PID kill, py-spy 는 ptrace 권한 불가 ③ PhysX 잡음 ±2/20ep — ≥3 차이만 판정 근거로.
+- **다음**: v12 결과 판정 → 미달 시 다음 레버(저tilt ladder 정리/descend 실행오차 원인/40mm 개방) → 목표 달성 시 결과 보고 + 사용자 영상 리뷰 대기 → 데이터셋 게이트(3cam 계약: SM CAMERA_KEYS=top/wrist 2cam 불일치 해소 필요). 미커밋: `pick_cube_state_machine.py`(v9~v12 수정).
+
+---
+
 ## 작업 인계 (2026-06-11 — in-process 결정적 grasp SM: 1큐브 90% 달성·4큐브 첫 all-4·리뷰영상 시스템 / 진행중)
 
 - **목표(사용자 확정)**: in-process Isaac Lab SM(`pick_cube_state_machine.py`)으로 cube_desk pick-and-place — expert 데이터셋 생성용, **순수 물리 grasp만**(grasp-assist 금지), 1큐브 고신뢰 먼저 → 4큐브. 계획서 `~/.claude/plans/isaac-sim-cube-desk-memoized-starfish.md`.
