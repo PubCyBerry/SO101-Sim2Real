@@ -89,13 +89,16 @@ class PolicyServerSession:
     """policy-server gRPC 세션 — 핸드셰이크 + obs 송신 + action chunk 수신."""
 
     def __init__(self, *, server_address, policy_type, pretrained, actions_per_chunk,
-                 policy_device, rename_map, poll_timeout):
+                 policy_device, lerobot_features, poll_timeout):
         self._poll_timeout = float(poll_timeout)
 
-        # lerobot_features 는 정적 스키마(units.LEROBOT_FEATURES) — 실 SO101Follower 와 동일.
+        # ⚠ rename 은 **클라가 직접 적용**(features·obs 키를 policy 키로) → server rename_map 은 비움.
+        # 이유: 0.5.1 server 는 raw_observation_to_observation 의 resize 에서
+        # policy.config.image_features[key] 를 lerobot_features 키로 조회하는데, 이 단계는
+        # preprocessor rename(rename_map) **이전**이다. 따라서 lerobot_features 이미지 키가
+        # 모델 config 키(SmolVLA=camera1/2/3)와 일치해야 KeyError 가 안 난다.
         self.policy_config = RemotePolicyConfig(
-            policy_type, pretrained, LEROBOT_FEATURES, int(actions_per_chunk), policy_device,
-            rename_map or {},
+            policy_type, pretrained, lerobot_features, int(actions_per_chunk), policy_device, {},
         )
         self.channel = grpc.insecure_channel(
             server_address, grpc_channel_options(initial_backoff="0.0333s")
@@ -107,7 +110,8 @@ class PolicyServerSession:
             services_pb2.PolicySetup(data=pickle.dumps(self.policy_config))
         )
         print(f"[vla] sent instructions (type={policy_type}, model={pretrained}, "
-              f"chunk={actions_per_chunk}, rename={bool(rename_map)})", flush=True)
+              f"chunk={actions_per_chunk}, image_keys={[k for k in lerobot_features if 'images' in k]})",
+              flush=True)
 
     def predict_chunk(self, raw_obs: dict, timestep: int) -> list:
         timed_obs = TimedObservation(
@@ -172,11 +176,24 @@ class VlaPolicyNode(Node):
                 "ROS param pretrained_name_or_path 지정 필요."
             )
 
+        # rename 을 클라에서 적용: features 이미지 키 + obs 이미지 키를 policy 키로 만든다.
+        # rename_map(dataset feat key → policy feat key), 예 observation.images.top→...camera1.
+        # self._cam_obs_key[cam] = obs dict 에 넣을 bare 키(camera1 또는 top).
+        lerobot_features = {"observation.state": dict(LEROBOT_FEATURES["observation.state"])}
+        self._cam_obs_key: dict[str, str] = {}
+        for cam in CAMERA_KEYS:
+            ds_key = f"observation.images.{cam}"
+            pol_key = rename_map.get(ds_key, ds_key)
+            lerobot_features[pol_key] = {
+                "dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"],
+            }
+            self._cam_obs_key[cam] = pol_key.split("observation.images.")[-1]
+
         # ── gRPC 세션 ───────────────────────────────────────────────────────
         self.session = PolicyServerSession(
             server_address=self.server_address, policy_type=policy_type, pretrained=pretrained,
             actions_per_chunk=actions_per_chunk, policy_device=policy_device,
-            rename_map=rename_map, poll_timeout=poll_timeout,
+            lerobot_features=lerobot_features, poll_timeout=poll_timeout,
         )
         self.actions_per_chunk = actions_per_chunk
         self._refill_floor = max(1, int(actions_per_chunk * self.chunk_size_threshold))
@@ -226,7 +243,8 @@ class VlaPolicyNode(Node):
         state_lerobot = to_lerobot_units(self._joint_rad)
         obs: dict = {name: float(state_lerobot[i]) for i, name in enumerate(JOINT_FEATURE_NAMES)}
         for cam in CAMERA_KEYS:
-            obs[cam] = self._images[cam]
+            # bare obs 키 = policy 이미지 키(camera1/2/3 또는 top/wrist/front) — features 와 정합.
+            obs[self._cam_obs_key[cam]] = self._images[cam]
         obs["task"] = self.task_instruction
         return obs
 
