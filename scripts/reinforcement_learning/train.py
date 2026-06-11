@@ -84,6 +84,8 @@ parser.add_argument("--grasp_bootstrap_prob_final", type=float, default=0.0,
                     help="부트스트랩 prob 를 이 값으로 선형 감쇠(annealing). 정상-env grasp 학습 압력↑.")
 parser.add_argument("--grasp_bootstrap_anneal_iters", type=int, default=0,
                     help="부트스트랩 감쇠 구간(iteration). 0=감쇠 없음. steps=iters×num_steps_per_env.")
+parser.add_argument("--place_bootstrap_prob", type=float, default=0.0,
+                    help="place 부트스트랩 비율(0~1). grasp 부트스트랩 후 남은 scratch env 중 이 비율을 큐브-그릇위로 시작.")
 # 진행 모니터링용 주기적 에피소드 비디오 녹화
 parser.add_argument("--video", action="store_true", default=False,
                     help="학습 중 주기적으로 에피소드 비디오 녹화(headless offscreen). enable_cameras 자동 on.")
@@ -314,6 +316,9 @@ def main() -> None:
             env_cfg.grasp_bootstrap_anneal_steps = float(
                 args.grasp_bootstrap_anneal_iters * args.num_steps_per_env
             )
+        # place 부트스트랩 — PickCubeEnv 가 읽는다.
+        if hasattr(env_cfg, "place_bootstrap_prob"):
+            env_cfg.place_bootstrap_prob = args.place_bootstrap_prob
 
         # 로그 디렉터리(비디오 폴더가 필요해 env 생성 전에 결정)
         log_dir = _resolve_log_dir(args)

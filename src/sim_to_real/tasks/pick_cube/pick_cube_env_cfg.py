@@ -677,7 +677,7 @@ class PickCubeRewardsCfg:
     # Stage 4: 들어올린 큐브의 XY → 그릇 접근 (밀집)
     transport_cube = RewTerm(
         func=task_mdp.transport_reward,
-        weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
+        weight=3.0,  # v11: 0(PBRS로 대체). v15: 3.0 복원 — over_bowl 도달 gradient 제공(PBRS와 공존, 장거리 유도)
         params={
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "container_center_xy": BOWL_CENTER_XY,
@@ -728,7 +728,7 @@ class PickCubeRewardsCfg:
             "container_cfg": SceneEntityCfg(BOWL_NAME),
             "container_radius": BOWL_SUCCESS_RADIUS,
             "container_height_range": BOWL_HEIGHT_RANGE,
-            "xy_range": 0.40,
+            "xy_range": 0.60,  # v15: 0.40→0.60 — φ 기울기 완만화, fine-grained learning 가능
             "gamma": 0.997,
         },
     )
@@ -765,7 +765,7 @@ class PickCubeRewardsCfg:
             "container_cfg": SceneEntityCfg(BOWL_NAME),
             "xy_range": 0.12,
             "open_threshold": 0.60,
-            "close_ref": 0.35,
+            "close_ref": 0.30,  # v15: 0.35→0.30 (75% open으로 보상, release valley 추가 완화)
             "gamma": 0.997,
         },
     )
@@ -963,6 +963,10 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
     grasp_bootstrap_pregrasp_open: float = 0.65  # pre-grasp 시 gripper open 각(rad). 0.90→0.65: 너무 벌린 시작이 "닫기 마무리" 학습을 방해 → 큐브 받아들일 최소폭으로
     grasp_bootstrap_rest_z: float = 0.726        # pre-grasp 큐브 책상 resting z(env-local, m)
     grasp_bootstrap_pregrasp_frac: float = -1.0  # pre-grasp 비율 오버라이드(>=0). -1=anneal p(학습 기본). 모니터용.
+
+    # place 부트스트랩 — 큐브를 그릇 위에 든 채 시작(over_bowl→placed 하류 학습 가속)
+    place_bootstrap_prob: float = 0.0   # place 부트스트랩 비율(고정, annealing 없음)
+    place_bootstrap_z: float = 0.09    # 그릇 rim 위 큐브 높이 offset (env-local, m)
 
     def __post_init__(self) -> None:
         super().__post_init__()

@@ -45,6 +45,9 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # pre-grasp 비율 오버라이드(>=0 이면 anneal p 대신 이 고정값 사용). 모니터가 세 가지
         # 시작조건(scratch/full/pre)을 동시에 측정할 때 사용. -1=anneal p(학습 기본).
         self._bootstrap_pregrasp_frac = float(getattr(cfg, "grasp_bootstrap_pregrasp_frac", -1.0))
+        # place 부트스트랩(큐브를 그릇 위에 든 채 시작, over_bowl→placed 하류 학습 가속)
+        self._place_bootstrap_prob = float(getattr(cfg, "place_bootstrap_prob", 0.0))
+        self._place_bootstrap_z = float(getattr(cfg, "place_bootstrap_z", 0.09))
         # env별 현재 에피소드 부트스트랩 여부(모니터의 scratch/bootstrap 단계별 집계용).
         # 0=scratch(정상 시작), 1=full-grasp, 2=pre-grasp.
         self.bootstrap_kind = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -144,6 +147,44 @@ class PickCubeEnv(ManagerBasedRLEnv):
             torch.full((len(sel),), 1, device=device, dtype=torch.long),
         )
 
+    def _bootstrap_place(self, env_ids: torch.Tensor) -> None:
+        """bootstrap_kind=0(scratch) env 중 일부를 place 부트스트랩 상태로 초기화.
+
+        큐브를 그릇 정중앙 위(place_bootstrap_z m)에 배치 + 그리퍼 닫힘 → over_bowl→placed
+        하류를 직접 학습(grasp 부트스트랩과 동형, place 단계 특화).
+        """
+        if self._place_bootstrap_prob <= 0.0 or len(env_ids) == 0:
+            return
+        # scratch(0)인 env 에서만 적용(grasp 부트스트랩과 중복 방지)
+        scratch = env_ids[self.bootstrap_kind[env_ids] == 0]
+        if len(scratch) == 0:
+            return
+        device = self.device
+        mask = torch.rand(len(scratch), device=device) < self._place_bootstrap_prob
+        sel = scratch[mask]
+        if len(sel) == 0:
+            return
+        bowl = self.scene[BOWL_NAME]
+        cube = self.scene[CUBE_NAMES[0]]
+        robot = self.scene["robot"]
+        origins = self.scene.env_origins[sel]
+        # 그릇 env-local 위치 + z offset
+        bowl_local = bowl.data.root_pos_w[sel] - origins
+        cube_pos = origins.clone()
+        cube_pos[:, 0] += bowl_local[:, 0]
+        cube_pos[:, 1] += bowl_local[:, 1]
+        cube_pos[:, 2] += bowl_local[:, 2] + self._place_bootstrap_z
+        quat = torch.zeros(len(sel), 4, device=device); quat[:, 0] = 1.0
+        cube.write_root_pose_to_sim(torch.cat([cube_pos, quat], dim=-1), env_ids=sel)
+        cube.write_root_velocity_to_sim(torch.zeros(len(sel), 6, device=device), env_ids=sel)
+        # 그리퍼 닫힘(큐브 잡은 상태)
+        robot.write_joint_position_to_sim(
+            torch.full((len(sel), 1), self._bootstrap_close, device=device),
+            joint_ids=[self._gripper_jid], env_ids=sel,
+        )
+        # bootstrap_kind=3 (place 부트스트랩)
+        self.bootstrap_kind[sel] = 3
+
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
         # 리셋되는 env 는 일단 scratch(0)로 초기화 — _bootstrap_grasp 가 선택된 env 만 1/2 로.
@@ -151,6 +192,7 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # offset 은 step() 에서 1회 캐시(첫 init reset 때는 body_pos_w 미확정일 수 있어
         # 캐시 전이면 부트스트랩 skip — _bootstrap_grasp 내부 가드).
         self._bootstrap_grasp(env_ids)
+        self._bootstrap_place(env_ids)  # grasp 부트스트랩 후 남은 scratch env 중 일부에 place 부트스트랩
         # 그릇 초기 pose 저장(super()._reset_idx 안에서 randomize_bowl 이 적용된 직후).
         # 교란 패널티의 기준점. env-origin 무관(방향=quat, 변위=env-local xy).
         bowl = self.scene[BOWL_NAME]
