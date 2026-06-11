@@ -1153,7 +1153,7 @@ class SO101PickPlaceSM:
                     q5_goal = q5_start - math.pi / 2
                 self.rot_pitch0[e] = (q5_start, q5_goal)
                 self.dwell_count[e] = 0
-            rot_t = min(1.0, self.dwell_count[e] / 30.0)
+            rot_t = min(1.0, self.dwell_count[e] / 10.0)
             self.dwell_count[e] += 1
             q5_start, q5_goal = self.rot_pitch0[e]
             # q_cmd 의 q5 만 보간 — 나머지 joint 동결
@@ -1182,7 +1182,9 @@ class SO101PickPlaceSM:
             b = self.obj_pos(BOWL_NAME, e)
             safe_z = self._safe_z_w(e)
             if self.z_ramp[e] is None:
-                self.z_ramp[e] = b[2].item() + args.place_height
+                # 시작점 = 실측 TCP z — 고정 가정(place_height)은 release 자세가
+                # 더 높을 때 '내려갔다 올라오는' 명령이 되어 그릇을 친다
+                self.z_ramp[e] = self._tcp_meas_w(e)[2].item()
             self.z_ramp[e] = min(safe_z, self.z_ramp[e] + args.lift_speed / 30.0)
             self._solve(e, (b[0].item(), b[1].item(), self.z_ramp[e]), 0.0)
             if self.z_ramp[e] >= safe_z - 1e-6 or timeout:
