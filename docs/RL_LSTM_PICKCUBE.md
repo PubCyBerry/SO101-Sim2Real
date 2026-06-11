@@ -252,6 +252,14 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - **한계(정직)**: weight 재균형이라 dense가 남아있어 **이론상 무한 hover는 여전히 이김**. 완전 차단은 **potential-based reward shaping**(F=γΦ(s')-Φ(s), 유지=0, optimal policy 보존, Ng 1999) 필요 — grasp 점화 리스크+큰 작업이라 보류. v10 재균형으로 보고 그래도 hover면 PBRS 도입.
 - run `lstm256_stage1_grasp_v10`(LSTM, fresh). 판정: over_bowl→placed 전이↑ + hover 영상 감소 + 완료(success) 추이.
 
+### T29. ✅ PBRS 도입 (v11) — place 유지 보상을 potential-based로 대체 (hover 원천 차단)
+- **근거**: Fable(claude-fable-5) 독립 평가 + T28 진단이 **동일 결론** — v10 재균형(weight)으로는 hover를 구조적으로 못 막음(dense 유지 누적이 gamma 0.997 유효지평 330step에서 terminal 완료를 여전히 압도, break-even ~23 step). **PBRS가 본질적 해결**(유지 시 telescoping으로 누적 0).
+  - Fable 평가 중 옛 코드값 참조 오류 정정: time_penalty 함수는 존재(v10 -0.02), insert는 이미 20, smoothness 이미 -1e-3 — Fable 권고 일부는 이미 반영돼 있었음. 핵심(PBRS 필요)은 유효.
+- **구현**: `place_pbrs_reward`(weight 50) = **r = γ·Φ(s_t) − Φ(s_{t-1})**, `Φ(s)` = 그릇 안 1.0 + 밖 (0.3·xy근접 + 0.2·z하강). PickCubeEnv `_place_potential_prev`(N,) 버퍼가 이전 Φ 보관(reward 함수가 매 step side-effect 갱신), `_reset_idx`에서 0 초기화. telescoping 누적 = γ^T Φ_T − Φ_0 → **유지하면 안 늘고(≈(γ−1)Φ<0 미세 손실), 그릇으로 진행할 때만 +**. optimal policy 불변(Ng 1999).
+- **대체**: `transport`(4→0)·`place_height`(12→0)·`insert`(20→0) weight 0(dense 유지 제거). **grasp 단계(reach/align/close/contact/pregrasp/grasp/guided_lift/carry/lift)·over_bowl_drop(12, 여는 행동)·release(10)·terminal(success 200/early_finish 100)·페널티 전부 보존.**
+- run `lstm256_stage1_grasp_v11`(LSTM, fresh). 판정: ① scratch over_bowl→placed 전이가 v6~v10의 12% 벽을 넘는지 ② hover 영상 소멸 ③ scratch.success→0.80. PBRS가 hover를 정말 차단했는지가 핵심.
+- 미흡 시 다음: grasp 단계도 부분 PBRS / over_bowl_drop도 PBRS화 / Φ 가중 튜닝(xy 0.3·z 0.2).
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)

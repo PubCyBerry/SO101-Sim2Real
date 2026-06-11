@@ -61,6 +61,10 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # 거리를 이 기준으로 측정한다.
         self._cube_init_xy = torch.zeros(self.num_envs, len(CUBE_NAMES), 2, device=self.device)
 
+        # place 단계 PBRS(place_pbrs_reward)의 이전 step potential Φ(s_{t-1}).
+        # reward 함수가 매 step γΦ(s_t)-Φ(s_{t-1}) 계산 후 갱신. reset 직후 0.
+        self._place_potential_prev = torch.zeros(self.num_envs, device=self.device)
+
     def _anneal_progress(self) -> float:
         """학습 진행도 p∈[0,1] (common_step_counter / anneal_steps). 감쇠 없으면 0."""
         if self._bootstrap_anneal_steps <= 0.0:
@@ -158,6 +162,8 @@ class PickCubeEnv(ManagerBasedRLEnv):
             self._cube_init_xy[env_ids, i] = (
                 cube_i.data.root_pos_w[env_ids, :2] - origins_xy
             ).clone()
+        # PBRS potential 초기화(reset 후 첫 step γΦ-0 jump 최소화)
+        self._place_potential_prev[env_ids] = 0.0
 
     def step(self, action):
         if self._grasp_offset is None:

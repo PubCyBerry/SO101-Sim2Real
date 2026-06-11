@@ -673,6 +673,74 @@ def cube_predisturb_penalty(
 
 
 # ---------------------------------------------------------------------------
+# Place 단계 PBRS — potential-based reward shaping (유지 보상 누적 제거 → hover 차단)
+# ---------------------------------------------------------------------------
+
+
+def _place_potential(
+    env: ManagerBasedRLEnv,
+    cfgs: list[SceneEntityCfg],
+    cup_center_xy: tuple[float, float],
+    cup_cfg: SceneEntityCfg | None,
+    cup_radius: float,
+    cup_height_range: tuple[float, float],
+    xy_range: float,
+) -> torch.Tensor:
+    """Place 진행 potential Φ(s) ∈ [0, num_pens].
+
+    큐브별: 그릇 안이면 1.0, 아니면 (0.3·xy근접 + 0.2·z하강) 의 부분 진행도.
+    "그릇에 얼마나 다가갔나"를 단조로 나타내는 척도 — 절대 상태 함수라 PBRS 의
+    Φ 로 쓰면 유지 시 보상 0(telescoping), 진행 시에만 +.
+    """
+    cx, cy = _cup_xy(env, cup_center_xy, cup_cfg)
+    z_min, z_max = cup_height_range
+    total = torch.zeros(env.num_envs, device=env.device)
+    for cfg in cfgs:
+        pen_pos = _pen_pos_w(env, cfg)
+        local = pen_pos - env.scene.env_origins
+        inside = _pen_inside_cup_mask(env, pen_pos, cup_center_xy, cup_radius, cup_height_range, cup_cfg)
+        xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
+        xy_prog = torch.clamp(1.0 - xy_dist / max(xy_range, 1e-6), 0.0, 1.0)
+        z_prog = torch.clamp(
+            (local[:, 2] - _DESK_TOP_Z - z_min) / max(z_max - z_min, 1e-6), 0.0, 1.0
+        )
+        phi = inside.float() * 1.0 + (~inside).float() * (0.3 * xy_prog + 0.2 * z_prog)
+        total = total + phi
+    return total
+
+
+def place_pbrs_reward(
+    env: ManagerBasedRLEnv,
+    pen_cfgs: list[SceneEntityCfg] | None = None,
+    cup_center_xy: tuple[float, float] = (2.2, -0.17),
+    cup_cfg: SceneEntityCfg | None = None,
+    cup_radius: float = 0.05,
+    cup_height_range: tuple[float, float] = (0.005, 0.12),
+    xy_range: float = 0.40,
+    gamma: float = 0.997,
+) -> torch.Tensor:
+    """Potential-based reward shaping: ``r = γ·Φ(s_t) − Φ(s_{t-1})`` (Ng 1999).
+
+    transport/place_height/insert 같은 dense '유지' 보상을 대체한다. 큐브가 그릇으로
+    **진행할 때만** +, 같은 자리를 유지하면 ≈(γ−1)Φ<0(미세 손실) → hover 가 value 상
+    이득이 안 됨(누적은 telescoping = γ^T Φ_T − Φ_0 라 유지로 안 늘어남). optimal policy
+    불변(이론 보장). grasp 단계엔 적용 안 함(검증된 dense 보상 보존).
+
+    이전 step Φ 는 PickCubeEnv 가 ``_place_potential_prev`` (N,) 로 보관·이 함수가
+    매 step 갱신(side-effect). reset 직후엔 env 가 0 으로 초기화(첫 step jump 최소).
+    버퍼 없으면 0 반환(다른 task 안전).
+    """
+    prev = getattr(env, "_place_potential_prev", None)
+    if prev is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    cfgs = _make_pen_cfgs(pen_cfgs)
+    phi_now = _place_potential(env, cfgs, cup_center_xy, cup_cfg, cup_radius, cup_height_range, xy_range)
+    shaped = gamma * phi_now - prev
+    env._place_potential_prev = phi_now.detach()
+    return shaped
+
+
+# ---------------------------------------------------------------------------
 # 그릇 교란 패널티 — 운반/place 중 그릇을 밀치거나 엎는 것 억제
 # ---------------------------------------------------------------------------
 

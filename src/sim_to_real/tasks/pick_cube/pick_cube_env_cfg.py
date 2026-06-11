@@ -669,7 +669,7 @@ class PickCubeRewardsCfg:
     # Stage 4: 들어올린 큐브의 XY → 그릇 접근 (밀집)
     transport_cube = RewTerm(
         func=task_mdp.transport_reward,
-        weight=4.0,  # v10: 8→4 그릇 위 hover 매력↓
+        weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
@@ -682,7 +682,7 @@ class PickCubeRewardsCfg:
     # place 정밀도 부족(v6 over_bowl 0.86→placed 0.10)의 핵심 레버.
     place_height_cube = RewTerm(
         func=task_mdp.place_height_reward,
-        weight=12.0,  # v10: 20→12 dense 유지 축소(hover 매력↓)
+        weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -698,13 +698,30 @@ class PickCubeRewardsCfg:
     # Stage 5: 그릇 안 삽입 — 그리퍼 조건 없음 (밀집, 큐브 수 비례)
     insert_cube = RewTerm(
         func=task_mdp.insert_reward,
-        weight=20.0,  # v10: 40→20 그릇 안 유지 보상 축소
+        weight=0.0,  # v11: PBRS(place_pbrs)의 inside 항으로 대체 — dense 유지 제거
         params={
             "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "cup_center_xy": BOWL_CENTER_XY,
             "cup_cfg": SceneEntityCfg(BOWL_NAME),
             "cup_radius": BOWL_SUCCESS_RADIUS,
             "cup_height_range": BOWL_HEIGHT_RANGE,
+        },
+    )
+
+    # Stage 4.5(v11): place 진행 PBRS — transport/place_height/insert(유지 보상) 대체.
+    # r = γ·Φ(s_t) − Φ(s_{t-1}), Φ=그릇 안 1.0 + 밖 (0.3·xy근접+0.2·z하강).
+    # 그릇으로 진행할 때만 +, 같은 자리 유지하면 ≈(γ−1)Φ<0 → hover 누적 차단.
+    place_pbrs_cube = RewTerm(
+        func=task_mdp.place_pbrs_reward,
+        weight=50.0,
+        params={
+            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "cup_center_xy": BOWL_CENTER_XY,
+            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "cup_radius": BOWL_SUCCESS_RADIUS,
+            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "xy_range": 0.40,
+            "gamma": 0.997,
         },
     )
 
@@ -978,6 +995,7 @@ _CUBE_REWARD_TERMS = (
     "transport_cube",
     "place_height_cube",
     "insert_cube",
+    "place_pbrs_cube",
     "release_cube",
     "over_bowl_drop_cube",
     "cube_predisturb",
@@ -997,6 +1015,7 @@ _BOWL_RADIUS_REWARD_TERMS = (
     "carry_cube",
     "place_height_cube",
     "insert_cube",
+    "place_pbrs_cube",
     "release_cube",
     "task_success",
     # 속도 보상의 cup_radius 도 동기화(반경 스케일 1.0 고정이라 사실상 no-op)
