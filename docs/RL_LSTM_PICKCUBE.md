@@ -335,6 +335,17 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 3. **place_pbrs Φ xy 가중 강화 (조건부)**: xy 0.3→0.5, z 0.2→0.15. over_bowl_drop PBRS 후에도 over_bowl<0.2면 적용.
 4. place 부트스트랩(그릇 위 든 채 시작)은 먼저 ①②로 성공률 50% 후 재검토.
 
+### T33. ⏳ place 부트스트랩 + transport 복원 + PBRS 튜닝 (v15 fresh, 2026-06-11, Opus 4.8 상담)
+
+- **v14 결과(model_1350 scratch)**: reach 1.0 / grasp 0.833 / lift 0.875 / over_bowl **0.750** / placed **0.083**(전이율 11%). v12 대비 over_bowl 2배 향상이나 placed 전이율 여전히 낮음.
+- **Opus 4.8 진단 — 3중 병목**:
+  1. **Release valley**: close_ref 0.35가 여전히 높아 살짝 열고 hover 가능
+  2. **transport dense=0**: v11 PBRS 도입 시 제거 → over_bowl 도달 gradient 자체 없음 (v4 dense 시절 전이율 32% vs v14 11%)
+  3. **over_bowl_drop PBRS 음수**: 도달 압력 없으면 drop 신호 수신 기회도 없음 → 악순환
+- **개입(v15 fresh)**: ① `transport` weight 0→**3.0** 복원 ② `place_pbrs` xy_range 0.40→**0.60** ③ `close_ref` 0.35→**0.30** ④ **place 부트스트랩** 신규 (scratch env 중 20%를 큐브 그릇 위에 든 채 시작, `bootstrap_kind=3`)
+- place 부트스트랩 구현: `PickCubeEnvCfg.place_bootstrap_prob/place_bootstrap_z` + `PickCubeEnv._bootstrap_place()` + `train.py --place_bootstrap_prob`.
+- 판정: over_bowl→placed 전이율 11% → 25%+ 상승. transport_cube>0 + over_bowl_drop>0 leading indicator.
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)
@@ -368,13 +379,13 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 
 ---
 
-## 7. 현재 진행 (2026-06-11 세션, T31 v13 resume)
+## 7. 현재 진행 (2026-06-11 세션, T33 v15 fresh)
 
-- **학습 중**: run `lstm256_stage1_grasp_v13`, 로그 `train_grasp_v13.log`. **model_650에서 resume**(v12 iter ~670), stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 16384**, ~12s/iter, PID 3393540.
-- **v13 개입(T31)**: smoothness `action_rate`/`joint_vel` **-1e-3→-1e-2**(jitter 억제), `over_bowl_drop` **xy_range 0.06→0.12 / close_ref 0.40→0.35**(release valley 완화). obs 87dim 불변, 구조 변경 없음.
-- **v12 달성 상태(model_600 평가)**: scratch.grasp **0.828** ✅, lift 0.828, over_bowl 0.379, placed 0.034. grasp 탐색 벽 완전 극복. 현재 병목 = place(over_bowl→placed 9%).
-- 판정: **`over_bowl_drop_cube`>0**(release valley 뚫림) + **`joint_vel` 에피소드 기여 -0.15 이상**(jitter 억제) → **scratch.placed 상승** → scratch.success ≥0.80 = 단일 큐브 통과 → 1→2→3→4 확장.
-- 30분 cron(`cron_monitor_v13.sh`, 카메라=사용자 보정 고정뷰)이 scratch/full/pre 단계별 + 16-env 비디오 자동 생성. 상태: `/tmp/train_pid.txt`.
+- **학습 중**: run `lstm256_stage1_grasp_v15`, 로그 `train_grasp_v15.log`. **fresh**, stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 4096 / horizon 48**, ~12s/iter, PID 3753492.
+- **v15 개입(T33)**: transport 0→**3.0** 복원 / place_pbrs xy_range 0.40→**0.60** / close_ref 0.35→**0.30** / **place 부트스트랩** 20%(그릇 위 든 채 시작).
+- **v14 달성 상태(model_1350)**: scratch.grasp **0.833** ✅, over_bowl **0.750** ✅, placed 0.083(전이율 11%). placed 전이율 병목.
+- 판정: `transport_cube`>0 + `over_bowl_drop_cube`>0 + **scratch.placed 25%+** → scratch.success ≥0.80 = 단일 큐브 통과.
+- 20분 cron(`cron_monitor_v15.sh`)이 scratch/full/pre/place 단계별 + 비디오 자동 생성. 상태: `/tmp/train_pid.txt`.
 
 ---
 
@@ -448,7 +459,7 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 ## 11. 미해결 / 리스크 / 전망
 
 - **grasp**: scratch.grasp 0.828 달성(v4~v12 유지), 탐색 벽 완전 극복 ✅. grasp 신뢰성(reach→grasp 80%)는 cube_predisturb 패널티+cube_lost 종료로 개선됨.
-- **place(현재 병목)**: over_bowl→placed 전이율 9%(v12). v13 iter 809에서 over_bowl 0.119로 추가 하락(v12 0.379 대비 68%). 근본 원인 = carry/guided_lift 합 29.76/step >> release terminal 10(break-even 0.34step) + gripper offset=0.20에서 열기 미학습. **다음 레버**: over_bowl_drop PBRS화 + carry 3→1.5 / guided_lift 6→3(T32 권고).
+- **place(v14 진전 / v15 시도 중)**: v14 model_1350 over_bowl 0.750 달성 / placed 0.083(전이율 11%). Opus 4.8 진단: transport dense=0 + close_ref 높음 + over_bowl_drop PBRS 음수 3중 병목. v15에서 transport 3.0 복원 + close_ref 0.30 + place_pbrs xy_range 0.60 + place 부트스트랩(20%)으로 전이율 25%+ 목표.
 - **jitter(sim2real 리스크)**: v12 joint_vel raw 30.4/ep(심각). v13 smoothness -1e-2로 억제 중. 판정 지표: `joint_vel` 에피소드 기여 -0.15 이상.
 - **monitor_eval 장기 걸림 리스크**: 버그 시 CPU 100% 무한 루프 + flock 미해제로 cron skip 연쇄. 증상: cron 로그에 "이전 점검이 아직 실행 중" 반복. 대응: `kill $(pgrep -f monitor_eval)`.
 - **4큐브 ≥0.90 의 산술적 벽**: 한 에피소드 4개 순차 → success ≈ (큐브당 성공)⁴. 0.90 하려면 **큐브당 ~97.4%** 필요. 현실 목표 = 먼저 단일 큐브 0.90. 멀티 큐브 진입 시 grasp_focus/부트스트랩이 CUBE_NAMES[0] 단일 전제라 재설계 필요.
