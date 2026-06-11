@@ -3596,10 +3596,13 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
 ### 해결 방법
 
 `pick_cube_state_machine.py` LOWER/RELEASE 재설계:
-1. 그릇 상공 정지 상태에서 **1초 점진 ramp** 로 pitch 0° + wrist roll 90° 재배향
-   (닫힘축이 바닥과 평행 → jaw 가 수평면에서 열려 퍼올림 불가).
-2. 하강 없이 안전고도에서 그대로 떨굼. 낙하점은 TCP-큐브 실측 오프셋으로 보정해
-   **큐브**가 그릇 중심 위에 오게.
+1. 그릇 상공 정지 상태에서 **wrist roll(q5)만 1초 점진 ramp 로 +90°** — 다른
+   joint 는 동결(IK 재계산 없음). jaw 개폐 평면이 접근축 주위로 90° 돌아
+   옆으로 열림 → 퍼올림 불가.
+   ※ IK 로 pitch 0° 재배향을 시도하면 그릇(r≈0.35)이 top-down 한계 밖이라
+   ramp 시작 pitch -90° 가정이 즉시 IK 실패 → 폴백으로 무력화된다 (실측).
+2. 하강 없이 안전고도에서 그대로 떨굼. 낙하점은 TRANSPORT 목표에 TCP-큐브
+   실측 오프셋을 보정해 **큐브**가 그릇 중심 위에 오게.
 3. open 후 0.4 s(12 step) 정지한 다음 RETREAT.
 
 ### 확인 방법

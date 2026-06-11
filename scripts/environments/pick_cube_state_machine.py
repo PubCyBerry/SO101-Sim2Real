@@ -651,6 +651,9 @@ class SO101PickPlaceSM:
         self.slide_s     : list[float] = [0.0] * self.num_envs
         # PRE_GRASP 에서 1회 확정하는 (roll_offset, 비킴 dx, dy) — step 간 토글 방지
         self.side_pick   : list[tuple[float, float, float] | None] = [None] * self.num_envs
+        # LOWER 재배향 ramp 의 시작 pitch (진입 시점의 실제 pitch — 그릇은 top-down
+        # 한계 밖이라 -90° 가정 시작은 즉시 IK 실패)
+        self.rot_pitch0  : list[float | None] = [None] * self.num_envs
         self.move_from   : list[tuple[float, float]] = [(0.0, 0.0)] * self.num_envs
 
     BIAS_KI  = 0.06
@@ -833,6 +836,7 @@ class SO101PickPlaceSM:
         self.z_ramp[e]       = None
         self.slide_s[e]      = 0.0
         self.side_pick[e]    = None
+        self.rot_pitch0[e]   = None
         if not self.remaining[e]:
             self.dwell_count[e] = 0
             self.phase[e]       = Phase.HOME_FINAL
@@ -1108,6 +1112,15 @@ class SO101PickPlaceSM:
                 self._finish_cube(e, done=False)
                 return self.q_cmd[e], args.gripper_open
             bx, by = self._place_xy(e)
+            # 낙하점 보정: 쥔 큐브가 TCP 에서 닫힘축 방향 2~3cm 오프셋 — '큐브'가
+            # 그릇 중심 위에 오도록 목표를 반대로 이동 (release 는 자세 불변이라
+            # 여기서 맞춰 두면 그대로 유효)
+            off_x = cube_p[0].item() - tcp_now[0].item()
+            off_y = cube_p[1].item() - tcp_now[1].item()
+            off_n = math.hypot(off_x, off_y)
+            if off_n > 0.04:
+                off_x, off_y = off_x * 0.04 / off_n, off_y * 0.04 / off_n
+            bx, by = bx - off_x, by - off_y
             fx, fy = self.move_from[e]
             dist = math.hypot(bx - fx, by - fy)
             self.slide_s[e] = min(dist, self.slide_s[e] + args.transport_speed / 30.0)
@@ -1127,55 +1140,27 @@ class SO101PickPlaceSM:
                 self.phase[e]       = Phase.LOWER
             return self.q_cmd[e], args.gripper_close
 
-        # ----- LOWER: 그릇 안 release 높이로 z-ramp 하강 -----
+        # ----- LOWER(ROTATE): 자세 불변, wrist roll 만 +90° ramp 후 release -----
+        # 사용자 지정: FK/IK 재계산 금지 — 다른 joint 는 그대로 두고 q5 만 돌린다.
+        # 닫힘축이 접근축 주위로 90° 돌아 jaw 가 옆으로 열림 → 퍼올림 방지.
+        # 하강도 하지 않는다 — 안전 고도에서 그대로 떨굼.
         if ph == Phase.LOWER:
-            # drop 감지 (그릇 상공이라 떨어지면 그릇 안/근처 — 그래도 재확인 가치)
-            tcp_now = self._tcp_meas_w(e)
-            cube_p = self.obj_pos(cube, e)
-            if torch.linalg.norm(cube_p - tcp_now).item() > 0.055:
-                log(f"[SM] env{e} {cube}: 하강 중 drop — release 처리")
-                self.z_ramp[e]      = None
+            if self.rot_pitch0[e] is None:
+                # 진입 시 1회: (시작 q5, 목표 q5=+90°, limit 밖이면 -90°) 고정
+                q5_start = self.q_cmd[e][4]
+                q5_goal = q5_start + math.pi / 2
+                if q5_goal > SO101Kinematics.JOINT_LIMITS[4][1]:
+                    q5_goal = q5_start - math.pi / 2
+                self.rot_pitch0[e] = (q5_start, q5_goal)
                 self.dwell_count[e] = 0
-                self.phase_steps[e] = 0
-                self.phase[e]       = Phase.RELEASE_DWELL
-                return self.q_cmd[e], args.gripper_open
-            b = self.obj_pos(BOWL_NAME, e)
-            bx, by = self._place_xy(e)
-            # 낙하점 보정: 쥔 큐브는 TCP 에서 닫힘축 방향으로 2~3cm 오프셋돼 있어
-            # TCP 를 그릇 중심에 맞추면 큐브가 테두리 빗면에 떨어져 튕겨 나간다 —
-            # '큐브'가 그릇 중심 위에 오도록 TCP 목표를 반대로 이동.
-            off_x = cube_p[0].item() - tcp_now[0].item()
-            off_y = cube_p[1].item() - tcp_now[1].item()
-            off_n = math.hypot(off_x, off_y)
-            if off_n > 0.04:  # 비정상 오프셋은 클램프
-                off_x, off_y = off_x * 0.04 / off_n, off_y * 0.04 / off_n
-            # release 자세 = 수평(pitch 0°) + wrist roll 90°: 닫힘축이 바닥과
-            # 평행해져 jaw 가 수평면에서 열림 — 퍼올림 방지 (사용자 지정 자세).
-            # 재배향은 그릇 상공 정지 상태에서 1초 점진 ramp — slew 풀속도 동시
-            # 회전은 원심력으로 쥔 큐브를 떨군다 (env3 실측).
-            # 하강은 하지 않는다 — 안전 고도에서 그대로 떨굼 (사용자 지정).
             rot_t = min(1.0, self.dwell_count[e] / 30.0)
             self.dwell_count[e] += 1
-            pitch_now = -math.pi / 2 * (1.0 - rot_t)
-            roll_now = (math.pi / 2) * rot_t
-            target = (bx - off_x, by - off_y, self._safe_z_w(e))
-            if not self._solve_fixed_pitch(e, target, 0.0, pitch_now,
-                                           roll_offset=roll_now):
-                log(f"[SM] env{e}: LOWER IK 실패 — 현재 고도에서 release")
-                self.z_ramp[e]      = None
-                self.dwell_count[e] = 0
-                self.phase_steps[e] = 0
-                self.phase[e]       = Phase.RELEASE_DWELL
-                return self.q_cmd[e], args.gripper_close
-            # release 게이트: 재배향 완료 + 큐브가 그릇 중심 5cm 이내 정렬
-            cube_bowl_d = math.hypot(cube_p[0].item() - b[0].item(),
-                                     cube_p[1].item() - b[1].item())
-            if (rot_t >= 1.0 and self._converged(e, tol) and cube_bowl_d < 0.05) \
-                    or timeout:
-                if timeout and cube_bowl_d >= 0.05:
-                    log(f"[SM] env{e} {cube}: LOWER 미수렴 release "
-                        f"(cube_bowl_d={cube_bowl_d * 1000:.0f}mm)")
-                self.z_ramp[e]      = None
+            q5_start, q5_goal = self.rot_pitch0[e]
+            # q_cmd 의 q5 만 보간 — 나머지 joint 동결
+            self.q_cmd[e] = list(self.q_cmd[e])
+            self.q_cmd[e][4] = q5_start + (q5_goal - q5_start) * rot_t
+            if (rot_t >= 1.0 and self._converged(e, tol)) or timeout:
+                self.rot_pitch0[e]  = None
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
                 self.phase[e]       = Phase.RELEASE_DWELL
