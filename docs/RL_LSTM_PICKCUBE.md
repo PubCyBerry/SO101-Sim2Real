@@ -234,6 +234,12 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - run `mlp_stage1_grasp_v8`, 로그 `train_grasp_v8.log`. 나머지 v7 동일(smoothness·place 정밀도·그릇/큐브 패널티·RND·부트스트랩·gamma 0.997).
 - **판정**: ① value_function loss 안정·수렴 속도(MLP가 LSTM 대비) ② grasp 재점화·place 전이가 v6/v7 수준 이상 ③ jitter. MLP가 LSTM보다 못하면 LSTM 복귀(아키텍처 A/B 비교 겸).
 
+### T27. ❌ v8 MLP 발산 → LSTM 복귀 (v9). monitor hidden mismatch 버그
+- **v8 결과: 발산(폐기)**. iter 345 **action noise std 0.5→55.53 폭발**(정상 ~1) → 액션이 clip 끝값 포화 = 랜덤 bang-bang. grasp 점화 0, **cube_lost 종료 20.9%**(랜덤 액션이 큐브 쳐냄), value loss 6.6. LSTM(v4~v7)은 entropy 0.02에서 std 정상(~1.3)이었으나 **MLP는 entropy 0.02에 민감해 발산**(entropy 항이 policy gradient 압도). near-MDP라 이론상 MLP 가능했으나 실측 불안정.
+- **부수 버그(수정)**: MLP 전환 때 train.py hidden만 [256,128]로 고치고 **monitor_eval.py는 [128,128] 방치** → cron이 v8 ckpt 로드 시 `size mismatch`(actor.0 [256,87] vs [128,87])로 **매 점검 실패**. monitor_eval hidden도 [256,128] 통일.
+- **결정(사용자): LSTM 복귀**. run `lstm256_stage1_grasp_v9` — LSTM(256,1)+epochs 10(v7 동일) + **v8 reward 재조정 유지**(발산 원인은 MLP지 reward 아님, 압축은 value 안정 이득). cron도 `--recurrent` 복구. 즉 v9 = v7(검증된 LSTM) + reward 스케일 재조정.
+- **교훈**: ① 아키텍처 변경 시 train/monitor/eval 등 **policy_cfg를 구성하는 모든 스크립트 동기화**. ② near-MDP라도 MLP가 entropy 설정에 민감해 발산 가능 — MLP 쓰려면 entropy_coef↓ 필요(미검증). LSTM이 이 task엔 더 안정적(요구사항과도 합치).
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)

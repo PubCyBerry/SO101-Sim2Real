@@ -112,8 +112,10 @@ def _build_eval_cfg() -> dict:
     policy_cfg = {
         "class_name": "ActorCritic",
         "init_noise_std": args.init_noise_std,
-        "actor_hidden_dims": [256, 128] if args.recurrent else [128, 128],
-        "critic_hidden_dims": [256, 128] if args.recurrent else [128, 128],
+        # train.py 와 동일 — MLP/LSTM 공통 [256,128]. (이전 MLP [128,128] 가 train 의
+        # [256,128] 와 불일치해 ckpt 로드 size mismatch 발생 → 통일.)
+        "actor_hidden_dims": [256, 128],
+        "critic_hidden_dims": [256, 128],
         "activation": "elu",
         "actor_obs_normalization": args.obs_normalization,
         "critic_obs_normalization": args.obs_normalization,
