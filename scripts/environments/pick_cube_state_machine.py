@@ -127,6 +127,8 @@ parser.add_argument("--side_offset", type=float, default=0.035,
                          "큐브를 손가락 사이에 넣고 닫는다")
 parser.add_argument("--slide_speed", type=float, default=0.10,
                     help="SLIDE 수평 진입 속도 (m/s)")
+parser.add_argument("--cube_clear", type=float, default=0.05,
+                    help="비킴 지점·슬라이드 경로와 다른 큐브 사이 최소 거리 (m)")
 parser.add_argument("--bowl_clear", type=float, default=0.12,
                     help="비킨 하강 지점이 그릇 중심에서 이만큼 못 떨어지면 wrist "
                          "roll 90° 대안 grasp 으로 비킴 방향을 돌린다 (그릇 끼임 방지)")
@@ -581,19 +583,20 @@ class Phase(IntEnum):
     DESCEND       = 3   # 비킨 지점에서 grasp 높이로 수직 하강 (큐브와 무충돌)
     SLIDE         = 4   # 닫힘축 따라 수평 진입 — 큐브가 손가락 사이로
     GRASP_DWELL   = 5   # 그리퍼 닫힘 정착
-    LIFT          = 6   # SAFE_Z 로 상승 + 파지 검증
-    TRANSPORT     = 7   # SAFE_Z 유지하며 그릇 상공 횡이동
-    LOWER         = 8   # 그릇 안 release 높이로 하강
-    RELEASE_DWELL = 9   # 그리퍼 열림 정착
-    RETREAT       = 10  # SAFE_Z 로 후퇴 → 다음 큐브
-    HOME_FINAL    = 11  # 홈 자세 복귀 후 완료
-    DONE          = 12
+    DRAG          = 6   # inner/outer-reach 보정: 낮게 쥔 채 liftable 반경으로 끌기
+    LIFT          = 7   # SAFE_Z 로 상승 + 파지 검증
+    TRANSPORT     = 8   # SAFE_Z 유지하며 그릇 상공 횡이동
+    LOWER         = 9   # 그릇 안 release 높이로 하강
+    RELEASE_DWELL = 10  # 그리퍼 열림 정착
+    RETREAT       = 11  # SAFE_Z 로 후퇴 → 다음 큐브
+    HOME_FINAL    = 12  # 홈 자세 복귀 후 완료
+    DONE          = 13
 
 
 # 이동 단계: max_phase_steps timeout 적용 대상
 _MOVE_PHASES = frozenset({
-    Phase.APPROACH, Phase.PRE_GRASP, Phase.DESCEND, Phase.SLIDE, Phase.LIFT,
-    Phase.TRANSPORT, Phase.LOWER, Phase.RETREAT,
+    Phase.APPROACH, Phase.PRE_GRASP, Phase.DESCEND, Phase.SLIDE, Phase.DRAG,
+    Phase.LIFT, Phase.TRANSPORT, Phase.LOWER, Phase.RETREAT,
 })
 # 정밀 수렴(fine_joint_tol) 단계
 _FINE_PHASES = frozenset({Phase.PRE_GRASP, Phase.DESCEND, Phase.SLIDE, Phase.LOWER})
@@ -615,14 +618,15 @@ class SO101PickPlaceSM:
         self.robot    = self.scene["robot"]
         self.kin      = SO101Kinematics()
 
-        # per-env 큐브 처리 순서 (robot root 근접 순)
-        self.ordered_cubes: list[list[str]] = [
-            self._order_by_proximity(active_cubes, e) for e in range(self.num_envs)
-        ]
+        # per-env 큐브 집합: 전체(리포트용) / 미처리 / 현재 대상 / 큐브별 시도 라운드
+        self.all_cubes : list[str] = list(active_cubes)
+        self.remaining : list[list[str]] = [list(active_cubes) for _ in range(self.num_envs)]
+        self.cur_cube  : list[str | None] = [None] * self.num_envs
+        self.rounds    : list[dict[str, int]] = [
+            {c: 0 for c in active_cubes} for _ in range(self.num_envs)]
 
         # per-env 상태
         self.phase       : list[Phase] = [Phase.SETTLE] * self.num_envs
-        self.cube_idx    : list[int]   = [0]   * self.num_envs
         self.n_placed    : list[int]   = [0]   * self.num_envs
         self.dwell_count : list[int]   = [0]   * self.num_envs
         self.phase_steps : list[int]   = [0]   * self.num_envs
@@ -733,34 +737,116 @@ class SO101PickPlaceSM:
         self.q_cmd[e], self.last_pitch[e] = q, pitch
         return True
 
-    # --- 정렬·전이 헬퍼 --------------------------------------------------
+    # --- grasp 후보·클리어런스·우선순위 헬퍼 --------------------------------
 
-    def _order_by_proximity(self, cubes: list[str], e: int) -> list[str]:
+    def _grasp_candidates(self, e: int, cube: str) -> list[tuple]:
+        """4방향(roll 0/±90/180°) side-approach 후보를 클리어런스와 함께 반환.
+
+        각 후보의 비킨 하강 지점·슬라이드 경로가 그릇/다른 큐브와 충돌하지 않는지
+        평가한다. 반환: [(clear:bool, margin:float, roll_off, dx, dy), ...]
+        (0° = base쪽 비킴이 첫 후보 — 우선 선호)
+        """
+        p = self.obj_pos(cube, e)
+        yaw = self.obj_yaw(cube, e)
+        root_yaw = _quat_to_yaw(self.robot.data.root_quat_w[e])
+        # 방위각: pan 축 기준 (PRE_GRASP 의 q1 과 동일 정의)
+        tb = self._to_base(p, e)
+        q1 = -math.atan2(tb[1], tb[0] - SO101Kinematics.PAN_X)
+        q5_base = SO101Kinematics._fold_45((yaw - root_yaw + BASE_YAW_OFFSET) + q1)
+        yaw_fixed_w = (q5_base - q1) - BASE_YAW_OFFSET + root_yaw
+        bowl_xy = self.obj_pos(BOWL_NAME, e)[:2]
+        others = [c for c in self.remaining[e] if c != cube]
+        cands = []
+        for roll_off in (0.0, math.pi / 2, -math.pi / 2, math.pi):
+            ax_yaw = yaw_fixed_w + roll_off
+            ddx, ddy = -math.cos(ax_yaw), -math.sin(ax_yaw)  # fixed 반대쪽 비킴
+            # 체크 지점: 비킨 하강 지점 + 슬라이드 경로 중간점
+            pts = [(p[0].item() + f * args.side_offset * ddx,
+                    p[1].item() + f * args.side_offset * ddy) for f in (1.0, 0.5)]
+            margin = float("inf")
+            for cx, cy in pts:
+                margin = min(margin,
+                             math.hypot(cx - bowl_xy[0].item(),
+                                        cy - bowl_xy[1].item()) - args.bowl_clear)
+                for oc in others:
+                    op = self.obj_pos(oc, e)
+                    margin = min(margin,
+                                 math.hypot(cx - op[0].item(), cy - op[1].item())
+                                 - args.cube_clear)
+            cands.append((margin >= 0.0, margin, roll_off, ddx, ddy))
+        return cands
+
+    def _place_xy(self, e: int) -> tuple[float, float]:
+        """운반·하강 목표 xy — 그릇 중심을 base 쪽으로 살짝 당겨 reach 마진 확보.
+        (성공 판정 반경 6cm 이므로 2cm 안쪽이어도 in-bowl)"""
+        b = self.obj_pos(BOWL_NAME, e)
+        root_xy = self.robot.data.root_pos_w[e, :2]
+        vx, vy = root_xy[0].item() - b[0].item(), root_xy[1].item() - b[1].item()
+        d = max(math.hypot(vx, vy), 1e-6)
+        return (b[0].item() + 0.02 * vx / d, b[1].item() + 0.02 * vy / d)
+
+    def _liftable(self, e: int, xy_w, z_w: float | None = None) -> bool:
+        """해당 world xy 에서 safe_z 까지 들어올릴 IK 해가 존재하는가."""
+        z = self._safe_z_w(e) if z_w is None else z_w
+        t = torch.tensor([float(xy_w[0]), float(xy_w[1]), z], device=self.device)
+        return self.kin.ik_reach(self._to_base(t, e), 0.0) is not None
+
+    def _select_next_cube(self, e: int) -> str | None:
+        """남은 큐브 중 다음 대상 선택: 장애물 클리어 > liftable > 근접 순.
+
+        막힌 큐브는 자연히 뒤로 가고, 앞 큐브가 치워지면 클리어해진다.
+        라운드 상한(2회) 초과 큐브는 후순위로만 선택.
+        """
+        if all(self.rounds[e][c] >= 2 for c in self.remaining[e]):
+            return None  # 전 큐브 라운드 소진 — 무한 재시도 방지
         base_xy = self.robot.data.root_pos_w[e, :2]
-        return sorted(
-            cubes,
-            key=lambda c: torch.linalg.norm(self.obj_pos(c, e)[:2] - base_xy).item(),
-        )
+        best = None
+        for c in self.remaining[e]:
+            p = self.obj_pos(c, e)
+            dist = torch.linalg.norm(p[:2] - base_xy).item()
+            clear = any(k[0] for k in self._grasp_candidates(e, c))
+            liftable = self._liftable(e, (p[0].item(), p[1].item()))
+            over_round = self.rounds[e][c] >= 2
+            # 정렬키: (라운드 초과 아님, 클리어, liftable, -거리) 큰 것이 우선
+            key = (not over_round, clear, liftable, -dist)
+            if best is None or key > best[0]:
+                best = (key, c)
+        return best[1] if best is not None else None
 
-    def _advance_cube(self, e: int) -> None:
-        self.cube_idx[e]    += 1
+    def _finish_cube(self, e: int, done: bool) -> None:
+        """현재 큐브 처리 종료. done=False 면 라운드 +1 하고 remaining 에 유지
+        (다른 큐브 처리 후 재시도) — 단 2라운드 초과면 완전 포기."""
+        cube = self.cur_cube[e]
+        if cube is not None:
+            if done:
+                self.remaining[e].remove(cube)
+            else:
+                self.rounds[e][cube] += 1
+                if self.rounds[e][cube] >= 2 and len(self.remaining[e]) == 1:
+                    log(f"[SM] env{e} {cube}: 라운드 소진 — 완전 포기")
+                    self.remaining[e].remove(cube)
+        self.cur_cube[e]     = None
         self.phase_steps[e]  = 0
         self.retries[e]      = 0
         self.latched[e]      = None
         self.z_ramp[e]       = None
         self.slide_s[e]      = 0.0
         self.side_pick[e]    = None
-        if self.cube_idx[e] >= len(self.ordered_cubes[e]):
+        if not self.remaining[e]:
             self.dwell_count[e] = 0
             self.phase[e]       = Phase.HOME_FINAL
         else:
             self.phase[e] = Phase.APPROACH
 
+    def _advance_cube(self, e: int) -> None:
+        """(구) 다음 큐브로 — 실패 종료 의미로 사용되던 호출부 호환."""
+        self._finish_cube(e, done=False)
+
     def _retry_or_skip(self, e: int, cube: str, reason: str) -> None:
         self.retries[e] += 1
         if self.retries[e] > args.max_retry:
-            log(f"[SM] env{e} {cube}: {reason} — 재시도 소진, 다음 큐브로")
-            self._advance_cube(e)
+            log(f"[SM] env{e} {cube}: {reason} — 재시도 소진, 뒤로 미룸")
+            self._finish_cube(e, done=False)
             return
         log(f"[SM] env{e} {cube}: {reason} — retry {self.retries[e]}/{args.max_retry}")
         self.phase_steps[e] = 0
@@ -785,17 +871,21 @@ class SO101PickPlaceSM:
             if self.dwell_count[e] >= args.settle_steps:
                 self.dwell_count[e] = 0
                 if ph == Phase.SETTLE:
-                    # 큐브 정착 후 처리 순서 확정
-                    self.ordered_cubes[e] = self._order_by_proximity(
-                        self.ordered_cubes[e], e)
                     self.phase[e] = Phase.APPROACH
-                    log(f"[SM] env{e}: pick order = {self.ordered_cubes[e]}")
                 else:
                     self.phase[e] = Phase.DONE
                     self._report(e)
             return list(self.HOME_Q), args.gripper_open
 
-        cube = self.ordered_cubes[e][self.cube_idx[e]]
+        if self.cur_cube[e] is None:
+            self.cur_cube[e] = self._select_next_cube(e)
+            if self.cur_cube[e] is None:
+                self.dwell_count[e] = 0
+                self.phase[e] = Phase.HOME_FINAL
+                return list(self.HOME_Q), args.gripper_open
+            log(f"[SM] env{e}: next cube = {self.cur_cube[e]} "
+                f"(remaining {self.remaining[e]})")
+        cube = self.cur_cube[e]
 
         if ph in _MOVE_PHASES:
             self.phase_steps[e] += 1
@@ -825,36 +915,19 @@ class SO101PickPlaceSM:
             # 큐브는 90° 대칭이라 wrist roll 을 0/±90/180° 돌린 grasp 이 모두 동등 —
             # 닫힘축 자체를 돌려 비킨 하강 지점이 그릇 테두리(중심 0.12m)를 피하는
             # 첫 후보를 채택한다 (0°=base쪽 비킴 우선).
-            # 닫힘축 기준은 q_cmd(이전 해의 roll_offset 포함)를 참조하지 말고 독립
-            # 재계산하고, retry 당 1회만 확정 — 자기참조·경계 토글 진동 방지.
+            # 후보 선택은 _grasp_candidates(그릇+다른 큐브 클리어런스)로 1회 확정 —
+            # q_cmd 자기참조·경계 토글 진동 방지 (retry 시 재평가).
             if self.side_pick[e] is None:
-                root_yaw = _quat_to_yaw(self.robot.data.root_quat_w[e])
-                q1 = self.q_cmd[e][0]  # 방위각 — 큐브 위치로 결정돼 안정적
-                q5_base = SO101Kinematics._fold_45(
-                    (yaw - root_yaw + BASE_YAW_OFFSET) + q1)
-                yaw_fixed_w = (q5_base - q1) - BASE_YAW_OFFSET + root_yaw
-                # fixed finger 는 fold ±45° 안에서 구조적으로 radial-out 쪽 — 0° 후보의
-                # 비킴(−방향)이 base 쪽. π 후보는 q5 limit 로 IK 가 거를 수 있음(최후순위).
-                bowl_xy = self.obj_pos(BOWL_NAME, e)[:2]
-                best = None
-                for roll_off in (0.0, math.pi / 2, -math.pi / 2, math.pi):
-                    ax_yaw = yaw_fixed_w + roll_off
-                    ddx, ddy = -math.cos(ax_yaw), -math.sin(ax_yaw)  # fixed 반대쪽
-                    cx = p[0].item() + args.side_offset * ddx
-                    cy = p[1].item() + args.side_offset * ddy
-                    bowl_d = math.hypot(cx - bowl_xy[0].item(), cy - bowl_xy[1].item())
-                    cand = (bowl_d, roll_off, ddx, ddy)
-                    if bowl_d >= args.bowl_clear:
-                        best = cand
-                        break
-                    if best is None or bowl_d > best[0]:
-                        best = cand
-                bowl_d, roll_off, ddx, ddy = best
+                cands = self._grasp_candidates(e, cube)
+                pick = next((k for k in cands if k[0]), None)  # 클리어 첫 후보
+                if pick is None:
+                    pick = max(cands, key=lambda k: k[1])      # 전부 막히면 최대 margin
+                clear, margin, roll_off, ddx, ddy = pick
                 self.side_pick[e] = (roll_off, ddx, ddy)
-                if abs(roll_off) > 1e-9:
-                    log(f"[SM] env{e} {cube}: 그릇 회피 — roll "
-                        f"{math.degrees(roll_off):+.0f}° 대안 grasp "
-                        f"(bowl_d={bowl_d * 1000:.0f}mm)")
+                if abs(roll_off) > 1e-9 or not clear:
+                    log(f"[SM] env{e} {cube}: 장애물 회피 — roll "
+                        f"{math.degrees(roll_off):+.0f}° (clear={clear} "
+                        f"margin={margin * 1000:.0f}mm)")
             roll_off, dx, dy = self.side_pick[e]
             sx = p[0].item() + args.side_offset * dx
             sy = p[1].item() + args.side_offset * dy
@@ -956,7 +1029,44 @@ class SO101PickPlaceSM:
             if self.dwell_count[e] >= args.grasp_dwell:
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
+                lx, ly = self.latched[e][0].tolist()
+                if self._liftable(e, (lx, ly)):
+                    self.phase[e] = Phase.LIFT
+                else:
+                    # inner/outer-reach: 이 자리에선 safe_z 로 못 든다 — 끌어오기
+                    self.slide_s[e] = 0.0
+                    self.phase[e]   = Phase.DRAG
+                    log(f"[SM] env{e} {cube}: liftable 아님 — DRAG 시작")
+            return self.q_cmd[e], args.gripper_close
+
+        # ----- DRAG: 낮게 쥔 채 liftable 반경으로 radial 끌기 -----
+        if ph == Phase.DRAG:
+            lx, ly = self.latched[e][0].tolist()
+            root_xy = self.robot.data.root_pos_w[e, :2]
+            rx, ry = lx - root_xy[0].item(), ly - root_xy[1].item()
+            r_cur = math.hypot(rx, ry)
+            # 목표 반경 0.20(중앙 영역) 방향으로 — 가까우면 밀고 멀면 당김
+            sgn = 1.0 if r_cur < 0.20 else -1.0
+            ux, uy = rx / max(r_cur, 1e-6), ry / max(r_cur, 1e-6)
+            self.slide_s[e] += args.slide_speed / 30.0
+            step_d = min(self.slide_s[e], 0.10)  # 끌기 한계 10cm
+            nx, ny = lx + sgn * step_d * ux, ly + sgn * step_d * uy
+            drag_z = self.latched[e][2] + self._zoff(cube) + 0.02  # 살짝 띄워 마찰 감소
+            if not self._solve_fixed_pitch(e, (nx, ny, drag_z), self.latched[e][1],
+                                           self.latched[e][3],
+                                           roll_offset=self.latched[e][6]):
+                # 끌기 경로 IK 실패 — 현 위치에서 그냥 lift 시도
+                self.phase_steps[e] = 0
                 self.phase[e]       = Phase.LIFT
+                return self.q_cmd[e], args.gripper_close
+            if self._liftable(e, (nx, ny)) or step_d >= 0.10 or timeout:
+                # latch xy 를 끌어온 위치로 갱신 후 lift
+                self.latched[e] = (torch.tensor([nx, ny], device=self.device),
+                                   *self.latched[e][1:])
+                self.slide_s[e]     = 0.0
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.LIFT
+                log(f"[SM] env{e} {cube}: DRAG 완료 — {step_d * 1000:.0f}mm 이동")
             return self.q_cmd[e], args.gripper_close
 
         # ----- LIFT: SAFE_Z 로 z-ramp 상승 + 파지 검증 -----
@@ -983,13 +1093,13 @@ class SO101PickPlaceSM:
 
         # ----- TRANSPORT: 그릇 상공으로 Cartesian 직선 ramp 횡이동 -----
         if ph == Phase.TRANSPORT:
-            b = self.obj_pos(BOWL_NAME, e)
+            bx, by = self._place_xy(e)
             fx, fy = self.move_from[e]
-            dist = math.hypot(b[0].item() - fx, b[1].item() - fy)
+            dist = math.hypot(bx - fx, by - fy)
             self.slide_s[e] = min(dist, self.slide_s[e] + args.transport_speed / 30.0)
             frac = 1.0 if dist < 1e-6 else self.slide_s[e] / dist
-            target = (fx + (b[0].item() - fx) * frac,
-                      fy + (b[1].item() - fy) * frac, self._safe_z_w(e))
+            target = (fx + (bx - fx) * frac,
+                      fy + (by - fy) * frac, self._safe_z_w(e))
             if not self._solve(e, target, 0.0):
                 # 그릇이 반경 밖이면 복구 불가 — 큐브를 들고 있으니 즉시 종료 처리
                 log(f"[SM] env{e}: 그릇 IK 실패 {target} — 작업 중단")
@@ -1005,11 +1115,12 @@ class SO101PickPlaceSM:
         # ----- LOWER: 그릇 안 release 높이로 z-ramp 하강 -----
         if ph == Phase.LOWER:
             b = self.obj_pos(BOWL_NAME, e)
+            bx, by = self._place_xy(e)
             place_z = b[2].item() + args.place_height
             if self.z_ramp[e] is None:
                 self.z_ramp[e] = self._safe_z_w(e)
             self.z_ramp[e] = max(place_z, self.z_ramp[e] - args.lower_speed / 30.0)
-            target = (b[0].item(), b[1].item(), self.z_ramp[e])
+            target = (bx, by, self.z_ramp[e])
             if not self._solve(e, target, 0.0):
                 log(f"[SM] env{e}: LOWER IK 실패 — 현재 고도에서 release")
                 self.z_ramp[e]      = None
@@ -1018,7 +1129,15 @@ class SO101PickPlaceSM:
                 self.phase[e]       = Phase.RELEASE_DWELL
                 return self.q_cmd[e], args.gripper_close
             ramp_done = self.z_ramp[e] <= place_z + 1e-6
-            if (ramp_done and self._converged(e, tol)) or timeout:
+            # release 게이트: TCP 실측이 그릇 중심 5cm 이내여야 — 테두리 위 release
+            # 는 큐브가 얹혀 굴러떨어진다 (timeout 시엔 어쩔 수 없이 release)
+            tcp = self._tcp_meas_w(e)
+            tcp_bowl_d = math.hypot(tcp[0].item() - b[0].item(),
+                                    tcp[1].item() - b[1].item())
+            if (ramp_done and self._converged(e, tol) and tcp_bowl_d < 0.05) or timeout:
+                if timeout and tcp_bowl_d >= 0.05:
+                    log(f"[SM] env{e} {cube}: LOWER 미수렴 release "
+                        f"(tcp_bowl_d={tcp_bowl_d * 1000:.0f}mm)")
                 self.z_ramp[e]      = None
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
@@ -1045,7 +1164,7 @@ class SO101PickPlaceSM:
             self.z_ramp[e] = min(safe_z, self.z_ramp[e] + args.lift_speed / 30.0)
             self._solve(e, (b[0].item(), b[1].item(), self.z_ramp[e]), 0.0)
             if self.z_ramp[e] >= safe_z - 1e-6 or timeout:
-                self._advance_cube(e)
+                self._finish_cube(e, done=True)
             return self.q_cmd[e], self._open_cmd(cube)
 
         return list(self.HOME_Q), args.gripper_open
@@ -1077,16 +1196,16 @@ class SO101PickPlaceSM:
             self._act_all(qs, grips)
         # 전체 env 합산 요약
         total_ok = sum(
-            sum(self._placed(c, e) for c in self.ordered_cubes[e])
+            sum(self._placed(c, e) for c in self.all_cubes)
             for e in range(self.num_envs))
-        total = sum(len(self.ordered_cubes[e]) for e in range(self.num_envs))
+        total = self.num_envs * len(self.all_cubes)
         log(f"[SM] TOTAL: {total_ok}/{total} cubes in bowl across {self.num_envs} envs "
             f"({100.0 * total_ok / max(total, 1):.0f}%).")
 
     # --- 결과 리포트 -----------------------------------------------------
 
     def _report(self, e: int) -> None:
-        cubes = self.ordered_cubes[e]
+        cubes = self.all_cubes
         n_ok  = sum(self._placed(c, e) for c in cubes)
         for c in cubes:
             p    = self.obj_pos(c, e)
