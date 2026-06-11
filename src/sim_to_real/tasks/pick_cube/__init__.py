@@ -4,7 +4,7 @@ import gymnasium as gym
 
 gym.register(
     id="SimToReal-SO101-PickCube-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.pick_cube_env:PickCubeEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.pick_cube_env_cfg:PickCubeEnvCfg",

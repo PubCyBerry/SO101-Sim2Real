@@ -27,6 +27,20 @@
 
 ---
 
+## 작업 인계 (2026-06-11 — PickCube RL: v11 PBRS(place potential-based shaping))
+
+> 상세 기록은 **`docs/RL_LSTM_PICKCUBE.md`**(T1~T25 전체 시행착오). 여기는 인계 요약만.
+
+- **위치**: 브랜치 `worktree-lstm-ppo-pickcube` → main 병합 완료. 재개 시 새 worktree/브랜치에서. 실행 = 메인 `.venv` + `PYTHONPATH=$(pwd)/src`. 서버 konan147 GPU(48GB) 공유.
+- **목표**: cube_desk 단일 큐브 pick→bowl, LSTM+PPO. scratch(부트스트랩 없는) **성공률 ≥0.80** → 1→2→3→4 커리큘럼.
+- **✅ grasp 해결(v4 점화 + v6 신뢰성)**: scratch.grasp/lift/over_bowl **0.85~0.89** 안정. 효과 개입 = grasp_contact(ContactSensor)+close-bridge(3.0)+slew 2.5+RND grasp_focus(v4) + **cube_predisturb 패널티(-3)·cube_lost 추락 종료**(v6, 큐브 변위 -0.40→-0.08·추락 6.9%→3.4%).
+- **남은 핵심 문제 = place 정밀도**: grasp 후 `over_bowl 0.86 → placed 0.10`(전이 12%). hover local-optimum. **PBRS 도입(T29)**: Φ=그릇안 1.0+밖 0.3·xy+0.2·z, transport/place_height/insert weight→0. v11(iter 66)은 종료·폐기.
+- **obs 87dim**: joint·grasp point·큐브·그릇 pos+rel + 속도 + 큐브 yaw/크기·ee quat·그릇 quat. LSTM(256,1)+PPO, num_envs 16384, gamma 0.997, RND grasp_focus(30dim).
+- **outputs 경로**: 새 학습 시 `--log_root_path /home/konan147/Workspaces/SO101-Sim2Real/outputs/rl/rsl_rl` 로 main 레포 outputs 사용. cron_monitor_v4.sh 의 RUN_GLOB 도 main outputs 절대경로로 갱신됨.
+- **다음 레버**: place 미해결 시 Φ 가중 튜닝(xy 0.3·z 0.2)·grasp 단계 PBRS화·over_bowl_drop PBRS화. success→0.80 시 커리큘럼 1→2.
+
+---
+
 ## 작업 인계 (2026-06-11 — in-process 결정적 grasp SM: 1큐브 90% 달성·4큐브 첫 all-4·리뷰영상 시스템 / 진행중)
 
 - **목표(사용자 확정)**: in-process Isaac Lab SM(`pick_cube_state_machine.py`)으로 cube_desk pick-and-place — expert 데이터셋 생성용, **순수 물리 grasp만**(grasp-assist 금지), 1큐브 고신뢰 먼저 → 4큐브. 계획서 `~/.claude/plans/isaac-sim-cube-desk-memoized-starfish.md`.

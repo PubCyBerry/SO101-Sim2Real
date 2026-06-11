@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.assets import RigidObject
@@ -171,6 +172,7 @@ def _randomize_cubes_scattered_fn(
     min_cube_sep: float,
     min_bowl_sep: float,
     max_attempts: int,
+    num_active: int | None = None,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -201,9 +203,22 @@ def _randomize_cubes_scattered_fn(
     min_bowl_sep_sq = min_bowl_sep ** 2
     min_cube_sep_sq = min_cube_sep ** 2
 
-    for cube_cfg in cube_cfgs:
+    n_active = len(cube_cfgs) if num_active is None else max(1, min(len(cube_cfgs), int(num_active)))
+
+    for cube_idx, cube_cfg in enumerate(cube_cfgs):
         asset: RigidObject = env.scene[cube_cfg.name]
         default = asset.data.default_root_state[env_ids].clone()  # (n, 13)
+
+        # 비활성 큐브(stage 에서 안 쓰는 큐브): 지면 아래로 치워 비활성화
+        # (작업공간·시야·물리 간섭 제거). 떨어져 사라지며 obs 는 num_active 로 0 마스킹됨.
+        if cube_idx >= n_active:
+            park = default[:, :3].clone()
+            park[:, 2] = -1.0  # 지면(z=0) 아래로 → 낙하해 작업공간 이탈
+            park_pos = park + env.scene.env_origins[env_ids]
+            pose = torch.cat([park_pos, default[:, 3:7]], dim=-1)
+            asset.write_root_pose_to_sim(pose, env_ids=env_ids)
+            asset.write_root_velocity_to_sim(torch.zeros(n, 6, device=device), env_ids=env_ids)
+            continue
 
         # 최종 위치. 조건 충족 못한 env 는 default 좌표로 유지
         final_x = default[:, 0].clone()
@@ -285,8 +300,12 @@ def randomize_cubes_scattered(
     min_cube_sep: float = 0.10,
     min_bowl_sep: float = 0.18,
     max_attempts: int = 50,
+    num_active: int | None = None,
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
+
+    num_active 지정 시 앞 num_active 개만 workspace 에 배치하고, 나머지는 지면 아래로
+    치워 비활성화한다(커리큘럼의 active_objects 와 연동).
 
     Args:
         cube_names: 배치할 큐브 prim 이름 목록. 순서대로 처리한다.
@@ -312,5 +331,64 @@ def randomize_cubes_scattered(
             "min_cube_sep": float(min_cube_sep),
             "min_bowl_sep": float(min_bowl_sep),
             "max_attempts": int(max_attempts),
+            "num_active": num_active,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# 물리 DR — Isaac Lab stock term(ManagerTermBase) 래퍼.
+#   sim2real 일반화를 위해 큐브의 마찰/질량을 env 별로 무작위화한다.
+#   mode="startup": env 초기화 시 1회 샘플 → env 간 물리 다양성(표준 패턴).
+#   grasp weld/유지력 추가가 아니므로 reward hacking 이 아니다.
+# ---------------------------------------------------------------------------
+
+
+def randomize_object_material(
+    name: str,
+    *,
+    static_friction_range: tuple[float, float] = (1.4, 2.0),
+    dynamic_friction_range: tuple[float, float] = (1.2, 1.7),
+    restitution_range: tuple[float, float] = (0.0, 0.0),
+    num_buckets: int = 64,
+) -> EventTerm:
+    """``name`` rigid body 의 마찰/반발 계수를 무작위 material bucket 으로 할당.
+
+    기본 범위는 큐브 authored 값(static 1.8 / dynamic 1.5) 중심의 ±대역.
+    make_consistent=True 로 dynamic ≤ static 을 강제한다.
+    """
+    return EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(name),
+            "static_friction_range": static_friction_range,
+            "dynamic_friction_range": dynamic_friction_range,
+            "restitution_range": restitution_range,
+            "num_buckets": int(num_buckets),
+            "make_consistent": True,
+        },
+    )
+
+
+def randomize_object_mass(
+    name: str,
+    *,
+    mass_range: tuple[float, float] = (0.9, 1.1),
+    operation: str = "scale",
+) -> EventTerm:
+    """``name`` rigid body 의 질량을 무작위화 (기본 ±10% scale).
+
+    grasp 안정 한계(actuator 10Nm) 내로 유지하기 위해 좁은 범위만 쓴다.
+    """
+    return EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(name),
+            "mass_distribution_params": mass_range,
+            "operation": operation,
+            "distribution": "uniform",
+            "recompute_inertia": True,
         },
     )

@@ -62,3 +62,26 @@ def task_done(
         done = torch.logical_and(done, _is_at_rest_pose(robot.data.joint_pos))
 
     return done
+
+
+def cube_lost(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    pens_cfg: list[SceneEntityCfg],
+    fall_z: float = 0.10,
+) -> torch.Tensor:
+    """활성 큐브 중 하나라도 책상보다 ``fall_z`` 아래로 추락하면 True (회복 불가).
+
+    잘못된 grasp 로 큐브를 책상 밖/아래로 쳐내 영영 도달 불가가 된 상태를 빠르게
+    종료해 학습 낭비를 막고(나머지 step 이 무의미), early termination 으로 '그 큐브
+    가치 0' 을 critic 에 전파해 애초에 안 쳐내도록 압력을 준다. xy 멀리 밀침은
+    cube_predisturb 패널티가 억제하고, 책상 끝을 넘으면 결국 z 로 잡힌다.
+
+    비활성 큐브(지면 아래 z=-1.0 로 치워둔 것)는 pens_cfg(active 만)에서 제외되므로
+    오탐하지 않는다 — apply_curriculum 이 active_cfgs 를 주입한다.
+    """
+    lost = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for pen_cfg in pens_cfg:
+        pen: RigidObject = env.scene[pen_cfg.name]
+        pen_z = pen.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+        lost = torch.logical_or(lost, pen_z < (_DESK_TOP_Z - fall_z))
+    return lost

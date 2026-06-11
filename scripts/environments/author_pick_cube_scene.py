@@ -472,7 +472,9 @@ def author_cube(name: str) -> "Usd.Stage":
     UsdGeom.Scope.Define(stage, looks)
     color, roughness, metallic = MATERIALS["GrayFoam"]
     gray_foam = _visual_material(stage, looks, "GrayFoam", color, roughness, metallic)
-    cube_friction = _physics_material(stage, looks, "CubeFriction", FRICTION_CUBE, friction_combine="average")
+    # 물리 friction 머티리얼은 큐브 USD 에 두지 않는다 — PhysX 64K 머티리얼 한도 때문에
+    # env 당 4개(큐브별) 복제를 막기 위해 scene.usd 가 단일 공유 CubeFriction 을 over-bind
+    # 한다(값 동일, 인스턴스만 4→1). 16384 env 가능(8192×6=49K → 16384×3=49K).
 
     # 시각 메시: 3mm 챔퍼 bevel (충돌 없음).
     sx, sy, sz = CUBE_SCALES[name]
@@ -488,7 +490,7 @@ def author_cube(name: str) -> "Usd.Stage":
     box.MakeInvisible()
     _set_xform(box, scale=CUBE_SCALES[name])
     _apply_collision(box.GetPrim(), contact_tuning=True, contact_offset=CUBE_CONTACT_OFFSET)
-    _bind_physics(box.GetPrim(), cube_friction)
+    # friction 머티리얼 바인딩은 scene.usd 가 공유 /Scene/Looks/CubeFriction 으로 over-bind.
 
     return stage
 
@@ -613,17 +615,15 @@ def author_scene() -> "Usd.Stage":
         color, roughness, metallic = MATERIALS[mat_name]
         mats[mat_name] = _visual_material(stage, looks, mat_name, color, roughness, metallic)
     desk_friction = _physics_material(stage, looks, "DeskFriction", FRICTION_DESK)
+    # 공유 CubeFriction — 4큐브가 각자 가지면 env 당 머티리얼 4개(PhysX 64K 한도로 16384 env
+    # 불가). scene 레벨 단일 머티리얼을 큐브 collider 에 over-bind(값 동일, 인스턴스 4→1).
+    shared_cube_friction = _physics_material(stage, looks, "CubeFriction", FRICTION_CUBE, friction_combine="average")
 
-    # ── 조명 (씬 자체에 author → usdview 단독 검증 가능) ──────────────────
-    dome = UsdLux.DomeLight.Define(stage, "/Scene/DomeLight")
-    dome.CreateIntensityAttr(2000.0)
-    dome.CreateColorAttr(Gf.Vec3f(0.9, 0.9, 0.9))
-    key = UsdLux.DistantLight.Define(stage, "/Scene/KeyLight")
-    key.CreateIntensityAttr(1800.0)
-    key.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.95))
-    key.CreateAngleAttr(1.0)  # soft shadow
-    # 위에서 비스듬히(고도 ~50°, 방위 ~ -35°) 내리쬐어 그림자·입체감 부여.
-    key.AddRotateXYZOp().Set(Gf.Vec3f(-50.0, 0.0, -35.0))
+    # ── 조명 ──────────────────────────────────────────────────────────────
+    # 광원은 scene.usd(=per-env {ENV_REGEX_NS}/Scene 로 마운트)에 두지 않는다.
+    # USD 광원은 scope 격리가 없어 env 수만큼 복제되면 N배 과노출(IsaacLab #4340/#1729).
+    # → 광원은 PickCubeSceneCfg 가 /World/Light·/World/KeyLight(env 계층 밖, 복제 안 됨)에
+    #   단일로 author 한다. usdview 단독 검증 시엔 뷰어 기본 조명/헤드라이트를 쓴다.
 
     # 천장.
     _static_cube(
@@ -663,6 +663,9 @@ def author_scene() -> "Usd.Stage":
             stage, name, f"./objects/{name}/{name}.usd",
             translate=_shift(pos), rotate_z=yaw,
         )
+        # 공유 CubeFriction 을 큐브 collider(payload 의 /Box)에 over-bind.
+        box_over = stage.OverridePrim(f"/Scene/{name}/Box")
+        _bind_physics(box_over, shared_cube_friction)
 
     return stage
 

@@ -39,6 +39,14 @@ def _quat_apply_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return vec + 2.0 * (qw * uv + uuv)
 
 
+def _yaw_from_quat_wxyz(quat: torch.Tensor) -> torch.Tensor:
+    """wxyz quaternion에서 yaw(z축 회전)를 라디안으로 추출한다. (N,) 반환."""
+    qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return torch.atan2(siny_cosp, cosy_cosp)
+
+
 def pen_grasped(
     env: ManagerBasedRLEnv | DirectRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -212,10 +220,15 @@ def rl_state(
     cup_name: str = "PenCup",
     gripper_body_name: str = "gripper",
     action_term_name: str = "arm",
+    include_velocities: bool = False,
+    include_orientation: bool = False,
+    include_container_orientation: bool = False,
+    pen_half_extents: Sequence[float] | None = None,
+    num_active: int | None = None,
 ) -> torch.Tensor:
     """Privileged state vector for RL training.
 
-    Shape: (num_envs, D) where D = 6 + 6 + 3 + 4*3 + 3 + 4*3 + 1 = 43.
+    Base shape: (num_envs, D) where D = 6 + 6 + 3 + 4*3 + 3 + 4*3 + 1 = 43.
 
     Breakdown (all positions are env-origin-relative):
       [0:6]   robot joint positions in SO-101 order (rad)
@@ -225,9 +238,29 @@ def rl_state(
       [27:30] cup position (m)
       [30:42] grasp point→pen relative vectors, 4×3 (m)
       [42]    gripper joint pos normalised to [0,1] (open fraction)
+
+    include_velocities=True 면 뒤에 +21: joint_vel(6)+ee lin vel(3)+pen lin vel(4×3).
+
+    include_orientation=True 면 그 뒤에 +19 (grasp 정렬용):
+      pen yaw sin/cos, 4×2 (8)      — 평행 jaw 면 정렬
+      pen half-extent, 4×1 (4)      — 30/40mm 2종 벌림 폭 매칭. pen_half_extents 미지정 시 0
+      ee(jaw) orientation quat wxyz (4) — 접근 각
+      grasp point→cup relative vector (3) — transport
+
+    include_container_orientation=True 면 그 뒤에 +4: 그릇(컵) quat wxyz —
+      동적 그릇의 tilt/엎힘 관측(부분관측 해소). bowl_disturb 패널티와 짝.
+
+    num_active 가 지정되면 그 수보다 뒤 인덱스의 펜/큐브 관련 블록(위치·상대·속도·
+    yaw·크기)을 모두 0 으로 마스킹한다(단일 큐브 스테이지의 distractor 제거 →
+    RND novelty 도 활성 큐브에 집중). joint/gripper/cup 항은 그대로.
     """
     robot: Articulation = env.scene[robot_cfg.name]
     origins = env.scene.env_origins  # (N, 3)
+
+    # 큐브별 active 마스크 (1=활성, 0=마스킹). num_active 미지정 시 전부 활성.
+    n_pens = len(pen_names)
+    n_act = n_pens if num_active is None else max(0, min(n_pens, int(num_active)))
+    pen_active = [1.0 if i < n_act else 0.0 for i in range(n_pens)]
 
     # --- joint positions (6) ---
     joint_pos = robot.data.joint_pos  # (N, num_joints)
@@ -253,22 +286,21 @@ def rl_state(
             )
         gripper_pos = robot.data.body_pos_w[:, gripper_idx, :] - origins  # (N, 3)
 
-    # --- pen positions relative to env origin (4×3) ---
+    # --- pen positions relative to env origin (4×3), 비활성 큐브 마스킹 ---
     pen_parts: list[torch.Tensor] = []
-    for name in pen_names:
+    for i, name in enumerate(pen_names):
         pen: RigidObject = env.scene[name]
-        pen_parts.append(pen.data.root_pos_w - origins)  # (N, 3)
-    pen_pos = torch.cat(pen_parts, dim=-1)  # (N, 12)
+        pen_parts.append((pen.data.root_pos_w - origins))  # (N, 3) raw(아래 rel 에 재사용)
+    pen_pos = torch.cat([p * pen_active[i] for i, p in enumerate(pen_parts)], dim=-1)  # (N, 12)
 
     # --- cup position relative to env origin (3) ---
     cup: RigidObject = env.scene[cup_name]
     cup_pos = cup.data.root_pos_w - origins  # (N, 3)
 
-    # --- grasp point → pen relative vectors (4×3) ---
+    # --- grasp point → pen relative vectors (4×3), 비활성 큐브 마스킹 ---
     rel_parts: list[torch.Tensor] = []
     for i in range(len(pen_names)):
-        pen_p = pen_parts[i]  # (N, 3)
-        rel_parts.append(pen_p - gripper_pos)
+        rel_parts.append((pen_parts[i] - gripper_pos) * pen_active[i])
     rel_pos = torch.cat(rel_parts, dim=-1)  # (N, 12)
 
     # --- gripper open fraction normalised to [0, 1] (1) ---
@@ -276,5 +308,103 @@ def rl_state(
     # full-open ≈ 1.0 rad, full-closed ≈ 0.0 rad (Feetech STS3215 limits)
     gripper_open = joint_pos[:, -1:].clamp(0.0, 1.0)  # (N, 1)
 
-    state = torch.cat([joint_pos, joint_target, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open], dim=-1)
+    parts = [joint_pos, joint_target, gripper_pos, pen_pos, cup_pos, rel_pos, gripper_open]
+
+    # --- 속도 항(선택) — 부분관측 해소(MDP화). joint_vel(6)+ee lin vel(3)+pen lin vel(4×3) ---
+    if include_velocities:
+        ee_body_idx = jaw_idx if "jaw" in body_names else gripper_idx
+        joint_vel = robot.data.joint_vel  # (N, nj)
+        ee_vel = robot.data.body_lin_vel_w[:, ee_body_idx, :]  # (N, 3) world frame(env 정지라 무관)
+        pen_vel = torch.cat(
+            [env.scene[n].data.root_lin_vel_w * pen_active[i] for i, n in enumerate(pen_names)],
+            dim=-1,
+        )  # (N, 4*3), 비활성 큐브 마스킹
+        parts += [joint_vel, ee_vel, pen_vel]
+
+    # --- 방향·크기 항(선택) — grasp 정렬용. pen yaw sin/cos + half-extent + ee quat + grasp→cup ---
+    if include_orientation:
+        # pen yaw sin/cos (4×2), 비활성 큐브 마스킹
+        yaw_parts: list[torch.Tensor] = []
+        for i, name in enumerate(pen_names):
+            yaw = _yaw_from_quat_wxyz(env.scene[name].data.root_quat_w)  # (N,)
+            sc = torch.stack([torch.sin(yaw), torch.cos(yaw)], dim=-1) * pen_active[i]  # (N, 2)
+            yaw_parts.append(sc)
+        pen_yaw = torch.cat(yaw_parts, dim=-1)  # (N, 8)
+
+        # pen half-extent (4×1) — 크기 정보. 미지정 시 0. 비활성 큐브 마스킹.
+        if pen_half_extents is not None:
+            he_vals = [float(pen_half_extents[i]) * pen_active[i] for i in range(n_pens)]
+            he = torch.tensor(he_vals, device=env.device, dtype=torch.float32).unsqueeze(0).expand(
+                env.num_envs, -1
+            )  # (N, 4)
+        else:
+            he = torch.zeros(env.num_envs, n_pens, device=env.device)
+
+        # ee(jaw) orientation quat wxyz (4)
+        if "jaw" in body_names:
+            ee_idx = body_names.index("jaw")
+        else:
+            ee_idx = next((i for i, n in enumerate(body_names) if gripper_body_name in n), 0)
+        ee_quat = robot.data.body_quat_w[:, ee_idx, :]  # (N, 4)
+
+        # grasp point → cup relative vector (3)
+        grasp_to_cup = cup_pos - gripper_pos  # (N, 3)
+
+        parts += [pen_yaw, he, ee_quat, grasp_to_cup]
+
+    # --- 컨테이너(그릇) 방향(선택) — 동적 그릇이라 운반/place 중 밀치거나 엎을 수 있다.
+    # 그릇 quat wxyz (4) 를 관측에 넣어 정책이 tilt/엎힘을 인지(부분관측 해소).
+    # 그릇 교란 패널티(bowl_disturb)와 짝을 이룬다. ---
+    if include_container_orientation:
+        cup_quat = cup.data.root_quat_w  # (N, 4) wxyz
+        parts.append(cup_quat)
+
+    state = torch.cat(parts, dim=-1)
+    return state.float()
+
+
+def grasp_focus_state(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    cube_name: str = "Cube1",
+    gripper_body_name: str = "gripper",
+) -> torch.Tensor:
+    """RND novelty 전용 grasp 부분공간 상태 (~27-dim).
+
+    전체 rl_state(83)는 reach 완성 후에도 EE 미세이동 등 grasp 무관 novelty 를 카운트해
+    RND 탐색이 분산된다. 이 함수는 **grasp 와 직결된 차원만** 모아 RND novelty 를 정렬·닫기·
+    들기 탐색에 집중시킨다: joint pos/vel + grasp point + gripper open + 활성 큐브 pos/vel +
+    grasp→cube 상대 + cube yaw sin/cos. (단일 큐브 스테이지 = cube_name 1개 기준.)
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    origins = env.scene.env_origins
+
+    joint_pos = robot.data.joint_pos          # (N, 6)
+    joint_vel = robot.data.joint_vel          # (N, 6)
+
+    body_names: list[str] = robot.data.body_names
+    if "jaw" in body_names:
+        jaw_idx = body_names.index("jaw")
+        off = torch.tensor(JAW_GRASP_OFFSET, device=env.device, dtype=robot.data.body_pos_w.dtype)
+        off = off.unsqueeze(0).expand(env.num_envs, -1)
+        grasp_pos_w = robot.data.body_pos_w[:, jaw_idx, :] + _quat_apply_wxyz(robot.data.body_quat_w[:, jaw_idx, :], off)
+        ee_idx = jaw_idx
+    else:
+        ee_idx = next((i for i, n in enumerate(body_names) if gripper_body_name in n), 0)
+        grasp_pos_w = robot.data.body_pos_w[:, ee_idx, :]
+    grasp_pos = grasp_pos_w - origins         # (N, 3)
+    ee_vel = robot.data.body_lin_vel_w[:, ee_idx, :]  # (N, 3)
+    gripper_open = joint_pos[:, -1:].clamp(0.0, 1.0)  # (N, 1)
+
+    cube: RigidObject = env.scene[cube_name]
+    cube_pos = cube.data.root_pos_w - origins  # (N, 3)
+    cube_vel = cube.data.root_lin_vel_w        # (N, 3)
+    rel = cube_pos - grasp_pos                 # (N, 3)
+    yaw = _yaw_from_quat_wxyz(cube.data.root_quat_w)
+    yaw_sc = torch.stack([torch.sin(yaw), torch.cos(yaw)], dim=-1)  # (N, 2)
+
+    state = torch.cat(
+        [joint_pos, joint_vel, grasp_pos, ee_vel, gripper_open, cube_pos, cube_vel, rel, yaw_sc],
+        dim=-1,
+    )  # 6+6+3+3+1+3+3+3+2 = 30
     return state.float()
