@@ -260,6 +260,81 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 - run `lstm256_stage1_grasp_v11`(LSTM, fresh). 판정: ① scratch over_bowl→placed 전이가 v6~v10의 12% 벽을 넘는지 ② hover 영상 소멸 ③ scratch.success→0.80. PBRS가 hover를 정말 차단했는지가 핵심.
 - 미흡 시 다음: grasp 단계도 부분 PBRS / over_bowl_drop도 PBRS화 / Φ 가중 튜닝(xy 0.3·z 0.2).
 
+### T30. 🔧 mdp 리팩터링 파라미터 불일치 버그 수정 + v12 model_600 평가 (2026-06-11)
+
+- **배경**: 커밋 `907d8e8`(tasks/common/mdp/ 공유 레이어 신설) 후 `pick_cube/mdp/` 함수들의 파라미터 이름이 cfg 전달값과 불일치 → `monitor_eval.py` 실행 시 env 초기화 단계에서 `ValueError` 즉시 실패. **학습(train.py)은 영향 없음** — 해당 커밋 전 이미 시작된 프로세스가 이전 코드로 실행 중.
+
+- **버그 및 수정(2파일)**:
+  - `pick_cube/mdp/terminations.py::cube_lost`: 파라미터 `cubes_cfg` → **`objects_cfg`** (cfg에서 `objects_cfg`로 전달)
+  - `pick_cube/mdp/rewards.py`: `over_bowl_drop_reward`·`cube_predisturb_penalty`·`place_pbrs_reward` 및 내부 헬퍼의 `cube_cfgs/bowl_center_xy/bowl_cfg/bowl_radius/bowl_height_range` → **`object_cfgs/container_center_xy/container_cfg/container_radius/container_height_range`** 일괄 통일(common/mdp 패턴 정렬).
+
+- **cron monitor model_250 점검 장기 걸림**: 14:30 시작 후 ~1시간 48분 CPU 100%(정상 ~7분). 프로세스 강제 종료(kill) → flock 해제 → model_600 수동 점검 실행.
+
+- **v12 model_600 평가 결과(iter ~670)**:
+
+  | 단계 | scratch | full_grasp | pre_grasp |
+  |---|---|---|---|
+  | reach | 1.000 ✅ | 0.538 | 1.000 |
+  | grasp | **0.828** ✅ | 0.385 | 1.000 |
+  | lift | 0.828 | 1.000 | 1.000 |
+  | over_bowl | 0.379 | 0.231 | 0.167 |
+  | placed | **0.034** | 0.231 | 0.000 |
+  | success | 0.034 | 0.231 | 0.000 |
+
+- **tfevents 분석(iter 669)**:
+  - `over_bowl_drop_cube: 0.0000` → **그릇 위에서도 그리퍼를 전혀 안 열고 있음** (xy_range=0.06이 너무 빡빡, 정확히 그릇 중심 위에서만 보상 → 사실상 트리거 안 됨)
+  - `joint_vel: -0.0304` (raw 30.4/ep) / `action_rate: -0.0076` (raw 7.6/ep) → `-1e-3` weight로는 carry(3) 대비 100배 약해 jitter 무비용
+  - `place_pbrs_cube: -0.0215` (음수 = over_bowl 이후 hover 패널티가 발생하고 있음)
+  - 주 병목: **lift→over_bowl(46%)**, **over_bowl→placed(9%)**
+
+### T31. ✅ smoothness + place 개입 (v13 resume, 2026-06-11, rl-expert 상담 반영)
+
+- **rl-expert 상담 결과**: jitter 근본 원인 = `-1e-3` weight로 joint_vel raw 30 페널티가 -0.03/ep → carry(3) 대비 100배 약함(무비용). over_bowl_drop 0=xy_range 0.06이 그릇 정중앙 위에서만 트리거 → 조금만 벗어나도 0(release 신호 전무). **Resume 권장**(grasp 0.828 보존, fresh 불필요).
+
+- **개입(cfg 수정, obs 차원 변경 없음 → model_650 resume 호환)**:
+  - **smoothness 10배 강화**: `action_rate`/`joint_vel` weight **-1e-3 → -1e-2** → joint_vel 페널티 -0.03→-0.30/ep, carry 10% 비용으로 진동이 경제적으로 불리해짐
+  - **`over_bowl_drop` 완화**: `xy_range` **0.06→0.12**(12cm, 그릇 반경 2배 허용), `close_ref` **0.40→0.35**(87% 열면 보상 — 살짝 열기 허용으로 release valley 완화)
+
+- run `lstm256_stage1_grasp_v13`, `--resume_checkpoint model_650.pt`, 로그 `train_grasp_v13.log`. PID 3393540, 12.36s/iter, ETA ~5h.
+- cron `cron_monitor_v13.sh` 생성·crontab 교체.
+- **판정**: ① `joint_vel` episode 기여 -0.15 이상(현 -0.03의 5배) + 비디오 진동 감소 ② `over_bowl_drop_cube`>0 뜨면 release valley 뚫림 ③ over_bowl→placed 전이율 9% 초과.
+
+### T32. 🔧 num_envs/horizon 분석 + v14 설정 결정 + place valley 재진단 (2026-06-11)
+
+#### num_envs=16384 분석 결과
+
+- **manipulation vs locomotion 차이**: contact-rich pick&place 사례(Factory 등) = 128~1024. 16384는 동일 태스크 비교군 최대치 16×. grasp 탐색에는 도움됐으나 place multi-stage에선 redundant gradient.
+- **gradient updates 과잉**: mini 16 × epochs 10 = **160 updates/iter** (locomotion 기본 20의 8배). batch 과대 + 업데이트 과잉 = PPO stale data 재사용.
+- **horizon=24 = episode의 3%**: LSTM context 24 step, episode 800 step → place 단계 전환 시 context 부족.
+- **clip_fraction 미기록**: rsl_rl ppo.py에 추가함(2026-06-11). `Algorithm/clip_fraction` 태그로 확인 가능. 정상 범위 0.1~0.3.
+
+#### v14 확정 설정 (사용자 결정)
+
+| 파라미터 | v13 | **v14** |
+|---|---|---|
+| `num_envs` | 16384 | **4096** |
+| `num_steps_per_env` | 24 | **48** |
+| `num_mini_batches` | 16 | **4** |
+| `learning_rate` | 3e-4 | **1e-4** |
+| `entropy_coef` | 0.02 | **0.01** |
+| `num_learning_epochs` | 10 | **6** |
+
+v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, gradient updates=4×6=**24/iter**.
+
+#### place valley 재진단 (rl-expert, v13 iter 809 기준)
+
+- **over_bowl 회귀**: v12 iter 670 **0.379** → v13 iter 809 **0.119** (68% 하락). transport dense=0(v11에서 제거)이 over_bowl 도달 압력 제거한 것이 원인으로 추정.
+- **carry/guided_lift 누적 vs release terminal**: carry(1.34/step×3) + guided_lift(4.29/step×6) = **29.76/step**. release terminal=10. break-even = **0.34 step** — 극단적으로 hover가 이득.
+- **over_bowl_drop≈0 근본 원인**: gripper offset=0.20(do-nothing=닫힘), carry 보상만으로 gripper≈0.20 유지. close_ref 낮춰도 정책이 gripper를 안 열기 때문에 무의미. → **close_ref 튜닝이 아닌 PBRS화 필요**.
+- **3가지 병목 동시 작동**: ① carry/guided_lift >> release ② over_bowl_drop 미작동 ③ transport dense=0으로 over_bowl 도달 압력 없음
+
+#### place valley 개입 방향 (rl-expert 권고)
+
+1. **`over_bowl_drop` PBRS화 (1순위)**: φ = over_bowl위(1.0) + 밖(0.3·xy+0.2·z+0.2·open_frac), r=γΦ-Φ_prev. carry와 경쟁 안 하고 진행만 보상.
+2. **carry/guided_lift 절반 축소**: carry 3→**1.5**, guided_lift 6→**3**.
+3. **place_pbrs Φ xy 가중 강화 (조건부)**: xy 0.3→0.5, z 0.2→0.15. over_bowl_drop PBRS 후에도 over_bowl<0.2면 적용.
+4. place 부트스트랩(그릇 위 든 채 시작)은 먼저 ①②로 성공률 50% 후 재검토.
+
 ---
 
 ## 5. 조사 내용 (참고 구현·MCP)
@@ -293,20 +368,23 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ---
 
-## 7. 현재 진행 (2026-06-10 세션, T21 fresh grasp_v4)
+## 7. 현재 진행 (2026-06-11 세션, T31 v13 resume)
 
-- **학습 중**: run `lstm256_stage1_grasp_v4`, 로그 `train_grasp_v4.log`. **처음부터(fresh)**, stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 16384**(큐브 머티리얼 통합으로 64K 한도 회피 — TROUBLESHOOTING §materials), iter 0→1500, VRAM ~23GB, ~11s/iter.
-- **전체 개입 묶음(T15~T21)**: obs rl_policy **83dim**(방향·크기) + RND용 grasp_focus **30dim**, 보상 align **1.0**/close **3.0**/**contact 2.0**(ContactSensor)/guided_lift 10/carry 8/…, 그리퍼 slew **2.5**, pre-grasp open **0.65**, graded 부트스트랩 0.75→0(anneal 1000), 비활성 큐브 비활성화, batch num_steps24/epochs10/mini8, gamma 0.997.
-- 판정: **scratch.grasp/lift 점화**(monitor scratch 그룹) → **scratch.success ≥0.80** = 단일 큐브 통과 → 1→2→3→4 확장. (train 로그 success는 bootstrap-inflated, 진짜 지표 아님.)
-- 30분 모니터 루프(`monitor_eval.py`, 카메라=사용자 보정 고정뷰)가 scratch/full/pre 단계별 + 16-env 비디오 자동 생성. 상태: `/tmp/train_pid.txt`, `/tmp/lstm_monitor_state.txt`.
+- **학습 중**: run `lstm256_stage1_grasp_v13`, 로그 `train_grasp_v13.log`. **model_650에서 resume**(v12 iter ~670), stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 16384**, ~12s/iter, PID 3393540.
+- **v13 개입(T31)**: smoothness `action_rate`/`joint_vel` **-1e-3→-1e-2**(jitter 억제), `over_bowl_drop` **xy_range 0.06→0.12 / close_ref 0.40→0.35**(release valley 완화). obs 87dim 불변, 구조 변경 없음.
+- **v12 달성 상태(model_600 평가)**: scratch.grasp **0.828** ✅, lift 0.828, over_bowl 0.379, placed 0.034. grasp 탐색 벽 완전 극복. 현재 병목 = place(over_bowl→placed 9%).
+- 판정: **`over_bowl_drop_cube`>0**(release valley 뚫림) + **`joint_vel` 에피소드 기여 -0.15 이상**(jitter 억제) → **scratch.placed 상승** → scratch.success ≥0.80 = 단일 큐브 통과 → 1→2→3→4 확장.
+- 30분 cron(`cron_monitor_v13.sh`, 카메라=사용자 보정 고정뷰)이 scratch/full/pre 단계별 + 16-env 비디오 자동 생성. 상태: `/tmp/train_pid.txt`.
 
 ---
 
 ## 8. 진행 예정
 
-1. **stage-1 성공률 ≥0.90**(eval, 부트스트랩 없이) 도달 시 **자동 커리큘럼 확장** 1→2→3→4(매시간 wakeup 이 `--resume_checkpoint` 로 재시작).
-2. **(C) sim2real DR 강화**: `randomize_actuator_gains`(stiffness/damping) + joint friction 랜덤화(gear_assembly 핵심) 추가 — 일반화/sim2real.
-3. 정밀도 향상이 더 필요하면: action scale 축소, grasp point↔cube dense 정렬 보상, contact/rest offset·torsional patch 튜닝.
+1. **v13 결과 확인** — `over_bowl_drop_cube`>0 + `placed` 상승 확인 후 **v14 시작**:
+   - over_bowl_drop PBRS화 + carry/guided_lift 절반 축소 (T32 권고)
+   - v14 설정: num_envs 4096, horizon 48, mini 4, lr 1e-4, entropy 0.01, epochs 6
+2. **stage-1 성공률 ≥0.90**(eval, 부트스트랩 없이) 도달 시 **커리큘럼 확장** 1→2→3→4.
+3. **(C) sim2real DR 강화**: actuator gain·joint friction 랜덤화(gear_assembly 핵심).
 4. **stage-4 ≥0.90 달성 = 최종 목표.** eval 영상으로 시각 확인.
 
 ---
@@ -316,11 +394,13 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 | 항목 | 값 |
 |---|---|
 | 정책 | ActorCriticRecurrent, rnn_type lstm, hidden 256, layers 1, MLP [256,128], elu, obs_normalization on |
-| PPO(v4) | num_steps_per_env **24**, learning_epochs **10**, mini_batches **16**(16384env서 ~24.5k/batch), lr 3e-4(adaptive), entropy 0.02, **gamma 0.997**, lam .95, clip .2 |
+| PPO(v13) | num_steps_per_env **24**, learning_epochs **10**, mini_batches **16**, num_envs **16384**, lr 3e-4(adaptive), entropy 0.02, gamma 0.997, lam .95, clip .2. gradient 160 updates/iter |
+| PPO(v14 예정) | num_steps_per_env **48**, learning_epochs **6**, mini_batches **4**, num_envs **4096**, lr **1e-4**, entropy **0.01**, gamma 0.997. rollout 196K, mini 49K, gradient **24 updates/iter** |
 | **탐색(RND)** | `--rnd` weight 0.5(×step_dt) linear→0, num_outputs 64, predictor/target [256,128], state/reward norm on, **rnd_state=grasp_focus(30dim 부분공간)** |
 | **관측 차원** | rl_policy **83dim**(속도+방향·크기): joint_pos6+target6+gripper_pos3+cube12+bowl3+rel12+gripper1 +joint_vel6+ee_vel3+cube_vel12 +cube_yaw8+half_extent4+ee_quat4+grasp→cup3. 단일 스테이지 비활성 큐브 0 마스킹(num_active) |
 | 속도 보상 | `time_penalty` weight -0.02(미완료 step당), `early_finish_bonus` weight 100(완료 시각 비례, 종료 1회) |
-| 단계 보상(T21/v4) | reach 1, **grasp_align 1.0**(열림+정밀), **grasp_close 3.0**(닫힘+정밀, close>align→단조), **grasp_contact 2.0**(ContactSensor 양손가락 접촉), pregrasp 0.2, **guided_lift 10**, grasp 1, **carry 8**, lift 2, transport 8, place_height 30, insert 80, release 10, task_success 200 |
+| 단계 보상(v13) | reach 1, **grasp_align 1.0**, **grasp_close 3.0**, **grasp_contact 2.0**, pregrasp 0.2, **guided_lift 6**, grasp 1, **carry 3**, lift 2, transport 0, place_height 0, insert 0, **place_pbrs 50**(PBRS γ=0.997), **over_bowl_drop 12**(xy_range 0.12/close_ref 0.35, **v13**), release 10, task_success 200, early_finish 100 |
+| place PBRS(v11) | `place_pbrs_reward` = γΦ(s_t)−Φ(s_{t-1}), Φ=그릇안1.0+밖(0.3·xy근접+0.2·z하강). transport/place_height/insert weight 0(dense 유지 제거) |
 | 그리퍼 slew | pick_cube 전용 dict: arm 5.0, **gripper 2.5 rad/s**(부드러운 닫기). 공유 상수 불변 |
 | 부트스트랩 | prob 0.75→0 annealing(v4 anneal_iters **1000**), graded full↔pre-grasp(p ramp), **pre-grasp open 0.65**, close -0.15, grasp point=default 자세 캐시 |
 | batch(v4) | num_steps_per_env **24**, learning_epochs **10**, mini_batches **8** |
@@ -330,15 +410,19 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 | GPU 버퍼(16384) | gpu_max_rigid_patch_count 16·2¹⁶, aggregate 1M, collision_stack 2²⁹ |
 | num_envs | **16384**(VRAM ~23GB). 큐브 4개 CubeFriction→공유 1개로 env당 물리 머티리얼 6→3, PhysX 64K 한도 회피(TROUBLESHOOTING). 8192 초과 불가였던 원인 |
 | viewer(영상) | eye (1.90,0.95,0.98) lookat (1.85,-0.32,0.76) res 1280×720 |
+| smoothness(v13) | `action_rate_l2` weight **-1e-2**, `joint_vel_l2` weight **-1e-2** (v7 -1e-3→v13 -1e-2, 10배. v12 실측 joint_vel raw 30.4/ep → -1e-3은 carry 100배 약함) |
+| obs(v11→) | rl_policy **87dim**: 83dim + 그릇 quat(4) — `include_container_orientation=True` |
 | 금지선 | container_radius_scale 1.0 고정, grasp weld 없음 |
 
 ---
 
 ## 10. 모니터링 / 상태 파일
 
-- 학습 로그: 최신 `train_grasp_v2.log`(또는 `train_*.log`).
-- 상태 파일: `/tmp/train_pid.txt`(TRAIN_PID), `/tmp/lstm_stage.txt`(현재 활성 큐브 수), `/tmp/lstm_monitor_state.txt`(마지막 평가 체크포인트 index).
+- 학습 로그: `outputs/train_grasp_v13.log` (현재).
+- 상태 파일: `/tmp/train_pid.txt`(TRAIN_PID).
 - 체크포인트/영상: `outputs/rl/rsl_rl/lstm_ppo_pickcube/<run>/` (`model_*.pt`, `videos/monitor/*.mp4`).
+- 평가 이력: `<run>/monitor_history/history.jsonl` (ts/ckpt/stage_success 누적), `video_<ts>_model_N.mp4`.
+- cron: `scripts/reinforcement_learning/cron_monitor_v13.sh`, 로그 `logs/cron_monitor_v13.cron.log`. 30분 주기, flock 중복 방지, 새 ckpt 없으면 skip. ⚠️ monitor_eval 버그 시 flock 미해제로 후속 실행 모두 skip — 걸리면 `kill $(pgrep -f monitor_eval)` 후 수동 재실행.
 
 ### `monitor_eval.py` — 단계별(env-type별) 성공률 + 그리드 비디오 (30분 주기)
 - scratch(정상시작=진짜 실력) / full-grasp / pre-grasp 부트스트랩을 **따로 집계**. 단계: reach→grasp→lift→over_bowl→placed→success.
@@ -363,9 +447,11 @@ f22db64 feat: 초기상태 grasp 부트스트랩 + pregrasp 보상 재설계
 
 ## 11. 미해결 / 리스크 / 전망
 
-- **정상-env grasp 점화**가 핵심 미확정. 부트스트랩 value 전파 + hold 수정(T13)으로 유도 시도 중. `grasp_cube`>0 가 leading indicator. 안 켜지면 추가 레버: grasp-point↔cube dense 정렬 보상, bootstrap_prob annealing, grasp 허용오차 점진 축소.
-- **곡선 전망**: manipulation RL 은 보통 sigmoid/계단(grasp "클릭" 시 급상승). 현재는 클릭 전 log 포화(~0.13). 개입으로 클릭 유도 필요.
-- **4큐브 ≥0.90 의 산술적 벽**: 한 에피소드 4개 순차 → success ≈ (큐브당 성공)⁴. 0.90 하려면 **큐브당 ~97.4%** 필요. 단일 큐브를 거의 완벽히 해야 가능 — 매우 도전적.
-- sim2real: 현재 DR(포즈/마찰/질량/관측노이즈)에 actuator gain·joint friction 미포함(예정, gear_assembly 핵심).
-- 정밀 grasp 가 끝내 부족하면 모방학습(SmolVLA/GR00T, 레포 본래 경로) 또는 planning(cuMotion, PATH E) 병행 검토.
+- **grasp**: scratch.grasp 0.828 달성(v4~v12 유지), 탐색 벽 완전 극복 ✅. grasp 신뢰성(reach→grasp 80%)는 cube_predisturb 패널티+cube_lost 종료로 개선됨.
+- **place(현재 병목)**: over_bowl→placed 전이율 9%(v12). v13 iter 809에서 over_bowl 0.119로 추가 하락(v12 0.379 대비 68%). 근본 원인 = carry/guided_lift 합 29.76/step >> release terminal 10(break-even 0.34step) + gripper offset=0.20에서 열기 미학습. **다음 레버**: over_bowl_drop PBRS화 + carry 3→1.5 / guided_lift 6→3(T32 권고).
+- **jitter(sim2real 리스크)**: v12 joint_vel raw 30.4/ep(심각). v13 smoothness -1e-2로 억제 중. 판정 지표: `joint_vel` 에피소드 기여 -0.15 이상.
+- **monitor_eval 장기 걸림 리스크**: 버그 시 CPU 100% 무한 루프 + flock 미해제로 cron skip 연쇄. 증상: cron 로그에 "이전 점검이 아직 실행 중" 반복. 대응: `kill $(pgrep -f monitor_eval)`.
+- **4큐브 ≥0.90 의 산술적 벽**: 한 에피소드 4개 순차 → success ≈ (큐브당 성공)⁴. 0.90 하려면 **큐브당 ~97.4%** 필요. 현실 목표 = 먼저 단일 큐브 0.90. 멀티 큐브 진입 시 grasp_focus/부트스트랩이 CUBE_NAMES[0] 단일 전제라 재설계 필요.
+- **sim2real**: actuator gain·joint friction DR 미포함(예정, gear_assembly 핵심).
+- **정밀 grasp 끝내 부족하면**: 모방학습(SmolVLA/GR00T) 또는 planning(cuMotion, PATH E) 병행 검토.
 </content>

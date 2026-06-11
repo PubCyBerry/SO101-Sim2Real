@@ -11,12 +11,61 @@ from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z
 from sim_to_real.tasks.common.mdp.rewards import _container_xy, _make_object_cfgs, _object_pos_w
 
 
+def over_bowl_drop_pbrs_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfgs: list[SceneEntityCfg] | None = None,
+    container_center_xy: tuple[float, float] = (2.2, -0.17),
+    container_cfg: SceneEntityCfg | None = None,
+    xy_range: float = 0.12,
+    lift_min: float = 0.02,
+    open_threshold: float = 0.60,
+    close_ref: float = 0.35,
+    gamma: float = 0.997,
+) -> torch.Tensor:
+    """PBRS: r = γΦ(s_t) − Φ(s_{t-1}) (Ng 1999) — over_bowl + 열기 유도.
+
+    Φ(s) 설계: 들린 큐브가 그릇 XY 위 = 0.6 + 0.2·open_frac + 0.2·(1-z_norm)
+               들렸으나 그릇 밖 = 0.3·xy_prog + 0.1·open_frac
+               안 들림 = 0
+    carry/guided_lift 와 직접 경쟁하지 않고(유지=≈(γ-1)Φ 미세 손실), 진행할 때만 +.
+    이전 step Φ 는 PickCubeEnv._over_bowl_drop_potential_prev 가 보관(매 step 갱신).
+    버퍼 없으면 0 반환(다른 task 안전).
+    """
+    prev = getattr(env, "_over_bowl_drop_potential_prev", None)
+    if prev is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    cfgs = _make_object_cfgs(object_cfgs)
+    robot: Articulation = env.scene[robot_cfg.name]
+    gripper = robot.data.joint_pos[:, -1]
+    open_frac = ((gripper - close_ref) / max(open_threshold - close_ref, 1e-6)).clamp(0.0, 1.0)
+    cx, cy = _container_xy(env, container_center_xy, container_cfg)
+
+    total = torch.zeros(env.num_envs, device=env.device)
+    for cfg in cfgs:
+        cube_pos = _object_pos_w(env, cfg)
+        local = cube_pos - env.scene.env_origins
+        lifted = local[:, 2] > (DESK_TOP_Z + lift_min)
+        xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
+        xy_prog = torch.clamp(1.0 - xy_dist / max(xy_range, 1e-6), 0.0, 1.0)
+        z_norm = torch.clamp((local[:, 2] - DESK_TOP_Z - lift_min) / 0.15, 0.0, 1.0)
+        over_bowl = lifted & (xy_dist < xy_range)
+        phi = (over_bowl.float() * (0.6 + 0.2 * open_frac + 0.2 * (1.0 - z_norm)) +
+               (~over_bowl).float() * lifted.float() * (0.3 * xy_prog + 0.1 * open_frac))
+        total = total + phi
+
+    shaped = gamma * total - prev
+    env._over_bowl_drop_potential_prev = total.detach()
+    return shaped
+
+
 def over_bowl_drop_reward(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    cube_cfgs: list[SceneEntityCfg] | None = None,
-    bowl_center_xy: tuple[float, float] = (2.2, -0.17),
-    bowl_cfg: SceneEntityCfg | None = None,
+    object_cfgs: list[SceneEntityCfg] | None = None,
+    container_center_xy: tuple[float, float] = (2.2, -0.17),
+    container_cfg: SceneEntityCfg | None = None,
     xy_range: float = 0.10,
     lift_min: float = 0.02,
     open_threshold: float = 0.60,
@@ -30,12 +79,12 @@ def over_bowl_drop_reward(
     큐브를 떨어뜨리는 행동으로 부드럽게 유도한다(바닥까지 안 내려도 됨 — 그릇 내부가
     미끄러워 위에서 떨궈도 중앙으로 정착). open_frac = (gripper-close_ref)/(open_thr-close_ref).
     """
-    cfgs = _make_object_cfgs(cube_cfgs)
+    cfgs = _make_object_cfgs(object_cfgs)
     robot: Articulation = env.scene[robot_cfg.name]
     gripper = robot.data.joint_pos[:, -1]
     open_frac = ((gripper - close_ref) / max(open_threshold - close_ref, 1e-6)).clamp(0.0, 1.0)
 
-    cx, cy = _container_xy(env, bowl_center_xy, bowl_cfg)
+    cx, cy = _container_xy(env, container_center_xy, container_cfg)
     total = torch.zeros(env.num_envs, device=env.device)
     for cfg in cfgs:
         cube_pos = _object_pos_w(env, cfg)
@@ -54,7 +103,7 @@ def over_bowl_drop_reward(
 
 def cube_predisturb_penalty(
     env: ManagerBasedRLEnv,
-    cube_cfgs: list[SceneEntityCfg] | None = None,
+    object_cfgs: list[SceneEntityCfg] | None = None,
     lift_min: float = 0.02,
 ) -> torch.Tensor:
     """잡기 전(책상 위·안 들린) 큐브가 reset 초기 xy 에서 밀려난 거리 합(+값).
@@ -69,7 +118,7 @@ def cube_predisturb_penalty(
     if init_xy is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    cfgs = _make_object_cfgs(cube_cfgs)
+    cfgs = _make_object_cfgs(object_cfgs)
     total = torch.zeros(env.num_envs, device=env.device)
     for i, cfg in enumerate(cfgs):
         cube_pos = _object_pos_w(env, cfg)
@@ -88,10 +137,10 @@ def cube_predisturb_penalty(
 def _place_potential(
     env: ManagerBasedRLEnv,
     cfgs: list[SceneEntityCfg],
-    bowl_center_xy: tuple[float, float],
-    bowl_cfg: SceneEntityCfg | None,
-    bowl_radius: float,
-    bowl_height_range: tuple[float, float],
+    container_center_xy: tuple[float, float],
+    container_cfg: SceneEntityCfg | None,
+    container_radius: float,
+    container_height_range: tuple[float, float],
     xy_range: float,
 ) -> torch.Tensor:
     """Place 진행 potential Φ(s) ∈ [0, num_cubes].
@@ -100,13 +149,13 @@ def _place_potential(
     "그릇에 얼마나 다가갔나"를 단조로 나타내는 척도 — 절대 상태 함수라 PBRS 의
     Φ 로 쓰면 유지 시 보상 0(telescoping), 진행 시에만 +.
     """
-    cx, cy = _container_xy(env, bowl_center_xy, bowl_cfg)
-    z_min, z_max = bowl_height_range
+    cx, cy = _container_xy(env, container_center_xy, container_cfg)
+    z_min, z_max = container_height_range
     total = torch.zeros(env.num_envs, device=env.device)
     for cfg in cfgs:
         cube_pos = _object_pos_w(env, cfg)
         local = cube_pos - env.scene.env_origins
-        inside = _cube_inside_bowl_mask(env, cube_pos, bowl_center_xy, bowl_radius, bowl_height_range, bowl_cfg)
+        inside = _cube_inside_bowl_mask(env, cube_pos, container_center_xy, container_radius, container_height_range, container_cfg)
         xy_dist = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
         xy_prog = torch.clamp(1.0 - xy_dist / max(xy_range, 1e-6), 0.0, 1.0)
         z_prog = torch.clamp(
@@ -120,14 +169,14 @@ def _place_potential(
 def _cube_inside_bowl_mask(
     env: ManagerBasedRLEnv,
     cube_pos: torch.Tensor,
-    bowl_center_xy: tuple[float, float],
+    container_center_xy: tuple[float, float],
     radius: float,
     height_range: tuple[float, float],
-    bowl_cfg: SceneEntityCfg | None = None,
+    container_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """큐브가 그릇 안에 있는지 여부, shape (num_envs,) bool."""
     local_pos = cube_pos - env.scene.env_origins
-    cx, cy = _container_xy(env, bowl_center_xy, bowl_cfg)
+    cx, cy = _container_xy(env, container_center_xy, container_cfg)
     inside_xy = torch.hypot(local_pos[:, 0] - cx, local_pos[:, 1] - cy) < radius
     above = local_pos[:, 2] > (DESK_TOP_Z + height_range[0])
     below = local_pos[:, 2] < (DESK_TOP_Z + height_range[1])
@@ -136,11 +185,11 @@ def _cube_inside_bowl_mask(
 
 def place_pbrs_reward(
     env: ManagerBasedRLEnv,
-    cube_cfgs: list[SceneEntityCfg] | None = None,
-    bowl_center_xy: tuple[float, float] = (2.2, -0.17),
-    bowl_cfg: SceneEntityCfg | None = None,
-    bowl_radius: float = 0.05,
-    bowl_height_range: tuple[float, float] = (0.005, 0.12),
+    object_cfgs: list[SceneEntityCfg] | None = None,
+    container_center_xy: tuple[float, float] = (2.2, -0.17),
+    container_cfg: SceneEntityCfg | None = None,
+    container_radius: float = 0.05,
+    container_height_range: tuple[float, float] = (0.005, 0.12),
     xy_range: float = 0.40,
     gamma: float = 0.997,
 ) -> torch.Tensor:
@@ -158,8 +207,8 @@ def place_pbrs_reward(
     prev = getattr(env, "_place_potential_prev", None)
     if prev is None:
         return torch.zeros(env.num_envs, device=env.device)
-    cfgs = _make_object_cfgs(cube_cfgs)
-    phi_now = _place_potential(env, cfgs, bowl_center_xy, bowl_cfg, bowl_radius, bowl_height_range, xy_range)
+    cfgs = _make_object_cfgs(object_cfgs)
+    phi_now = _place_potential(env, cfgs, container_center_xy, container_cfg, container_radius, container_height_range, xy_range)
     shaped = gamma * phi_now - prev
     env._place_potential_prev = phi_now.detach()
     return shaped

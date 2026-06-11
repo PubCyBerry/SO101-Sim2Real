@@ -626,7 +626,7 @@ class PickCubeRewardsCfg:
 
     guided_lift_cube = RewTerm(
         func=task_mdp.guided_lift_reward,
-        weight=6.0,  # v10: 10→6 dense 유지 축소(hover 매력↓)
+        weight=3.0,  # v10: 10→6, v14: 6→3 (carry+guided_lift 합 29.76→14.88/step, release valley 완화)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -654,7 +654,7 @@ class PickCubeRewardsCfg:
     # weight 4→8: 부트스트랩 큐브를 "잡은 채 유지"하도록 강한 유인(놓치면 보상 급감).
     carry_cube = RewTerm(
         func=task_mdp.carry_object,
-        weight=3.0,  # v10: 8→3 잡고-버티기 매력↓(hover 차단)
+        weight=1.5,  # v10: 8→3, v14: 3→1.5 (rl-expert: carry>>release break-even 0.34step 해소)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -750,19 +750,23 @@ class PickCubeRewardsCfg:
     # Stage 5.5: 그릇 위에서 그리퍼 열기 유도 — release valley 메움 (밀집)
     # carry(8)+transport(8) 잡고-버티기 local optimum 탈출. inside 게이트 없이
     # '그릇 중심 + 들림 + open_frac' 에 연속 gradient → 그릇 위에서 손 펴 떨구기.
-    # v7: close_ref 0.20→0.40(거의 다 열어야 보상 — '살짝 열고 hover' 캠핑 차단),
-    #     xy_range 0.10→0.06(그릇 중심 정밀 정렬 유도, 가장자리 떨구기 방지).
+    # v7: close_ref 0.20→0.40, xy_range 0.10→0.06.
+    # v13: xy_range 0.12, close_ref 0.35.
+    # v14: dense(open_frac 직접) → PBRS화(over_bowl_drop_pbrs_reward). carry와 경쟁 안 함.
+    #      gripper offset=0.20에서 정책이 안 열어 dense open_frac 보상이 무의미했음(rl-expert).
+    #      PBRS φ: over_bowl위(0.6+0.2·open_frac+0.2·(1-z)) + 밖(0.3·xy+0.1·open_frac).
     over_bowl_drop_cube = RewTerm(
-        func=task_mdp.over_bowl_drop_reward,
+        func=task_mdp.over_bowl_drop_pbrs_reward,
         weight=12.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "container_center_xy": BOWL_CENTER_XY,
             "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "xy_range": 0.06,
+            "xy_range": 0.12,
             "open_threshold": 0.60,
-            "close_ref": 0.40,
+            "close_ref": 0.35,
+            "gamma": 0.997,
         },
     )
 
@@ -801,12 +805,13 @@ class PickCubeRewardsCfg:
         },
     )
 
-    # 행동률·관절 속도 페널티 — smoothness. v7: -1e-4→-1e-3(10×). 큐브 든 채 위아래로
-    # 진동하는 jittery 정책 억제(이전 -1e-4 는 사실상 0 이라 흔들기 방치). sim2real 필수.
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
+    # 행동률·관절 속도 페널티 — smoothness. v7: -1e-4→-1e-3(10×). v13: -1e-3→-1e-2(10×).
+    # v12 실측: joint_vel raw 30.4/ep → -1e-3 페널티=-0.030, carry(3) 대비 100배 약해 무비용.
+    # -1e-2로 올리면 -0.30/ep → carry 10% 비용, 진동이 경제적으로 불리해짐. sim2real 필수.
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-2)
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-1e-3,
+        weight=-1e-2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 

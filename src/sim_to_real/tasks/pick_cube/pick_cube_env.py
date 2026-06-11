@@ -65,6 +65,10 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # reward 함수가 매 step γΦ(s_t)-Φ(s_{t-1}) 계산 후 갱신. reset 직후 0.
         self._place_potential_prev = torch.zeros(self.num_envs, device=self.device)
 
+        # over_bowl_drop PBRS(over_bowl_drop_pbrs_reward)의 이전 step potential.
+        # over_bowl+열기 유도. reset 직후 0.
+        self._over_bowl_drop_potential_prev = torch.zeros(self.num_envs, device=self.device)
+
     def _anneal_progress(self) -> float:
         """학습 진행도 p∈[0,1] (common_step_counter / anneal_steps). 감쇠 없으면 0."""
         if self._bootstrap_anneal_steps <= 0.0:
@@ -164,6 +168,7 @@ class PickCubeEnv(ManagerBasedRLEnv):
             ).clone()
         # PBRS potential 초기화(reset 후 첫 step γΦ-0 jump 최소화)
         self._place_potential_prev[env_ids] = 0.0
+        self._over_bowl_drop_potential_prev[env_ids] = 0.0
 
     def step(self, action):
         if self._grasp_offset is None:
