@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/konan147/Workspaces/SO101-Sim2Real
 WORKTREE="$ROOT/.claude/worktrees/lstm-ppo-pickcube"
 PY="$ROOT/.venv/bin/python"
-RUN_GLOB="$WORKTREE/outputs/rl/rsl_rl/lstm_ppo_pickcube"
+RUN_GLOB="$ROOT/outputs/rl/rsl_rl/lstm_ppo_pickcube"  # main 레포 outputs 절대경로(worktree 독립)
 LOCK=/tmp/cron_monitor_v4.lock
 
 # ── 중복 실행 방지 ──────────────────────────────────────────────
