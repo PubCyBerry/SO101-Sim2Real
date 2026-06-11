@@ -3,7 +3,8 @@
 #
 # DDS: host(bridge, 일반 유저) ↔ container(root) cross-UID /dev/shm 충돌 회피 위해
 # PATH E 와 동일하게 fastrtps + UDPv4 로 통일한다.
-set -euo pipefail
+# -u 제외: ROS setup.bash 가 AMENT_TRACE_SETUP_FILES 등 미설정 변수를 참조해 set -u 와 충돌.
+set -eo pipefail
 
 source /opt/ros/jazzy/setup.bash
 
