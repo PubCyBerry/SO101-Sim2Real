@@ -3595,15 +3595,16 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
 
 ### 해결 방법
 
-`pick_cube_state_machine.py` LOWER/RELEASE 재설계:
-1. 그릇 상공 정지 상태에서 **wrist roll(q5)만 1초 점진 ramp 로 +90°** — 다른
-   joint 는 동결(IK 재계산 없음). jaw 개폐 평면이 접근축 주위로 90° 돌아
-   옆으로 열림 → 퍼올림 불가.
+`pick_cube_state_machine.py` TRANSPORT/RELEASE 재설계:
+1. **운반 중 pitch·wrist roll 동시 점진 보간**: xy ramp 진행률(frac)에
+   pitch(현재→그릇 목표)와 roll(0→90°, release 자세)을 함께 실음. roll 90° 로
+   jaw 개폐 평면이 접근축 주위로 돌아 옆으로 열림 → 퍼올림 불가.
    ※ IK 로 pitch 0° 재배향을 시도하면 그릇(r≈0.35)이 top-down 한계 밖이라
    ramp 시작 pitch -90° 가정이 즉시 IK 실패 → 폴백으로 무력화된다 (실측).
 2. 하강 없이 안전고도에서 그대로 떨굼. 낙하점은 TRANSPORT 목표에 TCP-큐브
    실측 오프셋을 보정해 **큐브**가 그릇 중심 위에 오게.
-3. open 후 0.4 s(12 step) 정지한 다음 RETREAT.
+3. open 후 0.4 s(12 step) 정지한 다음 RETREAT (z-ramp 시작점은 실측 TCP —
+   고정 가정은 release 자세가 더 높을 때 '내려갔다 올라오며' 그릇을 친다).
 
 ### 확인 방법
 
@@ -3643,3 +3644,33 @@ pick_cube cfg 에서 0.135 지정 — rejection sampling 이 base 발치 후보�
 ### 확인 방법
 
 위와 동일 명령 — `IK 실패(approach ...)` 0건, DRAG 발동 로그로 끌기 확인.
+
+
+## Isaac Lab SO-101 SM 운반 시 팔이 위로 휘둘렸다 그릇에 내리꽂힘 (pitch 불연속)
+
+### 현상
+
+큐브를 들고 그릇으로 운반할 때 팔이 위로 크게 솟았다가 그릇 위로 떨어지며
+그릇을 덜컹거림("슬램덩크"). TCP xy 는 Cartesian 직선 ramp 인데도 발생.
+
+### 오류 메시지
+
+(로그 없음 — 영상 3~5s 구간 프레임으로 확인)
+
+### 원인
+
+TRANSPORT 의 ik_reach 가 그릇 앞에서 pitch 를 −90°→−40° 로 **단번에** 완화
+(그릇 r≈0.35 는 top-down 한계 밖) → slew 풀속도 재배향으로 팔 전체가 호를
+그리며 재배치. **위치만 ramp 하고 자세(pitch)를 ramp 하지 않은 것**이 원인.
+
+### 해결 방법
+
+TRANSPORT 진입 시 목표 pitch(그릇 위치의 ik_reach 채택값)를 1회 계산해 두고,
+xy ramp 진행률에 맞춰 pitch 를 시작값→목표값으로 점진 보간 (wrist roll 90°
+release 자세 전환도 같은 frac 에 실음). `_solve_fixed_pitch(pitch_now,
+roll_offset=roll_now)` 로 매 step 연속 자세 명령.
+
+### 확인 방법
+
+1env DR 영상 3~5s 구간 프레임 — 솟구침/내리꽂힘 소멸, 부드러운 호.
+4env DR `[SM] TOTAL: 16/16 (100%)`.
