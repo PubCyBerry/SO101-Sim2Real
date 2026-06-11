@@ -43,7 +43,7 @@ _DESK_TOP_Z = 0.76
 _REQUIRED_TERMS = {
     "reach_pen",
     "grasp_pen",
-    "carry_pen",
+    "carry_object",
     "lift_pen",
     "transport_pen",
     "place_height_pen",
@@ -76,15 +76,15 @@ def _check_term(name: str, value: torch.Tensor, num_envs: int, failures: list[st
 def _term_values(env) -> dict[str, torch.Tensor]:
     robot_gripper = SceneEntityCfg("robot", body_names=["gripper"])
     return {
-        "reach_pen": task_mdp.reach_reward(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
-        "grasp_pen": task_mdp.grasp_bonus(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
-        "carry_pen": task_mdp.carry_pen(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
+        "reach_pen": task_mdp.reach_reward(env, robot_cfg=robot_gripper, container_center_xy=PEN_CUP_CENTER_XY),
+        "grasp_pen": task_mdp.grasp_bonus(env, robot_cfg=robot_gripper, container_center_xy=PEN_CUP_CENTER_XY),
+        "carry_object": task_mdp.carry_object(env, robot_cfg=robot_gripper, container_center_xy=PEN_CUP_CENTER_XY),
         "lift_pen": task_mdp.lift_reward(env),
-        "transport_pen": task_mdp.transport_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
-        "place_height_pen": task_mdp.place_height_reward(env, robot_cfg=robot_gripper, cup_center_xy=PEN_CUP_CENTER_XY),
-        "insert_pen": task_mdp.insert_reward(env, cup_center_xy=PEN_CUP_CENTER_XY),
-        "release_pen": task_mdp.release_bonus(env, cup_center_xy=PEN_CUP_CENTER_XY),
-        "task_success": task_mdp.task_success_bonus(env, cup_center_xy=PEN_CUP_CENTER_XY),
+        "transport_pen": task_mdp.transport_reward(env, container_center_xy=PEN_CUP_CENTER_XY),
+        "place_height_pen": task_mdp.place_height_reward(env, robot_cfg=robot_gripper, container_center_xy=PEN_CUP_CENTER_XY),
+        "insert_pen": task_mdp.insert_reward(env, container_center_xy=PEN_CUP_CENTER_XY),
+        "release_pen": task_mdp.release_bonus(env, container_center_xy=PEN_CUP_CENTER_XY),
+        "task_success": task_mdp.task_success_bonus(env, container_center_xy=PEN_CUP_CENTER_XY),
     }
 
 
@@ -201,7 +201,7 @@ def main() -> None:
         target = _term_values(env.unwrapped)
         _assert_increase(stage_checks, "reach", baseline["reach_pen"], target["reach_pen"], failures)
         _assert_increase(stage_checks, "grasp", baseline["grasp_pen"], target["grasp_pen"], failures)
-        _assert_increase(stage_checks, "carry", baseline["carry_pen"], target["carry_pen"], failures)
+        _assert_increase(stage_checks, "carry", baseline["carry_object"], target["carry_object"], failures)
 
         # lift: independent desk baseline, then lift one pen above the desk.
         _write_all_pens_outside(env.unwrapped)
@@ -235,7 +235,7 @@ def main() -> None:
         baseline_place = task_mdp.place_height_reward(
             env.unwrapped,
             robot_cfg=robot_gripper,
-            cup_center_xy=PEN_CUP_CENTER_XY,
+            container_center_xy=PEN_CUP_CENTER_XY,
             diff_threshold=10.0,
         )
         target_height = _local_xyz(env.unwrapped, (PEN_CUP_CENTER_XY[0], PEN_CUP_CENTER_XY[1], _DESK_TOP_Z + 0.07))
@@ -244,7 +244,7 @@ def main() -> None:
         target_place = task_mdp.place_height_reward(
             env.unwrapped,
             robot_cfg=robot_gripper,
-            cup_center_xy=PEN_CUP_CENTER_XY,
+            container_center_xy=PEN_CUP_CENTER_XY,
             diff_threshold=10.0,
         )
         _assert_increase(stage_checks, "place_height", baseline_place, target_place, failures)

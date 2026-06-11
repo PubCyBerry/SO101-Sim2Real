@@ -1,1 +1,1 @@
-"""태스크 전용 event term 확장 포인트."""
+"""pen/mdp/events — 빈 파일 유지."""

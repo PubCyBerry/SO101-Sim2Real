@@ -426,7 +426,7 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     SO101_JOINT_ORDER,
     apply_curriculum,
 )
-from sim_to_real.tasks.pick_pen import mdp as task_mdp  # noqa: E402
+from sim_to_real.tasks.pick_cube import mdp as task_mdp  # noqa: E402
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (  # noqa: E402
     _look_at_quat_world,
     _pinhole_camera_cfg,
@@ -844,8 +844,8 @@ class ExpertTrajectoryRecorder:
     def record(self, env, action: torch.Tensor, phase: str) -> None:
         obs = task_mdp.rl_state(
             env.unwrapped,
-            pen_names=CUBE_NAMES,
-            cup_name=BOWL_NAME,
+            object_names=CUBE_NAMES,
+            container_name=BOWL_NAME,
         )
         self.obs.append(obs[0].detach().cpu().to(torch.float32))
         self.actions.append(action[0, :6].detach().cpu().to(torch.float32))
@@ -2037,10 +2037,10 @@ def _fk_solve_joint_target(
 
 
 def _cube_inside_bowl(env, cube_name: str, radius: float) -> bool:
-    inside = task_mdp.pen_inside_cup(
+    inside = task_mdp.object_inside_container(
         env.unwrapped,
         object_cfg=SceneEntityCfg(cube_name),
-        cup_cfg=SceneEntityCfg(BOWL_NAME),
+        container_cfg=SceneEntityCfg(BOWL_NAME),
         radius=radius,
         height_range=BOWL_HEIGHT_RANGE,
     )

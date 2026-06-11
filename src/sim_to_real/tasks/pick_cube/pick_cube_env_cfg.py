@@ -36,7 +36,7 @@ from sim_to_real.utils.domain_randomization import (
     randomize_object_on_arc,
 )
 
-from sim_to_real.tasks.pick_pen import mdp as task_mdp
+from sim_to_real.tasks.pick_cube import mdp as task_mdp
 
 
 # World-frame (x, y) of the bowl at scene authoring time.
@@ -448,37 +448,37 @@ class PickCubeObservationsCfg:
         """Per-cube placement signals (cube-in-bowl, gripper open check)."""
 
         place_cube1 = ObsTerm(
-            func=task_mdp.pen_in_cup,
+            func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube1"),
-                "cup_center_xy": BOWL_CENTER_XY,
+                "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,
             },
         )
         place_cube2 = ObsTerm(
-            func=task_mdp.pen_in_cup,
+            func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube2"),
-                "cup_center_xy": BOWL_CENTER_XY,
+                "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,
             },
         )
         place_cube3 = ObsTerm(
-            func=task_mdp.pen_in_cup,
+            func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube3"),
-                "cup_center_xy": BOWL_CENTER_XY,
+                "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,
             },
         )
         place_cube4 = ObsTerm(
-            func=task_mdp.pen_in_cup,
+            func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube4"),
-                "cup_center_xy": BOWL_CENTER_XY,
+                "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,
             },
@@ -503,14 +503,14 @@ class PickCubeObservationsCfg:
         rl_state_obs = ObsTerm(
             func=task_mdp.rl_state,
             params={
-                "pen_names": CUBE_NAMES,
-                "cup_name": BOWL_NAME,
+                "object_names": CUBE_NAMES,
+                "container_name": BOWL_NAME,
                 "include_velocities": True,  # joint_vel+ee vel+cube vel 추가(부분관측 해소) → 43→64dim
                 "include_orientation": True,  # cube yaw+half-extent+ee quat+grasp→cup → 64→83dim
                 "include_container_orientation": True,  # 그릇 quat → 83→87dim(동적 그릇 tilt/엎힘 관측)
                 # 큐브 크기(half-extent, m): Cube1/2=30mm→0.015, Cube3/4=40mm→0.020.
                 # 평행 jaw 벌림 폭 매칭에 필수(크기 2종). CUBE_NAMES 순서와 일치.
-                "pen_half_extents": (0.015, 0.015, 0.020, 0.020),
+                "object_half_extents": (0.015, 0.015, 0.020, 0.020),
             },
             noise=GaussianNoiseCfg(mean=0.0, std=0.005),
         )
@@ -553,11 +553,11 @@ class PickCubeRewardsCfg:
         weight=1.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -569,11 +569,11 @@ class PickCubeRewardsCfg:
         weight=1.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -585,11 +585,11 @@ class PickCubeRewardsCfg:
         weight=3.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -599,11 +599,11 @@ class PickCubeRewardsCfg:
         func=task_mdp.grasp_contact_reward,
         weight=2.0,
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -615,11 +615,11 @@ class PickCubeRewardsCfg:
         weight=0.2,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
             "diff_threshold": 0.045,
         },
     )
@@ -629,11 +629,11 @@ class PickCubeRewardsCfg:
         weight=6.0,  # v10: 10→6 dense 유지 축소(hover 매력↓)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -642,26 +642,26 @@ class PickCubeRewardsCfg:
         weight=1.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
     # Stage 2.5: 닫힌 그리퍼 + 들린 큐브 + 그릇 방향 운반 (밀집 도우미)
     # weight 4→8: 부트스트랩 큐브를 "잡은 채 유지"하도록 강한 유인(놓치면 보상 급감).
     carry_cube = RewTerm(
-        func=task_mdp.carry_pen,
+        func=task_mdp.carry_object,
         weight=3.0,  # v10: 8→3 잡고-버티기 매력↓(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -670,7 +670,7 @@ class PickCubeRewardsCfg:
         func=task_mdp.lift_reward,
         weight=2.0,
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
         },
     )
 
@@ -679,9 +679,9 @@ class PickCubeRewardsCfg:
         func=task_mdp.transport_reward,
         weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
         },
     )
 
@@ -693,11 +693,11 @@ class PickCubeRewardsCfg:
         weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
             "xy_range": 0.08,
             "require_carry": False,
         },
@@ -708,11 +708,11 @@ class PickCubeRewardsCfg:
         func=task_mdp.insert_reward,
         weight=0.0,  # v11: PBRS(place_pbrs)의 inside 항으로 대체 — dense 유지 제거
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -723,11 +723,11 @@ class PickCubeRewardsCfg:
         func=task_mdp.place_pbrs_reward,
         weight=50.0,
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
             "xy_range": 0.40,
             "gamma": 0.997,
         },
@@ -739,11 +739,11 @@ class PickCubeRewardsCfg:
         weight=10.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -757,9 +757,9 @@ class PickCubeRewardsCfg:
         weight=12.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
             "xy_range": 0.06,
             "open_threshold": 0.60,
             "close_ref": 0.40,
@@ -781,7 +781,7 @@ class PickCubeRewardsCfg:
     cube_predisturb = RewTerm(
         func=task_mdp.cube_predisturb_penalty,
         weight=-3.0,
-        params={"pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES], "lift_min": 0.02},
+        params={"object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES], "lift_min": 0.02},
     )
 
     # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
@@ -790,11 +790,11 @@ class PickCubeRewardsCfg:
         weight=200.0,  # v10: 50→200 복원·강화 — 완료(terminal)가 value 최대가 되게(hover 차단)
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
             # PickCube termination은 "큐브가 그릇 안에 있음"과 일치한다.
             # release_cube가 gripper open을 별도로 보상한다.
             "require_open": False,
@@ -820,11 +820,11 @@ class PickCubeRewardsCfg:
         func=task_mdp.time_penalty,
         weight=-0.02,  # v10: -0.006→-0.02 복원 — 버티기 시간 비용(hover 차단)
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
     # task_done(전부 배치)가 곧 종료라 이 보너스는 완료 step 에 1회 지급되는
@@ -833,11 +833,11 @@ class PickCubeRewardsCfg:
         func=task_mdp.early_finish_bonus,
         weight=100.0,  # v10: 30→100 복원 — 빨리 완료 강제(hover 차단)
         params={
-            "pen_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
-            "cup_radius": BOWL_SUCCESS_RADIUS,
-            "cup_height_range": BOWL_HEIGHT_RANGE,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+            "container_radius": BOWL_SUCCESS_RADIUS,
+            "container_height_range": BOWL_HEIGHT_RANGE,
         },
     )
 
@@ -855,9 +855,9 @@ class PickCubeTerminationsCfg:
     success = DoneTerm(
         func=task_mdp.task_done,
         params={
-            "pens_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
-            "cup_center_xy": BOWL_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(BOWL_NAME),
+            "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
             "radius": BOWL_SUCCESS_RADIUS,
             "height_range": BOWL_HEIGHT_RANGE,
             "require_rest_pose": False,  # rest-pose check is TA.1 territory
@@ -869,7 +869,7 @@ class PickCubeTerminationsCfg:
         func=task_mdp.cube_lost,
         time_out=False,
         params={
-            "pens_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
+            "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
             "fall_z": 0.10,
         },
     )
@@ -1053,18 +1053,18 @@ def apply_curriculum(
     for term_name in _CUBE_REWARD_TERMS:
         term = getattr(env_cfg.rewards, term_name, None)
         if term is not None:
-            term.params["pen_cfgs"] = active_cfgs
+            term.params["object_cfgs"] = active_cfgs
     for term_name in _BOWL_RADIUS_REWARD_TERMS:
         term = getattr(env_cfg.rewards, term_name, None)
         if term is not None:
-            term.params["cup_radius"] = bowl_radius
+            term.params["container_radius"] = bowl_radius
 
-    env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
+    env_cfg.terminations.success.params["objects_cfg"] = active_cfgs
     env_cfg.terminations.success.params["radius"] = bowl_radius
     # 큐브 추락 종료도 활성 큐브만 검사(비활성 큐브는 지면 아래라 오탐 방지)
     cube_lost_term = getattr(env_cfg.terminations, "cube_lost", None)
     if cube_lost_term is not None:
-        cube_lost_term.params["pens_cfg"] = active_cfgs
+        cube_lost_term.params["objects_cfg"] = active_cfgs
 
     # rl_state 관측의 비활성 큐브 마스킹(distractor 제거 + RND novelty 집중)
     rl_obs = getattr(env_cfg.observations.rl_policy, "rl_state_obs", None)

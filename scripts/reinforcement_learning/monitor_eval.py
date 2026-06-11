@@ -100,9 +100,10 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     apply_curriculum as apply_cube_curriculum,
     BOWL_CENTER_XY, BOWL_SUCCESS_RADIUS, BOWL_HEIGHT_RANGE,
 )
-from sim_to_real.tasks.pick_pen.mdp.rewards import (  # noqa: E402
-    _get_gripper_pos, _pen_inside_cup_mask, _DESK_TOP_Z,
+from sim_to_real.tasks.common.mdp.rewards import (  # noqa: E402
+    _get_gripper_pos, _object_inside_container_mask,
 )
+from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z  # noqa: E402
 from sim_to_real.utils.constant import CUBE_NAMES  # noqa: E402
 from isaaclab.managers import SceneEntityCfg  # noqa: E402
 
@@ -348,9 +349,9 @@ def main() -> None:
                 gripper = base.scene["robot"].data.joint_pos[:, -1]
                 closed = gripper < args.close_thr
                 local_z = cp[:, 2] - base.scene.env_origins[:, 2]
-                lifted_min = local_z > (_DESK_TOP_Z + args.lift_min)
-                lifted_stage = local_z > (_DESK_TOP_Z + args.lift_stage)
-                placed = _pen_inside_cup_mask(
+                lifted_min = local_z > (DESK_TOP_Z + args.lift_min)
+                lifted_stage = local_z > (DESK_TOP_Z + args.lift_stage)
+                placed = _object_inside_container_mask(
                     base, cp, BOWL_CENTER_XY, BOWL_SUCCESS_RADIUS, BOWL_HEIGHT_RANGE, cup_cfg)
                 cxw, cyw = BOWL_CENTER_XY
                 over_bowl = (torch.hypot(
