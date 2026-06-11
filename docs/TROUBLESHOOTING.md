@@ -3569,3 +3569,74 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
     --num_envs 1 --active_objects 4 --object_radius_scale 0 --headless --seed 42
 # [SM] env0 RESULT: 4/4 cubes in bowl.  (DR full 2env 는 6/8 — reach 경계 spawn 한계)
 ```
+
+## Isaac Lab SO-101 SM release 직후 jaw 가 큐브를 퍼올려 날림 (top-down release + 상승)
+
+### 현상
+
+큐브를 그릇 상공/안에서 release 한 직후 RETREAT 상승에서 회전형 jaw 가 큐브 밑을
+스쿱해 그릇 밖으로 날아감. release 게이트(그릇 중심 정렬)를 통과해도 placed=False.
+
+### 오류 메시지
+
+```
+[SM] env2 Cube2: dist_bowl=0.197m z=0.724 placed=False   (release 게이트는 통과)
+```
+
+### 원인
+
+복합 3건:
+1. top-down 자세의 회전형 jaw 는 **수직 평면에서 호를 그리며** 여닫음 — open 직후
+   상승하면 jaw 호가 낙하 중인 큐브 밑을 퍼올린다.
+2. 낙하점 기준 오류: 쥔 큐브는 TCP(gripper_frame)에서 닫힘축 방향 2~3cm 오프셋 —
+   TCP 를 그릇 중심에 맞추면 큐브가 테두리 빗면에 떨어져 튕겨 나감.
+3. release 자세 재배향(pitch/roll 동시 90°)을 slew 풀속도로 하면 원심력으로
+   쥔 큐브가 회전 중에 빠진다.
+
+### 해결 방법
+
+`pick_cube_state_machine.py` LOWER/RELEASE 재설계:
+1. 그릇 상공 정지 상태에서 **1초 점진 ramp** 로 pitch 0° + wrist roll 90° 재배향
+   (닫힘축이 바닥과 평행 → jaw 가 수평면에서 열려 퍼올림 불가).
+2. 하강 없이 안전고도에서 그대로 떨굼. 낙하점은 TCP-큐브 실측 오프셋으로 보정해
+   **큐브**가 그릇 중심 위에 오게.
+3. open 후 0.4 s(12 step) 정지한 다음 RETREAT.
+
+### 확인 방법
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
+    scripts/environments/pick_cube_state_machine.py \
+    --num_envs 4 --active_objects 4 --headless --seed 0
+# [SM] TOTAL: 16/16 cubes in bowl across 4 envs (100%).
+```
+
+## Isaac Lab cube DR 이 robot base 발치에 spawn — 접근 IK 부재로 수행 불가
+
+### 현상
+
+DR full 에서 일부 큐브가 base 에서 r≈0.11 에 spawn — 안전고도(desk+0.12) 접근
+IK 해가 없어 APPROACH 부터 실패(재시도 소진). SO-101 은 base 에 가까울수록
+위쪽 reach 가 급감한다.
+
+### 오류 메시지
+
+```
+[SM] env3 Cube2: IK 실패(approach (...)) — 재시도 소진
+```
+
+### 원인
+
+`_CUBE_SCATTER_Y_RANGE` 하한(-0.46)과 x 중앙대 조합이 base(1.84,-0.565)와
+거리 0.105 까지 허용 — inner-reach(r<0.13) 영역.
+
+### 해결 방법
+
+`randomize_cubes_scattered` 에 `min_base_sep`(기본 0 비활성) 파라미터 추가,
+pick_cube cfg 에서 0.135 지정 — rejection sampling 이 base 발치 후보를 기각
+(직사각형 범위 축소와 달리 workspace 면적 보존). r 0.135~0.20 의 "잡을 수 있는데
+못 드는" 영역은 SM 의 DRAG phase(낮게 쥔 채 r≈0.20 으로 끌기)가 처리.
+
+### 확인 방법
+
+위와 동일 명령 — `IK 실패(approach ...)` 0건, DRAG 발동 로그로 끌기 확인.

@@ -20,7 +20,11 @@
 - **검증**: 고정 spawn 1env 4큐브 **4/4**, DR full 2env **3/4+3/4=6/8** (실패=reach 경계 spawn, 기구학 한계). 영상 `docs/so101_pick_place-step-0.mp4`.
 - **핵심 해결책** (상세는 memory `pickcube-analytic-ik-sm-v3`): ① USD root↔URDF base frame 정합(yaw −90°+오프셋, 캘리 fit) ② 중력 처짐 적분 보상(q_bias) ③ 하강 z-ramp(수직 직선 경로 — joint 보간 찌르기 방지) ④ **side-approach**(닫힘축 base쪽 3.5cm 비켜 하강 후 수평 SLIDE — 사용자 제안, fixed finger 가 base-반대쪽이라 방향 중요).
 - **후속 개선 (같은 날)**: ① 속도 — 4큐브 86초→24초 (전 구간 Cartesian ramp 화: descend 0.15/slide 0.10/lift 0.40/transport 0.50/lower 0.25 m/s, dwell 축소, RETREAT z-ramp 즉시 전이; 운반 "내던지기"는 TRANSPORT 수평 직선 ramp 로 해결). ② 그릇 끼임 방지 — roll 0/±90/180° 대안 grasp 후보 중 그릇 먼 쪽 채택(`--bowl_clear` 0.12, 큐브 90° 대칭 이용). 함정: 후보 기준을 q_cmd 의 q5 로 계산하면 이전 roll_offset 자기참조로 진동("딱다구리") — fold_45 독립 재계산 + side_pick 1회 확정으로 해결. 강제 트리거(0.30) 4/4 + 기본 4/4 + DR 6/8 검증.
-- **남은 일**: reach 경계 spawn 실패(DR ~25%) — pregrasp IK 실패 시 비킴 방향 대체 시도 같은 폴백 미구현. 20ep 통계 sweep 미실시(PhysX 잡음 ±2ep 감안). 커밋 미실시.
+- **커밋**: `8a97780`(v3 본체) → `6a1be70`(20초 단축) → `55a6294`(장애물 회피·동적 순서·DRAG) → `07cbd7a`(release 재설계·spawn 제약·drop 복구). 영상(구버전 정리 후 2종): `docs/so101_pick_place_single-step-0.mp4`(1env DR), `docs/so101_pick_place_multi4-step-0.mp4`(4env DR 전체 부감, 16/16).
+- **실패 실체 (영상 분석)**: DR 실패의 주 패턴 = **inner-reach 한계** — base 발치(r≈0.15) 큐브는 grasp 까지 되는데 safe_z(+0.12)로 들어올릴 IK 가 없음 (가까울수록 높이 reach 급감). LIFT 의 _solve 반환 무시 → TRANSPORT 에서 "그릇 IK 실패 중단". 개선 후보: 적응형 lift 높이 (IK 실패 시 z 를 낮춰가며 최대 가능 높이로 운반).
+- **2차 고도화 (커밋 `55a6294`)**: ① 장애물 통합 회피 — `_grasp_candidates` 가 4방향 후보 경로에 그릇+다른 큐브 클리어런스 평가. ② 동적 집기 순서 — 매번 (클리어>liftable>근접) 선택, 라운드 2회 상한 후 포기. ③ DRAG phase — base 발치 큐브를 낮게 쥔 채 r≈0.20 으로 끌어온 후 lift (inner-reach 한계 해결). ④ place 정밀화 — 목표 그릇 중심 base쪽 2cm 안 + release 게이트(TCP 실측 5cm). **seed 0 DR 2env 8/8 첫 100%**, seed 42 4/4 20.1초 유지, 4env 11/16. 영상: `so101_drag_lift-step-0.mp4`.
+- **3차 고도화 (커밋 `07cbd7a`)**: ① release 재설계(사용자 지정) — 그릇 상공 정지→1초 점진 재배향(pitch 0°+roll 90°, 닫힘축 수평=jaw 수평면 개폐로 퍼올림 차단)→하강 없이 안전고도 떨굼→0.4s 정지. slew 풀속도 동시 재배향은 큐브 떨굼(점진 ramp 필수). 낙하점은 TCP-큐브 오프셋 보정. ② DR spawn 제약 — `min_base_sep=0.135` (inner-reach spawn 차단, domain_randomization.py). ③ drop 복구 — TCP-큐브 거리 5.5cm 이탈 감지→재시도. **seed 0 4env DR 16/16 (100%), seed 42 4/4 19.8초.**
+- **남은 일**: 20ep 통계 sweep 미실시(PhysX 잡음 ±2ep 감안). seed 다양화 검증 여지.
 - **실행**: `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/pick_cube_state_machine.py --num_envs 1 --active_objects 4 --headless [--video]`
 
 ## (이전) 작업 인계 (2026-06-11 후속 — 셀프피드백 루프: v8 65% 회귀 진단→v10 게이트 수정 85%(영상), 4큐브 정렬게이트 v12 검증중)
