@@ -89,15 +89,15 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--calibrate", action="store_true",
                     help="기구학 진단 모드: FK 예측 vs 시뮬 실측 비교 후 종료 (FSM 미실행)")
 # FSM 전이·정착 파라미터
-parser.add_argument("--joint_tol", type=float, default=0.07,
+parser.add_argument("--joint_tol", type=float, default=0.09,
                     help="관절 수렴 판정 max|q_goal-q_now| (rad). 거친 이동 단계용")
 parser.add_argument("--fine_joint_tol", type=float, default=0.025,
                     help="정밀 단계(DESCEND/LOWER) 관절 수렴 판정 (rad)")
 parser.add_argument("--max_phase_steps", type=int, default=240,
                     help="한 단계에서 수렴 못해도 넘어가는 step 상한 (30 Hz 기준 8초)")
-parser.add_argument("--grasp_dwell", type=int, default=12, help="그리퍼 닫힘 정착 step (30 Hz)")
+parser.add_argument("--grasp_dwell", type=int, default=10, help="그리퍼 닫힘 정착 step (30 Hz)")
 parser.add_argument("--release_dwell", type=int, default=6, help="그리퍼 열림 정착 step")
-parser.add_argument("--settle_steps", type=int, default=10, help="reset 후 큐브 정착 대기 step")
+parser.add_argument("--settle_steps", type=int, default=8, help="reset 후 큐브 정착 대기 step")
 parser.add_argument("--max_retry", type=int, default=3, help="큐브당 grasp 재시도 횟수")
 # 높이/오프셋 (m)
 parser.add_argument("--safe_height", type=float, default=0.12,
@@ -136,7 +136,7 @@ parser.add_argument("--slide_stop", type=float, default=0.010,
 parser.add_argument("--pregrasp_height", type=float, default=0.04,
                     help="최종 하강 전 큐브 위 hover 높이 (m). 여기서 dwell 하며 "
                          "중력 처짐 보상을 수렴시켜 손가락 수직을 확보")
-parser.add_argument("--pregrasp_dwell", type=int, default=8,
+parser.add_argument("--pregrasp_dwell", type=int, default=5,
                     help="pre-grasp hover 정착 step (bias 적분 수렴용)")
 parser.add_argument("--descend_speed", type=float, default=0.15,
                     help="DESCEND/LOWER Cartesian 수직 하강 속도 (m/s). joint 공간 "
@@ -157,6 +157,8 @@ parser.add_argument("--view_lookat", type=_vec3, default=(1.74, -0.38, 0.74),
 parser.add_argument("--video", action="store_true",
                     help="사이드뷰를 mp4 로 녹화해 docs/ 에 저장")
 parser.add_argument("--video_length", type=int, default=2000, help="녹화 최대 프레임 수")
+parser.add_argument("--video_name", default="so101_pick_place",
+                    help="docs/ 에 저장할 mp4 파일명 prefix")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -900,7 +902,7 @@ class SO101PickPlaceSM:
             ramp_done = self.z_ramp[e] <= final_z + 1e-6
             if ramp_done:
                 self.dwell_count[e] += 1
-            settle_timeout = self.dwell_count[e] >= 18
+            settle_timeout = self.dwell_count[e] >= 12
             if (ramp_done and tcp_z_err < 0.003) or settle_timeout or timeout:
                 self.z_ramp[e]      = None
                 self.slide_s[e]     = 0.0
@@ -935,7 +937,7 @@ class SO101PickPlaceSM:
             if slide_done:
                 self.dwell_count[e] += 1
             if (slide_done and self._converged(e, tol)) \
-                    or self.dwell_count[e] >= 10 or timeout:
+                    or self.dwell_count[e] >= 8 or timeout:
                 self.grasp_z0[e]    = p[2].item()
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
@@ -1073,6 +1075,13 @@ class SO101PickPlaceSM:
                 qs.append(q)
                 grips.append(g)
             self._act_all(qs, grips)
+        # 전체 env 합산 요약
+        total_ok = sum(
+            sum(self._placed(c, e) for c in self.ordered_cubes[e])
+            for e in range(self.num_envs))
+        total = sum(len(self.ordered_cubes[e]) for e in range(self.num_envs))
+        log(f"[SM] TOTAL: {total_ok}/{total} cubes in bowl across {self.num_envs} envs "
+            f"({100.0 * total_ok / max(total, 1):.0f}%).")
 
     # --- 결과 리포트 -----------------------------------------------------
 
@@ -1112,7 +1121,7 @@ def main() -> None:
         env = gym.wrappers.RecordVideo(
             env,
             video_folder="docs",
-            name_prefix="so101_pick_place",
+            name_prefix=args.video_name,
             step_trigger=lambda step: step == 0,
             video_length=args.video_length,
             disable_logger=True,
