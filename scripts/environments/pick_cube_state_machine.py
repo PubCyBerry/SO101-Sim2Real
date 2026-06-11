@@ -96,7 +96,8 @@ parser.add_argument("--fine_joint_tol", type=float, default=0.025,
 parser.add_argument("--max_phase_steps", type=int, default=240,
                     help="한 단계에서 수렴 못해도 넘어가는 step 상한 (30 Hz 기준 8초)")
 parser.add_argument("--grasp_dwell", type=int, default=10, help="그리퍼 닫힘 정착 step (30 Hz)")
-parser.add_argument("--release_dwell", type=int, default=6, help="그리퍼 열림 정착 step")
+parser.add_argument("--release_dwell", type=int, default=12,
+                    help="그리퍼 열림 후 정지 step (0.4s — 움직이면 jaw 가 큐브를 퍼올림)")
 parser.add_argument("--settle_steps", type=int, default=8, help="reset 후 큐브 정착 대기 step")
 parser.add_argument("--max_retry", type=int, default=3, help="큐브당 grasp 재시도 횟수")
 # 높이/오프셋 (m)
@@ -106,7 +107,7 @@ parser.add_argument("--safe_height", type=float, default=0.12,
 parser.add_argument("--grasp_z_offset", type=float, default=0.005,
                     help="grasp 시 큐브 중심 기준 TCP z 오프셋. +5mm가 검증값 — "
                          "더 깊게 내리면 reach 가장자리에서 실행 미달로 회귀")
-parser.add_argument("--place_height", type=float, default=0.07,
+parser.add_argument("--place_height", type=float, default=0.085,
                     help="그릇 중심 기준 release 시 TCP 높이")
 parser.add_argument("--drift_tol", type=float, default=0.015,
                     help="latch 후 하강 중 큐브 xy 이탈 허용 (m). 초과 시 재접근")
@@ -1071,6 +1072,12 @@ class SO101PickPlaceSM:
 
         # ----- LIFT: SAFE_Z 로 z-ramp 상승 + 파지 검증 -----
         if ph == Phase.LIFT:
+            # 상승 중 이탈 조기 감지 — 빈손 운반(게이트 영구 미충족) 방지
+            if (self.z_ramp[e] is not None
+                    and torch.linalg.norm(
+                        self.obj_pos(cube, e) - self._tcp_meas_w(e)).item() > 0.055):
+                self._retry_or_skip(e, cube, "상승 중 큐브 이탈")
+                return self.q_cmd[e], self._open_cmd(cube)
             lx, ly = self.latched[e][0].tolist()
             safe_z = self._safe_z_w(e)
             if self.z_ramp[e] is None:
@@ -1093,6 +1100,13 @@ class SO101PickPlaceSM:
 
         # ----- TRANSPORT: 그릇 상공으로 Cartesian 직선 ramp 횡이동 -----
         if ph == Phase.TRANSPORT:
+            # drop 감지: 운반 중 큐브가 손에서 이탈(마찰 DR 하한 env) → 다시 집으러
+            tcp_now = self._tcp_meas_w(e)
+            cube_p = self.obj_pos(cube, e)
+            if torch.linalg.norm(cube_p - tcp_now).item() > 0.055:
+                log(f"[SM] env{e} {cube}: 운반 중 drop 감지 — 재시도")
+                self._finish_cube(e, done=False)
+                return self.q_cmd[e], args.gripper_open
             bx, by = self._place_xy(e)
             fx, fy = self.move_from[e]
             dist = math.hypot(bx - fx, by - fy)
@@ -1108,36 +1122,59 @@ class SO101PickPlaceSM:
             ramp_done = self.slide_s[e] >= dist - 1e-6
             if (ramp_done and self._converged(e, tol)) or timeout:
                 self.slide_s[e]     = 0.0
+                self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
                 self.phase[e]       = Phase.LOWER
             return self.q_cmd[e], args.gripper_close
 
         # ----- LOWER: 그릇 안 release 높이로 z-ramp 하강 -----
         if ph == Phase.LOWER:
+            # drop 감지 (그릇 상공이라 떨어지면 그릇 안/근처 — 그래도 재확인 가치)
+            tcp_now = self._tcp_meas_w(e)
+            cube_p = self.obj_pos(cube, e)
+            if torch.linalg.norm(cube_p - tcp_now).item() > 0.055:
+                log(f"[SM] env{e} {cube}: 하강 중 drop — release 처리")
+                self.z_ramp[e]      = None
+                self.dwell_count[e] = 0
+                self.phase_steps[e] = 0
+                self.phase[e]       = Phase.RELEASE_DWELL
+                return self.q_cmd[e], args.gripper_open
             b = self.obj_pos(BOWL_NAME, e)
             bx, by = self._place_xy(e)
-            place_z = b[2].item() + args.place_height
-            if self.z_ramp[e] is None:
-                self.z_ramp[e] = self._safe_z_w(e)
-            self.z_ramp[e] = max(place_z, self.z_ramp[e] - args.lower_speed / 30.0)
-            target = (bx, by, self.z_ramp[e])
-            if not self._solve(e, target, 0.0):
+            # 낙하점 보정: 쥔 큐브는 TCP 에서 닫힘축 방향으로 2~3cm 오프셋돼 있어
+            # TCP 를 그릇 중심에 맞추면 큐브가 테두리 빗면에 떨어져 튕겨 나간다 —
+            # '큐브'가 그릇 중심 위에 오도록 TCP 목표를 반대로 이동.
+            off_x = cube_p[0].item() - tcp_now[0].item()
+            off_y = cube_p[1].item() - tcp_now[1].item()
+            off_n = math.hypot(off_x, off_y)
+            if off_n > 0.04:  # 비정상 오프셋은 클램프
+                off_x, off_y = off_x * 0.04 / off_n, off_y * 0.04 / off_n
+            # release 자세 = 수평(pitch 0°) + wrist roll 90°: 닫힘축이 바닥과
+            # 평행해져 jaw 가 수평면에서 열림 — 퍼올림 방지 (사용자 지정 자세).
+            # 재배향은 그릇 상공 정지 상태에서 1초 점진 ramp — slew 풀속도 동시
+            # 회전은 원심력으로 쥔 큐브를 떨군다 (env3 실측).
+            # 하강은 하지 않는다 — 안전 고도에서 그대로 떨굼 (사용자 지정).
+            rot_t = min(1.0, self.dwell_count[e] / 30.0)
+            self.dwell_count[e] += 1
+            pitch_now = -math.pi / 2 * (1.0 - rot_t)
+            roll_now = (math.pi / 2) * rot_t
+            target = (bx - off_x, by - off_y, self._safe_z_w(e))
+            if not self._solve_fixed_pitch(e, target, 0.0, pitch_now,
+                                           roll_offset=roll_now):
                 log(f"[SM] env{e}: LOWER IK 실패 — 현재 고도에서 release")
                 self.z_ramp[e]      = None
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0
                 self.phase[e]       = Phase.RELEASE_DWELL
                 return self.q_cmd[e], args.gripper_close
-            ramp_done = self.z_ramp[e] <= place_z + 1e-6
-            # release 게이트: TCP 실측이 그릇 중심 5cm 이내여야 — 테두리 위 release
-            # 는 큐브가 얹혀 굴러떨어진다 (timeout 시엔 어쩔 수 없이 release)
-            tcp = self._tcp_meas_w(e)
-            tcp_bowl_d = math.hypot(tcp[0].item() - b[0].item(),
-                                    tcp[1].item() - b[1].item())
-            if (ramp_done and self._converged(e, tol) and tcp_bowl_d < 0.05) or timeout:
-                if timeout and tcp_bowl_d >= 0.05:
+            # release 게이트: 재배향 완료 + 큐브가 그릇 중심 5cm 이내 정렬
+            cube_bowl_d = math.hypot(cube_p[0].item() - b[0].item(),
+                                     cube_p[1].item() - b[1].item())
+            if (rot_t >= 1.0 and self._converged(e, tol) and cube_bowl_d < 0.05) \
+                    or timeout:
+                if timeout and cube_bowl_d >= 0.05:
                     log(f"[SM] env{e} {cube}: LOWER 미수렴 release "
-                        f"(tcp_bowl_d={tcp_bowl_d * 1000:.0f}mm)")
+                        f"(cube_bowl_d={cube_bowl_d * 1000:.0f}mm)")
                 self.z_ramp[e]      = None
                 self.dwell_count[e] = 0
                 self.phase_steps[e] = 0

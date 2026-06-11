@@ -173,6 +173,8 @@ def _randomize_cubes_scattered_fn(
     min_bowl_sep: float,
     max_attempts: int,
     num_active: int | None = None,
+    min_base_sep: float = 0.0,
+    robot_cfg: SceneEntityCfg | None = None,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -196,6 +198,13 @@ def _randomize_cubes_scattered_fn(
 
     bowl_asset: RigidObject = env.scene[bowl_cfg.name]
     bowl_default_xy = bowl_asset.data.default_root_state[env_ids, :2]  # (n, 2) env-local
+
+    # robot base 최소 이격: base 발치(inner-reach)는 안전고도 접근 IK 가 없어
+    # 어떤 컨트롤러도 수행 불가 — spawn 자체를 막는다.
+    base_xy = None
+    if min_base_sep > 0.0 and robot_cfg is not None:
+        base_xy = env.scene[robot_cfg.name].data.default_root_state[env_ids, :2]
+    min_base_sep_sq = min_base_sep ** 2
 
     # 누적 배치 xy — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
     placed_xy: list[torch.Tensor] = []
@@ -237,6 +246,14 @@ def _randomize_cubes_scattered_fn(
             # 그릇 최소 거리 확인
             bxy = bowl_default_xy[idx]
             ok = (cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= min_bowl_sep_sq
+
+            # robot base 최소 거리 확인 (inner-reach spawn 금지)
+            if base_xy is not None:
+                rxy = base_xy[idx]
+                ok = ok & (
+                    (cand_x - rxy[:, 0]).pow(2) + (cand_y - rxy[:, 1]).pow(2)
+                    >= min_base_sep_sq
+                )
 
             # 이미 배치된 큐브들과의 최소 거리 확인
             for prev in placed_xy:
@@ -301,6 +318,8 @@ def randomize_cubes_scattered(
     min_bowl_sep: float = 0.18,
     max_attempts: int = 50,
     num_active: int | None = None,
+    min_base_sep: float = 0.0,
+    robot_name: str = "robot",
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
 
@@ -318,6 +337,10 @@ def randomize_cubes_scattered(
             흡수할 여유를 포함해야 한다.
         max_attempts: env 당 rejection sampling 최대 시도 횟수. 초과 시 해당
             env 의 큐브는 default_root_state 위치로 fallback.
+        min_base_sep: 큐브-robot base 간 최소 중심 거리 (m). 0 이면 비활성.
+            base 발치(inner-reach)는 안전고도 접근 IK 가 없어 수행 불가 —
+            SO-101 cube_desk 실측 한계 r≈0.13 에 여유를 더해 0.135 권장.
+        robot_name: base 이격 기준 articulation 이름.
     """
     return EventTerm(
         func=_randomize_cubes_scattered_fn,
@@ -332,6 +355,8 @@ def randomize_cubes_scattered(
             "min_bowl_sep": float(min_bowl_sep),
             "max_attempts": int(max_attempts),
             "num_active": num_active,
+            "min_base_sep": float(min_base_sep),
+            "robot_cfg": SceneEntityCfg(robot_name) if min_base_sep > 0.0 else None,
         },
     )
 

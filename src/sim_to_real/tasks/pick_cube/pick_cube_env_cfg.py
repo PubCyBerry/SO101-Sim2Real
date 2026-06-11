@@ -906,6 +906,9 @@ class PickCubeEventCfg:
         yaw_range_deg=(-30.0, 30.0),
         min_cube_sep=0.10,
         min_bowl_sep=0.18,
+        # base 발치(inner-reach, r<~0.13)는 안전고도 접근 IK 부재로 수행 불가 —
+        # y_lo(-0.46)·x 중앙대 조합이 r≈0.105 까지 허용하므로 base 이격으로 차단.
+        min_base_sep=0.135,
     )
 
     # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
