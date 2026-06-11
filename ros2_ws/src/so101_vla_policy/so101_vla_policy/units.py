@@ -25,6 +25,16 @@ JOINT_FEATURE_NAMES = [f"{j}.pos" for j in SO101_JOINT_ORDER]
 CAMERA_KEYS = ("top", "wrist", "front")
 GRIPPER_LEROBOT_SCALE = 31.75
 
+# policy-server RemotePolicyConfig.lerobot_features — 실 lerobot 의
+# map_robot_keys_to_lerobot_features(SO101Follower(top/wrist/front)) 와 동일 스키마.
+# 정적이라 하드코딩(SO101Follower import 회피 → lerobot 전체 의존 제거).
+LEROBOT_FEATURES = {
+    "observation.state": {"dtype": "float32", "shape": (6,), "names": list(JOINT_FEATURE_NAMES)},
+    "observation.images.top": {"dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"]},
+    "observation.images.wrist": {"dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"]},
+    "observation.images.front": {"dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"]},
+}
+
 _RAD_TO_DEG = 180.0 / math.pi
 _DEG_TO_RAD = math.pi / 180.0
 

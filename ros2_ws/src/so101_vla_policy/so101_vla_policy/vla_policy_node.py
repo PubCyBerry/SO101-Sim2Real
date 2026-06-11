@@ -35,20 +35,24 @@ from dotenv import load_dotenv
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 
-from lerobot.async_inference.helpers import (
-    RemotePolicyConfig,
-    TimedObservation,
-    map_robot_keys_to_lerobot_features,
-)
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
-from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
-from lerobot.robots.so_follower.so_follower import SO101Follower
-from lerobot.transport import services_pb2, services_pb2_grpc
-from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
+# lerobot.* 는 vendored mini-lerobot(pickle 호환 shim) — 실 lerobot 대신(import 체인이
+# transformers/datasets 까지 끌어와 컨테이너 부적합). 경로는 entrypoint 가 PYTHONPATH 로 추가
+# (/workspace/ros2_ws/src/so101_vla_policy/vendor). 미설정 환경 대비 __file__ 기준도 보강.
+import sys as _sys
+from pathlib import Path as _Path
 
-from so101_vla_policy.units import (
+_vendor = _Path(__file__).resolve().parents[1] / "vendor"
+if _vendor.is_dir() and str(_vendor) not in _sys.path:
+    _sys.path.insert(0, str(_vendor))
+
+from lerobot.async_inference.helpers import RemotePolicyConfig, TimedObservation  # noqa: E402
+from lerobot.transport import services_pb2, services_pb2_grpc  # noqa: E402
+from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks  # noqa: E402
+
+from so101_vla_policy.units import (  # noqa: E402
     CAMERA_KEYS,
     JOINT_FEATURE_NAMES,
+    LEROBOT_FEATURES,
     SO101_JOINT_ORDER,
     clamp_joint_rad,
     from_lerobot_units,
@@ -88,13 +92,9 @@ class PolicyServerSession:
                  policy_device, rename_map, poll_timeout):
         self._poll_timeout = float(poll_timeout)
 
-        cams = {n: OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=30)
-                for n in ("top", "wrist", "front")}
-        robot = SO101Follower(SO101FollowerConfig(port="", id="sim_vla_ros", cameras=cams))
-        lerobot_features = map_robot_keys_to_lerobot_features(robot)
-
+        # lerobot_features 는 정적 스키마(units.LEROBOT_FEATURES) — 실 SO101Follower 와 동일.
         self.policy_config = RemotePolicyConfig(
-            policy_type, pretrained, lerobot_features, int(actions_per_chunk), policy_device,
+            policy_type, pretrained, LEROBOT_FEATURES, int(actions_per_chunk), policy_device,
             rename_map or {},
         )
         self.channel = grpc.insecure_channel(

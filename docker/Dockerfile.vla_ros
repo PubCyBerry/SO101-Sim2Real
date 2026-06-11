@@ -1,14 +1,15 @@
-# sim VLA 추론 ROS 노드용 경량 이미지 — ROS 2 Jazzy + cv_bridge + lerobot(gRPC 클라).
+# sim VLA 추론 ROS 노드용 경량 이미지 — ROS 2 Jazzy + cv_bridge + gRPC 클라(vendored shim).
 #
 # Isaac Sim bridge(호스트, run_cube_desk_ros_bridge.py)가 publish 하는
 # /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 policy-server(gRPC)로
 # VLA 추론하고 /isaac_joint_commands 를 publish 하는 so101_vla_policy 노드를 띄운다.
 # cuMotion/MoveIt 불필요(joint command 직접 경로) → cumotion 이미지보다 가볍다.
 #
-# 런타임 분리: ROS Jazzy=py3.12, lerobot(uv venv)=py3.11 라 호스트 venv 를 못 쓴다.
-# 그래서 컨테이너 py3.12 에 lerobot 0.4.4 를 pip 설치한다(pickle 클래스
-# lerobot.async_inference.helpers.* 가 server 0.5.1 과 호환 — 실기기 경로 검증됨).
-# 추론은 policy-server 가 하므로 이 컨테이너엔 GPU 불필요 → torch CPU 휠만 설치.
+# 런타임 분리: ROS Jazzy=py3.12, lerobot(uv venv)=py3.11. 실 lerobot 은 import 체인이
+# transformers/datasets/diffusers 까지 끌어와 pip resolve 가 폭발 → **설치하지 않는다**.
+# 대신 ros2_ws/src/so101_vla_policy/vendor 에 gRPC pickle 호환 최소 shim
+# (lerobot.async_inference.helpers + transport pb2/utils)을 vendoring 하고 entrypoint 가
+# PYTHONPATH 로 잡는다. action chunk(torch.Tensor) unpickle 에 torch 필요 → CPU 휠만(추론은 서버).
 #
 # 빌드:  docker compose --env-file .env -f docker/docker-compose.yaml build vla-ros
 # 실행:  docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
@@ -24,14 +25,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip python3-colcon-common-extensions git \
     && rm -rf /var/lib/apt/lists/*
 
-# torch CPU 먼저(거대 CUDA 휠 회피) → lerobot 이 이미 만족된 torch 를 재설치 안 함.
-# --break-system-packages: Ubuntu 24.04 PEP668 externally-managed 우회.
-# ⚠ numpy ABI: cv_bridge(apt)는 system numpy(1.26)에 빌드됨. lerobot/torch 가 numpy 2.x 로
-#   올리면 cv_bridge import 가 깨질 수 있음 → 문제 시 "numpy<2" 핀 추가.
+# torch CPU(action chunk unpickle 용) + 경량 gRPC/pickle 의존만. lerobot 미설치 → resolve 단순.
+# protobuf>=6.31: vendored services_pb2 의 runtime_version 검사(6.31.0) 충족.
+# --break-system-packages: Ubuntu 24.04 PEP668 우회. numpy<2: cv_bridge(apt) ABI 보호.
 RUN pip install --break-system-packages --no-cache-dir \
         torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --break-system-packages --no-cache-dir \
-        "lerobot==0.4.4" grpcio protobuf python-dotenv "numpy<2"
+        grpcio "protobuf>=6.31,<7" python-dotenv "numpy<2"
 
 # 셸 진입 시 ROS + 워크스페이스 overlay source.
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc \

@@ -199,9 +199,13 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 
 - **apt**: `ros-jazzy-cv-bridge`(이미지 디코드), `ros-jazzy-rmw-fastrtps-cpp`(DDS),
   `python3-pip`, `python3-colcon-common-extensions`, `git`.
-- **pip(py3.12, `--break-system-packages`)**: `torch`(CPU 휠 — 추론은 서버라 GPU 불필요),
-  `lerobot==0.4.4`(gRPC pickle 클래스 — server 0.5.1 과 호환), `grpcio`, `protobuf`,
-  `python-dotenv`, `numpy<2`(cv_bridge ABI 보호).
+- **pip(py3.12, `--break-system-packages`)**: `torch`(CPU 휠 — action chunk torch.Tensor unpickle),
+  `grpcio`, `protobuf>=6.31`(vendored pb2 runtime 검사), `python-dotenv`, `numpy<2`(cv_bridge ABI 보호).
+  **실 lerobot 은 설치 안 함** — import 체인이 transformers/datasets/diffusers 까지 끌어와 pip
+  resolve 가 폭발(imageio backtracking). 대신 `ros2_ws/src/so101_vla_policy/vendor/lerobot/` 에
+  gRPC pickle 호환 최소 shim(`async_inference/helpers.py` dataclass + `transport/` pb2 복사·utils
+  재구현)을 두고 entrypoint 가 PYTHONPATH 로 잡는다. 실 lerobot 0.4.4 와 **양방향 pickle 호환 검증됨**
+  (RemotePolicyConfig/TimedObservation 송신·TimedAction 수신).
 - DDS: `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` + `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`(host↔container
   cross-UID SHM 회피, §1·`run_cube_desk_ros_bridge.sh` 와 동일).
 - compose 서비스 `vla-ros`: `network_mode/ipc: host`, repo 를 `/workspace` 로 마운트,
@@ -243,8 +247,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
 | 함정 | 메모 |
 |---|---|
 | **카메라 prim 부착** | bridge robot USD link prim 명(`gripper`/`shoulder`)이 gym 과 같다고 가정. 다르면 `[bridge] WARN: camera parent prim 없음` 후 skip → prim 경로 수정 |
-| **numpy ABI** | cv_bridge(apt)=system numpy 1.26 빌드. lerobot/torch 가 numpy 2.x 로 올리면 import 깨짐 → `numpy<2` 핀(Dockerfile 반영) |
-| **pickle 호환** | client lerobot 0.4.4 ↔ server 0.5.1 (실기기 policy-client 경로 검증). lerobot 버전 변경 시 재확인 |
+| **numpy ABI** | cv_bridge(apt)=system numpy 1.26 빌드. torch 가 numpy 2.x 로 올리면 import 깨짐 → `numpy<2` 핀(Dockerfile 반영) |
+| **vendored lerobot** | 실 lerobot 미설치 — `vendor/lerobot/` shim. server(0.5.1) 의 RemotePolicyConfig/TimedObservation/TimedAction 필드가 바뀌면 shim 도 갱신. pb2 는 `lerobot/transport/services.proto` 변경 시 재복사. 양방향 pickle 호환 검증됨 |
 | **${HF_USER} 미보간** | host 에서 `POLICY_REPO_ID=${HF_USER}/…` 미해결 시 노드 경고 → param `pretrained_name_or_path` 지정 |
 | **카메라 convention** | gym TiledCamera offset(convention="world")와 동일 view 위해 bridge 가 world→opengl 변환 후 USD prim author |
 

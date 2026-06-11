@@ -10,6 +10,10 @@ source /opt/ros/jazzy/setup.bash
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
 
+# vendored mini-lerobot(async_inference.helpers + transport pb2/utils) 경로 — gRPC pickle 호환용.
+# 실 lerobot 대신(import 체인 무거움) 이 경량 shim 으로 lerobot.* 를 resolve 한다.
+export PYTHONPATH="/workspace/ros2_ws/src/so101_vla_policy/vendor:${PYTHONPATH:-}"
+
 WS=/workspace/ros2_ws
 cd "${WS}"
 

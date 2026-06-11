@@ -8,7 +8,8 @@ package_name = "so101_vla_policy"
 setup(
     name=package_name,
     version="0.1.0",
-    packages=find_packages(exclude=["test"]),
+    # vendor/(vendored mini-lerobot)는 패키지로 설치하지 않는다 — 런타임 PYTHONPATH 로만 사용.
+    packages=find_packages(exclude=["test", "vendor", "vendor.*"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
