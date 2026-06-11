@@ -1,31 +1,38 @@
-"""SO-101 pick-and-place rule-based state machine (cube_desk 씬) — 해석적 IK 판.
+"""SO-101 pick-and-place rule-based state machine (cube_desk 씬) — 해석적 IK.
 
-v1(해석적 IK + 단순 FSM 초안) → v2(Cartesian 직선 + 재시도 FSM 초안) 를 거쳐,
-본 v3 는 둘을 실제 Isaac Lab 환경(`SimToReal-SO101-PickCube-v0`)에 연결한 메인 코드다.
-Lula/DiffIK 등 수치 솔버 없이 **닫힌 해(closed-form) IK + joint position action** 만 사용한다.
+Lula/DiffIK 등 수치 솔버 없이 닫힌 해(closed-form) IK + joint position action 만으로
+`SimToReal-SO101-PickCube-v0` 에서 큐브 4개(30/40mm)를 그릇에 담는다.
 
 설계
 ----
-- 기구학: URDF(so_arm101.urdf) origin 체인을 pan 회전 평면의 2-link(+wrist 체인)로
-  환원한 해석적 FK/IK. 관절 역할 분해:
+- 기구학(SO101Kinematics): URDF(so_arm101.urdf) origin 체인을 pan 회전 평면의
+  2-link(+wrist 체인)로 환원한 해석적 FK/IK. 관절 역할 분해:
     q1 (shoulder_pan)  : 방위각 (pan 축은 base -z → 부호 반전)
     q2,q3 (lift/elbow) : pitch 평면 2-link IK
-    q4 (wrist_flex)    : 툴 피치 보정 (top-down = -90°, 도달 불가 시 점진 완화)
-    q5 (wrist_roll)    : 손가락 닫힘축을 큐브 yaw 에 정렬 (90° 대칭 접기)
+    q4 (wrist_flex)    : 툴 피치 (top-down -90°, 도달 불가 시 ik_reach 가 점진 완화)
+    q5 (wrist_roll)    : 닫힘축을 큐브 yaw 에 정렬(90° 대칭 접기) + roll_offset
+  좌표 정합·기구학 상수는 --calibrate 모드 실측으로 검증 (FK err 1.5mm).
 - action: PickCubeEnvCfg 의 6-dim SlewLimitedJointPositionAction.
-  desired = raw*1.0 + default_offset (arm 0, gripper 0.20) 이므로
-  arm 은 절대 관절각 그대로, gripper 는 target-0.20 을 raw 로 보낸다.
-  속도 가감속은 slew limit(arm 5.0 / gripper 2.5 rad/s)이 보장한다.
-- FSM: per-env 상태 배열로 num_envs 병렬 관리, 매 step env.step([N,6]) 1회.
-  SAFE_Z 횡이동 / latch+drift 감지 / lift 후 파지 검증 / 재시도(MAX 3) /
-  max_phase_steps timeout 안전장치.
-- grasp = side-approach: 큐브 중심이 아니라 닫힘축의 base 쪽으로 side_offset 만큼
-  비킨 지점에 수직 하강(찌르기 원천 차단) 후, 수평 SLIDE 로 큐브를 손가락 사이에
-  넣고 닫는다. 비킴 방향이 base 쪽인 이유: fixed finger 가 닫힘축 base-반대쪽에
-  있어 반대로 비키면 slide 중 fixed 가 선두로 큐브 면을 밀고 다닌다 (실측).
-  중력 처짐(PD stiffness 17.8 의 정적 오차 ~0.14rad)은 적분 보상(q_bias)으로 제거.
+  desired = raw*1.0 + default_offset (arm 0, gripper 0.20) → arm 은 절대 관절각
+  그대로, gripper 는 target-0.20. 중력 처짐(PD 정적 오차 ~0.14rad)은 q_bias
+  적분 보상으로 제거. 모든 이동은 Cartesian ramp — 위치뿐 아니라 자세(pitch/roll)도
+  ramp 해야 한다 (불연속 자세 명령 = slew 풀속도 재배향 = 휘두름).
+- FSM(SO101PickPlaceSM): per-env 상태 배열로 num_envs 병렬, 매 step env.step([N,6]) 1회.
+  · 집기 순서: 매번 남은 큐브 중 (장애물 클리어 > liftable > 근접) 동적 선택,
+    큐브당 2라운드 상한.
+  · grasp = side-approach: 닫힘축의 base 쪽(=fixed finger 반대쪽)으로 side_offset
+    비킨 지점에 수직 하강 후 수평 SLIDE 로 큐브를 손가락 사이에 넣고 close.
+    비킴 방향은 _grasp_candidates 가 roll 0/±90/180° 후보 중 그릇·다른 큐브와
+    충돌하지 않는 첫 후보로 결정 (큐브 90° 대칭 이용).
+  · base 발치(inner-reach) 큐브는 DRAG: 낮게 쥔 채 liftable 반경으로 끌고 와서 lift.
+  · 운반(TRANSPORT) 중 xy ramp 진행률에 pitch(→그릇 목표)·wrist roll(→90°,
+    release 자세)을 함께 실어 점진 보간.
+  · release: 닫힘축이 바닥과 평행(roll 90°)한 자세로 안전 고도에서 하강 없이 떨굼
+    (jaw 가 수평면에서 열려 퍼올림 불가) → 0.4s 정지 → 상승.
+  · 안전장치: drift/drop/이탈 감지 → 재시도(MAX 3), max_phase_steps timeout.
 
-검증 결과 (2026-06-11): 고정 spawn 4/4, DR full 2 env 6/8 — 실패는 reach 경계 spawn.
+검증 (2026-06-12): 고정 spawn 4/4 (~20초), DR full 4 env 16/16 (100%).
+함정·해결 이력은 docs/TROUBLESHOOTING.md §SO-101 SM 관련 4개 섹션 참조.
 
 실행:
     OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \\
@@ -92,7 +99,7 @@ parser.add_argument("--calibrate", action="store_true",
 parser.add_argument("--joint_tol", type=float, default=0.09,
                     help="관절 수렴 판정 max|q_goal-q_now| (rad). 거친 이동 단계용")
 parser.add_argument("--fine_joint_tol", type=float, default=0.025,
-                    help="정밀 단계(DESCEND/LOWER) 관절 수렴 판정 (rad)")
+                    help="정밀 단계(PRE_GRASP/DESCEND/SLIDE) 관절 수렴 판정 (rad)")
 parser.add_argument("--max_phase_steps", type=int, default=240,
                     help="한 단계에서 수렴 못해도 넘어가는 step 상한 (30 Hz 기준 8초)")
 parser.add_argument("--grasp_dwell", type=int, default=10, help="그리퍼 닫힘 정착 step (30 Hz)")
@@ -107,21 +114,16 @@ parser.add_argument("--safe_height", type=float, default=0.12,
 parser.add_argument("--grasp_z_offset", type=float, default=0.005,
                     help="grasp 시 큐브 중심 기준 TCP z 오프셋. +5mm가 검증값 — "
                          "더 깊게 내리면 reach 가장자리에서 실행 미달로 회귀")
-parser.add_argument("--place_height", type=float, default=0.085,
-                    help="그릇 중심 기준 release 시 TCP 높이")
 parser.add_argument("--drift_tol", type=float, default=0.015,
                     help="latch 후 하강 중 큐브 xy 이탈 허용 (m). 초과 시 재접근")
 parser.add_argument("--lift_check", type=float, default=0.03,
                     help="파지 검증: lift 후 큐브 최소 상승량 (m)")
 # 그리퍼 명령 (joint target, rad)
 parser.add_argument("--gripper_open", type=float, default=0.65,
-                    help="30mm 큐브용 열림 joint target (rad). 더 좁히면 큐브가 "
-                         "손가락 사이로 못 들어오고, 더 벌리면 회전형 jaw 끝이 "
-                         "TCP 아래로 처져 하강이 일찍 막힘")
+                    help="30mm 큐브용 열림 joint target (rad). 좁히면 큐브가 안 들어오고 "
+                         "벌리면 jaw 끝이 처져 하강이 막힘")
 parser.add_argument("--gripper_open_large", type=float, default=0.85,
                     help="40mm 큐브용 열림 joint target (rad)")
-parser.add_argument("--grasp_z_offset_large", type=float, default=0.005,
-                    help="40mm 큐브용 grasp z 오프셋 (m)")
 parser.add_argument("--side_offset", type=float, default=0.035,
                     help="side-approach 횡오프셋 (m): 큐브 중심에서 닫힘축 방향으로 "
                          "이만큼 비켜 수직 하강(찌르기 원천 차단) 후 수평 slide 로 "
@@ -142,15 +144,12 @@ parser.add_argument("--pregrasp_height", type=float, default=0.04,
 parser.add_argument("--pregrasp_dwell", type=int, default=5,
                     help="pre-grasp hover 정착 step (bias 적분 수렴용)")
 parser.add_argument("--descend_speed", type=float, default=0.15,
-                    help="DESCEND/LOWER Cartesian 수직 하강 속도 (m/s). joint 공간 "
-                         "보간은 TCP 가 호를 그려 큐브를 찌르므로 z 를 점진 하강시켜 "
-                         "수직 직선 경로를 강제")
+                    help="DESCEND 수직 하강 속도 (m/s). joint 공간 보간은 TCP 가 "
+                         "호를 그려 큐브를 찌르므로 z-ramp 로 수직 직선 경로를 강제")
 parser.add_argument("--lift_speed", type=float, default=0.40,
-                    help="LIFT 수직 상승 속도 (m/s)")
+                    help="LIFT/RETREAT 수직 상승 속도 (m/s)")
 parser.add_argument("--transport_speed", type=float, default=0.50,
                     help="TRANSPORT 수평 운반 속도 (m/s). Cartesian 직선 ramp")
-parser.add_argument("--lower_speed", type=float, default=0.25,
-                    help="LOWER 하강 속도 (m/s)")
 parser.add_argument("--gripper_close", type=float, default=-0.05)
 # GUI 초기 카메라(사이드뷰) — world 좌표. headless 에선 무시됨.
 parser.add_argument("--view_eye", type=_vec3, default=(3.05, -0.78, 1.02),
@@ -587,7 +586,7 @@ class Phase(IntEnum):
     DRAG          = 6   # inner/outer-reach 보정: 낮게 쥔 채 liftable 반경으로 끌기
     LIFT          = 7   # SAFE_Z 로 상승 + 파지 검증
     TRANSPORT     = 8   # SAFE_Z 유지하며 그릇 상공 횡이동
-    LOWER         = 9   # 그릇 안 release 높이로 하강
+    LOWER         = 9   # release 자세 정착 게이트 (회전은 TRANSPORT 에서 완료)
     RELEASE_DWELL = 10  # 그리퍼 열림 정착
     RETREAT       = 11  # SAFE_Z 로 후퇴 → 다음 큐브
     HOME_FINAL    = 12  # 홈 자세 복귀 후 완료
@@ -600,7 +599,7 @@ _MOVE_PHASES = frozenset({
     Phase.LIFT, Phase.TRANSPORT, Phase.LOWER, Phase.RETREAT,
 })
 # 정밀 수렴(fine_joint_tol) 단계
-_FINE_PHASES = frozenset({Phase.PRE_GRASP, Phase.DESCEND, Phase.SLIDE, Phase.LOWER})
+_FINE_PHASES = frozenset({Phase.PRE_GRASP, Phase.DESCEND, Phase.SLIDE})
 
 
 class SO101PickPlaceSM:
@@ -628,7 +627,6 @@ class SO101PickPlaceSM:
 
         # per-env 상태
         self.phase       : list[Phase] = [Phase.SETTLE] * self.num_envs
-        self.n_placed    : list[int]   = [0]   * self.num_envs
         self.dwell_count : list[int]   = [0]   * self.num_envs
         self.phase_steps : list[int]   = [0]   * self.num_envs
         self.retries     : list[int]   = [0]   * self.num_envs
@@ -640,21 +638,26 @@ class SO101PickPlaceSM:
         self.grasp_z0    : list[float] = [0.0] * self.num_envs
         # 현재 관절 목표 (IK 실패 시 유지용)
         self.q_cmd       : list[list[float]] = [list(self.HOME_Q) for _ in range(self.num_envs)]
-        # 중력 처짐 보상 적분기: PD(stiffness 17.8) 정적 오차(lift ~0.14rad)를
+        # 중력 처짐 보상 적분기 [N,5]: PD(stiffness 17.8) 정적 오차(lift ~0.14rad)를
         # action 에 가산해 제거. 매 step bias += KI*(q_cmd - q_now), 클립 ±BIAS_MAX.
-        self.q_bias      : list[list[float]] = [[0.0] * 5 for _ in range(self.num_envs)]
-        # 최근 IK 가 채택한 접근 pitch (진단용)
+        self.q_bias = torch.zeros((self.num_envs, 5), device=env.unwrapped.device)
+        # 최근 IK 가 채택한 접근 pitch
         self.last_pitch  : list[float] = [-math.pi / 2] * self.num_envs
-        # DESCEND/LOWER 수직 경로 보간용 현재 z 명령 (None = 미시작)
+        # DESCEND/LIFT/RETREAT 수직 경로 ramp 의 현재 z 명령 (None = 미시작)
         self.z_ramp      : list[float | None] = [None] * self.num_envs
-        # SLIDE/TRANSPORT 수평 ramp 진행 거리 (m) + TRANSPORT 시작점
+        # SLIDE/TRANSPORT 수평 ramp 진행 거리 (m)
         self.slide_s     : list[float] = [0.0] * self.num_envs
         # PRE_GRASP 에서 1회 확정하는 (roll_offset, 비킴 dx, dy) — step 간 토글 방지
         self.side_pick   : list[tuple[float, float, float] | None] = [None] * self.num_envs
-        # LOWER 재배향 ramp 의 시작 pitch (진입 시점의 실제 pitch — 그릇은 top-down
-        # 한계 밖이라 -90° 가정 시작은 즉시 IK 실패)
-        self.rot_pitch0  : list[float | None] = [None] * self.num_envs
+        # TRANSPORT 자세 보간 파라미터 (시작 pitch, 목표 pitch, roll 부호) — 진입 시 1회
+        self.rot_pitch0  : list[tuple | None] = [None] * self.num_envs
+        # TRANSPORT 수평 ramp 시작점 (LIFT 종료 시 기록)
         self.move_from   : list[tuple[float, float]] = [(0.0, 0.0)] * self.num_envs
+
+        # TCP 실측용 캐시: gripper body index + grasp offset (매 step 재계산 방지)
+        self._g_idx = list(self.robot.data.body_names).index("gripper")
+        self._grasp_off = torch.tensor(
+            [-0.0079, -0.000218121, -0.0981274], device=self.device)
 
     BIAS_KI  = 0.06
     BIAS_MAX = 0.35
@@ -665,15 +668,12 @@ class SO101PickPlaceSM:
         return self.scene[name].data.root_pos_w[e, :3].clone()
 
     def _tcp_meas_w(self, e: int) -> torch.Tensor:
-        """gripper body + grasp offset → TCP world 실측 (진단용)."""
+        """gripper body + grasp offset → TCP(gripper_frame) world 실측."""
         from isaaclab.utils.math import quat_apply
 
-        names = list(self.robot.data.body_names)
-        g_idx = names.index("gripper")
-        off = torch.tensor([-0.0079, -0.000218121, -0.0981274], device=self.device)
-        gp = self.robot.data.body_pos_w[e, g_idx]
-        gq = self.robot.data.body_quat_w[e, g_idx]
-        return gp + quat_apply(gq.unsqueeze(0), off.unsqueeze(0)).squeeze(0)
+        gp = self.robot.data.body_pos_w[e, self._g_idx]
+        gq = self.robot.data.body_quat_w[e, self._g_idx]
+        return gp + quat_apply(gq.unsqueeze(0), self._grasp_off.unsqueeze(0)).squeeze(0)
 
     def obj_yaw(self, name: str, e: int) -> float:
         return _quat_to_yaw(self.scene[name].data.root_quat_w[e])
@@ -711,8 +711,7 @@ class SO101PickPlaceSM:
 
     @staticmethod
     def _zoff(cube: str) -> float:
-        return (args.grasp_z_offset_large
-                if CUBE_SIZES.get(cube, 0.030) >= 0.040 else args.grasp_z_offset)
+        return args.grasp_z_offset
 
     # --- IK 래퍼 ---------------------------------------------------------
 
@@ -1162,14 +1161,11 @@ class SO101PickPlaceSM:
                 self.phase[e]       = Phase.LOWER
             return self.q_cmd[e], args.gripper_close
 
-        # ----- LOWER(ROTATE): 자세 불변, wrist roll 만 +90° ramp 후 release -----
-        # 사용자 지정: FK/IK 재계산 금지 — 다른 joint 는 그대로 두고 q5 만 돌린다.
-        # 닫힘축이 접근축 주위로 90° 돌아 jaw 가 옆으로 열림 → 퍼올림 방지.
-        # 하강도 하지 않는다 — 안전 고도에서 그대로 떨굼.
+        # ----- LOWER: release 자세 정착 게이트 -----
+        # 자세 재배향(pitch→그릇 목표, roll→90°)은 TRANSPORT 가 운반과 함께 완료 —
+        # 여기선 정착만 확인하고 release 로 넘어간다. 하강 없음(안전 고도에서 떨굼).
         if ph == Phase.LOWER:
-            # 회전은 TRANSPORT 에서 이미 완료 — 여기선 정착 확인만 (짧은 dwell)
             self.dwell_count[e] += 1
-            rot_t = 1.0
             if (self.dwell_count[e] >= 5 and self._converged(e, tol)) or timeout:
                 self.rot_pitch0[e]  = None
                 self.dwell_count[e] = 0
@@ -1182,7 +1178,6 @@ class SO101PickPlaceSM:
             self.dwell_count[e] += 1
             if self.dwell_count[e] >= args.release_dwell:
                 self.dwell_count[e] = 0
-                self.n_placed[e]   += 1
                 self.phase_steps[e] = 0
                 self.phase[e]       = Phase.RETREAT
             return self.q_cmd[e], self._open_cmd(cube)
@@ -1193,8 +1188,8 @@ class SO101PickPlaceSM:
             b = self.obj_pos(BOWL_NAME, e)
             safe_z = self._safe_z_w(e)
             if self.z_ramp[e] is None:
-                # 시작점 = 실측 TCP z — 고정 가정(place_height)은 release 자세가
-                # 더 높을 때 '내려갔다 올라오는' 명령이 되어 그릇을 친다
+                # 시작점 = 실측 TCP z — 고정 가정은 release 자세가 더 높을 때
+                # '내려갔다 올라오는' 명령이 되어 그릇을 친다
                 self.z_ramp[e] = self._tcp_meas_w(e)[2].item()
             self.z_ramp[e] = min(safe_z, self.z_ramp[e] + args.lift_speed / 30.0)
             self._solve(e, (b[0].item(), b[1].item(), self.z_ramp[e]), 0.0)
@@ -1207,16 +1202,14 @@ class SO101PickPlaceSM:
     # --- 배치 액션 + 메인 루프 ---------------------------------------------
 
     def _act_all(self, q_list: list[list[float]], grip_targets: list[float]) -> None:
-        action = torch.zeros((self.num_envs, 6), device=self.device)
-        for e in range(self.num_envs):
-            # 적분 보상 갱신 (중력 처짐 제거)
-            q_now = self.robot.data.joint_pos[e, :5].detach().cpu().tolist()
-            for j in range(5):
-                b = self.q_bias[e][j] + self.BIAS_KI * (q_list[e][j] - q_now[j])
-                self.q_bias[e][j] = max(-self.BIAS_MAX, min(self.BIAS_MAX, b))
-            action[e, :5] = torch.tensor(
-                [q + b for q, b in zip(q_list[e], self.q_bias[e])], device=self.device)
-            action[e, 5]  = grip_targets[e] - GRIPPER_ACTION_OFFSET
+        """전체 env 의 (q_cmd + 중력 처짐 적분 보상) 을 배치 action 으로 1회 step."""
+        q_cmd = torch.tensor(q_list, device=self.device)                  # [N, 5]
+        q_now = self.robot.data.joint_pos[:, :5]                          # [N, 5]
+        self.q_bias = torch.clamp(
+            self.q_bias + self.BIAS_KI * (q_cmd - q_now),
+            -self.BIAS_MAX, self.BIAS_MAX)
+        grip = torch.tensor(grip_targets, device=self.device) - GRIPPER_ACTION_OFFSET
+        action = torch.cat([q_cmd + self.q_bias, grip.unsqueeze(-1)], dim=-1)
         self.env.step(action)
 
     def run(self) -> None:
