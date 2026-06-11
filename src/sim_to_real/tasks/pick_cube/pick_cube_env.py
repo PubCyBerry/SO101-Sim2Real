@@ -155,6 +155,9 @@ class PickCubeEnv(ManagerBasedRLEnv):
         """
         if self._place_bootstrap_prob <= 0.0 or len(env_ids) == 0:
             return
+        # _gripper_jid 는 step() 에서 1회 캐시 — 초기 reset 에선 아직 None
+        if self._grasp_offset is None:
+            return
         # scratch(0)인 env 에서만 적용(grasp 부트스트랩과 중복 방지)
         scratch = env_ids[self.bootstrap_kind[env_ids] == 0]
         if len(scratch) == 0:
