@@ -173,6 +173,10 @@ parser.add_argument("--jaw_grasp", action="store_true",
                          "기본은 side-approach+slide(run7). jaw_offset 튜닝해도 top-down 은 구조적 한계")
 parser.add_argument("--jaw_offset", type=float, default=0.0,
                     help="(--jaw_grasp 전용) 직하강 grasp 의 ⊥ 보정 (m). 비대칭 moving jaw 상쇄 시도용")
+parser.add_argument("--mj_outer", type=float, default=0.6,
+                    help="클러스터 grasp-face 선정 가중. >0 이면 **moving jaw 가 클러스터 바깥**(fixed "
+                         "finger 가 안쪽)을 향하는 roll 선호 → 움직이는 jaw 가 이웃 큐브 안 쓸고 빈 공간으로 "
+                         "닫힘(사용자). clearance 1차(틈 없으면 빈 face)·mj_outer 2차. 0.6 검증(clip −37%·clean +8.6pt)")
 parser.add_argument("--blend_radius", type=float, default=0.03,
                     help="이동 WP(flythrough) 코너 곡선 blend 반경 (m). >0 이면 목표 blend_radius 안에서 "
                          "다음 WP 로 조향 시작 → 둥근 호(부드러운 곡선 동선). 0=직각. 0.03 검증(success 불변)")
@@ -817,11 +821,12 @@ class SO101PickPlace:
             pitch = pmin + (pmax - pmin) * i / (nps - 1)
             for j in range(n):                     # 얇게(floor) → 깊게
                 gz = top - (lo + (deep - lo) * j / (n - 1))
-                if self._ik(e, (gx, gy, gz), pitch, yaw, roll) is None:
+                q_c = self._ik(e, (gx, gy, gz), pitch, yaw, roll)
+                if q_c is None:
                     continue                       # grasp/center 미도달 → 다음 (싼 쪽 먼저)
                 if (not args.jaw_grasp) and self._ik(e, (bx0, by0, gz), pitch, yaw, roll) is None:
                     continue                       # offset 점 미도달 → 다음 (slide 경로)
-                return gx, gy, gz, pitch, bx0, by0, dx, dy
+                return gx, gy, gz, pitch, bx0, by0, dx, dy, q_c[4]  # q5 = moving-jaw ⊥ 측 지표
         return None
 
     def _evaluate_all_grasps(self, e: int, cube: str):
@@ -854,7 +859,7 @@ class SO101PickPlace:
             cand = self._grasp_candidate(e, cube, roll)
             if cand is None:
                 continue
-            gx, gy, gz, pitch, bx0, by0, dx, dy = cand
+            gx, gy, gz, pitch, bx0, by0, dx, dy, q5 = cand
             fx, fy = -dy, dx                          # 손가락 분리축(⊥)
             pts = [
                 (px + fh * fx, py + fh * fy),         # 손가락 끝 A (⊥)
@@ -876,7 +881,19 @@ class SO101PickPlace:
             pitch_norm = max(0.0, min(1.0, (math.degrees(pitch) + 90.0) / 60.0))
             bias = 0.1 if abs(abs(roll) - math.pi / 2) < 1e-3 else 0.0  # ±90° 만 선호(0/π 제외)
             cont = 0.05 if (last is not None and abs(roll - last) < 1e-3) else 0.0
-            composite = clear_norm + pitch_norm + bias + cont
+            # 클러스터 grasp-face(사용자): moving jaw 를 클러스터 **바깥**으로(fixed finger 안쪽).
+            # moving jaw ⊥ 측 = sign(sin q5)·(fx,fy). 이웃 centroid 반대(바깥) 향할수록 +. clearance 가
+            # 1차(틈 없으면 빈 face 로) → mj_outer 는 2차 bias. 부호 convention 은 ±mj_outer 로 테스트.
+            outer_score = 0.0
+            if args.mj_outer != 0.0 and others:
+                cxn = sum(float(o[0]) for o in others) / len(others)
+                cyn = sum(float(o[1]) for o in others) / len(others)
+                oox, ooy = px - cxn, py - cyn          # target → 클러스터 바깥 방향
+                on = math.hypot(oox, ooy)
+                if on > 1e-6:
+                    s = -math.copysign(1.0, math.sin(q5))  # moving jaw ⊥ 부호(+0.6 검증으로 보정)
+                    outer_score = (s * fx * oox + s * fy * ooy) / on  # ∈[-1,1], +1=jaw 바깥
+            composite = clear_norm + pitch_norm + bias + cont + args.mj_outer * outer_score
             if best is None or composite > best[0]:
                 best = (composite, (gx, gy, gz, yaw, roll, pitch, bx0, by0))
         if best is None:

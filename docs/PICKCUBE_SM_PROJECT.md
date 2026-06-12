@@ -2,8 +2,9 @@
 
 > **한 줄 요약**: cube_desk 에서 SO-101 팔이 큐브 4개를 그릇에 넣는 **결정적(rule-based) pick-and-place 오라클**. **해석적(closed-form) IK + Cartesian waypoint follower** 만 사용(Lula/DiffIK·RL 없음). 용도는 **VLA 학습용 expert 데이터 생성**(RL 정책과 병행 — RL 은 다양성, SM 은 결정적 고신뢰).
 >
-> **현재 상태**: 🔵 **4-cube 256-env 55% · clean 25% · ~31초** · **1-cube 2048-env 93%·clean 77%·~16초**([1-cube_2048.md](1-cube_2048.md)). 커밋 `ccf64bf`(grasp-face 선정 + up-over-down 이동 + 곡선 blend). 직전 `831349d`(57.2%/40초).
-> **천장 = offset-descend self-clip**(4-cube 55%, 1-cube 93% — 단일 기구는 견고, 멀티큐브 클러스터에서 막힘). jaw-aware top-down(`--jaw_grasp`, slide 제거)은 실패(run8 25.9%) → **slide 구조적 필수**. 영상 `outputs/so101_success_env8.mp4`(4/4)·`so101_fail_env233.mp4`(2/4). 다음=jaw 기하 반영 grasp 재설계.
+> **현재 상태**: 🔵 **4-cube 256-env 57.6% · clean 34% · ~30초** · **1-cube 2048-env 93%·clean 77%·~16초**([1-cube_2048.md](1-cube_2048.md)·[4-cube_2048.md](4-cube_2048.md)). 직전 커밋 `aa3f196`.
+> **최신(③ 클러스터 grasp-face, 사용자 지시)**: `--mj_outer`(기본 0.6) — 클러스터에서 **fixed finger 안쪽·moving jaw 바깥**(움직이는 jaw 가 이웃 안 쓸고 빈 공간으로 닫힘) roll 선호. 128-env clip −37%·clean +8.6pt, 256-env **clean 24.6→34%·success 54.9→57.6%**. moving jaw ⊥측 = sign(sin q5), 이웃 centroid 반대 향할수록 가산(clearance 1차·mj_outer 2차).
+> **천장 = offset-descend self-clip**(여전히 182). jaw-aware top-down(`--jaw_grasp`, slide 제거)은 실패(run8 25.9%·jaw_offset ±도 19–26%) → **slide 구조적 필수**. 엣지 영상 `outputs/so101_edge_*.mp4`.
 > **세션 2026-06-13 (① grasp-face 선정 재설계 + ② up-over-down 이동 재설계)**:
 > ① `_grasp_setup`+`_grasp_pose`(roll 1개 commit, fallback 없음) → **`_evaluate_all_grasps`(roll 4개 end-to-end 도달성 게이트 + composite)**. build_plan None 636→314(−51%)·clean↑.
 > ② 사용자 영상 피드백("yaw 회전이 큐브 쓸고·그릇 침·home→전방 forklift") → `_build_plan` 을 **up-over-down**(횡이동은 항상 travel_height 고정고도, 수직만 오르내림 — 대각선 sweep 제거) + executor **flythrough**(이동 WP 코너서 안 멈춰 등속 부드럽게)로 재작성. **결과: clean 17.6→25.8%·descend-clip 265→223·slide-stuck 177→82·40→30초**. success 는 55% (offset-descend self-clip 223 이 여전히 천장). 세부 §7·§9.
@@ -220,8 +221,19 @@ flowchart TD
 | run9 | 기본 slide + 곡선 blend(0.03) | 55.2% | 24.6% | ✅ 코너 둥근 호(부드러운 곡선 동선) success 불변 → blend 기본 on |
 | 256 재확인 | slide+up-over-down+blend (커밋 `ccf64bf`) | 54.9% | 24.6% | 현 config 안정 |
 | 1-cube 2048 | --active_objects 1 | **93.0%** | 76.8% | ✅ <16초. 단일 큐브 견고 = SM 상한. 4-cube 격차=클러스터링 ([1-cube_2048.md](1-cube_2048.md)) |
+| 4-cube 2048 | scale 검증 | 55.8% | 23.0% | ✅ 256(54.9)와 동일 = scale 안정 ([4-cube_2048.md](4-cube_2048.md)) |
 
 > **grasp 순서별 clip율**: 1번째 22%→4번째 12% (밀집할수록↑, 후순위는 declutter 로↓). 사용자 "3·4번째 face 틀림"은 anecdotal — 체계적으로는 1번째(최밀집)가 최악. **천장 = 밀도 상관 self-clip** = jaw 기하 문제(§4).
+
+**이어서 (④ jaw-aware top-down 폐기 + 클러스터 grasp-face, 사용자 지시)**:
+
+| run | 변경 | success | clean | clip | 교훈 |
+|---|---|---|---|---|---|
+| jaw ±0.022 | `--jaw_grasp --jaw_offset ±0.022` (128) | 1–20% | — | — | ⚫ top-down 은 jaw_offset 부호 맞춰도 capture 불가(빈grasp↑). slide 필수 확정(D20) |
+| mj_outer +0.6 | 클러스터 grasp-face(jaw 바깥) (128) | 59.4% | **38.3%** | **50** | ✅ 사용자 영상 진단: 움직이는 jaw 가 큐브 윗면 쓸어 굴림 → jaw 를 클러스터 바깥으로 |
+| **mj_outer 0.6** | **256 확정(기본 on)** | **57.6%** | **34.0%** | 182 | ✅ baseline 대비 **clean +9.4pt·success +2.7**. moving-jaw-outer = 세션 최고 grasp-face |
+
+> **사용자 영상 진단(④)**: ① 움직이는 jaw 가 큐브 윗면 밀어 90° 굴림(slide 중) ② 나란히 붙은 2큐브 = grasp face 오선택 → 둘 다 한번에 집으려다 빈손. **해법(사용자 지시)**: 클러스터는 fixed finger 안쪽·moving jaw 바깥(`--mj_outer`), 틈 없으면 clearance 가 빈 face 로.
 
 **핵심 진단(확정)**:
 1. 🔥 **소규모 과대평가** — 16-env(76%)는 쉬운 spawn 우연. **2048=51.6% 가 진짜.** 검증은 ≥256-env(C5).
@@ -254,6 +266,8 @@ flowchart TD
 | D17 | descend-clip **open-jaw overhang 가설 반증** | descend 닫고 내려가기(run4) → 14%·빈grasp 1431 로 악화. clip 은 단순 open-jaw 가 아님(TCP 큐브 위서 손가락 침). 다음 수정은 **반드시 영상 관찰 기반** | 에이전트 진단 |
 | D18 | 이동 = **up-over-down 고정고도**(횡이동 항상 travel_height, 수직만) + executor **flythrough** | 사용자 영상: yaw 회전이 큐브 쓸고·home→전방 forklift·그릇 침 = **이동 중 sweep**(taxonomy 미포착). 대각선 sweep 제거 + 코너 무정지 등속. clean 17.6→25.8%·40→30초 | 사용자 영상 |
 | D19 | 고정고도 게이트는 **`_ik_reach`(pitch 스캔)** 필수, `_ik`(고정 top-down) 금지 | run6: `_ik` top-down 게이트 → 높은 점 도달 불가 100% reject(0%). 높은 운반점은 완화 pitch 라야 닿음 | 에이전트 진단 |
+| D20 | jaw-aware top-down(slide 제거) **폐기**, slide 구조적 필수 | run8 jaw_offset 0/±0.022: 19–26% (fixed finger 가 center 침·top-down 은 capture 불가). slide 의 수평 진입이 신뢰 capture | 에이전트 진단 |
+| D21 | 클러스터 grasp-face = **fixed finger 안쪽·moving jaw 바깥**(`--mj_outer` 0.6) | 사용자 영상 지시. 움직이는 jaw 가 이웃 안 쓸고 빈 공간으로 닫힘 → clip −37%·clean +9pt. 틈 없으면 clearance 가 빈 face 로(1차) | 사용자 |
 
 ---
 
@@ -273,6 +287,7 @@ flowchart TD
 | `--blend_radius` | **0.03** | 이동 WP 코너 곡선 blend 반경. >0=둥근 호(부드러운 동선). 0=직각 |
 | `--jaw_grasp` (실험) | off | top-down 직하강(slide 제거). run8 실패(25.9%, fixed finger 침) → 기본 off |
 | `--jaw_offset` (실험) | 0.0 | `--jaw_grasp` 시 ⊥ 보정(큐브를 gap 중심으로). 비대칭 jaw 상쇄 |
+| `--mj_outer` | **0.6** | 클러스터 grasp-face: moving jaw 를 클러스터 **바깥**(fixed finger 안쪽) 향하는 roll 선호. clip −37%·clean +9pt. 0=off |
 | `--reach_tol` | 0.012 | slide WP Cartesian 도달 판정(close miss 방지) |
 | `--max_round` | **3** | 큐브당 replan 상한(6 은 cap 컷오프) |
 | `--gripper_speed` | 5.0 | 그리퍼 slew(물리상한). close 시간↓ |
