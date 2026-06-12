@@ -2,7 +2,8 @@
 
 > **한 줄 요약**: cube_desk 에서 SO-101 팔이 큐브 4개를 그릇에 넣는 **결정적(rule-based) pick-and-place 오라클**. **해석적(closed-form) IK + Cartesian waypoint follower** 만 사용(Lula/DiffIK·RL 없음). 용도는 **VLA 학습용 expert 데이터 생성**(RL 정책과 병행 — RL 은 다양성, SM 은 결정적 고신뢰).
 >
-> **현재 상태**: 🔵 **flat-dense 256-env 55% · clean 25.8% · ~30초 (seed0)**. grasp-face 선정 + up-over-down 이동 재설계 반영 커밋. 직전 `831349d`(57.2%/clean17.6%/40초).
+> **현재 상태**: 🔵 **4-cube 256-env 55% · clean 25% · ~31초** · **1-cube 2048-env 93%·clean 77%·~16초**([1-cube_2048.md](1-cube_2048.md)). 커밋 `ccf64bf`(grasp-face 선정 + up-over-down 이동 + 곡선 blend). 직전 `831349d`(57.2%/40초).
+> **천장 = offset-descend self-clip**(4-cube 55%, 1-cube 93% — 단일 기구는 견고, 멀티큐브 클러스터에서 막힘). jaw-aware top-down(`--jaw_grasp`, slide 제거)은 실패(run8 25.9%) → **slide 구조적 필수**. 영상 `outputs/so101_success_env8.mp4`(4/4)·`so101_fail_env233.mp4`(2/4). 다음=jaw 기하 반영 grasp 재설계.
 > **세션 2026-06-13 (① grasp-face 선정 재설계 + ② up-over-down 이동 재설계)**:
 > ① `_grasp_setup`+`_grasp_pose`(roll 1개 commit, fallback 없음) → **`_evaluate_all_grasps`(roll 4개 end-to-end 도달성 게이트 + composite)**. build_plan None 636→314(−51%)·clean↑.
 > ② 사용자 영상 피드백("yaw 회전이 큐브 쓸고·그릇 침·home→전방 forklift") → `_build_plan` 을 **up-over-down**(횡이동은 항상 travel_height 고정고도, 수직만 오르내림 — 대각선 sweep 제거) + executor **flythrough**(이동 WP 코너서 안 멈춰 등속 부드럽게)로 재작성. **결과: clean 17.6→25.8%·descend-clip 265→223·slide-stuck 177→82·40→30초**. success 는 55% (offset-descend self-clip 223 이 여전히 천장). 세부 §7·§9.
@@ -109,7 +110,8 @@ flowchart LR
 | **fixed finger** | = gripper_link 본체(servo + wrist_roll_follower mesh) | 안 움직임. moving jaw 와 비대칭 |
 | `ROLL_RHO` | 0.0079 | wrist_roll(q5) 회전 시 TCP 가 도는 lateral 반경(IK 보정 적용) |
 
-> **함의(descend-clip)**: TCP 는 두 손가락 사이 grasp 점이고, **moving jaw 는 TCP 에서 ~28mm 치우쳐 있으며 열리면 더 벌어진다**. side-approach 가 TCP 를 offset 점에 두고 수직 하강해도, TCP 아래로 늘어진(98mm) + 비대칭 swing 한 jaw 손가락이 하강 중 큐브를 친다(clip 시점 TCP 가 큐브 위 z 0.761·옆 34mm 인데도 변위 → 손가락이 닿음). roll(±90)이 swing 방향을 뒤집어 clip 률이 달라짐. **단순 offset↑·descend-closed 로는 안 풀림(§7 run4)** — jaw 손가락 mesh 기하 자체 고려한 접근/하강 재설계 필요.
+> **jaw 운동학(STL+URDF 전개)**: moving jaw finger **82mm·아래로 늘어짐**(tip TCP보다 ~7mm 아래), gripper_link −Y 축 둘레 회전. **열림(0.65rad) 시 fingertip 이 ~46mm 횡swing**(gap ~46mm > 큐브 30mm). **fixed finger 는 TCP/center 근처에 고정**.
+> **함의(descend-clip)**: side-approach 가 TCP 를 offset 점에 둬도, 늘어진 비대칭 jaw 가 하강 중 큐브 침(clip 시 TCP 큐브 위 z 0.761·옆 34mm 인데도 변위). **top-down(center) 하강이 실패하는 이유(run8 25.9%)**: center 에 TCP 두면 **fixed finger 가 큐브 바로 위**(moving jaw 만 46mm 밖)→ fixed finger 가 큐브 top 침. **재설계 방향**: jaw_offset 으로 큐브를 **gap 중심(fixed finger ↔ swung moving jaw 사이)** 으로 ~half-gap(~20mm) 시프트 = fixed finger 가 큐브 옆을 비켜 내려감. 부호/크기는 close-up + sweep 으로 확정. (단순 offset↑·descend-closed run4 는 실패.)
 
 > **참고 정합**: ECE4560 A7(IK θ5=θ1·grasp-from-above), A8(0.03m 위 접근·stacking z), A9(linear vs cubic spline 평활) — 우리 설계와 일치. A9 의 등속·평활 레버는 **flythrough 로 반영**(이동 WP 코너 무정지 등속).
 
@@ -210,6 +212,17 @@ flowchart TD
 
 > **결론**: 선정(①)+이동(②) 재설계로 **품질·속도 대폭 개선**(clean 17.6→25.8%, 40→30초, sweep/forklift/bowl-clip 제거) — 사용자 영상 피드백 충족. 하지만 **success 55% 천장은 여전히 offset-descend self-clip(223)**: 비대칭 moving jaw(TCP서 28mm 치우침·98mm 늘어짐, §4 그리퍼 기하)가 수직 하강 중 큐브 침. 영상 `outputs/so101_descend_clip_env208.mp4`(구)·`outputs/so101_updown-step-0.mp4`(신, 이동 부드러움). 다음 = jaw 기하 고려한 grasp 접근 재설계.
 
+**이어서 (③ jaw-aware grasp 실험 + 곡선 blend + scale 검증)**:
+
+| run | 변경 | success | clean | 교훈 |
+|---|---|---|---|---|
+| run8 | `--jaw_grasp` top-down(slide 제거, jaw_offset 0) | **25.9%** | 0.4% | ⚫ center 하강 시 fixed finger 가 큐브 침(descend-clip 1611). **slide 구조적 필수** 확정. opt-in 보존 |
+| run9 | 기본 slide + 곡선 blend(0.03) | 55.2% | 24.6% | ✅ 코너 둥근 호(부드러운 곡선 동선) success 불변 → blend 기본 on |
+| 256 재확인 | slide+up-over-down+blend (커밋 `ccf64bf`) | 54.9% | 24.6% | 현 config 안정 |
+| 1-cube 2048 | --active_objects 1 | **93.0%** | 76.8% | ✅ <16초. 단일 큐브 견고 = SM 상한. 4-cube 격차=클러스터링 ([1-cube_2048.md](1-cube_2048.md)) |
+
+> **grasp 순서별 clip율**: 1번째 22%→4번째 12% (밀집할수록↑, 후순위는 declutter 로↓). 사용자 "3·4번째 face 틀림"은 anecdotal — 체계적으로는 1번째(최밀집)가 최악. **천장 = 밀도 상관 self-clip** = jaw 기하 문제(§4).
+
 **핵심 진단(확정)**:
 1. 🔥 **소규모 과대평가** — 16-env(76%)는 쉬운 spawn 우연. **2048=51.6% 가 진짜.** 검증은 ≥256-env(C5).
 2. 🔥 **descend-clip cascade** = success ceiling. clip(2048서 1658)이 큐브를 reach 밖으로 쳐 → build_plan None 14246 → 도미노. grip 얇게(ladder)로도 clip 안 줄음 → **clip 은 깊이 아닌 접근 기하 문제**.
@@ -257,6 +270,9 @@ flowchart TD
 | `--min_grip_depth` | 0.016 | grasp z ladder **얇은 floor**(top 아래 최소 침투, 윗면 긁기 방지) |
 | `--side_offset` | 0.035 | side-approach 비킴 하한(`_side_offset`가 크기로 키움) |
 | `--slide_stop` | 0.005 | slide 종점 큐브중심 잔여거리(작을수록 jaw 중앙 깊이) |
+| `--blend_radius` | **0.03** | 이동 WP 코너 곡선 blend 반경. >0=둥근 호(부드러운 동선). 0=직각 |
+| `--jaw_grasp` (실험) | off | top-down 직하강(slide 제거). run8 실패(25.9%, fixed finger 침) → 기본 off |
+| `--jaw_offset` (실험) | 0.0 | `--jaw_grasp` 시 ⊥ 보정(큐브를 gap 중심으로). 비대칭 jaw 상쇄 |
 | `--reach_tol` | 0.012 | slide WP Cartesian 도달 판정(close miss 방지) |
 | `--max_round` | **3** | 큐브당 replan 상한(6 은 cap 컷오프) |
 | `--gripper_speed` | 5.0 | 그리퍼 slew(물리상한). close 시간↓ |
