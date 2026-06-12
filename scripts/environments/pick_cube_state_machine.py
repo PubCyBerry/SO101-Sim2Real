@@ -167,6 +167,15 @@ parser.add_argument("--slide_stop", type=float, default=0.005,
                     help="SLIDE 종점의 큐브 중심 잔여 거리 (m). 작을수록 큐브가 jaw 중앙 깊이 들어옴 "
                          "(close miss↓). 손가락 분리축이 진입축 ⊥ 이라 깊이 들어와도 정면 ram 없음")
 parser.add_argument("--slide_speed", type=float, default=0.30, help="SLIDE 수평 진입 속도 (m/s)")
+parser.add_argument("--jaw_grasp", action="store_true",
+                    help="(실험·기본 OFF) jaw-aware top-down 직하강 grasp(slide 제거). **256-env 검증서 "
+                         "drooping 82mm jaw 가 center 하강 시 큐브 침 → descend-clip 7×·25.9% 로 실패**. "
+                         "기본은 side-approach+slide(run7). jaw_offset 튜닝해도 top-down 은 구조적 한계")
+parser.add_argument("--jaw_offset", type=float, default=0.0,
+                    help="(--jaw_grasp 전용) 직하강 grasp 의 ⊥ 보정 (m). 비대칭 moving jaw 상쇄 시도용")
+parser.add_argument("--blend_radius", type=float, default=0.03,
+                    help="이동 WP(flythrough) 코너 곡선 blend 반경 (m). >0 이면 목표 blend_radius 안에서 "
+                         "다음 WP 로 조향 시작 → 둥근 호(부드러운 곡선 동선). 0=직각. 0.03 검증(success 불변)")
 parser.add_argument("--pregrasp_height", type=float, default=0.04,
                     help="하강 전 비킨 지점 위 hover 높이 (m). 여기서 dwell 하며 중력 처짐 "
                          "보상(q_bias)을 수렴시켜 손가락 수직 확보 → 하강 찌름 방지")
@@ -786,9 +795,16 @@ class SO101PickPlace:
         top = pz + size * 0.5
         ax = self._closing_axis(e, cube, roll)      # gap-open(=slide·비킴) 방향
         dx, dy = math.cos(ax), math.sin(ax)
-        so = self._side_offset(cube)                 # 큐브 크기별 비킴 거리
-        bx0, by0 = px - so * dx, py - so * dy         # 비킨 하강점(진입축 따라)
-        gx, gy = px - args.slide_stop * dx, py - args.slide_stop * dy  # slide 종점(중심 근처)
+        fx, fy = -dy, dx                              # ⊥ 손가락 분리축
+        if not args.jaw_grasp:                        # 기본: side-approach+slide (run7, 검증됨)
+            so = self._side_offset(cube)             # 큐브 크기별 비킴 거리
+            bx0, by0 = px - so * dx, py - so * dy     # 비킨 하강점(진입축 따라)
+            gx, gy = px - args.slide_stop * dx, py - args.slide_stop * dy  # slide 종점(중심 근처)
+        else:
+            # (실험) jaw-aware top-down: center+⊥보정 위로 바로 직하강(slide 없음). drooping jaw 가
+            # 큐브 침 → 실패(run8). opt-in 보존만.
+            gx, gy = px + args.jaw_offset * fx, py + args.jaw_offset * fy
+            bx0, by0 = gx, gy
         # 도달성 게이트 = 아래 closed-form IK 스캔(acos 정의역 밖이면 None, 빠름). 반경 pre-filter 는
         # 쓰지 않는다 — annulus 상한(_reach_ok 0.32)은 top-down 선택 proxy 라, pitch 완화로 닿는
         # reach 가장자리(bowl·far 큐브 r>0.33)와 offset 점(중심보다 바깥)을 거짓 기각한다(build_plan None↑).
@@ -802,9 +818,9 @@ class SO101PickPlace:
             for j in range(n):                     # 얇게(floor) → 깊게
                 gz = top - (lo + (deep - lo) * j / (n - 1))
                 if self._ik(e, (gx, gy, gz), pitch, yaw, roll) is None:
-                    continue                       # center 미도달 → 다음 (싼 쪽 먼저)
-                if self._ik(e, (bx0, by0, gz), pitch, yaw, roll) is None:
-                    continue                       # offset 미도달 → 다음
+                    continue                       # grasp/center 미도달 → 다음 (싼 쪽 먼저)
+                if (not args.jaw_grasp) and self._ik(e, (bx0, by0, gz), pitch, yaw, roll) is None:
+                    continue                       # offset 점 미도달 → 다음 (slide 경로)
                 return gx, gy, gz, pitch, bx0, by0, dx, dy
         return None
 
@@ -921,16 +937,21 @@ class SO101PickPlace:
         oc, cc = self._open_cmd(cube), args.gripper_close
         ct, ft = args.joint_tol, args.fine_joint_tol
         tv, ds, sl = args.travel_speed, args.descend_speed, args.slide_speed
-        return [
+        wps = [
             WP((cx,  cy,  tz), rise_p,    yaw, roll, oc, tv, ct, 0,                "rise"),       # 현재 xy서 수직↑
-            WP((bx0, by0, tz), o_over[1], yaw, roll, oc, tv, ct, 0,                "over"),       # offset 위로 횡이동
+            WP((bx0, by0, tz), o_over[1], yaw, roll, oc, tv, ct, 0,                "over"),       # grasp/offset 위로 횡이동
             WP((bx0, by0, gz), pitch,     yaw, roll, oc, ds, ft, 0,                "descend"),    # 수직↓(top-down 재배향)
-            WP((gx,  gy,  gz), pitch,     yaw, roll, oc, sl, ft, 0,                "slide"),      # 중심 진입
+        ]
+        if not args.jaw_grasp:                         # 기본: offset 하강 후 수평 slide 로 중심 진입
+            wps.append(WP((gx, gy, gz), pitch, yaw, roll, oc, sl, ft, 0, "slide"))
+        # (--jaw_grasp): bx0=gx 라 slide 없이 직하강 close (실험)
+        wps += [
             WP((gx,  gy,  gz), pitch,     yaw, roll, cc, sl, ft, args.close_dwell, "grasp"),      # close
             WP((gx,  gy,  tz), o_lift[1], yaw, roll, cc, tv, ct, 0,                "lift"),       # 수직↑
             WP((bx,  by,  tz), o_bowl[1], yaw, roll, cc, tv, ct, 0,                "over_bowl"),  # 그릇 위로 횡이동
             WP((bx,  by,  rz), o_rel[1],  yaw, roll, oc, ds, ct, args.release_dwell, "release"),  # 그릇 중심 수직↓·떨굼
         ]
+        return wps
 
     def _nudge_target(self, e: int, cube: str) -> tuple[float, float] | None:
         """재배치 push 방향(world 단위벡터) 또는 None. base 발치=base 반대, 밀집=이웃 반대,
@@ -1219,6 +1240,14 @@ class SO101PickPlace:
             # (descend 는 offset 점이라 sub-cm 불필요 — 게이트 빼서 대기 단축)
             reached = float(np.linalg.norm(self.tcp_meas(e) - np.asarray(wp.pos, dtype=float))) \
                 < args.reach_tol
+        # 코너 곡선 blend: 이동 WP(flythrough)이고 다음도 이동 WP 면, 목표 blend_radius 안에서 조기
+        # 전이 → 다음 WP 로 일찍 조향 = 둥근 호(부드러운 곡선 동선·사용자). 이동→정밀(over→descend 등)
+        # 코너는 blend 안 함(하강점 정확 도달 필요).
+        if (args.blend_radius > 0.0 and flythrough and not reached
+                and self.idx[e] + 1 < len(self.plan[e])
+                and self.plan[e][self.idx[e] + 1].tag in ("rise", "over", "lift", "over_bowl")
+                and remaining <= args.blend_radius):
+            reached = True
         # 무진전 stuck = 멍한 대기(IK-fail frozen). 미도달 WP 만 — 정상 dwell 은 reached 가 처리.
         stuck = (not reached) and self.wp_stuck[e] >= args.stuck_patience
         if reached:
