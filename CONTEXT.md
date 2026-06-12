@@ -13,6 +13,58 @@
 
 ---
 
+## 작업 인계 (2026-06-12 후속 — SM 고도화: 소규모 검증 과대평가 판명, 2048 진짜 51.6%, root=descend-clip cascade / 진행중·미커밋)
+
+- **목표(사용자, 단계적 확정)**: ① **flat 큐브(z-stack OFF)·calibrated reach 범위·dense(cube_sep 0.04)를 먼저 100%**, 그 다음 z-stack/far 확장. ② GUI 관전 피드백 즉시 반영.
+- **🔴 최대 발견 — 소규모 검증이 과대평가**: 16-env seed0 가 76.6% 인데 **2048-env(cube_sep 0.05, 더 성김) = 51.6%** (clean 13.6%, 전 env 자연종료=진짜 모집단값, cut-off 아님). 16-env 은 쉬운 spawn 우연. **진짜 병목 = descend-clip(2048서 1658)·실패 grasp 이 큐브를 reach 밖으로 쳐 → build_plan None cascade(14246, max_round 6 이 6× 부풀림)**. root(clip) 안 고치면 scale 성공률 안 오름. **앞으로 검증은 ≥256-env** (16-env 믿지 말 것).
+- **반영한 사용자 지시 6건**:
+  1. ⏳ 밀집(삼각형) 억지추출 실패 → **#1 declutter(밀어 분산/틈 비집기)** — **미구현(다음 1순위)**.
+  2. ⏳ 속도 부자연 → **#2 velocity profile(A9 cubic ease-in-out)** — 미구현.
+  3. ✅ grip 깊이 → `_grasp_pose` **깊이 ladder**(top 아래 min_grip_depth→grip_height, 첫 IK 도달 해; 얇게 우선·reach robust).
+  4. ✅ "집을 수 있는데 home 복귀" → build_plan None **영구제외→defer**, `max_round 3→6`(**단 이게 churn·episode 길이↑ → scale 악화, 3 근처로 환원 필요**).
+  5. ✅ "살짝 들다 놓고 포기" → **집으면 release 까지 안 엶**: lift/transport drop 가드 open 제거(log만), lift 검증은 빈grasp(큐브 안오름+TCP멀음)만 abort.
+  6. ✅ 얇으면 윗면 긁음 → **min_grip_depth floor 0.016**.
+- **DR 재보정(아슬아슬=도달가능)**: `scatter_far 0.025→0`(calibrated 범위가 이미 reach 가장자리, >0 은 도달불가 spawn=None churn), `scatter_z 0.05→0`(flat). cube_sep 0.04 유지(밀집은 #1 로).
+- **batch1 효과(16-env flat-dense 0.04)**: 56%→76.6%, false-drop(#5) 제거 확인. but 2048 서 51.6% — 16-env 과신 금물.
+- **진단**: descend-drift 가드에 `[CLIP]` 로그(self vs neighbor). self-clip(이웃 없는데 목표 침)+neighbor-clip 혼재. close-up 영상(`docs/so101_clipclose-step-0.mp4`, view_eye 큐브 근처) 녹화 — 고정광각 영상은 crop 해도 판독 불가였음.
+- **남은 일(우선순위)**: ① close-up 영상으로 clip 메커니즘 확정 → ② **#1 declutter**(root) → ③ max_round 환원·None defer churn 축소 → ④ **≥256-env 재검증** → ⑤ #2 velocity → ⑥ z-stack/far 단계 복원 → ⑦ 커밋(전부 미커밋, main 이라 브랜치 후).
+- **운영**: `log()` 가 `num_envs>64` 면 fsync 생략(대량 로그 I/O 회피). 2048 wall-clock ~10–12분(per-env Python 루프, vectorize 안 됨 → dataset 대량생성은 시드 샤딩). 변경 파일=`scripts/environments/pick_cube_state_machine.py`(배치1+CLIP+DR기본값+log), CONTEXT.md.
+
+## 작업 인계 (2026-06-12 — SM 전면 재작성: Waypoint follower, 4-env 16/16 100% 달성 / grasp 튜닝·DR 확장 진행중, 전부 미커밋)
+
+- **목표(사용자 확정)**: 기존 14-phase FSM 이 "묘하게 마음에 안 듦" → **simple·compact·intuitive 재작성**(통째 갈아엎기 허용). 최종 목표 = **2048-env 병렬에서 placement 100% + retry 발동률 ~0%(zero-retry)**, expert 데이터 생성용. + **GUI 4-env 관전**(R=동일 셋업 / N=새 시드 reset). + **DR 확장**(로봇팔서 먼 쪽 아슬아슬 + Z 0~5cm 분산으로 쌓임 케이스).
+- **현재 상태**: `pick_cube_state_machine.py` **전면 재작성 완료** + 사용자 GUI 피드백 ~15라운드 반영. **4-env seed0 16/16 = 100% 달성**(설정: 아래 "검증" beeutf1ci). 단 zero-retry 미달(descend-clip 3건이 retry 로 회복). **전부 미커밋.**
+- **새 아키텍처** (14-phase FSM → 2조각):
+  - **범용 executor**: per-env 가 `WP(pos, pitch, yaw, roll, grip, speed, tol, settle, tag)` 리스트(plan)를 따름. 매 step 현재 명령 pose 를 다음 wp 로 **pos·pitch 선형보간**(roll·yaw 는 직접세팅) → IK → joint 명령. 도달+settle 시 다음 wp. **자세도 보간이라 슬램덩크가 구조적으로 불가**(별도 anti-slam 코드 없음). z/slide/transport/rot ramp 가 lerp 하나로 통합.
+  - **planner `_build_plan`**: 큐브당 8 waypoint(approach→hover→descend→slide→grasp→lift→transport→release). grasp = **side-approach**(닫힘축 옆으로 side_offset 비켜 수직 하강 → 수평 slide 로 중심 진입 → close). `_grasp_setup` 이 roll(±90° 우선, 0/π 는 나란한 큐브 회피) + slide 방향 + 비킴점을 그릇/이웃 클리어런스로 결정.
+  - **KEEP(검증됨, 손 안 댐)**: `SO101Kinematics`(해석적 FK/IK), `_world_to_base`(USD↔URDF 캘리브), `q_bias`(중력 처짐 적분보상), `--calibrate`.
+  - **성능(2048 대비)**: 매 step `_snapshot()` 1회 배치 `cpu().numpy()` → per-env `.item()` GPU 동기화 제거(기존 68지점). IK 는 순수 Python CPU.
+  - **진단/GUI**: per-env taxonomy JSON(`outputs/sm_scale_<N>_seed<S>.json` — placed/retry reason/spawn pose), `[GRASP]` 기하 로그, `GuiKeyboard`(carb) R/N, `--replay_spawn`(실패 env spawn 재현), 글로벌 step cap.
+- **시행착오 (핵심 — 다음 세션 반드시 숙지)**:
+  1. **center-descend(slide 제거) = 0/16**. 비대칭·처진 열린 jaw 가 큐브 윗면을 침 → **side-approach(옆 하강+slide) 필수**. 사용자도 "중심 직하강" 원했으나 물리적으로 불가.
+  2. **literal-perpendicular slide(닫힘축⊥ 진입) = lift-drop 전면**. jaw gap 이 코드의 `_closing_axis` **방향으로 열림**(두 손가락은 그 ⊥). 즉 along-`_closing_axis` slide 가 맞고, 사용자가 말한 "닫는 축(손가락 분리축) ⊥ 이동"은 along-axis 가 이미 충족. (변수명이 헷갈리게 돼 있음 — `_closing_axis`=gap-open 방향.)
+  3. **q1(shoulder_pan) 누락한 닫힘축 근사** → base 중심서 벗어난 큐브 slide 가 불도저(slide_drift 110mm, 빈 그리퍼 닫힘). `_closing_axis` 에 q1 포함(`yaw_fixed_w`)으로 해결 → 37.5%→62.5%.
+  4. **첫 큐브(보통 Cube1) 전 env 실패 = q_bias=0** → 첫 grasp 하강이 중력 sag 미보정으로 clip. **pre-grasp hover dwell**(bias 수렴 후 하강)로 해결 → 62.5%→87.5%.
+  5. **40mm(Cube3/4) drop 의 진짜 원인 = 그리퍼 닫기 속도**. slew 2.5rad/s(grasp valley 완화용으로 일부러 낮춤)로는 open→close 0.9rad 를 close_dwell 안에 못 닫아 **덜 닫힌 채 lift→drop**. **gripper slew 5.0 override + close_dwell 8** → 40mm 해결, **87.5%→16/16 100%**(사용자 통찰 "닫는 속도 빠르게").
+  6. 빠른 lift/transport(0.70/0.85)가 marginal 그립 전단 → 0.55/0.70 로.
+  7. **한 번에 여러 파라미터 변경 = seed0 고정인데도 56~100% 출렁**. 교훈: **한 번에 하나씩 + GUI 관전**. descend-clip 같은 기하 문제는 블라인드 튜닝(side_offset 등) 역효과 잦음 — 영상 필수.
+  8. **grasp z 는 큐브 '바닥' 기준이어야** 함: `gz = cube_z − size/2 + grip_height`. 책상 큐브는 바닥≈DESK 라 검증된 DESK-relative 와 동일, **elevated/stacked 큐브는 그 바닥 기준이라 정확**(Z-stacking 대응). DESK-relative(쌓인 큐브 못 잡음)·center-relative(40mm 높게 물어 불안정) 둘 다 일부 실패.
+- **검증 결과**:
+  - **✅ 4-env seed0 16/16 = 100%** (clean 2/4, ~26s): 설정 = side_offset 0.035/0.038, **grasp_floor 0.016 (DESK-relative)**, _grasp_setup 4-roll, gripper slew 5.0, close_dwell 8, DR 기본. (run `beeutf1ci`.)
+  - **⚠️ 미검증(현재 코드 HEAD)**: grasp 를 **bottom-relative**(`grip_height` 0.012)로 전환 + side_offset 0.035 복원 + **DR 확장**(`scatter_far` 0.025, `scatter_z` 0.05, `cube_sep` 0.04, z-preference 선택) 적용. 직전 잘못된 조합(side_offset 0.045 + cube-center grasp −0.003)은 75% 였음 → bottom-relative 로 교체했으나 **재검증 안 함**.
+- **DR 확장 구현(`domain_randomization.py`)**: `randomize_cubes_scattered`/`_randomize_cubes_scattered_fn` 에 `z_range` 추가(default (0,0) — RL 학습 무영향). SM `_apply_dr` 가 scatter x/y 를 먼 쪽 확장 + z_range + min_cube_sep 축소 override. 끄려면 `--scatter_z 0 --scatter_far 0 --cube_sep 0`.
+- **남은 일 (다음 세션 우선순위)**:
+  1. **bottom-relative grasp + DR-OFF 재검증** → 100% 회복 확인(직전 DR-OFF 75% 는 잘못된 grasp 조합 탓). 안 되면 grip_height 조정(0.012↔0.016).
+  2. **descend-clip 제거(zero-retry)** — GUI 로 비킨 하강 시 어느 jaw 가 큐브를 치는지 관찰 후 정밀 수정. (블라인드 side_offset↑ 는 역효과 확인됨.)
+  3. **DR 확장 검증** — z-stacking 시 SM 이 z 높은(stack top) 큐브 먼저 잡는지, 쌓인 케이스 placement.
+  4. **2048-env 스케일** — `--num_envs 2048 --headless` (physx capacity override 있음, ≥256 env 자동). wall-clock·성공률 측정.
+  5. **커밋** — 전부 미커밋. main 브랜치라 브랜치 후 커밋 권장.
+- **실행**:
+  - 4-env headless: `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/pick_cube_state_machine.py --num_envs 4 --active_objects 4 --headless`
+  - GUI 관전(R/N): 위에서 `--headless` 제거.
+  - DR 확장 OFF(기존 분포): `... --scatter_z 0 --scatter_far 0 --cube_sep 0`
+  - 결과: `outputs/so101_sm_progress.txt`(로그) + `outputs/sm_scale_4_seed0.json`(taxonomy).
+
 ## 작업 인계 (2026-06-11 최신 — 해석적 IK SM v3 전면 재작성: side-approach grasp, 고정 4/4·DR 6/8)
 
 - **목표**: `scripts/environments/pick_cube_state_machine.py` 를 v1/v2 초안 기반으로 전면 재작성 — closed-form IK + joint position action (Lula/DiffIK·기존 SM 구조 미사용, 사용자 제약).

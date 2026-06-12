@@ -175,6 +175,7 @@ def _randomize_cubes_scattered_fn(
     num_active: int | None = None,
     min_base_sep: float = 0.0,
     robot_cfg: SceneEntityCfg | None = None,
+    z_range: tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -275,7 +276,12 @@ def _randomize_cubes_scattered_fn(
         yaw_quat = math_utils.quat_from_euler_xyz(zero, zero, yaw_delta)
         new_quat = math_utils.quat_mul(default[:, 3:7], yaw_quat)
 
-        positions = torch.stack([final_x, final_y, default[:, 2]], dim=-1) + env.scene.env_origins[env_ids]
+        # z 분산(쌓임 유발): default z 위로 [z_lo, z_hi] 띄워 spawn → 낙하·적재
+        z_lo, z_hi = z_range
+        final_z = default[:, 2]
+        if z_hi > z_lo:
+            final_z = final_z + (torch.rand(n, device=device) * (z_hi - z_lo) + z_lo)
+        positions = torch.stack([final_x, final_y, final_z], dim=-1) + env.scene.env_origins[env_ids]
         pose = torch.cat([positions, new_quat], dim=-1)
         asset.write_root_pose_to_sim(pose, env_ids=env_ids)
         asset.write_root_velocity_to_sim(torch.zeros(n, 6, device=device), env_ids=env_ids)
@@ -320,6 +326,7 @@ def randomize_cubes_scattered(
     num_active: int | None = None,
     min_base_sep: float = 0.0,
     robot_name: str = "robot",
+    z_range: tuple[float, float] = (0.0, 0.0),
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
 
@@ -357,6 +364,7 @@ def randomize_cubes_scattered(
             "num_active": num_active,
             "min_base_sep": float(min_base_sep),
             "robot_cfg": SceneEntityCfg(robot_name) if min_base_sep > 0.0 else None,
+            "z_range": z_range,
         },
     )
 
