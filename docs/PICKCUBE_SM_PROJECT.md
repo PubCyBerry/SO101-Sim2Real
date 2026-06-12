@@ -2,9 +2,13 @@
 
 > **한 줄 요약**: cube_desk 에서 SO-101 팔이 큐브 4개를 그릇에 넣는 **결정적(rule-based) pick-and-place 오라클**. **해석적(closed-form) IK + Cartesian waypoint follower** 만 사용(Lula/DiffIK·RL 없음). 용도는 **VLA 학습용 expert 데이터 생성**(RL 정책과 병행 — RL 은 다양성, SM 은 결정적 고신뢰).
 >
-> **현재 상태**: 🔵 **flat-dense 256-env 57.2% (default, --nudge off)**. 세션 누적 개선: batch1(grip/retry/hold)·max_round3(cap 컷오프 제거, 2× 빠름)·M1(사다리꼴 속도=자연 모션)·D-c(그릇 arc=bowl-tip 해소). 사용자 5지시: 속도/feel ✅·그릇arc ✅·drag(opt-in, far-pull 기구학 한계)·top-down완화(ik_reach)·home-shove(env별). DR 정상(96% 도달·뭉침 아님). **천장 = descend-clip**(side-offset 수직 하강이 reachable 큐브 자체를 침 — self-clip, cube 들림; +dense neighbor-clip). **blind 튜닝 3연패**(neighbor-aware safe-gate=no-op·edge-nudge=net-neg·side-offset↑=worse) → CONTEXT 경고대로 **GUI 관찰 필수**(서버 광각 montage 는 arm framing 실패). **전부 미커밋.**
+> **현재 상태**: 🔵 **flat-dense 256-env 55% · clean 25.8% · ~30초 (seed0)**. grasp-face 선정 + up-over-down 이동 재설계 반영 커밋. 직전 `831349d`(57.2%/clean17.6%/40초).
+> **세션 2026-06-13 (① grasp-face 선정 재설계 + ② up-over-down 이동 재설계)**:
+> ① `_grasp_setup`+`_grasp_pose`(roll 1개 commit, fallback 없음) → **`_evaluate_all_grasps`(roll 4개 end-to-end 도달성 게이트 + composite)**. build_plan None 636→314(−51%)·clean↑.
+> ② 사용자 영상 피드백("yaw 회전이 큐브 쓸고·그릇 침·home→전방 forklift") → `_build_plan` 을 **up-over-down**(횡이동은 항상 travel_height 고정고도, 수직만 오르내림 — 대각선 sweep 제거) + executor **flythrough**(이동 WP 코너서 안 멈춰 등속 부드럽게)로 재작성. **결과: clean 17.6→25.8%·descend-clip 265→223·slide-stuck 177→82·40→30초**. success 는 55% (offset-descend self-clip 223 이 여전히 천장). 세부 §7·§9.
+> **천장 = descend-clip (진단 확정, §10)**: **93% self-clip**(target 큐브 자체, 이웃 아님)·**pitch −90°=14% vs 조금이라도 tilt=42–80%**·수직 clip 시점 **TCP 가 큐브 위(z 0.761>top 0.74)·옆 34mm** → TCP 아래로 늘어진 jaw 손가락이 하강 중 큐브 침. 영상 `outputs/so101_descend_clip_env208.mp4`. **반증: open-jaw overhang 가설(descend 닫고 내려가기) → 14% 로 악화(run4)**. blind 튜닝 **4연패**(safe-gate·edge-nudge·side-offset↑·descend-closed) → 다음은 GUI 관찰 기반.
 >
-> **작성 기준**: 2026-06-12. 단일 진입점 문서. 코드는 `scripts/environments/pick_cube_state_machine.py`(약 1380줄). 함정 이력은 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) §SO-101 SM.
+> **작성 기준**: 2026-06-13. 단일 진입점 문서. 코드는 `scripts/environments/pick_cube_state_machine.py`(~1450줄). 함정 이력은 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) §SO-101 SM.
 >
 > **참고 자료(설계 검증)**: ECE4560 SO-101 과제(maegantucker.com A6~A9)가 우리 설계(해석적 geometric IK·θ5=θ1·grasp-from-above·linear interpolation·블록 stacking z) 를 **textbook-correct** 로 확인. §13.
 
@@ -82,7 +86,7 @@ flowchart LR
   PLAN --> EXE["executor (_step_env)<br/>매 step pose→다음 WP 선형보간→해석적 IK→joint"]
   EXE -->|도달+settle| PLAN
   EXE -->|drift/empty-grasp| SAFE["안전망: replan (max_round)"]
-  GP["_grasp_pose<br/>깊이 ladder·side-approach roll"] --> PLAN
+  GP["_evaluate_all_grasps<br/>roll 4개 도달성 게이트·composite 선정"] --> PLAN
 ```
 
 | 조각 | 역할 | 핵심 |
@@ -92,11 +96,22 @@ flowchart LR
 | **Part C `--calibrate`** | FK 예측 vs 시뮬 실측(1회 진단) | max err 1.5mm |
 | **Part D `SO101PickPlace`** | per-env waypoint 추종 컨트롤러 | `_snapshot()` 1회 배치 cpu numpy(per-env .item() sync 제거) → 매 step `_step_env` per-env 실행 → `_act_all` 배치 step([N,6]) |
 | **grasp = side-approach** | 비대칭/처진 jaw 가 큐브 윗면 침 회피 | 닫힘축 방향 `side_offset` 비켜 **수직 하강** → **수평 slide** 로 중심 진입 → close. roll ±90° 우선(그릇/이웃 회피) |
-| **`_grasp_pose` 깊이 ladder** | 정확 깊이 고집 안 함 | top 아래 `min_grip_depth`(얇게)→`grip_height`(깊게) 첫 IK 도달 해 채택 |
+| **`_evaluate_all_grasps`** 🔥 | roll 4개({±90,0,π}) end-to-end 평가 | 각 roll: offset+center 가 **동일 pitch**(가파른 쪽부터) 로 닿는 (pitch,깊이) 탐색 = 도달성 게이트. 통과 roll 중 `composite = clear_norm + pitch_norm + ±90 bias + 직전roll continuity` 최대. 깊이 ladder = `min_grip_depth`→`grip_height`. 1-roll commit(구 `_grasp_setup`/`_grasp_pose`) 폐기 → build_plan None −39% |
 
-**진단 도구**: `--check_spawns`(초기 spawn 도달가능·뭉침 점검 후 종료) · `[CLIP]` 로그(descend drift 시 self vs neighbor 분리) · per-env taxonomy JSON(`outputs/sm_scale_<N>_seed<S>.json`) · `--replay_spawn`+`--replay_env_idx`(특정 env 1:1 재현) · `--video`(사이드뷰 mp4) · `GuiKeyboard` R/N(GUI 관전).
+**이동 = up-over-down (충돌 회피, 2026-06-13)**: `_build_plan` 8-WP = rise→over→descend→slide→grasp→lift→over_bowl→release. **횡이동(rise/over/lift/over_bowl)은 항상 `travel_height`(0.15m, desk 기준=구 safe_z) 고정고도, 수직만 오르내림** → 대각선 sweep 제거(yaw 회전이 큐브 쓸기·home→전방 forklift·그릇 rim 침 차단). 고정고도점은 `_ik_reach`(pitch 스캔)로 도달 확인 — 높은 점은 top-down 불가, 완화 pitch 라야 닿음(descend 가 하강하며 top-down 재배향). executor **flythrough**: 이동 WP 는 코너서 감속·정지 안 함(등속 부드럽게), stop WP(descend/slide/grasp/release)만 0 으로 감속.
 
-> **참고 정합**: ECE4560 A7(IK θ5=θ1·grasp-from-above), A8(0.03m 위 접근·50%open/5%close·stacking z 0.014/0.043/0.071/0.100), A9(linear vs cubic spline 평활) — 우리 설계와 일치. A9 의 cubic velocity profile 이 유일한 미적용 개선 레버(#2, TODO).
+### SO-101 그리퍼 기하 (URDF `so_arm101.urdf`, descend-clip 분석 근거)
+
+| 요소 | 값(gripper_link frame) | 의미 |
+|---|---|---|
+| **TCP**(`gripper_frame_link`) | `(-0.0079, -0.0002, -0.0981)`, rpy `(0,π,0)` | 캘리된 grasp 중심. gripper_link 원점서 **z −98mm**(아래). FK 검증 1.5mm |
+| **moving jaw** pivot(`gripper` joint) | `(0.0202, 0.0188, -0.0234)`, axis z, limit `[-0.175, 1.745]` | TCP 기준 **+x 28mm·+y 19mm 치우침**. 열리면 이쪽으로 더 swing |
+| **fixed finger** | = gripper_link 본체(servo + wrist_roll_follower mesh) | 안 움직임. moving jaw 와 비대칭 |
+| `ROLL_RHO` | 0.0079 | wrist_roll(q5) 회전 시 TCP 가 도는 lateral 반경(IK 보정 적용) |
+
+> **함의(descend-clip)**: TCP 는 두 손가락 사이 grasp 점이고, **moving jaw 는 TCP 에서 ~28mm 치우쳐 있으며 열리면 더 벌어진다**. side-approach 가 TCP 를 offset 점에 두고 수직 하강해도, TCP 아래로 늘어진(98mm) + 비대칭 swing 한 jaw 손가락이 하강 중 큐브를 친다(clip 시점 TCP 가 큐브 위 z 0.761·옆 34mm 인데도 변위 → 손가락이 닿음). roll(±90)이 swing 방향을 뒤집어 clip 률이 달라짐. **단순 offset↑·descend-closed 로는 안 풀림(§7 run4)** — jaw 손가락 mesh 기하 자체 고려한 접근/하강 재설계 필요.
+
+> **참고 정합**: ECE4560 A7(IK θ5=θ1·grasp-from-above), A8(0.03m 위 접근·stacking z), A9(linear vs cubic spline 평활) — 우리 설계와 일치. A9 의 등속·평활 레버는 **flythrough 로 반영**(이동 WP 코너 무정지 등속).
 
 ---
 
@@ -132,18 +147,21 @@ flowchart TD
 
 | 단계 | 상태 | 중요도 | 내용 | 완료 기준 |
 |---|---|---|---|---|
-| 배치1: grip 깊이 ladder+floor·retry defer·hold-until-placed | 🟢 DONE | 🔥 | #3/#4/#5/#6 (§7) | false-drop 제거 ✅ |
-| DR 재보정·검증 | 🟢 DONE | 🔥 | scatter_far/z→0, `--check_spawns` | 96% 도달가능·뭉침 아님 확인 ✅ |
-| max_round 3 최적화 | 🟢 DONE | ⭐ | 6→3 (cap 컷오프 제거) | steps 4000→2011, 2× 빠름 ✅ |
-| **grasp precision** | 🔵 IN-PROGRESS | ⭐ | slide Cartesian 도달 게이트(close miss 방지) | 빈grasp↓ 확인중 |
-| **descend-clip cascade 해결** | 🔴 BLOCKER | 🔥 | clip→변위→도달불가 연쇄(success ceiling) | descend-clip→~0, success↑ |
-| **궤적/속도 고도화**(사용자) | ⚪ TODO | 🔥 | ① 이동 너무 빠름→늦춤 ② slide 정밀 너무 느림·대기→빠르게(평균↑) ③ 그릇 근처 직선→**곡선/FK 로 그릇 안 침** ④ home-start 펼치며 큐브 밀침 제거 ⑤ top-down 비강제 | <20초·자연·그릇 안 엎음 |
-| **edge drag**(사용자) | ⚪ TODO | ⭐ | far=끌어오기·near=밀어내기로 reach 안 이동 후 grasp | 4% edge 도 처리 |
-| #2 velocity profile (A9) | ⚪ TODO | | linear→cubic ease-in-out | 궤적 부드러움 |
+| 배치1: grip ladder+floor·retry defer·hold-until-placed | 🟢 DONE | 🔥 | #3/#4/#5/#6 (§7). 커밋 831349d | false-drop 제거 ✅ |
+| DR 재보정·검증(`--check_spawns`) | 🟢 DONE | 🔥 | scatter_far/z→0 | 96% 도달·뭉침 아님 ✅ |
+| max_round 3 최적화 | 🟢 DONE | ⭐ | 6→3 cap 컷오프 제거 | steps 4000→2011 2×↑ ✅ |
+| **M1 사다리꼴 속도 프로파일(A9변형)** | 🟢 DONE | ⭐ | 등속→가·감속(--accel/--min_speed) | 자연 모션·텔레포트 제거 ✅ |
+| **D-c 그릇 arc**(사용자③) | 🟢 DONE | 🔥 | --bowl_clear_height, rim 위로 arc | env41 1/4→3/4, bowl-tip↓ ✅ (단 ②잔존: 2번째 큐브 아직 침 → 강화 필요) |
+| **edge drag(nudge)**(사용자①) | 🟢 opt-in | ⭐ | --nudge paddle-push, 기본 off | far-pull 기구학 한계, net-neutral |
+| **dead-wait fail-fast**(사용자⑥) | 🟢 DONE | 🔥 | stuck_patience(TCP 무진전 조기종료)+settle 6 | 시작 대기 제거 ✅ |
+| selection isolation(loner-first) | 🟢 DONE | ⭐ | `_select_next` 고립도 우선 + `_reach_ok` 반경 proxy | net-neutral(57.2→56.7) — 선정은 천장 아님 |
+| **grasp-face 선정 재설계**(사용자⑤) | 🟢 DONE | 🔥 | `_evaluate_all_grasps`: roll 4개 end-to-end 도달성 게이트 + composite | build_plan None 636→314·clean↑ ✅ / success net-neutral |
+| **up-over-down 이동 재설계**(사용자: sweep/forklift/bowl-clip) | 🟢 DONE | 🔥 | 횡이동 고정고도(travel_height)·수직만·flythrough 등속. `_build_plan` 단순화 | clean 17.6→25.8%·slide-stuck↓·40→30초 ✅ |
+| **descend-clip**(사용자②④, 천장) | 🔴 BLOCKER | 🔥 | offset-descend self-clip 잔존(223): 비대칭 moving jaw(TCP서 28mm·98mm 늘어짐)가 수직 하강 중 침 | descend-clip→~0 (jaw 기하 고려 grasp 재설계) |
 | z-stack/far 복원 | ⚪ TODO | | flat 100% 후 scatter_z·scatter_far 재투입 | 확장 분포 ≥90% |
-| 2048-env 100% + 커밋 | ⚪ TODO | 🔥 | scale 검증 → 브랜치 후 커밋(전부 미커밋, main) | — |
+| 2048-env 100% | ⚪ TODO | 🔥 | scale 검증 | placement 100%·zero-retry |
 
-> **현재 BLOCKER = descend-clip cascade.** flat-dense 256-env 52.7% 의 상한을 만드는 root. grip ladder(얇은 grip)로 안 줄었음(~0.8 clip/env 유지). 해결 후보: ① **궤적 고도화**(그릇/이웃 안 치게 곡선화) ② **edge drag** ③ neighbor-aware(과거 no-op 판명, §10) ④ A9 velocity profile(모멘텀 완화).
+> **현재 BLOCKER = offset-descend self-clip(223).** 55% 천장. 선정(①)+이동(②) 재설계로 **품질·속도는 대폭 개선**(clean 25.8%·30초·sweep/forklift/bowl-clip 제거)됐으나 success 불변 — 천장은 **grasp 실행**: 비대칭 moving jaw(§4 그리퍼 기하: TCP서 +28mm·−98mm 늘어짐)가 수직 하강 중 큐브 침. **반증**: open-jaw overhang(descend-closed run4 14%)·blind side-offset↑(tilt 강제 60%). 다음 = jaw 손가락 mesh 기하 고려한 접근/하강 재설계. 영상 `outputs/so101_descend_clip_env208.mp4`·`outputs/so101_updown_env8.mp4`.
 
 ---
 
@@ -163,6 +181,34 @@ flowchart TD
 | Step A | grasp precision(slide Cartesian 게이트·slide_stop 0.005) | 🔵 | 256/0.05 **49.6% but steps=4000(cap 도달)** — 게이트 대기+max_round6 가 episode 늘려 컷오프 |
 | 최적화 | **max_round 6→3**, 게이트 slide-only·12mm 완화 | 🟢 DONE | 256/0.04 **52.7%, steps 4000→2011**(컷오프 제거), build_plan None 1956→805, 2× 빠름 |
 | 진단 | edge 2클립(far env151·near env41) | 🟢 | **far**(외측 reach, x2.04): 팔이 못 뻗어 제외, 나머지 3/4. **near**(내측 base발치, x1.68): 팔 cramp·못 들어올림·env 망침 1/4 |
+| M1 | **사다리꼴 속도 프로파일**(등속→가·감속, A9변형) | 🟢 DONE | 256/0.04 52.7→54.2%, 자연 모션. 텔레포트·급출발 제거 |
+| D-c | **그릇 arc**(bowl_clear_height 0.18) | 🟢 DONE | env41 1/4→**3/4 clean**, 256 54.2→**57.2%**, build_plan None 781→624 |
+| nudge | paddle-push(--nudge opt-in) | 🟢 opt-in | far-pull 기구학 한계(접촉점도 도달불가), 256 net-neutral(57.2→56.2) → 기본 off |
+| 실험 | side-offset margin↑(0.018→0.028) | ⚫ REVERT | 256 53.5%·descend-clip 240↑ — CONTEXT 경고대로 blind side_offset↑ 역효과 |
+| 커밋 | **`831349d` (main)** SM 전체+doc | 🟢 | docker-compose·camera 제외(별도 작업) |
+| 진단 | 사용자 GUI 영상(env5 사선뷰) | 🟢 | 5피드백(§0). [TIMEOUT] = Cube4 hover **TCP 249mm off** = home→첫 WP IK-fail stall(8초 대기 정체) |
+| 실험 | max_wp 240→90(대기 단축) | ⚫ REVERT | env5 3/4→0/4·256 53.5% — 정상-느린 WP 도 잘림. → **stuck_patience**(무진전 조기종료)로 교체 |
+| dead-wait | **stuck_patience 24**(TCP 무진전 abort)+settle 6 | 🔵 | IK-fail frozen 대기만 잘라냄, 정상 WP 무영향. 검증중 |
+
+**세션 2026-06-13 (grasp-face 선정 재설계, seed0 256-env)**:
+
+| run | 변경 | success | clean | build_plan None | descend-clip | 교훈 |
+|---|---|---|---|---|---|---|
+| baseline | `831349d` stuck+isolation | 56.7% | 17.6% | 636 | 152 | — |
+| run1 | `_evaluate_all_grasps`(roll 4개) + **radial pre-filter** | 42.3% | 1.2% | **1555** | 231 | ⚫ pre-filter [0.17,0.32] 가 pitch-완화 reach·offset점 거짓기각 → 폐기 |
+| run2 | pre-filter 제거 | **57.4%** | 21.9% | **397** | 273 | ✅ reachability 회수(None −38%)·clean↑ / clip↑(회수큐브가 clip) |
+| run3 | 수직 hard-gate(vert=10) | 56.7% | 21.1% | 335 | 268 | ⚫ 가장자리 큐브 무리한 수직 → slide-stuck/빈grasp↑. soft 로 복귀 |
+| run4 | **descend-closed + preopen**(open-jaw 가설) | **14.1%** | 0% | 502 | 461 | ⚫ **가설 반증**(clip↑·빈grasp 1431). 전면 revert |
+| run5 | revert(soft pitch, grasp-face 최종) | 54.3% | 14.8% | 385 | 265 | seed0 변동폭 내. **천장=descend-clip 확정** |
+
+**이어서 (② up-over-down 이동 재설계, 사용자 영상 피드백 반영)**:
+
+| run | 변경 | success | clean | None | clip | steps(s) | 교훈 |
+|---|---|---|---|---|---|---|---|
+| run6 | up-over-down + 고정고도 게이트(`_ik`, top-down) | **0%** | 0% | **3072** | — | — | ⚫ `_ik`(고정 top-down)로 고정고도 게이트 → 높은 점 top-down 불가 100% reject. `_ik_reach` 로 수정 |
+| run7 | `_ik_reach` 게이트(완화 pitch) + flythrough 등속 | 55.2% | **25.8%** | 314 | 223 | **896(30s)** | ✅ clean +8(vs base)·slide-stuck 177→82·40→30초·descend-clip↓. success 55%(self-clip 잔존) |
+
+> **결론**: 선정(①)+이동(②) 재설계로 **품질·속도 대폭 개선**(clean 17.6→25.8%, 40→30초, sweep/forklift/bowl-clip 제거) — 사용자 영상 피드백 충족. 하지만 **success 55% 천장은 여전히 offset-descend self-clip(223)**: 비대칭 moving jaw(TCP서 28mm 치우침·98mm 늘어짐, §4 그리퍼 기하)가 수직 하강 중 큐브 침. 영상 `outputs/so101_descend_clip_env208.mp4`(구)·`outputs/so101_updown-step-0.mp4`(신, 이동 부드러움). 다음 = jaw 기하 고려한 grasp 접근 재설계.
 
 **핵심 진단(확정)**:
 1. 🔥 **소규모 과대평가** — 16-env(76%)는 쉬운 spawn 우연. **2048=51.6% 가 진짜.** 검증은 ≥256-env(C5).
@@ -187,6 +233,14 @@ flowchart TD
 | D9 | **top-down(-90°) 비강제** | 멀거나 가깝지 않아도 pitch 완화 자유 — 도달성·궤적 개선 | 사용자 |
 | D10 | **그릇 근처 운반은 곡선/FK 로**(직선 금지) | 직선 운반이 그릇을 쳐서 엎음(near 클립) | 사용자 |
 | D11 | neighbor-aware descend hardening **폐기** | sep 0.04 밀집엔 clip-free 방향 부재 → no-op, churn 만 유발 | 에이전트 진단 |
+| D12 | dead-wait = **stuck_patience(무진전 조기종료)**, max_wp blunt-cut 폐기 | 8초 대기 = WP IK-fail frozen(계산 아님). max_wp 90 은 정상-느린 WP 도 잘라 grasp 실패↑ → 무진전만 abort | 사용자+에이전트 |
+| D13 | selection = **isolation 우선 + 싼 reach proxy** | 고립(loner) 먼저 = 클러스터 바깥부터 벗겨 헤집음↓. _graspable(52 IK/큐브) 선택 부하 → 반경 proxy 로(2048 루프↑). 8초 대기는 계산 아님 | 사용자 질문 |
+| D14 | grasp = **큐브 옆면 정렬**(fixed finger ram 회피) | 사용자 영상: "집으려던 면 말고 옆면 노렸어야". fixed finger 가 진입축 앞서면 ram(②) | 사용자 |
+| D15 | grasp-face 선정 = **roll 4개 end-to-end 평가**(`_evaluate_all_grasps`), 1-roll commit 폐기 | 종전 `_grasp_setup` 가 clearance 로 1개 고른 뒤 도달 불가면 fallback 없이 plan None. 4개 다 평가(offset+center 동일 pitch 도달성 게이트)로 build_plan None −39% | 에이전트(사용자 위임) |
+| D16 | **selection·reachability 는 success 천장 아님** — descend-clip 이 천장 | run1–5: build_plan None 636→385 인데 success 54–57% 불변. 회수한 reach-edge 큐브가 곧장 clip → 선정 개선이 success 로 전환 안 됨 | 에이전트 진단 |
+| D17 | descend-clip **open-jaw overhang 가설 반증** | descend 닫고 내려가기(run4) → 14%·빈grasp 1431 로 악화. clip 은 단순 open-jaw 가 아님(TCP 큐브 위서 손가락 침). 다음 수정은 **반드시 영상 관찰 기반** | 에이전트 진단 |
+| D18 | 이동 = **up-over-down 고정고도**(횡이동 항상 travel_height, 수직만) + executor **flythrough** | 사용자 영상: yaw 회전이 큐브 쓸고·home→전방 forklift·그릇 침 = **이동 중 sweep**(taxonomy 미포착). 대각선 sweep 제거 + 코너 무정지 등속. clean 17.6→25.8%·40→30초 | 사용자 영상 |
+| D19 | 고정고도 게이트는 **`_ik_reach`(pitch 스캔)** 필수, `_ik`(고정 top-down) 금지 | run6: `_ik` top-down 게이트 → 높은 점 도달 불가 100% reject(0%). 높은 운반점은 완화 pitch 라야 닿음 | 에이전트 진단 |
 
 ---
 
@@ -206,8 +260,14 @@ flowchart TD
 | `--reach_tol` | 0.012 | slide WP Cartesian 도달 판정(close miss 방지) |
 | `--max_round` | **3** | 큐브당 replan 상한(6 은 cap 컷오프) |
 | `--gripper_speed` | 5.0 | 그리퍼 slew(물리상한). close 시간↓ |
-| `--descend_speed`/`--lift_speed`/`--transport_speed` | 0.32 / 0.55 / 0.70 m/s | Cartesian 이동 속도 (⚠ **사용자: 이동 너무 빠름→늦추고, slide 정밀 너무 느림→빠르게, 평균↑, <20초**) |
-| `--close_dwell`/`--settle_steps`/`--pregrasp_dwell` | 8 / 10 / 5 | 정착 step |
+| `--travel_height` | **0.15** | up-over-down 단일 운반 고도(desk 기준). 횡이동 항상 이 높이=충돌 회피. =구 safe_z(도달 검증됨) |
+| `--travel_speed` | **0.60** | 이동(rise/over/lift/over_bowl) 등속 순항. flythrough(코너 무정지)라 episode 대부분 이 속도 |
+| `--descend_speed` | **0.40** | 하강·그릇 내림(구 0.32 → 단축) |
+| `--accel`/`--min_speed` | 6.0 / 0.04 | 사다리꼴 가·감속도/하한. **stop WP(descend/slide/grasp/release)만 적용**, flythrough 는 등속 |
+| `--lift_speed`/`--transport_speed`/`--bowl_clear_height`/`--pregrasp_height` | (legacy) | up-over-down 재작성으로 `_build_plan` 미사용. travel_height/speed 가 대체 |
+| `--max_wp_steps`/`--stuck_patience` | 240 / 24 | WP 시간 hard cap / TCP 무진전 조기종료(멍한 대기 제거) |
+| `--close_dwell`/`--settle_steps`/`--pregrasp_dwell` | 8 / 6 / 5 | 정착 step (settle 6=시작 대기 단축) |
+| `--nudge` (opt-in) | off | paddle-push 재배치(--nudge_dist 0.06·max_nudge 2). far-pull 기구학 한계 |
 
 ### 9.2 DR (`utils/domain_randomization.py::randomize_cubes_scattered`)
 
@@ -227,7 +287,7 @@ flowchart TD
 | 현상 | 원인 | 해결 | 상태 |
 |---|---|---|---|
 | **소규모 검증 과대평가** | 16-env 쉬운 spawn 우연(76%) | ≥256-env 검증(2048=51.6%가 진짜) | 🟢 |
-| **descend-clip** (self+neighbor) | side-approach 비킨 하강/slide 가 목표/이웃 큐브 침 → 변위 | 미해결(BLOCKER). grip 얇게로 안 줄음 → 접근 기하 문제 | 🔴 |
+| **descend-clip** (진단 확정 2026-06-13) | **93% self-clip**(target 큐브, 이웃 아님). 수직(−90°) 14% vs tilt 42–80%. clip 시점 **TCP 가 큐브 위(z 0.761>top 0.74)·옆 34mm** → TCP 아래로 늘어진 open-jaw 손가락이 하강 중 큐브 침. 영상 `outputs/so101_descend_clip_env208.mp4` | 미해결(BLOCKER). **반증된 시도**: ⓐ descend-closed+preopen → 14% 악화(open-jaw 단순 overhang 아님) ⓑ blind side-offset↑ → 하강점을 reach 가장자리로 밀어 tilt 강제(60% clip) 역효과 ⓒ 수직 hard-gate → 가장자리 큐브 slide-stuck↑. 다음 = jaw 손가락 mesh 기하/접근 재설계, GUI 관찰 기반 | 🔴 |
 | **build_plan None cascade** | clip 이 큐브를 reach 밖으로 침 → 도달불가 → defer churn(max_round 6 이 6× 부풀림) | max_round 3 + clip 해결(근본) | 🔵 |
 | **max_round 6 cap 컷오프** | 실패 큐브 6×200tick → 가장 느린 env 가 max_total_steps 도달 → 미완 | max_round 3 (steps 4000→2011) | 🟢 |
 | **grasp-precision miss** | slide 가 관절 tol 0.025 로 8mm 못미쳐 close → 큐브 jaw 가장자리 | slide Cartesian 게이트(reach_tol)·slide_stop 0.005 | 🔵 검증중 |
@@ -235,7 +295,10 @@ flowchart TD
 | **윗면 긁기** | grip 너무 얇아 손가락이 top 못 넘음 | min_grip_depth floor 0.016 | 🟢 |
 | **neighbor-aware safe-gate no-op** | sep 0.04 밀집엔 clip-free 방향 부재 → safe 항상 False | 폐기(D11). churn 만 유발 | ⚫ |
 | **2048 로그 I/O 병목** | per-env 로그 5만줄 매줄 fsync | `num_envs>64` 면 fsync 생략(flush 만) | 🟢 |
-| **edge spawn 4%** | 외측(x~2.04 reach 한계)·내측(x~1.68 base발치 inner-reach) | SM drag(D8) 또는 range 조이기 | ⚪ |
+| **edge spawn 4%** | 외측(x~2.04 reach 한계)·내측(x~1.68 base발치 inner-reach) | SM drag(D8, nudge opt-in)/range 조이기 | ⚪ |
+| **시작 ~8초 멍한 대기** | home→첫 WP 접근이 IK-fail 경로로 stall(팔 frozen) → max_wp(240=8s)까지 대기. **계산 아님** | stuck_patience(TCP 무진전 24step abort). max_wp blunt-cut(90)은 정상 WP 도 잘라 역효과 | 🔵 검증중 |
+| **2번째 큐브 그릇 침**(잔존) | D-c arc(0.18) 부족 — 그릇 가까운 grasp→over-bowl 직선이 아직 rim 스침 | arc 강화/접근방향 — TODO | 🔴 |
+| **descend ram**(포크레인) | side-offset 하강이 큐브 ram, fixed finger 앞서 추정 | GUI 관찰 기반 grasp face(D14) — TODO | 🔴 |
 
 > 새 에러 진단·수정 성공 시 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) 에 (현상→오류→원인→해결→확인) 5블록 추가.
 
@@ -290,7 +353,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
 ```
 
 - 관련 파일: `scripts/environments/pick_cube_state_machine.py`(전부), `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py`(상수·DR), `src/sim_to_real/utils/{constant,domain_randomization}.py`.
-- **전부 미커밋**(main 브랜치) — flat-dense 100% 후 브랜치 생성→커밋.
+- **커밋 `831349d` (main)** — SM 전체+`domain_randomization.py`+CONTEXT+이 문서. 이후 stuck_patience·selection 등 미커밋.
 
 ---
 
@@ -304,4 +367,5 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python \
 
 ---
 
-> **다음 갱신 시점**: descend-clip cascade 해결 또는 궤적/속도 고도화(사용자 5지시) 반영 후 §6 칸반·§7 타임라인·§9 config 갱신. flat-dense 100% 달성 시 z-stack/far 단계로.
+> **다음 작업**: **descend-clip 이 유일 천장**(grasp-face 선정·reachability 는 해결됨). 영상 `outputs/so101_descend_clip_env208.mp4`(self-clip 관찰) 기반으로 jaw 손가락 mesh 기하/접근 재설계. blind 튜닝 4연패(safe-gate·edge-nudge·side-offset↑·descend-closed) — **반드시 관찰 기반**. 해결 시 success 가 build_plan None 회수분(−39%)만큼 상승 기대 → 그 후 2048-env·z-stack/far.
+> **다음 갱신 시점**: descend-clip 해결 후 §6·§7·§10 갱신. flat-dense 100% 달성 시 z-stack/far 단계로.

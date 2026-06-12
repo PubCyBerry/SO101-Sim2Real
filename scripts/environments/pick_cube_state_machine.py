@@ -124,7 +124,12 @@ parser.add_argument("--reach_tol", type=float, default=0.012,
                          "수 mm 못 미쳐 close 가 큐브를 jaw 가장자리서 놓침(grasp miss) → 실측 TCP 가 "
                          "목표 이 거리 안에 들 때만 도달. 너무 작으면 도달 대기 길어짐(8mm→12mm 완화)")
 parser.add_argument("--max_wp_steps", type=int, default=240,
-                    help="한 waypoint 에서 수렴 못해도 넘어가는 step 상한 (30 Hz 기준 8초)")
+                    help="한 waypoint 에서 수렴 못해도 넘어가는 step 상한 (30 Hz 기준 8초, hard cap). "
+                         "stuck 대기는 stuck_patience(무진전 abort)가 먼저 잘라낸다 — 이건 backstop. "
+                         "(90 으로 줄이면 느리지만 도달 가능한 WP 도 잘려 grasp 실패↑)")
+parser.add_argument("--stuck_patience", type=int, default=24,
+                    help="WP 에서 TCP-목표 거리가 이만큼 step 동안 안 줄면 stuck 으로 보고 조기 종료 "
+                         "(IK-fail 로 팔이 frozen 한 채 max_wp_steps 까지 멍때리는 대기 제거)")
 parser.add_argument("--close_dwell", type=int, default=8,
                     help="그리퍼 닫힘 정착 step (30 Hz). gripper_speed 5rad/s 면 ~6 step 에 완전 닫힘")
 parser.add_argument("--gripper_speed", type=float, default=5.0,
@@ -133,8 +138,8 @@ parser.add_argument("--release_wait", type=int, default=3,
                     help="release 전 그릇 위에서 닫은 채 정지 step (감속만 — 정체 방지). 하강 없이 떨굼")
 parser.add_argument("--release_dwell", type=int, default=10,
                     help="그리퍼 열림 후 정지 step (큐브 낙하·open 완료 대기)")
-parser.add_argument("--settle_steps", type=int, default=10,
-                    help="reset 후 큐브 정착 대기 step (z 분산 spawn 낙하·정착 여유 포함)")
+parser.add_argument("--settle_steps", type=int, default=6,
+                    help="reset 후 큐브 정착 대기 step. flat(z분산 0)이라 짧게 — 시작 대기 단축")
 parser.add_argument("--max_round", type=int, default=3,
                     help="큐브당 replan 라운드 상한. (6 은 실패 큐브가 6×200tick 재시도 → 가장 느린 "
                          "env 가 max_total_steps cap 도달 → 대량 env 미완·성공률 추락. 3 이 균형)")
@@ -202,10 +207,16 @@ parser.add_argument("--gripper_open_large", type=float, default=0.85,
                     help="40mm 큐브용 열림 joint target (rad)")
 parser.add_argument("--gripper_close", type=float, default=-0.05)
 # 속도 (m/s, Cartesian)
-parser.add_argument("--descend_speed", type=float, default=0.32, help="하강 속도")
-parser.add_argument("--lift_speed", type=float, default=0.55, help="상승/후퇴 속도")
+parser.add_argument("--travel_height", type=float, default=0.15,
+                    help="up-over-down 단일 운반 고도(desk 기준). 횡이동은 항상 이 높이 → 큐브 top·"
+                         "그릇 rim·매달린 큐브 위로 지나가 충돌 회피. 0.15=구 safe_z(도달 검증됨)")
+parser.add_argument("--travel_speed", type=float, default=0.60,
+                    help="up-over-down 횡/수직 이동(rise/over/lift/over_bowl) 등속 순항 속도. "
+                         "flythrough(코너서 안 멈춤)라 episode 대부분이 이 속도로 부드럽게")
+parser.add_argument("--descend_speed", type=float, default=0.40, help="하강·그릇 내림 속도")
+parser.add_argument("--lift_speed", type=float, default=0.55, help="(legacy) 상승/후퇴 속도")
 parser.add_argument("--transport_speed", type=float, default=0.70,
-                    help="수평 운반 순항 속도 상한. 너무 빠르면 marginal 그립(특히 40mm)을 전단해 drop")
+                    help="(legacy) 수평 운반 순항 속도 상한")
 parser.add_argument("--accel", type=float, default=6.0,
                     help="사다리꼴 속도 프로파일 가·감속도 (m/s²). 등속 선형(텔레포트 느낌·급출발 "
                          "큐브 밀침) 대신 양끝 0속도로 가속→순항(*_speed)→감속. 클수록 순항 빨리 "
@@ -646,11 +657,14 @@ class SO101PickPlace:
         self.q_cmd    : list[list[float]] = [list(self.HOME_Q) for _ in range(N)]
         self.cur_pose : list[Pose | None] = [None] * N
         self.seg_v    : list[float] = [0.0] * N    # 현재 segment Cartesian 속도(사다리꼴 프로파일)
+        self.wp_best_d: list[float] = [1e9] * N    # 현재 WP 의 TCP-목표 최소거리(stuck 감지)
+        self.wp_stuck : list[int]   = [0] * N      # TCP 거리 무진전 step 수
         self.grasp_z0 : list[float] = [0.0] * N
         self.grasp_ref: list[np.ndarray | None] = [None] * N  # plan 시점 큐브 xy (drift 기준)
         self.n_placed : list[int] = [0] * N  # 그릇에 담은 큐브 수 (release 분산 인덱스)
         self.drop_logged: list[bool] = [False] * N  # drop 징후 1회만 기록 (attempt 별)
         self.nudge_n  : list[dict[str, int]] = [{c: 0 for c in self.cubes} for _ in range(N)]
+        self.last_roll: list[dict[str, float | None]] = [{c: None for c in self.cubes} for _ in range(N)]  # 직전 채택 roll (replan oscillation 방지)
         self.is_nudge : list[bool] = [False] * N  # 현재 plan 이 nudge(재배치)인가
         self.outcome  : list[Outcome] = [Outcome.RUNNING] * N
         self.events   : list[list[dict]] = [[] for _ in range(N)]  # taxonomy: retry/나쁜궤적
@@ -752,78 +766,111 @@ class SO101PickPlace:
         yaw_fixed_w = (q5_base - q1) - BASE_YAW_OFFSET + root_yaw
         return yaw_fixed_w + roll
 
-    def _grasp_setup(self, e: int, cube: str):
-        """grasp 자세·진입 방향 결정. 반환 (roll, (sdx, sdy) slide 단위벡터, (bx0, by0) 비킴점).
+    def _grasp_candidate(self, e: int, cube: str, roll: float):
+        """roll 1개의 full-reachable grasp 후보. 반환 (gx, gy, gz, pitch, bx0, by0, dx, dy)
+        또는 None(도달 불가).
 
-        · roll 은 **±90° 만**(사용자 기본 자세). 큐브 90° 대칭이라 둘 다 동등 grasp 인데
-          접근 방향이 180° 반대라, 그릇/이웃 큐브 없는 쪽을 골라 장애물 회피(=사용자가 말한
-          "닫는 축에 장애물 있으면 90° 돌려").
-        · slide(비킴 진입)는 `_closing_axis` 방향 = **jaw gap 이 열린 방향** → 큐브가 두 손가락
-          사이로 들어옴. 손가락 분리축(사용자가 말한 닫는 축)은 이에 ⊥ → 닫는 축이 이동
-          방향과 수직(정면 ram 없음). roll 0 은 닫는 축 ∥ 이동이라 ram → 제외.
-        · 손가락 연장선·비킴점·slide 경로가 그릇/이웃 큐브와 충돌하면 점수↓.
+        side-approach: 닫힘축(`_closing_axis`) 방향 dx,dy 로 side_offset 비켜 수직 하강(offset
+        점)→ 수평 slide 로 큐브 중심(center 점) 진입. 실행기는 descend·slide·grasp 를 **동일
+        pitch** 로 쓰므로(전이 시 재배향 없음), **offset 점과 center 점이 같은 pitch 에서 동시에
+        닿는** (pitch, 깊이) 를 찾는다. pitch 는 가파른(top-down) 쪽부터 스캔 → 채택 pitch 가
+        최대한 수직 = 손가락 수평 overhang 최소 = 하강 self-clip(forklift ram) 최소.
+
+        gz 침투 깊이는 min_grip_depth(얇은 쪽 floor)→grip_height(깊은 쪽) ladder. 얇은 쪽
+        floor 가 윗면 긁기를 막고, '최소 이상이면 grip'(사용자) 로 reach 가장자리에 강하다.
         """
-        p = self.obj_pos(cube, e)
-        bowl = self.obj_pos(BOWL_NAME, e)
-        others = [self.obj_pos(c, e) for c in self.remaining[e] if c != cube]
-        so = self._side_offset(cube)   # 큐브 크기별 비킴 거리
-        fh = 0.045   # 손가락 분리축(⊥) 연장 평가 반길이 (m)
-        px, py = float(p[0]), float(p[1])
-        bx, by = float(bowl[0]), float(bowl[1])
-        best = None
-        # ±90 = 닫는 축 ⊥ yaw(기본), 0/π = 90° 돌린 자세(나란한 큐브 회피용). 막힘 적은
-        # 후보 채택, ±90 에 가산점(기본 자세 우선). 진입로(slide, ax)+손가락 끝(⊥) 둘 다 검사.
-        for pref, roll in ((True, math.pi / 2), (True, -math.pi / 2),
-                           (False, 0.0), (False, math.pi)):
-            ax = self._closing_axis(e, cube, roll)      # gap-open(=slide·비킴) 방향
-            dx, dy = math.cos(ax), math.sin(ax)
-            fx, fy = -math.sin(ax), math.cos(ax)         # 손가락 분리축(⊥)
-            bx0, by0 = px - so * dx, py - so * dy         # 비킨 하강점(진입축 따라)
-            pts = [
-                (px + fh * fx, py + fh * fy),             # 손가락 끝 A (⊥)
-                (px - fh * fx, py - fh * fy),             # 손가락 끝 B (⊥)
-                (bx0, by0),                               # 비킨 하강점(진입로)
-                (0.5 * (bx0 + px), 0.5 * (by0 + py)),     # slide 중간(진입로)
-            ]
-            score = 1e9
-            for cxx, cyy in pts:
-                score = min(score, math.hypot(cxx - bx, cyy - by) - args.bowl_clear)
-                for o in others:
-                    score = min(score, math.hypot(cxx - float(o[0]), cyy - float(o[1]))
-                                - args.cube_clear)
-            adj = score + (0.04 if pref else 0.0)         # ±90 기본 선호
-            if best is None or adj > best[0]:
-                best = (adj, roll, (dx, dy), (bx0, by0))
-        return best[1], best[2], best[3]
-
-    def _grasp_pose(self, e: int, cube: str):
-        """grasp 해 (gx, gy, gz, yaw, roll, pitch, bx0, by0) 또는 None.
-
-        gz = 큐브 top 아래 침투 깊이를 **min_grip_depth(얇은 쪽)부터 grip_height 깊이까지**
-        ladder 로 IK 시도해 첫 도달 해를 채택한다. 정확한 깊이를 고집하지 않고 '최소 이상이면
-        grip'(사용자) → reach 가장자리에 강하고, 얇을수록 하강 self-clip 도 준다. 단 min_grip_depth
-        floor 가 너무 얇아 손가락이 윗면을 긁는 것을 막는다.
-        """
-        roll, (sdx, sdy), (bx0, by0) = self._grasp_setup(e, cube)
         p = self.obj_pos(cube, e)
         yaw = self.obj_yaw(cube, e)
         size = CUBE_SIZES.get(cube, 0.030)
-        top = float(p[2]) + size * 0.5
-        gx = float(p[0]) - args.slide_stop * sdx
-        gy = float(p[1]) - args.slide_stop * sdy
+        px, py, pz = float(p[0]), float(p[1]), float(p[2])
+        top = pz + size * 0.5
+        ax = self._closing_axis(e, cube, roll)      # gap-open(=slide·비킴) 방향
+        dx, dy = math.cos(ax), math.sin(ax)
+        so = self._side_offset(cube)                 # 큐브 크기별 비킴 거리
+        bx0, by0 = px - so * dx, py - so * dy         # 비킨 하강점(진입축 따라)
+        gx, gy = px - args.slide_stop * dx, py - args.slide_stop * dy  # slide 종점(중심 근처)
+        # 도달성 게이트 = 아래 closed-form IK 스캔(acos 정의역 밖이면 None, 빠름). 반경 pre-filter 는
+        # 쓰지 않는다 — annulus 상한(_reach_ok 0.32)은 top-down 선택 proxy 라, pitch 완화로 닿는
+        # reach 가장자리(bowl·far 큐브 r>0.33)와 offset 점(중심보다 바깥)을 거짓 기각한다(build_plan None↑).
         deep = size - args.grip_height            # top 아래 최대 침투(= grip_height 깊이)
         lo = min(args.min_grip_depth, deep)       # 얇은 쪽 floor
         n = 4
-        for i in range(n):
-            depth = lo + (deep - lo) * i / (n - 1)   # 얇게(floor) → 깊게
-            out = self._ik_reach(e, (gx, gy, top - depth), yaw, roll)
-            if out is not None:
-                return gx, gy, top - depth, yaw, roll, out[1], bx0, by0
+        pmin, pmax = math.radians(-90), math.radians(-30)
+        nps = 13
+        for i in range(nps):                       # 가파른(top-down) pitch 우선
+            pitch = pmin + (pmax - pmin) * i / (nps - 1)
+            for j in range(n):                     # 얇게(floor) → 깊게
+                gz = top - (lo + (deep - lo) * j / (n - 1))
+                if self._ik(e, (gx, gy, gz), pitch, yaw, roll) is None:
+                    continue                       # center 미도달 → 다음 (싼 쪽 먼저)
+                if self._ik(e, (bx0, by0, gz), pitch, yaw, roll) is None:
+                    continue                       # offset 미도달 → 다음
+                return gx, gy, gz, pitch, bx0, by0, dx, dy
         return None
 
+    def _evaluate_all_grasps(self, e: int, cube: str):
+        """roll 4개({±90°,0,π})를 end-to-end 평가해 최선 grasp 해를 고른다.
+        반환 (gx, gy, gz, yaw, roll, pitch, bx0, by0) 또는 None(전 roll 도달 불가).
+
+        선정 기준(사용자 위임 — "grasp face 를 잘 골라라"):
+          ① **full 도달성 게이트**: offset+center 가 동일 pitch 로 닿는 roll 만 후보 → 종전엔
+             clearance 로 1개 고른 뒤 그 roll 이 도달 불가면 plan 전체가 None 이었다(build_plan
+             None 의 회수가능분). 4개 다 평가하므로 닿는 face 를 놓치지 않는다.
+          ② 후보 중 composite 최대:
+             clear_norm = clamp(clearance / 4cm, 0, 1)   여유 충분(≥4cm)이면 포화
+             pitch_norm = clamp((pitch°+90)/60, 0, 1)    -90°(top-down)=1 … -30°=0
+             composite  = clear_norm + pitch_norm + 0.1·(±90) + 0.05·(직전 roll)
+        여유가 충분하면 clear 포화→**pitch 가 결정**(가장 top-down = forklift/self-clip↓), 부족하면
+        clearance 가 페널티(이웃·그릇 충돌 회피). obstacle score 는 **target 큐브 제외**(self-clip 은
+        clearance 가 못 잡아 pitch 가 담당). 직전 roll 미세 가산 = replan 시 roll oscillation 방지.
+        roll ±90° 는 큐브 90° 대칭상 ⊥ 두 face-pair, 0/π 는 그 180° 반대 접근(나란한 큐브 회피).
+        """
+        p = self.obj_pos(cube, e)
+        yaw = self.obj_yaw(cube, e)
+        bowl = self.obj_pos(BOWL_NAME, e)
+        others = [self.obj_pos(c, e) for c in self.remaining[e] if c != cube]
+        px, py = float(p[0]), float(p[1])
+        bx, by = float(bowl[0]), float(bowl[1])
+        fh = 0.045   # 손가락 분리축(⊥) 연장 평가 반길이 (m)
+        last = self.last_roll[e].get(cube)
+        best = None  # (composite, solution 8-tuple)
+        for roll in (math.pi / 2, -math.pi / 2, 0.0, math.pi):
+            cand = self._grasp_candidate(e, cube, roll)
+            if cand is None:
+                continue
+            gx, gy, gz, pitch, bx0, by0, dx, dy = cand
+            fx, fy = -dy, dx                          # 손가락 분리축(⊥)
+            pts = [
+                (px + fh * fx, py + fh * fy),         # 손가락 끝 A (⊥)
+                (px - fh * fx, py - fh * fy),         # 손가락 끝 B (⊥)
+                (bx0, by0),                           # 비킨 하강점(진입로)
+                (0.5 * (bx0 + px), 0.5 * (by0 + py)), # slide 중간(진입로)
+            ]
+            clear = 1e9
+            for cxx, cyy in pts:
+                clear = min(clear, math.hypot(cxx - bx, cyy - by) - args.bowl_clear)
+                for o in others:
+                    clear = min(clear, math.hypot(cxx - float(o[0]), cyy - float(o[1]))
+                                - args.cube_clear)
+            clear_norm = max(0.0, min(1.0, clear / 0.04))
+            # 수직(-90°)이 tilt 보다 self-clip 1/4 (14% vs 60%, 256-env). pitch_norm(가중 1)으로
+            # 수직 선호하되 **절대 게이트는 안 함** — 절대 게이트(vert=10)는 reach 가장자리 큐브를
+            # 무리한 수직으로 끌어 slide-stuck/빈grasp↑ 라 net 악화(run3 56.7 < run2 57.4). tilt 가
+            # 닿는 가장자리 큐브는 tilt 로 잡는 게 낫다(수직 강제 시 stuck).
+            pitch_norm = max(0.0, min(1.0, (math.degrees(pitch) + 90.0) / 60.0))
+            bias = 0.1 if abs(abs(roll) - math.pi / 2) < 1e-3 else 0.0  # ±90° 만 선호(0/π 제외)
+            cont = 0.05 if (last is not None and abs(roll - last) < 1e-3) else 0.0
+            composite = clear_norm + pitch_norm + bias + cont
+            if best is None or composite > best[0]:
+                best = (composite, (gx, gy, gz, yaw, roll, pitch, bx0, by0))
+        if best is None:
+            return None
+        self.last_roll[e][cube] = best[1][4]
+        return best[1]
+
     def _graspable(self, e: int, cube: str) -> bool:
-        """도달 가능한 grasp 해(어떤 깊이로든)가 있는가 — 선택용 reach 판정."""
-        return self._grasp_pose(e, cube) is not None
+        """도달 가능한 grasp 해(어떤 roll·깊이로든)가 있는가 — 선택용 reach 판정."""
+        return self._evaluate_all_grasps(e, cube) is not None
 
     def _place_xy(self, e: int) -> tuple[float, float]:
         """release 목표 xy — 그릇 중심을 base 쪽으로 살짝 당겨 reach 마진 확보 후,
@@ -840,50 +887,49 @@ class SO101PickPlace:
         return (cx + r * math.cos(ang), cy + r * math.sin(ang))
 
     def _build_plan(self, e: int, cube: str) -> list[WP] | None:
-        """큐브 1개 plan. 도달 불가 시 None(defer).
+        """큐브 1개 plan(up-over-down). 도달 불가 시 None(defer).
 
-        grasp = side-approach: 비대칭 jaw 가 큐브 윗면을 찌르지 않게 닫힘축 방향으로
-        side_offset 비켜 **수직 하강**(하강 중 큐브 무접촉) 후 **수평 slide 로 큐브 중심까지**
-        진입해 close → 중심 파지. roll 은 ±90° 고정으로 접근부터 grasp 까지 불변(내려가서
-        재정렬 안 함). grasp 깊이는 바닥 기준(grasp_floor)으로 깊게. release = 그릇 위
-        안전고도에서 **하강 없이** n_placed 별 분산 지점에 0.3s 대기 후 떨굼.
+        **충돌 회피 = 횡이동은 항상 travel_height 고정고도, 수직만 오르내림** (대각선 sweep 금지).
+        rise(현재 xy서 수직↑) → over(offset 위로 횡이동) → descend(수직↓) → slide(중심 진입) →
+        grasp → lift(수직↑) → over_bowl(그릇 위로 횡이동) → release(그릇 중심 수직↓ 후 떨굼).
+        고도 이동(rise/over/lift/over_bowl)은 큐브 top·그릇 rim·매달린 큐브 위라 무엇도 안 침.
+        grasp = side-approach(닫힘축 비켜 수직 하강 후 수평 slide), roll·pitch 는 _evaluate_all_grasps.
         """
-        p = self.obj_pos(cube, e)
-        # grasp 해: 자세(roll)·진입(side/slide)·도달 가능 gz(얇게 우선 깊이 ladder) 일괄.
-        gp = self._grasp_pose(e, cube)
+        # grasp 해: roll 4개 end-to-end 평가(도달성 게이트 + clearance/pitch 선정) 일괄.
+        gp = self._evaluate_all_grasps(e, cube)
         if gp is None:
             return None
         gx, gy, gz, yaw, roll, pitch, bx0, by0 = gp
-        if self._ik(e, (bx0, by0, gz), pitch, yaw, roll) is None:
-            return None  # 비킨 하강점 도달 불가
-        sz = self._safe_z()
-        # 그릇 위 통과·release 고도: 매달린 큐브 바닥이 그릇 rim 을 넘게 올림(arc over) →
-        # 직선 운반이 rim 치는 것 방지(사용자). lift(sz)→transport(bz) 가 올라가며 그릇 위로
-        # 호를 그린다. bz 도달 불가(그릇이 높이+먼 reach 한계)면 sz 로 폴백(큐브 포기보다 나음).
-        bz = DESK_TOP_Z + args.bowl_clear_height
+        tz = DESK_TOP_Z + args.travel_height       # 단일 운반 고도
         bx, by = self._place_xy(e)
-        rel = self._ik_reach(e, (bx, by, bz), yaw, roll)
-        if rel is None:
-            bz = sz
-            rel = self._ik_reach(e, (bx, by, sz), yaw, roll)
-            if rel is None:
-                return None  # 그릇 도달 불가 (DR 상 거의 없음)
-        pit_bowl = rel[1]
+        rz = DESK_TOP_Z + args.release_height
+        cur = self.cur_pose[e]
+        cx, cy = (float(cur.x), float(cur.y)) if cur is not None else (bx0, by0)
+        # 고정고도 운반점은 **_ik_reach(pitch 스캔)** — 높은 점은 top-down(-90°) 불가, 완화 pitch
+        # 라야 닿는다(arm 이 위로 뻗으면 수직 자세 못 냄). 하나라도 불가면 defer. descend/slide/grasp
+        # 만 grasp pitch(top-down) 사용 → 하강하며 재배향.
+        o_over = self._ik_reach(e, (bx0, by0, tz), yaw, roll)
+        o_lift = self._ik_reach(e, (gx,  gy,  tz), yaw, roll)
+        o_bowl = self._ik_reach(e, (bx,  by,  tz), yaw, roll)
+        o_rel  = self._ik_reach(e, (bx,  by,  rz), yaw, roll)
+        if o_over is None or o_lift is None or o_bowl is None or o_rel is None:
+            return None
+        o_rise = self._ik_reach(e, (cx, cy, tz), yaw, roll)
+        rise_p = o_rise[1] if o_rise is not None else o_over[1]
 
-        self.grasp_ref[e] = p[:2].copy()  # 하강 drift 가드 기준
-        oc = self._open_cmd(cube)
-        cc = args.gripper_close
+        self.grasp_ref[e] = self.obj_pos(cube, e)[:2].copy()  # 하강 drift 가드 기준
+        oc, cc = self._open_cmd(cube), args.gripper_close
         ct, ft = args.joint_tol, args.fine_joint_tol
-        hover_z = gz + args.pregrasp_height
+        tv, ds, sl = args.travel_speed, args.descend_speed, args.slide_speed
         return [
-            WP((bx0, by0, sz),      pitch,    yaw, roll, oc, args.transport_speed, ct, 0,                   "approach"),
-            WP((bx0, by0, hover_z), pitch,    yaw, roll, oc, args.descend_speed,   ft, args.pregrasp_dwell, "hover"),
-            WP((bx0, by0, gz),      pitch,    yaw, roll, oc, args.descend_speed,   ft, 0,                   "descend"),
-            WP((gx, gy, gz),        pitch,    yaw, roll, oc, args.slide_speed,     ft, 0,                   "slide"),
-            WP((gx, gy, gz),        pitch,    yaw, roll, cc, args.slide_speed,     ft, args.close_dwell,    "grasp"),
-            WP((gx, gy, sz),        pitch,    yaw, roll, cc, args.lift_speed,      ct, 0,                   "lift"),
-            WP((bx, by, bz),        pit_bowl, yaw, roll, cc, args.transport_speed, ct, args.release_wait,   "transport"),
-            WP((bx, by, bz),        pit_bowl, yaw, roll, oc, args.lift_speed,      ct, args.release_dwell,  "release"),
+            WP((cx,  cy,  tz), rise_p,    yaw, roll, oc, tv, ct, 0,                "rise"),       # 현재 xy서 수직↑
+            WP((bx0, by0, tz), o_over[1], yaw, roll, oc, tv, ct, 0,                "over"),       # offset 위로 횡이동
+            WP((bx0, by0, gz), pitch,     yaw, roll, oc, ds, ft, 0,                "descend"),    # 수직↓(top-down 재배향)
+            WP((gx,  gy,  gz), pitch,     yaw, roll, oc, sl, ft, 0,                "slide"),      # 중심 진입
+            WP((gx,  gy,  gz), pitch,     yaw, roll, cc, sl, ft, args.close_dwell, "grasp"),      # close
+            WP((gx,  gy,  tz), o_lift[1], yaw, roll, cc, tv, ct, 0,                "lift"),       # 수직↑
+            WP((bx,  by,  tz), o_bowl[1], yaw, roll, cc, tv, ct, 0,                "over_bowl"),  # 그릇 위로 횡이동
+            WP((bx,  by,  rz), o_rel[1],  yaw, roll, oc, ds, ct, args.release_dwell, "release"),  # 그릇 중심 수직↓·떨굼
         ]
 
     def _nudge_target(self, e: int, cube: str) -> tuple[float, float] | None:
@@ -937,10 +983,21 @@ class SO101PickPlace:
             WP((exp_, eyp, sz), pit, 0.0, 0.0, cc, args.lift_speed,     ct, 0, "nudge_up"),
         ]
 
-    def _select_next(self, e: int) -> str | None:
-        """남은 큐브 중 다음 대상: clear(장애물 적음) > reachable > 그릇에서 먼 순.
+    def _reach_ok(self, e: int, cube: str) -> bool:
+        """싼 도달 proxy: base frame 반경이 reach annulus 안인가. **선택 정렬 전용** —
+        full IK(_evaluate_all_grasps = roll 4개 × pitch·깊이 스캔)는 비싸므로 순서엔 반경만 쓰고,
+        실제 도달은 _build_plan(_evaluate_all_grasps)이 검증.
+        per-env 루프 부하를 크게 줄인다(2048 가속)."""
+        tb = self._to_base(self.obj_pos(cube, e), e)
+        r = math.hypot(tb[0] - SO101Kinematics.PAN_X, tb[1])
+        return args.nudge_r_near <= r <= args.nudge_r_far
 
-        막힌 큐브는 자연히 뒤로, 앞 큐브가 치워지면 clear 해진다. round 상한 초과는 후순위.
+    def _select_next(self, e: int) -> str | None:
+        """남은 큐브 중 다음 대상: round미소진 > 도달 > **고립(loner) 우선** > 높은z > 그릇서 먼.
+
+        고립 우선 = 이웃과 가장 먼 큐브(클러스터 가장자리)부터 → 바깥부터 벗겨 ram/헤집음 없이
+        깨끗하게, 매 grasp 가 최대 여유 확보(declutter 효과). 막힌/밀집 큐브는 뒤로 밀려 앞 큐브가
+        치워지며 트인다. round 상한 초과는 후순위.
         """
         rem = self.remaining[e]
         if not rem:
@@ -953,11 +1010,12 @@ class SO101PickPlace:
         best, best_key = None, None
         for c in rem:
             p = self.obj_pos(c, e)
-            reachable = self._graspable(e, c)
-            d_bowl = float(np.linalg.norm(p[:2] - bowl[:2]))
             over = self.rounds[e][c] >= args.max_round
-            # 우선순위: round 미소진 > 도달가능 > 높은 z(쌓인 stack top 먼저) > 그릇서 먼
-            key = (not over, reachable, round(float(p[2]), 3), d_bowl)
+            reachable = self._reach_ok(e, c)
+            iso = min((float(np.linalg.norm(p[:2] - self.obj_pos(o, e)[:2]))
+                       for o in rem if o != c), default=9.9)  # 이웃 최소거리 = 고립도
+            d_bowl = float(np.linalg.norm(p[:2] - bowl[:2]))
+            key = (not over, reachable, round(iso, 3), round(float(p[2]), 3), d_bowl)
             if best_key is None or key > best_key:
                 best_key, best = key, c
         return best
@@ -1077,11 +1135,14 @@ class SO101PickPlace:
             if self.cur_pose[e] is None:
                 self._init_pose(e)
             log(f"[SM] env{e}: cube={cube} roll={math.degrees(plan[0].roll):+.0f}° "
-                f"(remaining {self.remaining[e]})")
+                f"pitch={math.degrees(plan[0].pitch):+.0f}° (remaining {self.remaining[e]})")
 
         cube = self.cur_cube[e]
         wp = self.plan[e][self.idx[e]]
         self.wp_steps[e] += 1
+        if self.wp_steps[e] == 1:  # 새 WP 진입 — stuck 추적 초기화
+            self.wp_best_d[e] = 1e9
+            self.wp_stuck[e] = 0
         timeout = self.wp_steps[e] >= args.max_wp_steps
         tol = wp.tol
 
@@ -1104,7 +1165,7 @@ class SO101PickPlace:
                     f"nearest_other={nc}@{nd * 1000:.0f}mm tcp_z={tcp[2]:.3f} cube_z={cp[2]:.3f}")
                 self._replan_cube(e, cube, f"하강 중 큐브 밀림 {drift * 1000:.0f}mm")
                 return self.q_cmd[e], wp.grip
-        if holding and wp.tag in ("lift", "transport"):
+        if holding and wp.tag in ("lift", "over_bowl"):
             dist = float(np.linalg.norm(self.obj_pos(cube, e) - self.tcp_meas(e)))
             if dist > args.drop_tol and not self.drop_logged[e]:
                 # 쥔 큐브가 멀어짐 = drop 징후. **여기서 그리퍼를 열면 확실히 떨군다** —
@@ -1119,7 +1180,10 @@ class SO101PickPlace:
         cp = self.cur_pose[e]
         remaining = math.dist((cp.x, cp.y, cp.z), tuple(wp.pos))
         dt = 1.0 / 30.0
-        v_decel = math.sqrt(max(2.0 * args.accel * remaining, 0.0))  # 목표서 0 되게 감속
+        # flythrough(이동 WP: rise/over/lift/over_bowl)는 코너서 감속·정지 안 함 → episode 대부분
+        # 등속 부드럽게(사용자). stop WP(descend/slide/grasp/release)만 목표서 0 으로 감속(정밀).
+        flythrough = wp.tag in ("rise", "over", "lift", "over_bowl")
+        v_decel = 1e9 if flythrough else math.sqrt(max(2.0 * args.accel * remaining, 0.0))
         v_cmd = max(min(wp.speed, self.seg_v[e] + args.accel * dt, v_decel), args.min_speed)
         self.seg_v[e] = v_cmd
         step = v_cmd * dt
@@ -1131,32 +1195,46 @@ class SO101PickPlace:
         cp.roll = wp.roll  # roll 직접 — 접근부터 grasp roll(±90) 고정
         cp.yaw = wp.yaw    # yaw 직접(fold 대칭, 스윙 없음)
         at_end = remaining <= step
-        if at_end:
-            self.seg_v[e] = 0.0  # segment 종료 → 다음 segment 0 부터 재가속
+        if at_end and not flythrough:
+            self.seg_v[e] = 0.0  # stop WP: 다음 segment 0 부터. flythrough 는 속도 유지(코너 통과)
 
         q = self._ik(e, (cp.x, cp.y, cp.z), cp.pitch, cp.yaw, cp.roll)
         if q is not None:
             self.q_cmd[e] = q
         # IK 실패 시 직전 q_cmd 유지 (보간이 다음 step 더 가까운 점을 줌)
 
+        # ----- stuck 감지: TCP-목표 거리가 안 줄면(IK-fail 로 팔 frozen) 조기 종료 -----
+        d_tgt = float(np.linalg.norm(self.tcp_meas(e) - np.asarray(wp.pos, dtype=float)))
+        if d_tgt < self.wp_best_d[e] - 0.002:
+            self.wp_best_d[e], self.wp_stuck[e] = d_tgt, 0
+        else:
+            self.wp_stuck[e] += 1
+
         # ----- 전이 -----
-        reached = at_end and self._converged(e, tol)
+        # flythrough 는 기하 도착(at_end)만으로 전이(관절 수렴 대기 안 함 → 등속 유지). stop WP 만 수렴 확인.
+        reached = at_end and (flythrough or self._converged(e, tol))
         if reached and wp.tag == "slide":
             # slide 만: 관절 수렴(tol)만으론 TCP 가 수 mm 못 미친 채 advance → close 가 큐브를
             # jaw 가장자리서 놓침(Cube2형 miss). 실측 TCP 가 목표 reach_tol 안일 때만 도달.
             # (descend 는 offset 점이라 sub-cm 불필요 — 게이트 빼서 대기 단축)
             reached = float(np.linalg.norm(self.tcp_meas(e) - np.asarray(wp.pos, dtype=float))) \
                 < args.reach_tol
+        # 무진전 stuck = 멍한 대기(IK-fail frozen). 미도달 WP 만 — 정상 dwell 은 reached 가 처리.
+        stuck = (not reached) and self.wp_stuck[e] >= args.stuck_patience
         if reached:
             self.dwell[e] += 1
-        if (reached and self.dwell[e] >= wp.settle) or timeout:
+        if (reached and self.dwell[e] >= wp.settle) or timeout or stuck:
+            if timeout or stuck:
+                why = "stuck(무진전)" if stuck else f"{args.max_wp_steps}step 미수렴"
+                log(f"[TIMEOUT] env{e} {cube} wp={wp.tag} {why} (TCP-목표 {d_tgt * 1000:.0f}mm)")
             # grasp 직후 lift 진입 전 큐브 z0 기록 (파지 검증 기준) + 기하 진단
             if wp.tag == "grasp":
                 self.grasp_z0[e] = float(self.obj_pos(cube, e)[2])
                 self._log_grasp(e, cube)
             self.dwell[e] = 0
             self.wp_steps[e] = 0
-            self.seg_v[e] = 0.0  # WP 전환 → 다음 segment 0 부터 가속
+            if not flythrough:
+                self.seg_v[e] = 0.0  # stop WP 전환 → 0 부터. flythrough 는 속도 유지(등속 통과)
             # lift 종료 = 파지 검증. 단 **쥐고 있으면(TCP 근처) 살짝만 올라와도 놓지 않는다**
             # (사용자: 집었으면 유지). 큐브가 안 오르고 TCP 에서도 멀면 = 빈 grasp → 재시도.
             if wp.tag == "lift" and not timeout:
