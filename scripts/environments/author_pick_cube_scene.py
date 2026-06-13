@@ -47,7 +47,6 @@ SCENE_OFFSET: tuple[float, float, float] = (0.36, 0.045, 0.705)
 MATERIALS = {
     "DeskWood": ((0.72, 0.64, 0.54), 0.72, 0.0),  # 밝은 자작 합판(다리·상판 측면). 윗면은 DeskTopTex 텍스처.
     "DeskMat": ((0.025, 0.026, 0.032), 0.93, 0.0),
-    "GrayFoam": ((0.45, 0.46, 0.47), 0.92, 0.0),
     "BowlBlue": ((0.65, 0.83, 0.96), 0.28, 0.0),
     "Ceiling": ((0.88, 0.86, 0.82), 0.95, 0.0),
 }
@@ -81,7 +80,15 @@ CUBE_MASSES: dict[str, float] = {
 }
 CONTACT_OFFSET_DEFAULT = 0.004      # 정적·두꺼운 면(책상/매트/그릇)
 CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용
-CUBE_BEVEL: float = 0.003           # 큐브 모서리 챔퍼 3mm (시각 전용)
+# 큐브 시각 형태 — 실물은 회색 펠트로 감싼 쿠션형(코너 반경 큼). 라운드 박스로 author.
+#   collision 은 별도 invisible Box(정육면체) 그대로라 grasp 물리·좌표 불변(시각 전용).
+CUBE_ROUND_RADIUS_FRAC: float = 0.22  # 변 대비 코너 반경 비율(0.030→6.6mm, 0.040→8.8mm)
+CUBE_ROUND_SEGS: int = 10             # 면당 격자 분할(라운딩 매끈도)
+CUBE_FELT_ROUGHNESS: float = 0.95     # 펠트 천 — 거의 완전 확산
+# 흰 시접 무늬는 geometry 가 아니라 albedo 텍스처에 그린다(평면 무늬). UV 는 큐브
+# 전개도(net): 앞(+X)·윗(+Z)·뒤(-X)·밑(-Z) 4면을 세로(v)로 연속 적층(밴드 컬럼 u<0.5),
+# 옆면(±Y)은 우측 컬럼(u>0.5). 텍스처의 밴드 컬럼에 흰 둥근사각 윤곽선을 그리면
+# 앞→윗→뒤 3면에 걸친 길쭉한 사각 무늬가 모서리 넘어 연속으로 이어진다.
 BOWL_MASS: float = 0.25             # kg, 약 250 g 플라스틱 그릇
 
 # 그릇 곡면 프로파일 — spherical cap(_profile_r). z(t) = z_base + depth * t.
@@ -208,11 +215,17 @@ def _textured_material(
     texture_rel: str,
     *,
     roughness: float,
+    normal_rel: str | None = None,
+    wrap: str = "clamp",
 ) -> str:
     """UsdPreviewSurface + UsdUVTexture 텍스처 머티리얼 생성, prim path 반환.
 
-    texture_rel: 레이어(scene.usda) 기준 상대 에셋 경로 (예: "./textures/desk_mat.png").
+    texture_rel: 머티리얼이 author 되는 레이어 기준 상대 에셋 경로
+      (scene.usda → "./textures/desk_mat.png", 객체 USD → "../../textures/cube_felt_albedo.png").
     diffuseColor 를 텍스처 rgb 출력에 연결하고, st 는 PrimvarReader_float2("st") 로 읽는다.
+    normal_rel 지정 시 tangent-space normal map 을 surface.normal 에 연결한다
+      (raw 컬러스페이스 + scale (2,2,2) / bias (-1,-1,-1) 로 [0,1]→[-1,1] 디코드).
+    wrap: UsdUVTexture wrapS/T 모드("clamp" 단일 이미지 / "repeat" 타일링 펠트).
     """
     mat_path = f"{parent_path}/{name}"
     material = UsdShade.Material.Define(stage, mat_path)
@@ -227,8 +240,8 @@ def _textured_material(
     tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_rel)
     tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_out)
     tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB")
-    tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
-    tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
+    tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set(wrap)
+    tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set(wrap)
     tex_rgb = tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
 
     shader = UsdShade.Shader.Define(stage, f"{mat_path}/Preview")
@@ -236,6 +249,20 @@ def _textured_material(
     shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_rgb)
     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
     shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+    if normal_rel is not None:
+        ntex = UsdShade.Shader.Define(stage, f"{mat_path}/NormalTex")
+        ntex.CreateIdAttr("UsdUVTexture")
+        ntex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(normal_rel)
+        ntex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_out)
+        ntex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+        ntex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set(wrap)
+        ntex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set(wrap)
+        ntex.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(2, 2, 2, 1))
+        ntex.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(-1, -1, -1, 0))
+        ntex_rgb = ntex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+        shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(ntex_rgb)
+
     material.CreateSurfaceOutput().ConnectToSource(
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
     )
@@ -364,39 +391,92 @@ def _set_mesh(
 # Mesh 기하 생성 (순수 함수)
 # ---------------------------------------------------------------------------
 
-def _bevel_box_geometry(
-    sx: float, sy: float, sz: float, bevel: float
-) -> tuple[list[tuple[float, float, float]], list[list[int]]]:
-    """26-face chamfered box (8 main quads + 12 edge bevels + 8 corner tris).
+def _rounded_box_geometry(
+    sx: float, sy: float, sz: float, radius: float, segs: int
+) -> tuple[
+    list[tuple[float, float, float]],
+    list[list[int]],
+    list[tuple[float, float]],
+    list[tuple[float, float, float]],
+]:
+    """매끈한 라운드 박스(쿠션형) — clamp-core 라운딩. 실물 펠트 큐브 재현.
 
-    모든 face normal 이 바깥을 향하도록 winding 검증 완료. 정점은 실제 크기.
+    6면을 각각 (segs+1)² 격자로 만들고, full-box 면 위 점 p 에 대해
+    core = clamp(p, -a, +a) (a = 반치수 - radius) 로 잡아 v = core + radius·dir̂
+    로 모서리/코너를 매끈하게 굴린다. 면 중심부(|p_inplane| ≤ a)는 평면 유지.
+
+    normal = dir̂ (라운딩 방향) 을 per-vertex 로 author → 매끈 셰이딩. UV 는 큐브
+    전개도(net) — `_net_uv` 로 앞·윗·뒤·밑을 세로 연속 적층(시접 무늬용). 면 경계
+    정점은 위치·노멀이 위치기반 결정이라 인접 면과 동일 좌표로 산출돼 crack 이
+    없다(double-sided 라 winding 영향도 없음).
+
+    반환: (points, faces, uvs, normals)
     """
-    ax, ay, az = sx / 2.0, sy / 2.0, sz / 2.0
-    c = bevel
-    corner_signs = [
-        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
-        (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1),
+    h = (sx / 2.0, sy / 2.0, sz / 2.0)
+    a = tuple(max(1e-6, hi - radius) for hi in h)  # core 반치수
+    # (법선축, 부호, u축, v축)
+    faces_def = [
+        (0, +1, 1, 2), (0, -1, 2, 1),
+        (1, +1, 2, 0), (1, -1, 0, 2),
+        (2, +1, 0, 1), (2, -1, 1, 0),
     ]
-    pts: list[tuple[float, float, float]] = []
-    for (qx, qy, qz) in corner_signs:
-        pts.append((qx * ax, qy * (ay - c), qz * (az - c)))      # v_x
-        pts.append((qx * (ax - c), qy * ay, qz * (az - c)))      # v_y
-        pts.append((qx * (ax - c), qy * (ay - c), qz * az))      # v_z
-    faces: list[list[int]] = [
-        # 6 main quads
-        [0, 3, 9, 6], [12, 18, 21, 15], [1, 13, 16, 4],
-        [7, 10, 22, 19], [2, 8, 20, 14], [5, 17, 23, 11],
-        # 4 edge bevels (z-parallel)
-        [0, 3, 4, 1], [6, 7, 10, 9], [12, 13, 16, 15], [18, 21, 22, 19],
-        # 4 edge bevels (y-parallel)
-        [0, 2, 8, 6], [3, 9, 11, 5], [12, 18, 20, 14], [15, 17, 23, 21],
-        # 4 edge bevels (x-parallel)
-        [1, 13, 14, 2], [4, 5, 17, 16], [7, 8, 20, 19], [10, 22, 23, 11],
-        # 8 corner triangles
-        [0, 1, 2], [3, 5, 4], [6, 8, 7], [9, 10, 11],
-        [12, 14, 13], [15, 16, 17], [18, 19, 20], [21, 23, 22],
-    ]
-    return pts, faces
+    points: list[tuple[float, float, float]] = []
+    uvs: list[tuple[float, float]] = []
+    normals: list[tuple[float, float, float]] = []
+    faces: list[list[int]] = []
+    for (ax, sign, ua, va) in faces_def:
+        base = len(points)
+        su, sv = 2.0 * h[ua], 2.0 * h[va]
+        for j in range(segs + 1):
+            for i in range(segs + 1):
+                fu, fv = i / segs, j / segs
+                p = [0.0, 0.0, 0.0]
+                p[ax] = sign * h[ax]
+                p[ua] = (fu - 0.5) * su
+                p[va] = (fv - 0.5) * sv
+                core = [min(max(p[k], -a[k]), a[k]) for k in range(3)]
+                d = [p[k] - core[k] for k in range(3)]
+                dl = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+                if dl > 1e-9:
+                    nrm = (d[0] / dl, d[1] / dl, d[2] / dl)
+                    v = (core[0] + radius * nrm[0], core[1] + radius * nrm[1], core[2] + radius * nrm[2])
+                else:  # radius=0 등 퇴화 — 면 법선
+                    nrm = (0.0, 0.0, 0.0)
+                    nrm = tuple(sign if k == ax else 0.0 for k in range(3))  # type: ignore[assignment]
+                    v = tuple(core)  # type: ignore[assignment]
+                points.append(v)
+                normals.append(nrm)
+                uvs.append(_net_uv(ax, sign, fu, fv))
+        for j in range(segs):
+            for i in range(segs):
+                v00 = base + j * (segs + 1) + i
+                v10 = v00 + 1
+                v01 = v00 + (segs + 1)
+                v11 = v01 + 1
+                faces.append([v00, v10, v11, v01] if sign > 0 else [v00, v01, v11, v10])
+    return points, faces, uvs, normals
+
+
+def _net_uv(
+    ax: int, sign: int, fu: float, fv: float
+) -> tuple[float, float]:
+    """라운드박스 면(ax,sign) 의 격자 파라미터(fu,fv)→큐브 전개도 UV.
+
+    밴드 컬럼(u∈[0,0.5]): 앞(+X) v[0,.25] → 윗(+Z) v[.25,.5] → 뒤(-X) v[.5,.75]
+    → 밑(-Z) v[.75,1]. Y(밴드 폭)→u. 인접면 공유 모서리에서 u·v 가 정확히 일치해
+    무늬가 모서리 넘어 연속된다. 옆면(±Y): 우측 컬럼 u∈[0.5,1], 무늬 없음.
+    """
+    if ax == 0 and sign > 0:        # +X 앞 (fu=Y, fv=Z)
+        return (0.5 * fu, 0.25 * fv)
+    if ax == 2 and sign > 0:        # +Z 윗 (fu=X, fv=Y)
+        return (0.5 * fv, 0.25 + 0.25 * (1.0 - fu))
+    if ax == 0 and sign < 0:        # -X 뒤 (fu=Z, fv=Y)
+        return (0.5 * fv, 0.50 + 0.25 * (1.0 - fu))
+    if ax == 2 and sign < 0:        # -Z 밑 (fu=Y, fv=X)
+        return (0.5 * fu, 0.75 + 0.25 * fv)
+    if ax == 1 and sign > 0:        # +Y 옆 (fu=Z, fv=X)
+        return (0.5 + 0.5 * fv, 0.5 * fu)
+    return (0.5 + 0.5 * fu, 0.5 + 0.5 * fv)  # -Y 옆 (fu=X, fv=Z)
 
 
 def _bowl_wall_geometry(
@@ -513,18 +593,33 @@ def author_cube(name: str) -> "Usd.Stage":
 
     looks = f"/{name}/Looks"
     UsdGeom.Scope.Define(stage, looks)
-    color, roughness, metallic = MATERIALS["GrayFoam"]
-    gray_foam = _visual_material(stage, looks, "GrayFoam", color, roughness, metallic)
+    # 회색 펠트 천 머티리얼 — 실사 기반 절차적 albedo + normal map (보풀감). 객체 USD
+    #   기준 상대 경로(objects/<name>/<name>.usda → ../../textures/). repeat 타일링.
+    felt = _textured_material(
+        stage, looks, "GrayFelt",
+        "../../textures/cube_felt_albedo.png",
+        roughness=CUBE_FELT_ROUGHNESS,
+        normal_rel="../../textures/cube_felt_normal.png",
+        wrap="repeat",
+    )
     # 물리 friction 머티리얼은 큐브 USD 에 두지 않는다 — PhysX 64K 머티리얼 한도 때문에
     # env 당 4개(큐브별) 복제를 막기 위해 scene.usd 가 단일 공유 CubeFriction 을 over-bind
     # 한다(값 동일, 인스턴스만 4→1). 16384 env 가능(8192×6=49K → 16384×3=49K).
 
-    # 시각 메시: 3mm 챔퍼 bevel (충돌 없음).
+    # 시각 메시: 라운드 박스(쿠션형 펠트 큐브) — per-vertex UV + 매끈 normal. 충돌 없음.
     sx, sy, sz = CUBE_SCALES[name]
+    radius = min(sx, sy, sz) * CUBE_ROUND_RADIUS_FRAC
     visual = UsdGeom.Mesh.Define(stage, f"/{name}/Visual")
-    pts, faces = _bevel_box_geometry(sx, sy, sz, CUBE_BEVEL)
+    pts, faces, uvs, normals = _rounded_box_geometry(sx, sy, sz, radius, CUBE_ROUND_SEGS)
     _set_mesh(visual, pts, faces, double_sided=True)
-    _bind_visual(visual.GetPrim(), gray_foam)
+    st = UsdGeom.PrimvarsAPI(visual).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex
+    )
+    st.Set([Gf.Vec2f(*uv) for uv in uvs])
+    visual.CreateNormalsAttr([Gf.Vec3f(*n) for n in normals])
+    visual.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
+    _bind_visual(visual.GetPrim(), felt)
+    # 흰 시접 무늬는 GrayFelt albedo(전개도 net UV)에 그려져 있어 별도 mesh 불필요.
 
     # 충돌 전용 Box: invisible 해석적 Cube(size=1) + scale. 완전 평면 grasp 면.
     box = UsdGeom.Cube.Define(stage, f"/{name}/Box")
