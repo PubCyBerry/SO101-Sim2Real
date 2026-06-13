@@ -13,7 +13,39 @@
 
 ---
 
-## 작업 인계 (2026-06-13 — 손목 카메라 홀더(Hex-Nut Mount) SO-101 부착: URDF+USD / ✅ 완료·미커밋)
+## 작업 인계 (2026-06-14 — cube_desk 큐브 현실화: 단색 샤프박스 → 라운드 펠트 큐브 + 흰 시접 무늬 / ✅ 완료·커밋 8fcf8ee)
+
+- **배경(사용자)**: 실물 큐브(회색 펠트 천 + 코너 둥근 쿠션형 + 흰 시접선)와 sim 큐브(단색 회색 0.45,0.46,0.47·26-face 3mm 베벨·UV없음) 시각 갭 큼. NVIDIA content-agents(ref_repos/content-agents) 적용 검토 → 큐브는 지오 단순(박스)이라 **hand-author로 충분, content-agents는 보류**(physics-tune·look_right·복잡에셋용으로 가치). 결정: 큐브 표면 hand-author.
+- **변경(scripts/environments/author_pick_cube_scene.py +108/-41)**:
+  - `_bevel_box_geometry` → **`_rounded_box_geometry`**(clamp-core 라운딩: core=clamp(p,-a,a), v=core+r·dir̂). per-vertex UV(면별 planar 0..1) + 매끈 normal(=dir̂) 반환. 면중심 평면 유지(±half-extent flush). 726 pts/600 faces/cube.
+  - `_textured_material` 에 `normal_rel`·`wrap` 인자 추가(tangent-space normal: raw + scale(2,2,2)/bias(-1,-1,-1)).
+  - `author_cube`: GrayFoam 단색 → **GrayFelt 텍스처 머티리얼**(`../../textures/cube_felt_{albedo,normal}.png`, roughness 0.95, repeat) + Visual mesh 에 st·normals 부여. 상수 `CUBE_ROUND_RADIUS_FRAC=0.22`(30mm→6.6/40mm→8.8mm), `CUBE_ROUND_SEGS=10`.
+  - **흰 시접 무늬(albedo 평면 무늬 — geometry 아님)**: 큐브 UV 를 **전개도(net)** 로 변경(`_net_uv`: 앞+X·윗+Z·뒤−X·밑−Z 를 밴드 컬럼 u<0.5 에 v 세로 연속 적층, 옆±Y는 u>0.5). 텍스처(`build_cube_felt_texture.py`)가 밴드 컬럼에 흰 둥근사각 **윤곽선**(rounded-rect SDF, center(.25,.375)·half(.13,.315)·r.05·stroke.013) 그림 → 앞→윗→뒤 3면 걸친 길쭉한 사각 무늬가 모서리 넘어 연속. (초기 3D welt 튜브 시도 → 사용자 "털실 같다" 피드백으로 평면 무늬로 교체.)
+  - **collision Box(invisible 정육면체 0.03/0.04)·mass·friction·좌표 전부 불변** → grasp 물리·env_cfg 좌표 무영향(시각 전용). scene.usd 바이트 불변(무회귀).
+- **신규 에셋**: `scripts/assets/build_cube_felt_texture.py`(FFT 주기 노이즈로 절차적 펠트 albedo+normal 생성, 타일링), `assets/scenes/cube_desk/textures/cube_felt_{albedo,normal}.png` 1024². 사진 마스킹 회색(sRGB~0.59 쿨) base + 미세 보풀 nap. **얼룩(저주파)은 약하게**(돌처럼 안 보이게).
+- **검증**: USD 6개 재생성(`OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/author_pick_cube_scene.py`) → ovrtx 헤드리스 렌더(`.venv-ovrtx`) `docs/ovrtx_poc.png`(전체) + `docs/cube_felt_closeup.png`(Cube3 근접). 둥근 쿠션형 + 균일 회색 펠트 확인. 렌더 로그에 felt 텍스처 로드 확인.
+- **남은 옵션(미적용)**: ① 로봇 보라색 매칭(`so101_follower.usd`, wrist/front 카메라 도메인갭), ② content-agents 보류해제 시 physics-tune(bowl 미끌)+look_right. NIM 키 루트 `.env`에 준비됨. (흰 시접선은 ✅ 추가 완료)
+- **⚠ 무관 사전변경**: git status 의 `docs/pics/cube_desk/시뮬_그립_{1,2,3}.png` D(삭제, 커밋 9a26787 추적분), `scripts/assets/build_cam_holders.py` M 은 이번 작업과 무관(세션 전 상태). 복원/스테이징 안 함 — 사용자 판단.
+- **플랜**: `~/.claude/plans/curious-jingling-kahn.md`(Part A 큐브 hand-author 완료, Part B content-agents 보류·준비완료).
+
+---
+
+## 작업 인계 (2026-06-13 후속 — 카메라 홀더 사진기반 재설계 + belly(front) 홀더 신규 / 🔄 렌더검토중·미커밋)
+
+- **목표(사용자)**: 사진(docs/pics/cube_desk) 보고 ① wrist 카메라 마운트 디자인 수정(generic hex-nut → 실제 모양), ② front(belly) 카메라 홀더 STL 신규 제작+장착. 색=본체 보라(`material_a_3d_printed`)와 일치.
+- **빌드 방식**: `scripts/assets/build_cam_holders.py` 가 두 홀더를 **부모 링크 프레임(미터)에 procedural(box/wedge/fork)** 직접 생성 → STL(scale 없음) + USD inline 베이크. 카메라 mount 면을 sim 튜닝 pose 에 맞춤.
+  - wrist: gripper_link 프레임, hex-nut 나사쌍 결합, 카메라=WristCamera pose(0,0.045,-0.04) fwd(0,-0.469,-0.883) 전방-하향 grasp 시야. STL `wrist_cam_holder_so101.stl`.
+  - belly: shoulder_link 앞면(local -x=world -Y). **재설계(사진 전면카메라크롭)**: 카메라 뒤 얇은 backing 판(두께 5mm,36×36) + shoulder→판 얇은 사각기둥(10×10mm). 카메라 optical=shoulder local **(-0.09,0,0)** fwd=local -x. STL `front_cam_holder_so101.stl`.
+  - **SM home 자세**: `pick_cube_state_machine.py` `HOME_Q` wrist_roll +90°→**-90°**(180° 회전, 손목 카메라 마운트 위로). limit 내(+270°는 초과라 등가 -90°). ⚠ grasp `_init_pose` roll init 은 +90° 유지 → grasp 시작 시 wrist 180° 스윙 발생 가능(사용자 확인 필요).
+- **색**: holder=보라(material_a_3d_printed 바인딩), 카메라 모듈=검정(`material_black` 신규 OmniPBR). USD 에 holder+camera 메시 분리 author.
+- **변경 파일**: `so_arm101.urdf`(wrist 링크 메시 교체+identity origin, `front_cam_mount_link`+joint 신규 parent shoulder_link), `so101_follower.usd`(`/gripper/WristCamMount`·`/shoulder/BellyCamMount` 각 holder+camera 메시), 신규 STL 2개 + `scripts/assets/build_cam_holders.py`.
+- **렌더 검토**: `outputs/wrist_mount/*.png` 11뷰(ovrtx, `.venv-ovrtx`, `/tmp/render_holders.py`). wrist 전방-하향·belly 전방 시야 확인. 모양은 사진 컨셉 반영하나 거침 → 사용자 디자인 피드백 대기.
+- **⚠ front cam sim pose 불일치**: `_FRONT_CAM_LOCAL_POS=(0.05,0,0)`(shoulder 뒤쪽)인데 새 홀더는 앞쪽(-0.083). 방향(quat 0,0,1,0=fwd -x)은 동일, 위치만 다름. observation.front 와 정합하려면 `_FRONT_CAM_LOCAL_POS`→`(-0.085,0,0)` 갱신 필요(pick_cube_env_cfg.py:117, pick_pen 도). 사용자 결정 대기.
+- **고아(미사용)**: `assets/robots/wrist_cam_mount.usd`(dead), `wrist_cam_mount_so101_v1.stl`(이전 hex-nut ref). 커밋 시 정리 여부 결정.
+
+---
+
+## 작업 인계 (2026-06-13 — 손목 카메라 홀더(Hex-Nut Mount) SO-101 부착: URDF+USD / ✅ 완료·커밋 9221278)
 
 - **목표(사용자)**: `ref_repos/SO-ARM100/Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module` 의 카메라 홀더 STL 을 SO-101 URDF asset 으로 가져와 gripper 에 **올바른 6D pose** 로 부착. 사용자 확정: pose = **나사 구멍 매칭**(홀더 M3 2구멍 ↔ wrist_roll_follower hex-nut 나사쌍), URDF + 시뮬 USD 렌더 둘 다, cuMotion xrdf sphere 는 제외.
 - **6D pose 도출(STEP CAD, exact)**: STL 은 프린트 방향·triangle soup 라 구멍 추출 불안정 → **STEP 의 `CIRCLE` 엔티티**(ASCII 파싱, CAD 커널 불필요)에서 추출. 홀더 M3=R1.65 2구멍(간격 8.1mm) ↔ follower hex-nut 나사쌍 R1.6(간격 8.1mm) **간격 정확 일치**로 쌍 확정. 접촉면(홀더 x=0 ↔ follower 외측 y=-24.22mm) 밀착. flip = 홀더 body 가 gripper +y(카메라쪽)로 → 튜닝된 WristCamera(+y0.045) 와 부합(교차검증).
