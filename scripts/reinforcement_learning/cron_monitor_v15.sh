@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# grasp_v4 LSTM+PPO 학습 자동 점검 (cron, 세션 독립).
+# grasp_v15 LSTM+PPO 학습 자동 점검 (cron, 세션 독립).
 # 30분 주기로 최신 체크포인트에 monitor_eval 을 돌려 scratch/full/pre 단계별
 # 성공률을 집계하고, 16-env 그리드 추론 비디오를 녹화·보존한다.
 #
-# 등록 예 (crontab -e): */30 * * * * /…/cron_monitor_v4.sh >> /…/logs/cron_monitor_v4.cron.log 2>&1
+# 등록 예 (crontab -e): */30 * * * * /…/cron_monitor_v15.sh >> /…/logs/cron_monitor_v15.cron.log 2>&1
 #
 # - flock 으로 중복 실행 방지(점검이 30분 넘게 걸려도 안전).
 # - 마지막 점검한 체크포인트를 기억해, 새 ckpt 가 없으면 GPU 낭비 없이 skip.
@@ -15,7 +15,8 @@ ROOT=/home/konan147/Workspaces/SO101-Sim2Real
 WORKTREE="$ROOT/.claude/worktrees/lstm-ppo-pickcube"
 PY="$ROOT/.venv/bin/python"
 RUN_GLOB="$ROOT/outputs/rl/rsl_rl/lstm_ppo_pickcube"  # main 레포 outputs 절대경로(worktree 독립)
-LOCK=/tmp/cron_monitor_v4.lock
+RUN_NAME="lstm256_stage1_grasp_v15"                    # v12 run 고정
+LOCK=/tmp/cron_monitor_v15.lock
 
 # ── 중복 실행 방지 ──────────────────────────────────────────────
 exec 9>"$LOCK"
@@ -26,8 +27,11 @@ fi
 
 cd "$WORKTREE"
 
-# ── 최신 학습 run + 최신 체크포인트 ────────────────────────────
-RUN=$(ls -td "$RUN_GLOB"/* 2>/dev/null | head -1 || true)
+# ── v12 run 디렉 탐색 (없으면 최신 run) ────────────────────────
+RUN=$(ls -td "$RUN_GLOB"/*"$RUN_NAME"* 2>/dev/null | head -1 || true)
+if [[ -z "${RUN:-}" || ! -d "$RUN" ]]; then
+  RUN=$(ls -td "$RUN_GLOB"/* 2>/dev/null | head -1 || true)
+fi
 if [[ -z "${RUN:-}" || ! -d "$RUN" ]]; then
   echo "[$(date -Is)] run 디렉 없음 — skip"
   exit 0
@@ -74,7 +78,6 @@ fi
 # ── 결과 JSON 추출 → history.jsonl append ──────────────────────
 RESULT=$(grep -oE '\{"status": "ok".*\}' "$EVAL_LOG" | tail -1 || true)
 if [[ -n "$RESULT" ]]; then
-  # timestamp·ckpt 를 앞에 붙여 한 줄 기록
   echo "{\"ts\":\"$(date -Is)\",\"ckpt\":\"$MODEL_TAG\",\"result\":$RESULT}" \
     >> "$HIST_DIR/history.jsonl"
   echo "[$(date -Is)] 결과 기록: $HIST_DIR/history.jsonl"

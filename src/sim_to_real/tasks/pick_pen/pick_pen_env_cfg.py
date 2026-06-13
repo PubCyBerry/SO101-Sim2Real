@@ -501,20 +501,20 @@ class PickPenObservationsCfg:
         """Per-pen placement signals (pen-in-cup, gripper open check)."""
 
         place_white = ObsTerm(
-            func=task_mdp.pen_in_cup,
-            params={"object_cfg": SceneEntityCfg("PenWhite"), "cup_center_xy": PEN_CUP_CENTER_XY},
+            func=task_mdp.object_in_container,
+            params={"object_cfg": SceneEntityCfg("PenWhite"), "container_center_xy": PEN_CUP_CENTER_XY},
         )
         place_gray = ObsTerm(
-            func=task_mdp.pen_in_cup,
-            params={"object_cfg": SceneEntityCfg("PenGray"), "cup_center_xy": PEN_CUP_CENTER_XY},
+            func=task_mdp.object_in_container,
+            params={"object_cfg": SceneEntityCfg("PenGray"), "container_center_xy": PEN_CUP_CENTER_XY},
         )
         place_black = ObsTerm(
-            func=task_mdp.pen_in_cup,
-            params={"object_cfg": SceneEntityCfg("PenBlack"), "cup_center_xy": PEN_CUP_CENTER_XY},
+            func=task_mdp.object_in_container,
+            params={"object_cfg": SceneEntityCfg("PenBlack"), "container_center_xy": PEN_CUP_CENTER_XY},
         )
         place_blue = ObsTerm(
-            func=task_mdp.pen_in_cup,
-            params={"object_cfg": SceneEntityCfg("PenBlue"), "cup_center_xy": PEN_CUP_CENTER_XY},
+            func=task_mdp.object_in_container,
+            params={"object_cfg": SceneEntityCfg("PenBlue"), "container_center_xy": PEN_CUP_CENTER_XY},
         )
 
         def __post_init__(self) -> None:
@@ -533,8 +533,8 @@ class PickPenObservationsCfg:
         rl_state_obs = ObsTerm(
             func=task_mdp.rl_state,
             params={
-                "pen_names": PEN_NAMES,
-                "cup_name": PEN_CUP_NAME,
+                "object_names": PEN_NAMES,
+                "container_name": PEN_CUP_NAME,
             },
         )
 
@@ -562,8 +562,9 @@ class PickPenRewardsCfg:
         weight=1.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -573,19 +574,21 @@ class PickPenRewardsCfg:
         weight=1.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
     # Stage 2.5: 닫힌 그리퍼 + 들린 펜 + 컵 방향 운반 (밀집 도우미)
     carry_pen = RewTerm(
-        func=task_mdp.carry_pen,
+        func=task_mdp.carry_object,
         weight=4.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -593,6 +596,9 @@ class PickPenRewardsCfg:
     lift_pen = RewTerm(
         func=task_mdp.lift_reward,
         weight=2.0,
+        params={
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
+        },
     )
 
     # Stage 4: 들어올린 펜의 XY → 컵 접근 (밀집)
@@ -600,8 +606,9 @@ class PickPenRewardsCfg:
         func=task_mdp.transport_reward,
         weight=8.0,
         params={
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -611,8 +618,10 @@ class PickPenRewardsCfg:
         weight=6.0,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_radius": PEN_CUP_SUCCESS_RADIUS,
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -621,8 +630,10 @@ class PickPenRewardsCfg:
         func=task_mdp.insert_reward,
         weight=25.0,
         params={
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_radius": PEN_CUP_SUCCESS_RADIUS,
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -632,8 +643,10 @@ class PickPenRewardsCfg:
         weight=10.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_radius": PEN_CUP_SUCCESS_RADIUS,
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -643,8 +656,10 @@ class PickPenRewardsCfg:
         weight=100.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "container_radius": PEN_CUP_SUCCESS_RADIUS,
+            "object_cfgs": [SceneEntityCfg(n) for n in PEN_NAMES],
         },
     )
 
@@ -670,9 +685,9 @@ class PickPenTerminationsCfg:
     success = DoneTerm(
         func=task_mdp.task_done,
         params={
-            "pens_cfg": [SceneEntityCfg(name) for name in PEN_NAMES],
-            "cup_center_xy": PEN_CUP_CENTER_XY,
-            "cup_cfg": SceneEntityCfg(PEN_CUP_NAME),
+            "objects_cfg": [SceneEntityCfg(name) for name in PEN_NAMES],
+            "container_center_xy": PEN_CUP_CENTER_XY,
+            "container_cfg": SceneEntityCfg(PEN_CUP_NAME),
             "require_rest_pose": False,  # rest-pose check is TA.1 territory
         },
     )
@@ -794,14 +809,14 @@ def apply_curriculum(
     for term_name in _PEN_REWARD_TERMS:
         term = getattr(env_cfg.rewards, term_name, None)
         if term is not None:
-            term.params["pen_cfgs"] = active_cfgs
+            term.params["object_cfgs"] = active_cfgs
     for term_name in _CUP_RADIUS_REWARD_TERMS:
         term = getattr(env_cfg.rewards, term_name, None)
         if term is not None:
-            term.params["cup_radius"] = cup_radius
+            term.params["container_radius"] = cup_radius
 
     # 종료 조건에 활성 펜 목록 주입
-    env_cfg.terminations.success.params["pens_cfg"] = active_cfgs
+    env_cfg.terminations.success.params["objects_cfg"] = active_cfgs
     env_cfg.terminations.success.params["radius"] = cup_radius
 
     # ellipse 반경 스케일링 — randomize_pen_{white,gray,black,blue}

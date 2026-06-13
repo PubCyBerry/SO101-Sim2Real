@@ -37,6 +37,12 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--obs_group", default="rl_policy")
 parser.add_argument("--critic_obs_group", default=None)
 parser.add_argument("--init_noise_std", type=float, default=0.5)
+parser.add_argument("--recurrent", action="store_true", default=False,
+                    help="ActorCriticRecurrent(LSTM) 로 BC. stateful SM(q_bias 적분+phase) clone 에 필요 — "
+                         "memoryless MLP BC 는 scratch grasp 점화 못 함(검증). 시퀀스 BC(per-trajectory).")
+parser.add_argument("--rnn_type", default="lstm")
+parser.add_argument("--rnn_hidden_dim", type=int, default=256)
+parser.add_argument("--rnn_num_layers", type=int, default=1)
 parser.add_argument("--num_learning_epochs", type=int, default=20)
 parser.add_argument("--num_mini_batches", type=int, default=4)
 parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -81,6 +87,23 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
     rl_device = args.rl_device if args.rl_device is not None else args.device
     obs_group = args.obs_group
     critic_group = args.critic_obs_group if args.critic_obs_group is not None else obs_group
+    policy_cfg = {
+        "class_name": "ActorCritic",
+        "init_noise_std": args.init_noise_std,
+        "actor_hidden_dims": [256, 128],
+        "critic_hidden_dims": [256, 128],
+        "activation": "elu",
+        "actor_obs_normalization": False,
+        "critic_obs_normalization": False,
+    }
+    if args.recurrent:
+        # stateful SM clone — train.py/monitor_eval 의 --recurrent 와 동일 arch(어긋나면 ckpt 로드 실패)
+        policy_cfg.update({
+            "class_name": "ActorCriticRecurrent",
+            "rnn_type": args.rnn_type,
+            "rnn_hidden_dim": args.rnn_hidden_dim,
+            "rnn_num_layers": args.rnn_num_layers,
+        })
     return {
         "seed": args.seed,
         "device": rl_device,
@@ -94,15 +117,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "load_checkpoint": "model_.*.pt",
         "logger": "tensorboard",
         "obs_groups": {"policy": [obs_group], "critic": [critic_group]},
-        "policy": {
-            "class_name": "ActorCritic",
-            "init_noise_std": args.init_noise_std,
-            "actor_hidden_dims": [128, 128],
-            "critic_hidden_dims": [128, 128],
-            "activation": "elu",
-            "actor_obs_normalization": False,
-            "critic_obs_normalization": False,
-        },
+        "policy": policy_cfg,
         "algorithm": {
             "class_name": "PPO",
             "num_learning_epochs": args.num_learning_epochs,
@@ -186,6 +201,37 @@ def _load_expert_dataset(paths: list[Path]) -> tuple[torch.Tensor, torch.Tensor,
     return torch.cat(obs_parts, dim=0), torch.cat(action_parts, dim=0), phase_parts, metas
 
 
+def _load_expert_trajectories(paths: list[Path]) -> tuple[list, dict, list[dict]]:
+    """recurrent BC 용 — 궤적별 (obs_seq, act_seq) 유지(hidden 연속성). phase 제외는 앞뒤 trim
+    (allowed[0]:allowed[-1]+1 contiguous slice → 선두 SETTLE/후미 RETREAT·HOME·DONE 제거,
+    중간 DRAG 등은 보존). 시퀀스 중간에 gap 안 생기게."""
+    trajs: list = []
+    metas: list[dict] = []
+    phase_counts: dict[str, int] = defaultdict(int)
+    for path in paths:
+        data = torch.load(path, map_location="cpu", weights_only=False)
+        meta = dict(data.get("meta", {}))
+        meta["path"] = str(path)
+        metas.append(meta)
+        if args.require_success and not meta.get("placed_and_released", False):
+            continue
+        obs = data["obs"].to(torch.float32)
+        actions = data["actions"].to(torch.float32)
+        phases = list(data.get("phases", ["unknown"] * int(obs.shape[0])))
+        if obs.shape[0] != actions.shape[0] or obs.shape[0] != len(phases):
+            raise ValueError(f"Expert dataset length mismatch: {path}")
+        allowed = [i for i, ph in enumerate(phases) if _phase_allowed(ph)]
+        if len(allowed) < 2:
+            continue
+        lo, hi = allowed[0], allowed[-1] + 1  # contiguous slice
+        trajs.append((obs[lo:hi].contiguous(), actions[lo:hi].contiguous()))
+        for ph in phases[lo:hi]:
+            phase_counts[ph] += 1
+    if not trajs:
+        raise RuntimeError("No expert trajectories after filtering")
+    return trajs, dict(sorted(phase_counts.items())), metas
+
+
 def main() -> None:
     env = None
     try:
@@ -194,11 +240,6 @@ def main() -> None:
         rl_device = args.rl_device if args.rl_device is not None else args.device
         output_dir = args.output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        obs_cpu, actions_cpu, phases, metas = _load_expert_dataset(args.expert_dataset_pt)
-        if args.target_clip_actions > 0:
-            clip = abs(args.target_clip_actions)
-            actions_cpu = actions_cpu.clamp(-clip, clip)
 
         env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
         _apply_task_curriculum(env_cfg, args)
@@ -214,30 +255,69 @@ def main() -> None:
 
         policy = runner.alg.policy
         policy.train()
-        optimizer = torch.optim.Adam(policy.actor.parameters(), lr=args.learning_rate)
-        loss_fn = torch.nn.MSELoss()
-        obs = obs_cpu.to(device=rl_device)
-        actions = actions_cpu.to(device=rl_device)
-        sample_count = int(obs.shape[0])
-        steps_per_epoch = max(1, math.ceil(sample_count / max(1, args.batch_size)))
         final_loss = float("nan")
+        clip = abs(args.target_clip_actions) if args.target_clip_actions > 0 else None
 
-        for _epoch in range(args.epochs):
-            perm = torch.randperm(sample_count, device=rl_device)
-            for step in range(steps_per_epoch):
-                idx = perm[step * args.batch_size : (step + 1) * args.batch_size]
-                batch_obs = {args.obs_group: obs.index_select(0, idx)}
-                batch_actions = actions.index_select(0, idx)
-                pred = policy.act_inference(batch_obs)
-                loss = loss_fn(pred, batch_actions)
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy.actor.parameters(), 1.0)
-                optimizer.step()
-                final_loss = float(loss.detach().cpu().item())
+        if args.recurrent:
+            # === 시퀀스 BC (per-trajectory, hidden 연속) — stateful SM(q_bias 적분+phase) clone ===
+            trajs, phase_hist, metas = _load_expert_trajectories(args.expert_dataset_pt)
+            if clip is not None:
+                trajs = [(o, a.clamp(-clip, clip)) for o, a in trajs]
+            params = list(policy.actor.parameters()) + list(policy.memory_a.parameters())
+            optimizer = torch.optim.Adam(params, lr=args.learning_rate)
+            n_traj = len(trajs)
+            obs_dim = int(trajs[0][0].shape[-1])
+            act_dim = int(trajs[0][1].shape[-1])
+            traj_batch = max(1, min(64, n_traj))   # 궤적/minibatch (패딩 후 (T,B,*))
+            sample_count = int(sum(o.shape[0] for o, _ in trajs))
+            for _epoch in range(args.epochs):
+                order = torch.randperm(n_traj).tolist()
+                for s in range(0, n_traj, traj_batch):
+                    batch = [trajs[i] for i in order[s:s + traj_batch]]
+                    bs = len(batch)
+                    max_t = max(o.shape[0] for o, _ in batch)
+                    obs_pad = torch.zeros(max_t, bs, obs_dim, device=rl_device)
+                    act_pad = torch.zeros(max_t, bs, act_dim, device=rl_device)
+                    mask = torch.zeros(max_t, bs, 1, device=rl_device)
+                    for j, (o, a) in enumerate(batch):
+                        t = o.shape[0]
+                        obs_pad[:t, j] = o.to(rl_device)
+                        act_pad[:t, j] = a.to(rl_device)
+                        mask[:t, j, 0] = 1.0
+                    mem_out, _ = policy.memory_a.rnn(obs_pad)   # (T,B,hidden) — h0=0 per traj
+                    pred = policy.actor(mem_out)                # (T,B,act)
+                    loss = ((pred - act_pad) ** 2 * mask).sum() / (mask.sum() * act_dim)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(params, 1.0)
+                    optimizer.step()
+                    final_loss = float(loss.detach().cpu().item())
+        else:
+            obs_cpu, actions_cpu, phases, metas = _load_expert_dataset(args.expert_dataset_pt)
+            if clip is not None:
+                actions_cpu = actions_cpu.clamp(-clip, clip)
+            optimizer = torch.optim.Adam(policy.actor.parameters(), lr=args.learning_rate)
+            loss_fn = torch.nn.MSELoss()
+            obs = obs_cpu.to(device=rl_device)
+            actions = actions_cpu.to(device=rl_device)
+            sample_count = int(obs.shape[0])
+            steps_per_epoch = max(1, math.ceil(sample_count / max(1, args.batch_size)))
+            for _epoch in range(args.epochs):
+                perm = torch.randperm(sample_count, device=rl_device)
+                for step in range(steps_per_epoch):
+                    idx = perm[step * args.batch_size : (step + 1) * args.batch_size]
+                    batch_obs = {args.obs_group: obs.index_select(0, idx)}
+                    batch_actions = actions.index_select(0, idx)
+                    pred = policy.act_inference(batch_obs)
+                    loss = loss_fn(pred, batch_actions)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(policy.actor.parameters(), 1.0)
+                    optimizer.step()
+                    final_loss = float(loss.detach().cpu().item())
+            phase_hist = dict(sorted((phase, phases.count(phase)) for phase in set(phases)))
 
         checkpoint_path = output_dir / f"model_{args.output_iteration}.pt"
-        phase_hist = dict(sorted((phase, phases.count(phase)) for phase in set(phases)))
         infos = {
             "task_id": TASK_ID,
             "bc": {
