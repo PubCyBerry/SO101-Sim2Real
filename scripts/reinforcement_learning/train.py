@@ -132,6 +132,9 @@ parser.add_argument("--grasp_close_weight", type=float, default=None,
 parser.add_argument("--grasp_align_weight", type=float, default=None,
                     help="grasp_align_cube reward weight override(미지정 시 cfg 기본 1.0). "
                          "carry phase 서 0 으로 두면 per-step 상태보상 camp(align hover) 차단.")
+parser.add_argument("--carry_rc_anneal_iters", type=int, default=0,
+                    help="carry 역커리큘럼: full-grasp env 그릇을 든 큐브 밑(f=0)→정상 arc(f=1) 로 "
+                         "이 iters 동안 이동. 0=비활성. release→short→long carry backward 학습.")
 parser.add_argument("--rnd", action="store_true", default=False,
                     help="Random Network Distillation(내재 탐색 보상) 사용 — grasp 탐색 벽 공략.")
 parser.add_argument("--rnd_weight", type=float, default=0.5,
@@ -364,6 +367,9 @@ def main() -> None:
             )
             if hasattr(env_cfg, "grasp_bootstrap_pregrasp_frac"):
                 env_cfg.grasp_bootstrap_pregrasp_frac = args.grasp_bootstrap_pregrasp_frac
+        # carry 역커리큘럼 — PickCubeEnv 가 읽는다(iters → common_step_counter 단위).
+        if args.carry_rc_anneal_iters > 0:
+            env_cfg.carry_rc_anneal_steps = float(args.carry_rc_anneal_iters * args.num_steps_per_env)
         # place 부트스트랩 — PickCubeEnv 가 읽는다.
         if hasattr(env_cfg, "place_bootstrap_prob"):
             env_cfg.place_bootstrap_prob = args.place_bootstrap_prob

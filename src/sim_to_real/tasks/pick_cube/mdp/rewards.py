@@ -56,7 +56,9 @@ def over_bowl_drop_pbrs_reward(
         xy_prog = torch.clamp(1.0 - xy_dist / max(xy_range, 1e-6), 0.0, 1.0)
         z_norm = torch.clamp((local[:, 2] - DESK_TOP_Z - lift_min) / 0.15, 0.0, 1.0)
         over_bowl = lifted & (xy_dist < xy_range)
-        phi = (over_bowl.float() * (0.6 + 0.2 * open_frac + 0.2 * (1.0 - z_norm)) +
+        # v31: over_bowl open_frac weight 0.2→0.4 — carry phase 는 grasp_close/align=0 이라
+        # 그리퍼 open 신호가 이 항뿐. release(그릇 위 손 펴기) 유도 강화.
+        phi = (over_bowl.float() * (0.6 + 0.4 * open_frac + 0.2 * (1.0 - z_norm)) +
                (~over_bowl).float() * lifted.float() * (0.3 * xy_prog + 0.1 * open_frac))
         total = total + phi
 
@@ -297,7 +299,11 @@ def _task_progress_potential(
         lift_prog = torch.clamp((local[:, 2] - _DTZ) / max(lift_ref, 1e-6), 0.0, 1.0)
         bowl_xy = torch.hypot(local[:, 0] - cx, local[:, 1] - cy)
         bowl_prog = torch.clamp(1.0 - bowl_xy / max(transport_range, 1e-6), 0.0, 1.0)
-        phi_lifted = 0.4 + 0.2 * lift_prog + 0.3 * bowl_prog
+        # v31: lift-hold camp 차단 — 영상서 lift 100%·over_bowl 3%(들고 제자리 정지) 확정.
+        # 기존 0.4+0.2·lift+0.3·bowl 은 들기만 해도 Φ 0.6(큰 점프) → 들고 hold 가 안정 local opt,
+        # transport(+0.3) marginal. 재균형: base 0.4→0.35(grasped 0.35 와 동급=lift-hold 무이득),
+        # lift_prog 0.2→0.05(극소 유지, lift 퇴화 방지), bowl_prog 0.3→0.55(transport 지배).
+        phi_lifted = 0.35 + 0.05 * lift_prog + 0.55 * bowl_prog
         phi = torch.where(
             inside, torch.ones_like(reach_prog),
             torch.where(lifted, phi_lifted,

@@ -1,12 +1,15 @@
 # SO-101 PickCube RL — 프로젝트 마스터 문서
 
-> **한 줄 요약**: cube_desk 에서 SO-101 팔이 큐브를 집어 그릇에 넣는 **pick-and-place 정책을 RL 로 학습**한다. 용도는 **VLA 학습 데이터 생성**. 현 전략 = **LSTM + 순수 PPO scratch + full-grasp bootstrap(높은 비율 + 다양한 held-cube 쿼터니온)**. SM·BC·demo-reset 전부 미사용(사용자 지시 2026-06-13).
+> **한 줄 요약**: cube_desk 에서 SO-101 팔이 큐브를 집어 그릇에 넣는 **pick-and-place 정책을 RL 로 학습**한다. 용도는 **VLA 학습 데이터 생성**. 현 전략 = **LSTM + 순수 PPO + grasp/place bootstrap + carry 역커리큘럼**. SM·BC·demo-reset 미사용(사용자 지시).
 >
-> **현재 상태**: 🔵 **순수 PPO scratch** 진행 중 (`lstm_ppo_gb`, `--skill full_bc --recurrent`, BC resume 없음). grasp_bootstrap **0.7**(full-grasp 든 큐브 + 다양 yaw / pregrasp_frac 0.3) anneal→0 over 1200 + grasp shaping(align 1.0·close 3.0, γ=0.99 camp-free) + task_progress PBRS + RND grasp_focus. grasp_bootstrap 은 기하적 reset(default 자세 grasp point)이라 SM 데이터 아님 → 허용. **순수 PPO라 grasp 점화에 시간 소요(감안).**
-> **핵심 발견(검증)**: ① **scratch grasp 점화 = camp/dense 의 근본 trade-off + γ 가 분기점**: dense grasp_close camp value = w/(1−γ). γ0.997 → ×333 ≫ terminal = camp(8회 실패). **γ0.99 → ×100 < terminal = camp-free 점화 가능**. ② **`_grasp_offset` 프레임 버그(수정)**: grasp_bootstrap 이 큐브를 jaw-gripper 중점에 놓았으나 grasp_close 보상 기준은 jaw+JAW_GRASP_OFFSET(손가락 point) — ~7cm 어긋나 **grasp_close/align reward 가 항상 0(점화 레버 死)**. 두 점을 동일 공식으로 정합. ③ **BC(MLP/LSTM)·demo-reset·grasp-bootstrap-camp-free 모두 scratch grasp 못 점화**(메트릭+영상 확정) → 순수 PPO + grasp shaping(레버 부활) + bootstrap 으로 복귀.
-> **작성 기준**: 2026-06-13. 이 문서는 프로젝트 전체를 총망라하는 단일 진입점이다. 세부 실험 이력은 [`RL_LSTM_PICKCUBE.md`](RL_LSTM_PICKCUBE.md)(T1~T39).
+> **현재 상태(2026-06-13 갱신)**: 🟢 **grasp 점화 + std 안정 달성**(프로젝트 최초) → 🔴 **carry 블로커 = grasp 물리(grip 이 들린 큐브 못 잡음) 확정**(RL 아님). 벽 현황:
+> 1. 🟢 **bootstrap stale-FK 버그** — `_grasp_offset` 단일 캐시 + `_reset_idx` 시 `body_pos_w`(articulation FK) stale 이라 bootstrap 큐브가 settle 전 자세 기준 ~5cm 오배치 → 그리퍼가 빈 공간 닫아 grip 실패 → `grasp_close` reward 死였음. **2-phase 배치**(`_apply_pending_grasp`, reset 2 step 뒤 fresh FK 시점 배치+close)로 수정.
+> 2. 🟢 **grasp 점화** — `grasp_close/align` tolerance 확대(xy 0.05→0.12, z 0.06→0.10; arm drift 가 tight 창 벗어나던 것 densify) + `grasp_bootstrap_pregrasp_frac` 0.3→**0.65**(그리퍼 open·큐브 책상 = grasp 행동 강제, loose-carry 우회 차단) → grasp_close 0.0005→**0.3+ 점화**.
+> 3. 🟢 **std 발산** — `entropy_coef` 0.005→**0.003** + scratch → std 0.30 안정(이전 매 run 1.3+ 발산 해소).
+> 4. 🔴 **carry 블로커 = grasp 물리 marginal (영상+diag 확정, RL 아님)** — 사용자 영상 관찰 + diag(**그리퍼 강제 닫힘 -0.05 유지 + 팔 정지**)로 확정: **닫힌 그리퍼가 들린 2.5cm 큐브를 못 잡고 중력에 ~20 step 만에 빠져나가 떨어짐**(dist3d 0.015→0.234, ejected 0→100%, 큐브 책상 낙하). 즉 그동안의 RL camp/carry/Φ/RC 튜닝(v22~v31, 10+ run)은 **헛다리** — 큐브가 물리적으로 안 잡히는데 운반 보상 무의미. "lift 1.0" 메트릭은 bootstrap **시작상태**(force_kind 1=든·들린 채 시작)지 정책 능력 아님(이걸 "lift+hold camp"로 추측 오독했다 사용자 영상 관찰로 정정 — [`pickcube-descend-clip` 교훈]: 추측 금지·영상 필수). **SM 은 90% 들고 운반** → 물리적 가능, bootstrap teleport-grip 이 SM cage-grip 만큼 안 단단(gripper stiffness 17.8·dynamic effort·마찰/배치). **다음 = grasp 물리 수정**(SM grip 비교·강건화) or SM→VLA 피벗.
+> **작성 기준**: 2026-06-13. 단일 진입점. 세부 이력 [`RL_LSTM_PICKCUBE.md`](RL_LSTM_PICKCUBE.md).
 >
-> **⚠️ 전략 변천(2026-06-12~13)**: scratch-only(C3/C4/C5) 폐지 → BC-MLP → LSTM-BC+reverse-curriculum → (BC/SM 가 scratch grasp 못 점화 확정) → **사용자 지시: SM·BC 미사용, 순수 PPO + full-grasp bootstrap(grasp_v4 가 유일하게 점화시킨 구조)으로 회귀**. §4·§6·§8·§9 가 순수-PPO 기준. 구 skill-chaining·BC 는 이력(§7).
+> **⚠️ 전략 변천**: scratch-only 폐지 → BC → 순수 PPO+bootstrap → **(2-phase+tolerance+pregrasp 0.65 = grasp 점화)** → camp 진단(per-step 보상=camp, camp-free spine 도 carry 미학습) → carry 역커리큘럼(v30/31 실패) → **영상 관찰로 진짜 원인 발견: grasp 물리(grip 이 들린 큐브 못 잡음)**. **교훈: 메트릭만으로 추측 말고 영상 관찰**(이 세션도 "lift+hold camp" 오진 → 사용자 영상으로 정정). 다음 = grasp 물리 영역(GRASP_PHYSICS.md).
 
 ---
 
@@ -133,20 +136,22 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  P1[P1 순수 PPO grasp 점화] --> P2[P2 단일큐브 eval ≥0.90]
+  P1[P1 grasp 점화 ✅] --> P1b[P1.5 carry 학습 = camp 벽]
+  P1b --> P2[P2 단일큐브 eval ≥0.90]
   P2 --> P3[P3 멀티큐브 확장]
   P3 --> P4[P4 VLA 데이터]
-  P1 -.미점화시 bootstrap·γ·grasp shaping·yaw 튜닝.-> P1
+  P1b -.역커리큘럼·anneal 속도·task_progress 튜닝.-> P1b
 ```
 
 | 단계 | 상태 | 중요도 | 내용 | 완료 기준 |
 |---|---|---|---|---|
-| **P1 순수 PPO grasp 점화** | 🔵 IN-PROGRESS | 🔥 | `run_expert_policy.sh train` (`lstm_ppo_gb`): LSTM 순수 PPO scratch + grasp_bootstrap 0.7(다양 yaw)+grasp shaping(align1/close3, γ0.99)+task_progress+RND. `_grasp_offset` 수정 후 | scratch grasp 점화(pure-scratch eval grasp>0 → 상승) |
-| **P2 단일큐브 eval** | ⚪ TODO | 🔥 | `monitor_eval.py --skill full_bc --recurrent --bootstrap_prob 0` | success ≥0.90 + 영상 자연(hover 없음·release) |
+| **P1 grasp 점화** | 🟢 **DONE** | 🔥 | 2-phase bootstrap 수정 + tolerance 0.12/0.10 + pregrasp_frac 0.65 + entropy 0.003 → grasp_close 0.0005→0.3+ 점화·std 안정 | ✅ 달성(프로젝트 최초) |
+| **P1.5 carry** | 🔴 **BLOCKER = grasp 물리** | 🔥 | (정정) camp/carry RL 튜닝은 헛다리. **진짜 = 닫힌 그리퍼가 들린 2.5cm 큐브 못 잡음**(영상+diag: 강제 닫힘+정지에도 ~20step 미끄러져 떨어짐). SM 90%=물리 가능 → bootstrap grip(stiffness 17.8·dynamic effort·마찰/배치) 강건화 필요(GRASP_PHYSICS.md) | 들린 큐브 hold robust(diag dist3d 유지) |
+| **P2 단일큐브 eval** | ⚪ TODO | 🔥 | `monitor_eval.py --skill full_bc --recurrent --bootstrap_prob 0 --carry_rc_anneal_iters 0` | success ≥0.90 + 영상 자연(hover 없음·release) |
 | **P3 멀티큐브 확장** | ⚪ TODO | ⭐ | active_objects 1→4 (resume 허용) | 4큐브 ≥0.90 (DR-on) |
 | **P4 VLA 데이터** | ⚪ TODO | | `rollout_to_lerobot.py` → LeRobot v3 (3-cam 부착) | 데이터셋 로드·궤적 자연·다양 |
 
-> **현재 관문 = P1 grasp 점화.** 순수 PPO scratch 라 **시간 소요(감안)**. `_grasp_offset` 프레임 수정으로 grasp shaping reward(점화 레버) 부활 검증 중. 추적 = checkpoint pure-scratch eval grasp. **순수 PPO 는 긴 학습**이라 watch 간격 길게(수백 iter). 미점화 시 튜닝: grasp_close weight·γ·pregrasp_frac·yaw_max·bootstrap_prob·anneal.
+> **현재 관문 = P1.5 carry = grasp 물리(RL 아님).** grasp 점화·std 해결. **영상+diag 로 확정된 진짜 블로커**: 닫힌 그리퍼(-0.05 강제)+팔 정지에도 들린 2.5cm 큐브가 ~20 step 미끄러져 떨어짐(ejected 0→100%). camp/carry RL 튜닝(v22~v31)은 **증상 쫓던 헛다리** — 큐브가 물리적으로 안 잡히는데 운반 보상 무의미. **다음 = grasp 물리**: SM(90% hold)과 bootstrap grip 비교 → gripper stiffness/effort(dynamic_reset)·마찰(1.8/1.5)·close 각도·teleport 배치(SM 처럼 cage) 강건화. or SM→VLA 데이터 피벗. **교훈: 메트릭 추측 금지, 영상 관찰.**
 
 ---
 
@@ -175,9 +180,31 @@ flowchart TD
 | 23:0x | **grasp-bootstrap 중심** (γ0.99, demo-reset 폐기, grasp_close 3.0) | ⚫ 진단 | grasp_close reward **0.0000** — bootstrap 든 큐브인데도. → `_grasp_offset`(중점) ≠ grasp_close 기준(jaw+offset) **프레임 버그** 발견 |
 | 23:1x | **사용자 지시: SM·BC 폐기, 순수 PPO** + full-grasp bootstrap↑ + 다양 yaw quat | — | "LSTM+PPO+full grasp bootstrap 됐던 걸로 기억" + "물리적으로 가능한 큐브 쿼터니온 다양화". BC·SM·demo-reset 전부 제거(C6) |
 | 23:2x | **`_grasp_offset` 프레임 수정** + 다양 yaw bootstrap + grip 영상 검증 | 🔵 진행 | bootstrap 든 큐브 = 손가락 grasp point(JAW_GRASP_OFFSET) 정합 → grasp shaping reward 부활. diverse yaw+wrist_roll grip 유효(cube_lost 낮음 확인) |
-| 23:3x | **P1 순수 PPO** (`lstm_ppo_gb`: bootstrap 0.7 다양yaw + align1/close3 γ0.99 + RND) | 🔵 IN-PROGRESS | 순수 PPO scratch(BC 없음). grasp_close reward>0 부활 검증 → scratch grasp 점화 추적. **순수 PPO라 시간 소요(감안)** |
+| 23:3x | **P1 순수 PPO** (`lstm_ppo_gb`: bootstrap 0.7 다양yaw + align1/close3 γ0.99 + RND) | ⚫ 막힘 | grasp_close reward 끝까지 0.0005(점화 안됨)·std 발산. → 더 깊은 버그(아래) |
 
-**핵심 진단(확정·정교화)**: skill1 은 **점화 vs camp 의 근본 trade-off**에 막혀 있다.
+### 세션 2026-06-13 오후 — grasp 점화 달성 → camp → carry 역커리큘럼
+
+| 시점 | 작업(run) | 상태 | 결과 / 교훈 |
+|---|---|---|---|
+| — | **진단(diag_bootstrap_grasp.py)**: bootstrap reset 직후 ee vs cube 실측 | 🟢 | grasp_close=0 원인 = `_grasp_offset` env0 단일캐시 + `_reset_idx` body_pos_w **stale** → 큐브 z 7cm 오배치. live-FK 로도 4.8cm(reset FK stale 확정). 30-step rollout: 그리퍼 빈 공간 닫아 큐브 낙하 |
+| — | **2-phase 수정**(`_apply_pending_grasp`) | 🟢 | reset 엔 pending 마킹만, FK fresh(2 step 뒤) 시점 배치+close → dz 7cm→3.8cm, grasp_close 0.0005→0.18(placement). succ 13%→32%. **but 학습 grasp_close 평탄**(loose-carry 우회) |
+| — | **v22 tolerance**(0.05/0.06→0.12/0.10) | ⚫ | grasp_close ×5(0.0026), iter~110 spike but loose-carry 잔존 |
+| — | **v23 pregrasp_frac 0.65** | 🟢 점화 | grasp_close 0.0005→**0.30 점화(최초)**·std 0.65 안정. **but camp**(tprog/succ 정체 16%) |
+| — | **v24 grasp_close 3→1.0** (resume) | ⚫ | camp 안깨짐(weight magnitude 문제 아님) |
+| — | **v26 lift-gate** | ⚫ | 책상 grasp camp(succ→0). 단 **entropy 0.003 + scratch → std 0.30 안정 확인** |
+| — | **v27 grasp_close anneal 3→0.3** | ⚫ | weight 1.7 까지 내려도 camp(in-air hold) |
+| — | **v28 grasp_close 0** (resume) | ⚫ | camp 이 **grasp_align 로 이동**(galign 0.22 soaring) — per-step 상태보상은 무엇이든 camp 확인 |
+| — | **v29 grasp_close+align 0** (camp-free, 800 iter) | ⚫ DROPPED | succ 평탄 20-25%·tprog 평탄 = **camp-free spine 만으로 carry 미학습 확정**(800 iter). carry motion RL 탐색 미발견 |
+| — | **사용자 선택: carry 역커리큘럼** | — | 옵션(역커리큘럼/task_progress 재설계/거리축소/SM피벗) 중 **역커리큘럼(geometric)** 채택 |
+| — | **v30 carry RC**(`_carry_reverse_curriculum`: 그릇 든-큐브-밑→정상-arc, anneal 400, resume model_200, gclose/align 0) | ⚫ DROPPED | succ 거리 따라 하락(21%@106→15.6%@206), f≈0 짧은 운반도 21%뿐. → carry 미학습 |
+| — | **v31 Φ 재균형**(lifted Φ 0.4+0.2lift+0.3bowl→0.35+0.05lift+0.55bowl, transport 지배 + over_bowl open_frac 0.2→0.4) | ⚫ 중단 | 틀린 진단 기반(lift+hold camp 가정). 사용자 영상 관찰로 "큐브 시작하자마자 떨굼" 지적 → 중단 |
+| — | **영상 관찰**(monitor_eval force_kind 1 + diag 그리퍼 강제 닫힘) | 🟢 **결정적** | eval: reach/grasp/lift 1.0(=bootstrap 시작상태) but over_bowl 0.03. diag(그리퍼 -0.05 강제 닫힘+팔 정지): 큐브 ~20 step 미끄러져 떨어짐(ejected 0→100%). = **grip 물리 marginal, RL 아님** |
+
+**핵심 진단(세션, 정정됨)**: ① grasp 점화 레시피 확정(2-phase·tolerance·pregrasp 0.65·entropy 0.003). ② camp = per-step 상태보상 본질 + camp-free spine 도 carry 미학습. **③ (정정) 진짜 carry 블로커 = grasp 물리** — 닫힌 그리퍼가 들린 2.5cm 큐브 못 버팀(영상+diag 확정). camp/carry RL 튜닝(②)은 **증상 쫓던 헛다리**. **교훈: 메트릭+흐릿 프레임으로 "lift+hold camp" 추측 오진 → 사용자 영상 관찰로 정정.** SM(90%)은 들고 운반 = 물리 가능 → bootstrap grip 강건화가 과제(GRASP_PHYSICS.md).
+
+---
+
+**(이력) 핵심 진단(확정·정교화)**: skill1 은 **점화 vs camp 의 근본 trade-off**에 막혀 있다.
 1. **grasp-camp** 🔥 — per-step *상태* 보상(reach/align/close/lift/carry — 어떤 상태에 있음을 보상)은 무엇이든 그 상태서 camp. **γ=0.997 → "영원히 holding" 가치 = income/(1−γ) = income×333 ≫ terminal**. 그래서 forward weight·episode 길이로는 산술적으로 못 이긴다(v1·scratch1·scratch2 검증).
 2. **ram/cube_lost** 🔥 — camp 피하려 per-step 상태보상 다 빼면(scratch3/4) **gentle grasp shaping 도 사라져** 정책이 큐브를 쳐서 떨굼(cube_lost 25~36%). 추가로 그리퍼 init 0.20(닫힘)이라 닫힌 채 ram + grasp_align(open 필요) 死.
 3. **std 폭주** — 희소 대형 terminal / std 강제 reset / camp 모델 resume / PBRS 단독(progress 0). scratch + sustained bootstrap 으로 회피(scratch3~5 std 안정).
@@ -207,12 +234,28 @@ flowchart TD
 | **D15** | **SM·BC 폐기, 순수 PPO + full-grasp bootstrap**(C6) | BC(MLP/LSTM)·demo-reset 모두 scratch grasp 점화 실패(reach 0.32→0 퇴화, 영상 확정). grasp_v4 가 유일 점화시킨 구조(LSTM+PPO+grasp_bootstrap+shaping+RND)로 회귀. bootstrap 비율↑·다양 yaw quat 추가 | **사용자** |
 | **D16** | **`_grasp_offset` 프레임 수정** (점화 레버 부활) | grasp_bootstrap 큐브 배치점(jaw-gripper 중점) ≠ grasp_close 보상 기준(jaw+JAW_GRASP_OFFSET=손가락 point), ~7cm 어긋나 grasp_close/align reward 항상 0. 동일 공식 정합 → grasp shaping 작동 | 에이전트 |
 | **D17** | **γ=0.99 + full-grasp bootstrap 다양 yaw 쿼터니온** | γ0.99 가 dense grasp_close 를 camp-free 로(camp value ×100<terminal). 든 큐브 yaw 다양화(wrist_roll 정합 grip 유효)로 하류 robust + 다양 궤적(VLA). 물리 유효(cube_lost 낮음 확인) | 에이전트 |
+| **D18** | **bootstrap 2-phase 배치**(reset 마킹 → 2 step 뒤 fresh-FK 배치+close) | `_grasp_offset` 단일캐시 + `_reset_idx` body_pos_w(articulation FK) stale → 큐브 ~5cm 오배치 → grip 실패 → grasp_close 死. 경험 확정(diag). yaw 다양성은 점화 우선 일시 제거 | 에이전트(경험) |
+| **D19** | **grasp_close/align tolerance 0.05/0.06→0.12/0.10** | early arm drift(3~5cm) 가 tight 보상창 벗어나 reward 0. 완화로 gradient densify. camp 위험 낮음(succ=bootstrap 발) | 에이전트(rl-expert) |
+| **D20** | **pregrasp_frac 0.3→0.65** | full-grasp(쥐여줌)는 loose-carry cheat 경로 → grasp 우회. pre-grasp(그리퍼 open·큐브 책상)는 grasp 행동 강제. 65% → grasp 점화(최초) | 에이전트(rl-expert) |
+| **D21** | **entropy_coef 0.005→0.003 + scratch** | std 매 run 발산(0.5→1.3+)의 주범 = entropy×약한 gradient. 0.003 + clean scratch → std 0.30 안정 | 에이전트 |
+| **D22** | **camp = per-step 상태보상 본질**(close/align/weight/anneal/0 무엇이든 camp) | weight 3/1.7/1.0·anneal·lift-gate·0 전부 camp 또는 다른 상태 이동. camp value<terminal 인데도(carry motion 미학습이 본질). camp-free spine(task_progress)만으론 800 iter 도 carry 미발견 | 에이전트(경험) |
+| **D23** | **carry 역커리큘럼**(`_carry_reverse_curriculum`: 그릇 든-큐브-밑→정상-arc anneal) + grasp_close/align 0 | carry motion 이 RL 탐색 미발견 → achievable success(그릇 가까이=release 만으로 성공)부터 backward 학습. grasp 는 resume(점화 model)+task_progress Φ-jump 로 유지. IK 불필요(그릇 rigid pose fresh) | **사용자 선택** |
+| **D24** | **`--grasp_close_weight`·`--grasp_align_weight`·`--carry_rc_anneal_iters` CLI arg 신설** | reward weight/RC 를 cfg 안 건드리고 per-run 제어(미래 scratch 점화 weight 3.0 보존) | 에이전트 |
+| **D25** | **carry 진짜 블로커 = grasp 물리(grip 이 들린 큐브 못 잡음), RL 아님** | 영상(사용자) + diag(그리퍼 강제 닫힘 -0.05+팔 정지에도 큐브 ~20 step 미끄러져 떨어짐, ejected 0→100%)로 확정. camp/carry/Φ/RC RL 튜닝 10+ run 은 증상 쫓던 헛다리. SM 90% = 물리 가능 → bootstrap grip(stiffness 17.8·dynamic effort·마찰/teleport 배치) 강건화 과제. **교훈: 메트릭 추측 금지, 영상 관찰**(이 세션 "lift+hold camp" 오진→사용자 영상 정정) | **사용자 영상 관찰** |
 
 ---
 
 ## 9. 주요 설정 (Configs)
 
-### 9.1 보상 (`apply_skill_full_bc`) — 순수 PPO grasp 점화 ⭐🔥
+### 9.0 현 config (2026-06-13 — grasp 점화 후 carry phase) ⭐🔥
+
+**grasp 점화 레시피(검증·재현)**: scratch + `--grasp_bootstrap_pregrasp_frac 0.65` + grasp_close/align tolerance 0.12/0.10(cfg) + `--entropy_coef 0.003` + 2-phase bootstrap. → grasp_close 0.0005→0.3+ 점화·std 0.30.
+
+**carry phase(현 v30)**: 점화 model resume + `--grasp_close_weight 0.0 --grasp_align_weight 0.0`(per-step 상태보상 제거=camp 차단) + `--carry_rc_anneal_iters 400`(carry 역커리큘럼: 그릇 든-큐브-밑→정상-arc) + `--place_bootstrap_prob 0.15`. spine=`task_progress_pbrs 80`+terminal(camp-free).
+
+**신규 코드**: `pick_cube_env.py::{_apply_pending_grasp(2-phase),_carry_reverse_curriculum}` · `common/mdp/rewards.py::grasp_close_reward`(disable_when_lifted·anneal params) · `train.py`(`--grasp_close_weight`/`--grasp_align_weight`/`--carry_rc_anneal_iters`) · `diag_bootstrap_grasp.py`(진단). cfg `grasp_align/close_cube` align_xy=0.12·align_z=0.10.
+
+### 9.1 보상 (`apply_skill_full_bc`) — (이력) 순수 PPO grasp 점화 ⭐🔥
 
 grasp shaping(점화 dense) + camp-free spine. **γ=0.99** 가 dense 를 camp-free 로 만듦(camp value w/(1−γ): grasp_close 3.0×100=300 < terminal ~350).
 
@@ -273,6 +316,8 @@ train.py --skill full_bc $RECURRENT --num_envs 4096 --num_steps_per_env 48 --gam
 | dense grasp 점화 ↔ camp 모순 | dense grasp_close 가 점화엔 필수(camp-free Φ점프만으론 약함) but γ0.997 서 camp(camp value w/(1−γ)=×333≫terminal) | **γ=0.99**(×100<terminal) → dense 가 camp-free 점화(D17) + task_progress PBRS 가 dense local credit 로 짧은 horizon 보완 | 🔵 검증중(순수 PPO) |
 | resume 발산 (구) vs BC resume (현) | **camp 된 scratch** 정책 resume = critic value 불일치 발산(구). BC resume 은 `--resume_without_optimizer`(actor 만, critic/optimizer 새로) → 발산 없음 | camp 모델 resume 금지, **BC resume 은 OK**(fresh critic) | 🟢 구분됨 |
 | monitor `success` 가 cube_lost 오집계 | `done & ~time_out` 이 cube_lost(time_out=False) 포함 | `termination_manager.get_term("success")` 직접 조회 | 🟢 해결 |
+| grasp_close reward=0.0005(bootstrap 든 큐브인데도) | `_grasp_offset` env0 단일캐시 + `_reset_idx` body_pos_w(articulation FK) **stale**(joint write 미반영) → 큐브 settle 전 자세 기준 ~5cm 오배치 → 그리퍼 빈 공간 닫음 → grip 실패 | **2-phase**: reset 엔 pending 마킹만, fresh-FK(2 step 뒤) `_apply_pending_grasp` 가 현 jaw grasp point 에 배치+close. (diag_bootstrap_grasp.py 로 실측 확정) | 🟢 해결 |
+| grasp 점화 후 carry 안 됨(들고 운반 안 함, over_bowl 3%) | (1차 오진) per-step 상태보상 camp → RL 튜닝 10+ run 헛다리. **(정정) 진짜 = grasp 물리**: 닫힌 그리퍼가 들린 2.5cm 큐브 못 잡고 미끄러져 떨굼(diag: 강제 닫힘+정지에도 ~20step ejected 0→100%). "lift 1.0"=bootstrap 시작상태지 정책 능력 아님 | **grasp 물리 수정**(SM 90% hold 와 비교 → gripper stiffness/effort/마찰/close각/teleport 배치 강건화). RL 보상 아님. **진단=영상 관찰 필수(메트릭 추측 금물)** | 🔴 미해결(물리) |
 
 > 새 에러 진단·수정 성공 시 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) 에 (현상→오류→원인→해결→확인) 5블록으로 추가.
 

@@ -60,6 +60,12 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._grasp_pending = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # countdown(2→1→0)
         self._grasp_pending_pre = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # carry 역커리큘럼: full-grasp 부트스트랩(든 큐브) env 의 그릇을 carry 경로 따라 배치.
+        # f=anneal(0→1): f=0 그릇이 든 큐브 바로 밑(release만=trivial success), f=1 정상 arc(full transport).
+        # achievable success 로 terminal gradient 확보 → release→short→long carry backward 학습.
+        # anneal_steps<=0 이면 비활성(그릇 정상 위치 유지).
+        self._carry_rc_anneal_steps = float(getattr(cfg, "carry_rc_anneal_steps", 0.0))
+
         # 그릇(동적 rigid body) 초기 pose — 교란 패널티(bowl_disturb)의 기준.
         # reset(randomize_bowl) 직후 값을 "교란 안 된 상태"로 저장 → reward 가 현재 pose 와
         # 비교해 tilt(엎힘)·xy 변위를 패널티화. 운반·place 중 그릇을 밀치거나 엎는 것 억제.
@@ -351,6 +357,30 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # bootstrap_kind=3 (place 부트스트랩)
         self.bootstrap_kind[sel] = 3
 
+    def _carry_reverse_curriculum(self, env_ids: torch.Tensor) -> None:
+        """full-grasp 부트스트랩 env(든 큐브)의 그릇을 carry 경로 따라 이동(역커리큘럼).
+        bowl_xy = lerp(pickup=grasp_offset_xy, 현재 random bowl xy, f), f=clamp(step/anneal_steps).
+        f=0: 그릇이 든 큐브 바로 밑 → release 만으로 success(achievable=강한 terminal gradient).
+        f=1: 정상 arc 위치(full transport). step 증가로 f 0→1 = 운반 거리 점진 확대 → backward 학습.
+        그릇 rigid pose 는 write 즉시 .data 갱신(articulation FK staleness 무관)."""
+        if self._grasp_offset is None or self._carry_rc_anneal_steps <= 0.0 or len(env_ids) == 0:
+            return
+        sel = env_ids[(self._grasp_pending[env_ids] > 0) & (~self._grasp_pending_pre[env_ids])]
+        if len(sel) == 0:
+            return
+        step = float(getattr(self, "common_step_counter", 0))
+        f = max(0.0, min(1.0, step / self._carry_rc_anneal_steps))
+        bowl = self.scene[BOWL_NAME]
+        origins = self.scene.env_origins[sel]
+        bowl_pos = bowl.data.root_pos_w[sel].clone()      # (M,3) — rigid, fresh
+        bowl_quat = bowl.data.root_quat_w[sel].clone()    # (M,4)
+        pickup_xy = origins[:, :2] + self._grasp_offset[:2].unsqueeze(0)  # held cube world xy
+        new_xy = pickup_xy + (bowl_pos[:, :2] - pickup_xy) * f
+        bowl_pos[:, 0] = new_xy[:, 0]
+        bowl_pos[:, 1] = new_xy[:, 1]
+        bowl.write_root_pose_to_sim(torch.cat([bowl_pos, bowl_quat], dim=-1), env_ids=sel)
+        bowl.write_root_velocity_to_sim(torch.zeros(len(sel), 6, device=self.device), env_ids=sel)
+
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
         # 리셋되는 env 는 일단 scratch(0)로 초기화 — _bootstrap_grasp 가 선택된 env 만 1/2 로.
@@ -361,7 +391,8 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self._bootstrap_demo(env_ids)
         self._bootstrap_grasp(env_ids)
         self._bootstrap_place(env_ids)  # grasp 부트스트랩 후 남은 scratch env 중 일부에 place 부트스트랩
-        # 그릇 초기 pose 저장(super()._reset_idx 안에서 randomize_bowl 이 적용된 직후).
+        self._carry_reverse_curriculum(env_ids)  # full-grasp env 그릇을 carry 경로 따라(easy→hard)
+        # 그릇 초기 pose 저장(super()._reset_idx 안에서 randomize_bowl 이 적용된 직후 + RC 이동 후).
         # 교란 패널티의 기준점. env-origin 무관(방향=quat, 변위=env-local xy).
         bowl = self.scene[BOWL_NAME]
         self._bowl_init_quat[env_ids] = bowl.data.root_quat_w[env_ids].clone()
