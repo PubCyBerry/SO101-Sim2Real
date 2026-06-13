@@ -289,8 +289,20 @@ def grasp_close_reward(
     align_xy: float = 0.05,
     align_z: float = 0.06,
     open_target: float = 0.70,
+    disable_when_lifted: bool = False,
+    lift_min: float = 0.04,
+    anneal_start_step: float = 0.0,
+    anneal_end_step: float = 0.0,
+    anneal_final_scale: float = 1.0,
 ) -> torch.Tensor:
-    """grasp point 가 물체에 정밀 정렬된 채 그리퍼를 닫는 행동을 보상 — [0, num_objects]."""
+    """grasp point 가 물체에 정밀 정렬된 채 그리퍼를 닫는 행동을 보상 — [0, num_objects].
+
+    disable_when_lifted: True 면 큐브가 책상 위(local_z <= DESK_TOP_Z+lift_min)일 때만 지급.
+
+    anneal: per-step grasp_close 는 점화엔 필수지만 점화 후엔 hold income → camp 유발.
+      common_step_counter 가 anneal_start_step→anneal_end_step 구간서 출력을 1.0→
+      anneal_final_scale 로 선형 감쇠 → 점화는 초기 high weight 로, camp 는 후기 low weight 로
+      회피(camp-free spine task_progress 가 carry 인수). anneal_end_step<=start 면 비활성."""
     cfgs = _make_object_cfgs(object_cfgs)
     robot_cfg.resolve(env.scene)
     robot: Articulation = env.scene[robot_cfg.name]
@@ -306,7 +318,24 @@ def grasp_close_reward(
         placed = _object_inside_container_mask(
             env, obj_pos, container_center_xy, container_radius, container_height_range, container_cfg
         )
-        total = total + (~placed).float() * xy_rew * z_rew * closed_frac
+        gate = ~placed
+        if disable_when_lifted:
+            local_z = (obj_pos - env.scene.env_origins)[:, 2]
+            lifted = local_z > (DESK_TOP_Z + lift_min)
+            gate = gate & (~lifted)  # 책상 위에서만 grasp_close(hold income) 지급
+        total = total + gate.float() * xy_rew * z_rew * closed_frac
+
+    # weight anneal (점화→camp 전환): common_step_counter 기준 출력 스케일 1.0→final.
+    if anneal_end_step > anneal_start_step:
+        step = float(getattr(env, "common_step_counter", 0))
+        if step <= anneal_start_step:
+            scale = 1.0
+        elif step >= anneal_end_step:
+            scale = anneal_final_scale
+        else:
+            p = (step - anneal_start_step) / (anneal_end_step - anneal_start_step)
+            scale = 1.0 - (1.0 - anneal_final_scale) * p
+        total = total * scale
     return total
 
 

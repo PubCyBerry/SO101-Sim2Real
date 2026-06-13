@@ -20,6 +20,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim
+from sim_to_real.tasks.common.mdp._geometry import JAW_GRASP_OFFSET, _quat_apply_wxyz
 
 
 class PickCubeEnv(ManagerBasedRLEnv):
@@ -29,6 +30,7 @@ class PickCubeEnv(ManagerBasedRLEnv):
         super().__init__(cfg, render_mode=render_mode, **kwargs)
         self._grasp_offset = None  # (3,) env-local, default 자세의 jaw·gripper 중점
         self._gripper_jid = None   # articulation 내 gripper joint index
+        self._wrist_roll_jid = None  # wrist_roll joint index (full-grasp 부트스트랩 cube yaw 정합용)
         # cfg 로 조정: 부트스트랩 비율, 그리퍼 hold 각, 들어올림 offset
         self._bootstrap_prob = float(getattr(cfg, "grasp_bootstrap_prob", 0.0))
         self._bootstrap_close = float(getattr(cfg, "grasp_bootstrap_close", -0.05))
@@ -52,6 +54,12 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # 0=scratch(정상 시작), 1=full-grasp, 2=pre-grasp.
         self.bootstrap_kind = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
+        # 2-phase grasp 부트스트랩: reset 시 body_pos_w(FK)가 stale(joint write 미반영)이라
+        # 큐브를 reset 자세 기준으로 놓으면 팔이 settle 하며 어긋나 grip 미성립. → reset 에선
+        # pending 마킹만, FK fresh 해지는 2 step 뒤 step() 의 _apply_pending_grasp() 가 실제 배치.
+        self._grasp_pending = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # countdown(2→1→0)
+        self._grasp_pending_pre = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         # 그릇(동적 rigid body) 초기 pose — 교란 패널티(bowl_disturb)의 기준.
         # reset(randomize_bowl) 직후 값을 "교란 안 된 상태"로 저장 → reward 가 현재 pose 와
         # 비교해 tilt(엎힘)·xy 변위를 패널티화. 운반·place 중 그릇을 밀치거나 엎는 것 억제.
@@ -72,6 +80,117 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # over_bowl+열기 유도. reset 직후 0.
         self._over_bowl_drop_potential_prev = torch.zeros(self.num_envs, device=self.device)
 
+        # task_progress PBRS(task_progress_pbrs_reward)의 이전 step potential — 전용 버퍼
+        # (place_pbrs 의 _place_potential_prev 와 분리). reset 직후 0.
+        self._task_progress_potential_prev = torch.zeros(self.num_envs, device=self.device)
+
+        # --- demo-state reset (RFCL reverse curriculum) ---
+        # SM 성공 궤적의 실제 scene 상태를 reset 분포로 주입 → place 탐색 valley 우회.
+        # 행동 클론이 아니라 상태 분포만 seed(grasp-assist 금지선과 무관). 데모 상태는
+        # env-local 로 저장돼 임의 env 로 주입 가능(origin 재가산).
+        self._demo_reset_prob = float(getattr(cfg, "demo_reset_prob", 0.0))
+        self._demo_dataset_dir = getattr(cfg, "demo_dataset_dir", None)
+        # reverse curriculum: 초반 궤적 후반부(success 근처)만 sample → 진행도 p 로 시작쪽 확장.
+        # anneal_steps<=0 이면 전 구간 uniform. frac threshold = 1-p.
+        self._demo_anneal_steps = float(getattr(cfg, "demo_anneal_steps", 0.0))
+        self._demo_subsample = int(getattr(cfg, "demo_subsample", 2))  # 매 k step 만 적재(메모리)
+        self._demo_max_files = int(getattr(cfg, "demo_max_files", 4000))
+        self._demo_loaded = False
+        self._demo = {}  # device 텐서 묶음 + frac
+        if self._demo_reset_prob > 0.0 and self._demo_dataset_dir:
+            self._load_demos()
+
+    def _load_demos(self) -> None:
+        """demo_dataset_dir 의 demo_*.pt 를 적재해 전체 상태를 device 텐서로 concat.
+        각 상태에 frac(궤적 내 정규화 위치 [0,1], 1=success 종료)을 부여(reverse curriculum)."""
+        import glob
+        import os
+
+        files = sorted(glob.glob(os.path.join(self._demo_dataset_dir, "demo_*.pt")))[: self._demo_max_files]
+        if not files:
+            print(f"[demo-reset] WARNING: no demo_*.pt in {self._demo_dataset_dir}", flush=True)
+            return
+        k = max(1, self._demo_subsample)
+        # multi-env SM 은 모든 env DONE 까지 돌아 trailing 패딩(DONE/HOME_FINAL)이 쌓인다.
+        # 추가로 RELEASE_DWELL/RETREAT(=이미 그릇에 든 success 상태)도 제외 — 거기로 reset 하면
+        # 즉시 success 종료(학습 0). 데모 끝을 LOWER(그릇 위 들고 있음=완성 직전 must-complete)로
+        # 둬야 reverse curriculum frac~1 이 place 완성 학습 상태가 된다(place valley 직격).
+        _PAD_PHASES = {"DONE", "HOME_FINAL", "RETREAT", "RELEASE_DWELL"}
+        jpos, jvel, cpos, cquat, cvel, bpos, bquat, bvel, frac = ([] for _ in range(9))
+        for f in files:
+            d = torch.load(f, map_location="cpu", weights_only=False)
+            if not d.get("meta", {}).get("success", False):
+                continue
+            phases = d.get("phases", [])
+            T = int(d["joint_pos"].shape[0])
+            # 조작 구간(패딩 제외) 인덱스만 → subsample
+            keep = [t for t in range(T) if t >= len(phases) or phases[t] not in _PAD_PHASES]
+            if not keep:
+                continue
+            keep = keep[::k]
+            idx = torch.tensor(keep, dtype=torch.long)
+            n = len(keep)
+            jpos.append(d["joint_pos"][idx]);  jvel.append(d["joint_vel"][idx])
+            cpos.append(d["cube_pos"][idx]);   cquat.append(d["cube_quat"][idx]);  cvel.append(d["cube_vel"][idx])
+            bpos.append(d["bowl_pos"][idx]);   bquat.append(d["bowl_quat"][idx]);  bvel.append(d["bowl_vel"][idx])
+            # frac = 조작 구간 내 정규화 위치 [0,1] (0=SETTLE 시작, 1=RELEASE/RETREAT 직후)
+            frac.append(torch.arange(n, dtype=torch.float32) / max(1, n - 1))
+        if not jpos:
+            print(f"[demo-reset] WARNING: no success demos in {self._demo_dataset_dir}", flush=True)
+            return
+        dev = self.device
+        self._demo = {
+            "jpos": torch.cat(jpos).to(dev),   "jvel": torch.cat(jvel).to(dev),
+            "cpos": torch.cat(cpos).to(dev),   "cquat": torch.cat(cquat).to(dev),  "cvel": torch.cat(cvel).to(dev),
+            "bpos": torch.cat(bpos).to(dev),   "bquat": torch.cat(bquat).to(dev),  "bvel": torch.cat(bvel).to(dev),
+            "frac": torch.cat(frac).to(dev),
+        }
+        self._demo_loaded = True
+        S = self._demo["frac"].shape[0]
+        print(f"[demo-reset] loaded {len(jpos)} demos → {S} states from {self._demo_dataset_dir} "
+              f"(subsample {k}, anneal_steps {self._demo_anneal_steps})", flush=True)
+
+    def _bootstrap_demo(self, env_ids: torch.Tensor) -> None:
+        """env_ids 중 demo_reset_prob 비율을 SM 데모 상태로 주입(robot joint + 4 cube + bowl).
+        reverse curriculum: 진행도 p 에서 frac>=1-p 인 상태만 sample(초반=success 근처)."""
+        if not self._demo_loaded or len(env_ids) == 0:
+            return
+        device = self.device
+        mask = torch.rand(len(env_ids), device=device) < self._demo_reset_prob
+        sel = env_ids[mask]
+        if len(sel) == 0:
+            return
+        # reverse curriculum 후보 풀: frac >= threshold
+        if self._demo_anneal_steps > 0.0:
+            p = float(min(1.0, max(0.0, self.common_step_counter / self._demo_anneal_steps)))
+        else:
+            p = 1.0  # anneal 없음 = 전 구간 uniform
+        thresh = 1.0 - p
+        pool = (self._demo["frac"] >= thresh).nonzero(as_tuple=True)[0]
+        if len(pool) == 0:
+            pool = torch.arange(self._demo["frac"].shape[0], device=device)
+        pick = pool[torch.randint(len(pool), (len(sel),), device=device)]
+
+        robot = self.scene["robot"]
+        origins = self.scene.env_origins[sel]  # (M,3)
+        # robot joint state (pos+vel, 전 관절)
+        robot.write_joint_state_to_sim(
+            self._demo["jpos"][pick], self._demo["jvel"][pick], env_ids=sel)
+        # 큐브 4개 pose(env-local→world)+vel
+        for i, name in enumerate(CUBE_NAMES):
+            cube = self.scene[name]
+            pos = origins + self._demo["cpos"][pick, i]            # (M,3)
+            quat = self._demo["cquat"][pick, i]                    # (M,4)
+            cube.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=sel)
+            cube.write_root_velocity_to_sim(self._demo["cvel"][pick, i], env_ids=sel)
+        # 그릇 pose+vel
+        bowl = self.scene[BOWL_NAME]
+        bpos = origins + self._demo["bpos"][pick]
+        bowl.write_root_pose_to_sim(torch.cat([bpos, self._demo["bquat"][pick]], dim=-1), env_ids=sel)
+        bowl.write_root_velocity_to_sim(self._demo["bvel"][pick], env_ids=sel)
+        # 부트스트랩 종류 기록(모니터 집계용): 4=demo-reset
+        self.bootstrap_kind[sel] = 4
+
     def _anneal_progress(self) -> float:
         """학습 진행도 p∈[0,1] (common_step_counter / anneal_steps). 감쇠 없으면 0."""
         if self._bootstrap_anneal_steps <= 0.0:
@@ -84,15 +203,24 @@ class PickCubeEnv(ManagerBasedRLEnv):
     def _cache_grasp_geom(self) -> None:
         robot = self.scene["robot"]
         bn = list(robot.data.body_names)
-        if "jaw" in bn and "gripper" in bn:
-            j, g = bn.index("jaw"), bn.index("gripper")
-            gp = 0.5 * (robot.data.body_pos_w[:, j, :] + robot.data.body_pos_w[:, g, :])
+        # _get_gripper_pos(grasp 보상 기준점)과 **동일 공식** = jaw + 회전된 JAW_GRASP_OFFSET
+        # (손가락 grasp point). 옛 중점 0.5*(jaw+gripper) 은 grasp_close 기준과 ~7cm 어긋나
+        # 부트스트랩 큐브가 보상 지점 밖 → grasp_close/align=0(점화 레버 死). 정합 수정.
+        if "jaw" in bn:
+            j = bn.index("jaw")
+            off = torch.tensor(JAW_GRASP_OFFSET, device=self.device, dtype=robot.data.body_pos_w.dtype)
+            off = off.unsqueeze(0).expand(robot.data.body_pos_w.shape[0], -1)
+            gp = robot.data.body_pos_w[:, j, :] + _quat_apply_wxyz(robot.data.body_quat_w[:, j, :], off)
         else:
             g = bn.index("gripper")
             gp = robot.data.body_pos_w[:, g, :]
         # env-local (고정베이스·동일로봇이라 env 간 동일) → env0 기준 (3,)
         self._grasp_offset = (gp - self.scene.env_origins)[0].clone()
         self._gripper_jid = list(robot.data.joint_names).index("gripper")
+        try:
+            self._wrist_roll_jid = list(robot.data.joint_names).index("wrist_roll")
+        except ValueError:
+            self._wrist_roll_jid = None
 
     def _bootstrap_grasp(self, env_ids: torch.Tensor) -> None:
         """env_ids 중 일부를 grasp 부트스트랩 상태(full-grasp 또는 pre-grasp)로 초기화.
@@ -109,29 +237,70 @@ class PickCubeEnv(ManagerBasedRLEnv):
         if prob <= 0.0:
             return
         device = self.device
-        mask = torch.rand(len(env_ids), device=device) < prob
-        sel = env_ids[mask]
+        # demo-reset(kind=4) 와 비중복: scratch(kind==0) env 에서만 grasp 부트스트랩.
+        scratch = env_ids[self.bootstrap_kind[env_ids] == 0]
+        if len(scratch) == 0:
+            return
+        mask = torch.rand(len(scratch), device=device) < prob
+        sel = scratch[mask]
         if len(sel) == 0:
             return
         # 선택된 env 를 pre-grasp / full-grasp 로 분할 (pre-grasp 비율 = override 또는 anneal p)
         pre_frac = self._bootstrap_pregrasp_frac if self._bootstrap_pregrasp_frac >= 0.0 else p
         is_pre = torch.rand(len(sel), device=device) < pre_frac
-        robot = self.scene["robot"]
-        cube = self.scene[CUBE_NAMES[0]]  # 활성 큐브 1개(stage 별 첫 큐브)
-        origins = self.scene.env_origins[sel]
-        quat = torch.zeros(len(sel), 4, device=device); quat[:, 0] = 1.0
+        # 2-phase 배치: reset 시점 body_pos_w(FK)는 joint write 미반영이라 stale.
+        # 여기서 큐브를 놓으면 팔이 settle 하며 ~5cm 어긋나 그리퍼가 빈 공간을 닫아 grip 실패
+        # (rollout trace 로 확정 — 큐브 낙하·grasp_close 0). 그래서 지금은 pending 마킹만 하고,
+        # FK 가 fresh 해지는 2 step 뒤 _apply_pending_grasp() 가 현재(settle된) jaw grasp point 에
+        # 큐브 배치 + 그리퍼 close → 실제 grip 성립. 큐브는 그때까지 scatter 위치 유지
+        # (1~2 step 과도기, episode 길이 512 대비 무시 가능). yaw 다양성은 일시 제거(점화 우선).
+        self._grasp_pending[sel] = 2
+        self._grasp_pending_pre[sel] = is_pre
+        # 부트스트랩 종류 기록(모니터 집계용): pre-grasp=2, full-grasp=1
+        self.bootstrap_kind[sel] = torch.where(
+            is_pre,
+            torch.full((len(sel),), 2, device=device, dtype=torch.long),
+            torch.full((len(sel),), 1, device=device, dtype=torch.long),
+        )
 
-        # 큐브 위치: full-grasp=grasp point(+lift), pre-grasp=grasp XY·책상 높이
-        offset = self._grasp_offset.unsqueeze(0).expand(len(sel), -1).clone()  # (M,3)
-        offset[:, 2] += self._bootstrap_lift
-        pre_off = offset.clone()
-        pre_off[:, 2] = self._bootstrap_rest_z  # 책상 위 resting 높이로 대체
-        cube_off = torch.where(is_pre.unsqueeze(-1), pre_off, offset)
-        pos = origins + cube_off
+    def _apply_pending_grasp(self) -> None:
+        """2-phase grasp 부트스트랩 배치 — FK(body_pos_w)가 fresh 해진 시점(reset 2 step 뒤)에
+        실제 수행. 현재(settle된) jaw grasp point 에 큐브를 놓고 그리퍼 close → 그리퍼가 큐브를
+        실제로 감싸 grip 성립. 이후 큐브가 jaw 를 따라간다. (reset 시 stale FK 로 놓으면 grip
+        실패하는 문제 해소.)"""
+        pend = self._grasp_pending
+        ready = pend == 1
+        self._grasp_pending = torch.clamp(pend - 1, min=0)
+        if not bool(ready.any()):
+            return
+        sel = ready.nonzero(as_tuple=False).flatten()
+        device = self.device
+        is_pre = self._grasp_pending_pre[sel]
+        robot = self.scene["robot"]
+        cube = self.scene[CUBE_NAMES[0]]
+        origins = self.scene.env_origins[sel]
+        # 현재(fresh) jaw grasp point = jaw + 회전된 JAW_GRASP_OFFSET (grasp_close 보상 기준과 동일)
+        bn = list(robot.data.body_names)
+        if "jaw" in bn:
+            jid = bn.index("jaw")
+            joff = torch.tensor(JAW_GRASP_OFFSET, device=device, dtype=robot.data.body_pos_w.dtype)
+            joff = joff.unsqueeze(0).expand(robot.data.body_pos_w.shape[0], -1)
+            gp_all = robot.data.body_pos_w[:, jid, :] + _quat_apply_wxyz(
+                robot.data.body_quat_w[:, jid, :], joff
+            )
+        else:
+            gp_all = robot.data.body_pos_w[:, bn.index("gripper"), :]
+        gp = gp_all[sel]  # world (M,3)
+        quat = torch.zeros(len(sel), 4, device=device)
+        quat[:, 0] = 1.0   # identity (yaw 0)
+        full_pos = gp.clone()
+        full_pos[:, 2] += self._bootstrap_lift
+        pre_pos = gp.clone()
+        pre_pos[:, 2] = origins[:, 2] + self._bootstrap_rest_z  # 책상 위 resting (env-local z)
+        pos = torch.where(is_pre.unsqueeze(-1), pre_pos, full_pos)
         cube.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=sel)
         cube.write_root_velocity_to_sim(torch.zeros(len(sel), 6, device=device), env_ids=sel)
-
-        # 그리퍼 joint: full-grasp=닫힘각, pre-grasp=열림(큐브 받아들일 자세)
+        # 그리퍼 joint: full-grasp=닫힘각(큐브 감쌈), pre-grasp=열림(받아들일 자세)
         jpos = torch.where(
             is_pre,
             torch.full((len(sel),), self._bootstrap_pregrasp_open, device=device),
@@ -139,12 +308,6 @@ class PickCubeEnv(ManagerBasedRLEnv):
         )
         robot.write_joint_position_to_sim(
             jpos.unsqueeze(-1), joint_ids=[self._gripper_jid], env_ids=sel
-        )
-        # 부트스트랩 종류 기록(모니터 집계용): pre-grasp=2, full-grasp=1
-        self.bootstrap_kind[sel] = torch.where(
-            is_pre,
-            torch.full((len(sel),), 2, device=device, dtype=torch.long),
-            torch.full((len(sel),), 1, device=device, dtype=torch.long),
         )
 
     def _bootstrap_place(self, env_ids: torch.Tensor) -> None:
@@ -194,6 +357,8 @@ class PickCubeEnv(ManagerBasedRLEnv):
         self.bootstrap_kind[env_ids] = 0
         # offset 은 step() 에서 1회 캐시(첫 init reset 때는 body_pos_w 미확정일 수 있어
         # 캐시 전이면 부트스트랩 skip — _bootstrap_grasp 내부 가드).
+        # demo-reset(RFCL) 우선 — 데모 run 에선 grasp/place bootstrap prob=0 으로 두고 이것만 사용.
+        self._bootstrap_demo(env_ids)
         self._bootstrap_grasp(env_ids)
         self._bootstrap_place(env_ids)  # grasp 부트스트랩 후 남은 scratch env 중 일부에 place 부트스트랩
         # 그릇 초기 pose 저장(super()._reset_idx 안에서 randomize_bowl 이 적용된 직후).
@@ -214,10 +379,13 @@ class PickCubeEnv(ManagerBasedRLEnv):
         # PBRS potential 초기화(reset 후 첫 step γΦ-0 jump 최소화)
         self._place_potential_prev[env_ids] = 0.0
         self._over_bowl_drop_potential_prev[env_ids] = 0.0
+        self._task_progress_potential_prev[env_ids] = 0.0
 
     def step(self, action):
         if self._grasp_offset is None:
             self._cache_grasp_geom()
+        # 2-phase grasp 부트스트랩: reset 2 step 뒤(FK fresh) 큐브 배치 + 그리퍼 close.
+        self._apply_pending_grasp()
         if getattr(self.cfg, "dynamic_reset_gripper_effort_limit", False):
             dynamic_reset_gripper_effort_limit_sim(self)
         return super().step(action)

@@ -76,6 +76,12 @@ parser.add_argument("--container_radius_scale", "--cup_radius_scale", dest="cont
                     help="그릇/컵 안 판정 반경 배율. --cup_radius_scale은 호환 alias.")
 parser.add_argument("--episode_length_s", type=float, default=None,
                     help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
+parser.add_argument("--skill", default="full", choices=["full", "acquire", "place", "full_bc"],
+                    help="skill chaining 프리셋(PickCube): acquire(=skill1, '그릇 위 grasp' "
+                         "도달 즉시 종료·grasp 점화 dense) / place(=skill2, lower+open·단기 "
+                         "horizon 5s·grasp_close 제거) / full(기존 전체 task) / full_bc(BC "
+                         "warmstart 의 단일 end-to-end finetune·camp-free·require_open). full_bc 는 "
+                         "--resume_checkpoint <bc> --demo_reset_prob <r> --demo_dataset_dir <SM demos> 와 쓴다.")
 parser.add_argument("--grasp_bootstrap_prob", type=float, default=0.0,
                     help="초기상태 grasp 부트스트랩 비율(0~1). reset 시 이 비율의 env 를 큐브-인-그리퍼로 시작.")
 parser.add_argument("--grasp_bootstrap_close", type=float, default=-0.15,
@@ -84,8 +90,20 @@ parser.add_argument("--grasp_bootstrap_prob_final", type=float, default=0.0,
                     help="부트스트랩 prob 를 이 값으로 선형 감쇠(annealing). 정상-env grasp 학습 압력↑.")
 parser.add_argument("--grasp_bootstrap_anneal_iters", type=int, default=0,
                     help="부트스트랩 감쇠 구간(iteration). 0=감쇠 없음. steps=iters×num_steps_per_env.")
+parser.add_argument("--grasp_bootstrap_pregrasp_frac", type=float, default=-1.0,
+                    help="grasp 부트스트랩 중 pre-grasp(큐브 옆 그리퍼 open→닫기 연습) 비율 고정값. "
+                         "-1=anneal 진행도 p(초반 full→후반 pre). 0.5=절반 close 연습(grasp 점화용).")
 parser.add_argument("--place_bootstrap_prob", type=float, default=0.0,
                     help="place 부트스트랩 비율(0~1). grasp 부트스트랩 후 남은 scratch env 중 이 비율을 큐브-그릇위로 시작.")
+# demo-state reset (RFCL reverse curriculum) — SM 성공 궤적 상태를 reset 분포로 주입
+parser.add_argument("--demo_reset_prob", type=float, default=0.0,
+                    help="reset 시 SM 데모 상태로 시작할 env 비율(0~1). place 탐색 valley 우회.")
+parser.add_argument("--demo_dataset_dir", default=None,
+                    help="demo_*.pt 디렉터리(pick_cube_state_machine --record_demos 산출).")
+parser.add_argument("--demo_anneal_iters", type=int, default=0,
+                    help="reverse curriculum 구간(iteration). 초반 success 근처→시작쪽 확장. 0=전구간 uniform.")
+parser.add_argument("--demo_subsample", type=int, default=2, help="데모 궤적 매 k step 만 적재(메모리).")
+parser.add_argument("--demo_max_files", type=int, default=4000, help="적재할 demo 파일 상한.")
 # 진행 모니터링용 주기적 에피소드 비디오 녹화
 parser.add_argument("--video", action="store_true", default=False,
                     help="학습 중 주기적으로 에피소드 비디오 녹화(headless offscreen). enable_cameras 자동 on.")
@@ -108,6 +126,12 @@ parser.add_argument("--learning_rate", type=float, default=3e-4,
 parser.add_argument("--gamma", type=float, default=0.99,
                     help="PPO 할인율. 긴 지평(900 step/30s)엔 0.997 권장.")
 parser.add_argument("--lam", type=float, default=0.95, help="GAE lambda")
+parser.add_argument("--grasp_close_weight", type=float, default=None,
+                    help="grasp_close_cube reward weight override(미지정 시 cfg 기본 3.0). "
+                         "점화(3.0) 후 resume 시 낮춰(예 1.0) camp hold income↓ → carry 유도.")
+parser.add_argument("--grasp_align_weight", type=float, default=None,
+                    help="grasp_align_cube reward weight override(미지정 시 cfg 기본 1.0). "
+                         "carry phase 서 0 으로 두면 per-step 상태보상 camp(align hover) 차단.")
 parser.add_argument("--rnd", action="store_true", default=False,
                     help="Random Network Distillation(내재 탐색 보상) 사용 — grasp 탐색 벽 공략.")
 parser.add_argument("--rnd_weight", type=float, default=0.5,
@@ -152,7 +176,12 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
-from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import apply_curriculum as apply_cube_curriculum  # noqa: E402
+from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
+    apply_curriculum as apply_cube_curriculum,
+    apply_skill_acquire,
+    apply_skill_full_bc,
+    apply_skill_place,
+)
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum as apply_pen_curriculum  # noqa: E402
 
 
@@ -305,8 +334,25 @@ def main() -> None:
             env_cfg.seed = args.seed
         # 커리큘럼 파라미터 적용
         _apply_task_curriculum(env_cfg, args)
+        # skill chaining 프리셋 (PickCube 한정; apply_curriculum 이후 = 활성 큐브 cfg 회수 가능)
+        if args.task and "PickCube" in args.task:
+            if args.skill == "acquire":
+                apply_skill_acquire(env_cfg)
+            elif args.skill == "place":
+                apply_skill_place(env_cfg)
+            elif args.skill == "full_bc":
+                apply_skill_full_bc(env_cfg)
+        # --episode_length_s 는 skill 프리셋(place=5s)보다 우선(명시 CLI override)
         if args.episode_length_s is not None:
             env_cfg.episode_length_s = args.episode_length_s
+        # grasp_close weight override (camp 탈출 — 점화 후 hold income↓ 로 carry 유도).
+        # 점화는 weight 3.0 으로 달성(scratch), resume 후 이 arg 로 낮춰 camp 깨고 carry 연결.
+        if args.grasp_close_weight is not None and hasattr(env_cfg.rewards, "grasp_close_cube"):
+            env_cfg.rewards.grasp_close_cube.weight = float(args.grasp_close_weight)
+            print(f"[reward] grasp_close_cube.weight override → {args.grasp_close_weight}")
+        if args.grasp_align_weight is not None and hasattr(env_cfg.rewards, "grasp_align_cube"):
+            env_cfg.rewards.grasp_align_cube.weight = float(args.grasp_align_weight)
+            print(f"[reward] grasp_align_cube.weight override → {args.grasp_align_weight}")
         # grasp 부트스트랩(backward curriculum) — PickCubeEnv 가 읽는다.
         if hasattr(env_cfg, "grasp_bootstrap_prob"):
             env_cfg.grasp_bootstrap_prob = args.grasp_bootstrap_prob
@@ -316,9 +362,18 @@ def main() -> None:
             env_cfg.grasp_bootstrap_anneal_steps = float(
                 args.grasp_bootstrap_anneal_iters * args.num_steps_per_env
             )
+            if hasattr(env_cfg, "grasp_bootstrap_pregrasp_frac"):
+                env_cfg.grasp_bootstrap_pregrasp_frac = args.grasp_bootstrap_pregrasp_frac
         # place 부트스트랩 — PickCubeEnv 가 읽는다.
         if hasattr(env_cfg, "place_bootstrap_prob"):
             env_cfg.place_bootstrap_prob = args.place_bootstrap_prob
+        # demo-state reset (RFCL) — PickCubeEnv 가 읽는다.
+        if hasattr(env_cfg, "demo_reset_prob"):
+            env_cfg.demo_reset_prob = args.demo_reset_prob
+            env_cfg.demo_dataset_dir = args.demo_dataset_dir
+            env_cfg.demo_anneal_steps = float(args.demo_anneal_iters * args.num_steps_per_env)
+            env_cfg.demo_subsample = args.demo_subsample
+            env_cfg.demo_max_files = args.demo_max_files
 
         # 로그 디렉터리(비디오 폴더가 필요해 env 생성 전에 결정)
         log_dir = _resolve_log_dir(args)
@@ -358,10 +413,18 @@ def main() -> None:
         # 이어학습: resume_checkpoint 지정 시 optimizer 포함 로드
         if args.resume_checkpoint is not None:
             load_optimizer = not args.resume_without_optimizer
-            try:
-                runner.load(args.resume_checkpoint, load_optimizer=load_optimizer, map_location=rl_device)
-            except TypeError:
-                runner.load(args.resume_checkpoint)
+            if args.resume_without_optimizer:
+                # BC warmstart 등 — policy state_dict 만 로드(optimizer/RND 는 fresh).
+                # BC ckpt 엔 rnd_state_dict 가 없어 runner.load 의 RND 로드가 KeyError → 수동 로드로 우회.
+                import torch as _torch
+                _loaded = _torch.load(args.resume_checkpoint, map_location=rl_device, weights_only=False)
+                runner.alg.policy.load_state_dict(_loaded["model_state_dict"])
+                print(f"[resume] policy-only load from {args.resume_checkpoint} (optimizer/RND fresh)", flush=True)
+            else:
+                try:
+                    runner.load(args.resume_checkpoint, load_optimizer=load_optimizer, map_location=rl_device)
+                except TypeError:
+                    runner.load(args.resume_checkpoint)
             _override_policy_std(runner.alg.policy, args.override_policy_std)
         runner.learn(
             num_learning_iterations=args.max_iterations,
@@ -403,6 +466,7 @@ def main() -> None:
                 "checkpoints": [os.path.basename(c) for c in checkpoints],
                 "latest_checkpoint": checkpoints[-1],
                 "curriculum": {
+                    "skill": args.skill,
                     "active_objects": args.active_objects,
                     "object_radius_scale": args.object_radius_scale,
                     "container_angle_scale": args.container_angle_scale,

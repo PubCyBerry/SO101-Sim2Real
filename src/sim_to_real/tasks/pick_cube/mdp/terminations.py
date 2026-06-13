@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import torch
-from isaaclab.assets import RigidObject
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 
 from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z
+from sim_to_real.tasks.common.mdp.rewards import _object_inside_container_mask
+from sim_to_real.tasks.pick_cube.mdp.rewards import _over_bowl_grasped_mask
 
 
 def cube_lost(
@@ -31,3 +33,50 @@ def cube_lost(
         cube_z = cube.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
         lost = torch.logical_or(lost, cube_z < (DESK_TOP_Z - fall_z))
     return lost
+
+
+def over_bowl_grasped(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    objects_cfg: list[SceneEntityCfg],
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["gripper"]),
+    container_center_xy: tuple[float, float] = (2.2, -0.17),
+    container_cfg: SceneEntityCfg | None = None,
+    over_bowl_xy: float = 0.10,
+    lift_min: float = 0.02,
+    grasp_dist: float = 0.07,
+    close_threshold: float = 0.50,
+) -> torch.Tensor:
+    """skill1(acquire+transport) 종료 — 큐브를 그릇 위에서 grasp 한 채 들고 있으면 True.
+
+    도달 즉시 종료 → dense 보상이 hover trap 으로 이어질 수 없다(skill chaining 의 핵심).
+    skill2 의 reset 분포(=이 종료 상태)와 동일 판정. reward(over_bowl_grasped_bonus)와 공유.
+    """
+    return _over_bowl_grasped_mask(
+        env, objects_cfg, robot_cfg, container_center_xy, container_cfg,
+        over_bowl_xy, lift_min, grasp_dist, close_threshold,
+    )
+
+
+def cube_placed_open(
+    env: ManagerBasedRLEnv | DirectRLEnv,
+    objects_cfg: list[SceneEntityCfg],
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    container_center_xy: tuple[float, float] = (2.2, -0.17),
+    container_cfg: SceneEntityCfg | None = None,
+    radius: float = 0.05,
+    height_range: tuple[float, float] = (0.005, 0.12),
+    open_threshold: float = 0.60,
+) -> torch.Tensor:
+    """skill2(place+release) 종료 — 모든 활성 큐브가 그릇 안 AND 그리퍼 열림이면 True.
+
+    open 강제 = '닫은 채 그릇 안' 으로 success 회피 → release 행동을 반드시 학습(VLA 품질).
+    """
+    robot: Articulation = env.scene["robot"]
+    done = robot.data.joint_pos[:, -1] > open_threshold  # gripper open
+    for obj_cfg in objects_cfg:
+        obj: RigidObject = env.scene[obj_cfg.name]
+        inside = _object_inside_container_mask(
+            env, obj.data.root_pos_w, container_center_xy, radius, height_range, container_cfg
+        )
+        done = torch.logical_and(done, inside)
+    return done

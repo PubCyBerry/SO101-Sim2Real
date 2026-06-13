@@ -78,6 +78,13 @@ parser.add_argument("--rnn_num_layers", type=int, default=1)
 parser.add_argument("--obs_normalization", action="store_true", default=False)
 parser.add_argument("--init_noise_std", type=float, default=0.5)
 parser.add_argument("--active_objects", type=int, default=1, choices=[1, 2, 3, 4])
+# skill chaining 프리셋 — termination 을 skill 종료(acquire=over-bowl-grasped, place=placed-open)로
+# 맞춰야 success 지표가 해당 skill 을 반영한다. full=기존 전체 task.
+parser.add_argument("--skill", default="full", choices=["full", "acquire", "place", "full_bc"])
+# skill2(place) eval 용 — over-bowl-grasped 수집 상태에서 시작.
+parser.add_argument("--demo_reset_prob", type=float, default=0.0,
+                    help="reset 시 데모(skill1 수집) 상태로 시작할 env 비율. place eval=1.0.")
+parser.add_argument("--demo_dataset_dir", default=None, help="demo_*.pt 디렉터리.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = not args.gui  # GUI 모드면 headless 해제(뷰포트 표시)
@@ -98,6 +105,7 @@ from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     apply_curriculum as apply_cube_curriculum,
+    apply_skill_acquire, apply_skill_full_bc, apply_skill_place,
     BOWL_CENTER_XY, BOWL_SUCCESS_RADIUS, BOWL_HEIGHT_RANGE,
 )
 from sim_to_real.tasks.common.mdp.rewards import (  # noqa: E402
@@ -225,6 +233,19 @@ def main() -> None:
             env_cfg, active_objects=args.active_objects,
             object_radius_scale=1.0, container_angle_scale=1.0, container_radius_scale=1.0,
         )
+        # skill chaining 프리셋 (apply_curriculum 이후 = 활성 큐브 cfg 회수). termination 을
+        # skill 종료로 맞춰 success 지표가 해당 skill 을 반영한다.
+        if args.skill == "acquire":
+            apply_skill_acquire(env_cfg)
+        elif args.skill == "place":
+            apply_skill_place(env_cfg)
+        elif args.skill == "full_bc":
+            apply_skill_full_bc(env_cfg)
+        # demo-state reset (skill2 eval = over-bowl-grasped 수집 상태에서 시작)
+        if hasattr(env_cfg, "demo_reset_prob"):
+            env_cfg.demo_reset_prob = args.demo_reset_prob
+            env_cfg.demo_dataset_dir = args.demo_dataset_dir
+            env_cfg.demo_anneal_steps = 0.0
         # 고정 부트스트랩(annealing off) — env-type 분류용
         if hasattr(env_cfg, "grasp_bootstrap_prob"):
             env_cfg.grasp_bootstrap_prob = args.bootstrap_prob
@@ -371,10 +392,15 @@ def main() -> None:
                 ever["placed"] |= placed & cont
 
                 if done_mask.any():
-                    time_outs = extras.get("time_outs", None)
-                    if time_outs is None:
-                        time_outs = torch.zeros_like(done_mask)
-                    success = done_mask & (~time_outs.bool())
+                    # success = '성공' 종료 term 만 직접 조회(over_bowl_grasped/placed_open/task_done).
+                    # done & ~time_out 는 cube_lost(time_out=False)까지 포함해 오집계되므로 사용 안 함.
+                    try:
+                        success = base.termination_manager.get_term("success").clone()
+                    except Exception:
+                        time_outs = extras.get("time_outs", None)
+                        if time_outs is None:
+                            time_outs = torch.zeros_like(done_mask)
+                        success = done_mask & (~time_outs.bool())
                     idxs = torch.nonzero(done_mask, as_tuple=False).flatten().tolist()
                     for i in idxs:
                         k = int(kind_snap[i].item())

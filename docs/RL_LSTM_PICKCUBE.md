@@ -346,7 +346,95 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 - place 부트스트랩 구현: `PickCubeEnvCfg.place_bootstrap_prob/place_bootstrap_z` + `PickCubeEnv._bootstrap_place()` + `train.py --place_bootstrap_prob`.
 - 판정: over_bowl→placed 전이율 11% → 25%+ 상승. transport_cube>0 + over_bowl_drop>0 leading indicator.
 
+### T34. 🔄 전면 재설계 — Demonstration-Bootstrapped RL (v16, 2026-06-12, Opus 4.8 RL-expert 세션)
+
+- **결정**: 15차 reward-shaping 폐기. place valley(전이율 11%)는 **탐색 문제**인데 reward 로 풀려다 hover/camping local optimum 만 양산(reward hacking). 같은 repo `main` 의 **analytic-IK state machine**(`pick_cube_state_machine.py`, multi-env, 동일 6-dim joint action·동일 env, 4큐브 DR best-case 16/16)을 **데모 소스**로 활용. 사용자 평가상 SM 은 ~80-90%(fumbling·그릇 엎음·비효율) → BC 클론 부적합. 대신 **SM 궤적의 상태(state)만 RL reset 분포로 주입**(RFCL reverse curriculum), 행동은 PPO 가 reward 로 재최적화 → place valley 우회 + SM 결함 교정. 용도=VLA 데이터 생성(실기기 배포 아님 → sim2real DR 강투입 생략). 외부 근거: RFCL(arXiv 2405.03379), DAPG/POfD, Isaac Lab Factory/Forge.
+- **핵심 통찰**: demo-reset 는 **탐색(상태분포)**을 풀지만 hover(T28)는 **목적함수** 문제 → reward trim 동반 필수. place 상태로 reset 해도 dense 유지보상이 완료를 압도하면 정책은 hover 한다.
+- **개입(v16)**:
+  1. **데모 생성**: main multi-env SM 을 worktree 도입 + per-step recorder 추가(`--record_demos`). env-local scene state(robot joint pos/vel + 4 cube pose/vel + bowl pose/vel) + 87dim obs + action + phase 기록, 성공 에피소드만 `demo_*.pt` 저장. `apply_curriculum` 적용해 비활성 큐브 비활성화(학습 env 정합). **단일 큐브 1763 데모 생성**(512env×4ep DR-on, SM 성공률 86%).
+  2. **demo-state reset** (`PickCubeEnv._bootstrap_demo`): reset 시 `demo_reset_prob` env 를 데모 상태로 주입(write_joint_state/write_root_pose+velocity). reverse curriculum: frac>=1-p sample(초반 success 근처→시작 확장). `bootstrap_kind=4`. cfg: `demo_reset_prob/demo_dataset_dir/demo_anneal_steps`. train.py CLI: `--demo_reset_prob/--demo_dataset_dir/--demo_anneal_iters`.
+  3. **reward trim**(hover income 제거): carry 1.5→**0**, transport 3→**0**, lift 2→**0**, guided_lift 3→**1**(최소 lift bridge). 유지: grasp 점화(reach/align/close/contact/pregrasp/grasp), place_pbrs 50, over_bowl_drop_pbrs 12, release 10, terminal(success 200/early 100), 교정 페널티(bowl_disturb -3/cube_predisturb -3/action_rate·joint_vel -1e-2/time -0.02).
+- run `lstm256_demo_v16`(예정). 판정: scratch(demo_reset_prob=0) eval DR-on **단일 ≥0.95** → 커리큘럼 1→4 → **4큐브 ≥0.90**. leading: place 전이율 ≫11%, hover 소멸, episode length↓.
+- 에스컬레이션 사다리(정체 시): L1 DAPG BC-gradient / L2 success-gated 자동커리큘럼+mid-sequence demo / L3 자원·arch 스케일.
+
+### T35. ❌ v16 진단 → grasp bootstrap 복원 (v17, 2026-06-12)
+
+- **v16 결과(model_50/150 scratch eval, monitor_eval bootstrap_prob=0)**:
+
+  | iter | reach | grasp | lift | over_bowl | placed | success |
+  |---|---|---|---|---|---|---|
+  | 58(m50) | 0.594 | 0 | 0 | 0 | 0 | 0 |
+  | 148(m150) | **0.984** | **0** | 0 | 0 | 0 | 0 |
+
+- **진단(핵심)**: scratch reach 0.98 인데 **grasp 0 미점화**. tfevents 의 grasp_close 0.82·success 0.12 는 **demo-reset envs(이미 잡은 채 시작)가 inflate** 한 값 — scratch 실력 아님. 즉 **demo-reset 단독은 "잡은 후 하류"만 가르치고 "scratch grasp 발견"은 못 가르친다**. v16 이 v4 의 검증된 grasp bootstrap 을 제거 + 과한 reward trim(carry/transport/lift=0, guided_lift 1) → v4 가 풀었던 grasp 점화를 상실.
+- **부수 문제**: noise_std 0.5→**2.07 폭주**(entropy 0.01 + scratch 약 gradient → 정책이 std 무한확대). std 2.07 = 정밀 grasp/place 실행 불가 → grasp 미consolidate·place fumble·success 0.19→0.12 하락.
+- **교훈**: demo-reset 는 **place(post-grasp) 레버**지 grasp 점화 레버가 아니다. grasp 점화는 v4 의 bootstrap+shaping+RND 가 담당. 둘은 보완재 — 합쳐야 함.
+- **개입(v17 fresh)** = v4 grasp 머신 + demo-reset place + std 통제:
+  1. **grasp bootstrap 복원**: prob 0.6→0 anneal(600 iter). `_bootstrap_grasp` 를 scratch(kind==0) 전용 게이트(demo-reset kind=4 와 비중복).
+  2. **demo_reset_prob 0.5→0.3** (place 교습, grasp bootstrap 과 env 분담).
+  3. **entropy_coef 0.01→0.005** (std 폭주 억제).
+  4. **guided_lift 1→2** (scratch post-grasp gradient 보강).
+- run `lstm256_demo_v17`. 판정: scratch grasp 점화(v4 처럼 iter150~650) + noise_std 안정(<1.5) + **place 전이(demo-reset 효과 본령)**. model_150/300 재eval.
+
+### T36. 🔬 v17~v19 — reverse curriculum 이 place 점화 + entropy 검증 (2026-06-12)
+
+빠른 반복으로 핵심 하이퍼/메커니즘 2개 검증 확정:
+
+| run | 변경 | 결과(scratch eval / tfevents) |
+|---|---|---|
+| v17 | grasp boot 복원 + entropy **0.005** + demo uniform | std 통제(0.97 ✅) but scratch grasp **0**@150. place valley 가 grasp value 오염(잡아도 success 안 되니 critic 이 grasp 가치 학습 못 함) |
+| v18 | **reverse curriculum**(demo trim→LOWER, anneal 400) + entropy 0.01 | **place 점화** ✅ success_term 0.275→0.467, place_pbrs 음수→**+0.01**(15차+v16/v17 처음). but entropy 0.01 → **std 0.5→1.78 폭주**(v16 동일) |
+| v19 | v18 + entropy **0.005**(model_100 resume, override_std 0.9) | 진행 중 — reverse curriculum 보존 + std 통제 결합 |
+
+**검증된 결론**:
+1. **entropy_coef 0.01 = std 폭주**(v16·v18 재현), **0.005 = 통제**(v17·v19). 이 task 의 std 레버.
+2. **demo-reset 단독은 scratch grasp 못 켬**(잡은 후 하류만). place valley 가 grasp value 까지 오염 → place 가 먼저 풀려야 grasp 점화.
+3. **reverse curriculum(place-first, demo 끝=LOWER) 이 place valley 직격** — 15차 내내 못 넘은 over_bowl→placed 에 처음으로 양의 신호(place_pbrs+, success_term↑).
+4. **reverse curriculum 정책은 scratch eval 이 p→1(iter~400) 전까지 0** — 정책이 "후반부 전문가"라 초반(reach/grasp) 미학습. scratch 성공률은 curriculum 완전확장 후 상승. 중간 판정은 training success_term + place 지표로.
+- v19 run `lstm256_demo_v19`. 판정: std<1.2 유지 + curriculum 확장(iter→400)하며 grasp 점화 + **scratch eval 상승(iter 400+)**. require_open=False 라 release 0 이어도 success 가능 — VLA release 품질 위해 후속 require_open=True 검토.
+
+### T37. 🎯 핵심 전환 — Unified Task-Progress PBRS (v20, 2026-06-12)
+
+- **19실험 통산 근본 진단**: v16~v19 내내 **scratch grasp 0 미점화**. 원인 추적 결과 **dense downstream(carry/lift/transport) 제거가 grasp 를 깸** — v4 는 grasp 시 carry(8)+guided_lift(6) 즉시 보상으로 grasp 를 강화했는데, 이를 trim 하니 grasp 가 우연히 발생해도 강화 안 됨(미consolidate) + 약 gradient 로 std 폭주. **그러나 dense 복원 = hover 부활**(T28: hover value≈2400 >> terminal 200, demo-reset 도 못 이김). **dense 는 grasp 강화에 필수면서 hover 의 원흉 — 19실험을 관통한 근본 긴장.**
+- **해소 = Unified Task-Progress PBRS**(`task_progress_pbrs_reward`): 큐브 상태 기반 단조 potential Φ ∈ [0,1] (`task_progress_cube`, weight 40):
+  - inside_bowl: 1.0 / lifted: 0.4+0.2·lift_prog+0.3·bowl_xy_prog(≤0.9, **grasp 무관**) / grasped(closed+near, 책상): 0.35 / else: 0.2·reach_prog
+  - r = γΦ(s')−Φ(s). **grasp 시 0.2→0.35 점프(+6 보상)=강화** + lift/transport 진행 + / **정지(hover)=Φ일정=0 보상(hover 차단)** / 놓기(lifted+over_bowl 0.9→inside 1.0)=+. lifted 항이 grasp 무관이라 **release 후 낙하도 Φ 유지→놓기가 Φ↑**(release 페널티 회피).
+  - **dense 단계보상 reach/guided_lift/grasp_bonus/carry/lift/transport/place_pbrs 를 이 하나로 대체**(전부 weight 0). grasp 정밀(align 1/close 3/contact 2/pregrasp 0.2)·release(over_bowl_drop_pbrs 12/release 10)·terminal(success 200/early 100)·교정 페널티 유지.
+- **이론**: PBRS(Ng 1999) optimal policy 불변 + grasp 를 progress 로 강화(dense 아님) → grasp 강화·hover 차단·std 안정(dense gradient) 동시 달성.
+- **v20 설정**: task_progress PBRS 40 + grasp 정밀 + demo_reset 0.3(uniform) + grasp_boot 0.3 + **entropy 0.008**(PBRS dense gradient 라 std 통제 기대). 4096/48, lr 1e-4, gamma 0.997, RND. run `lstm256_v20`.
+- **판정(결정적)**: ① **scratch grasp 점화**(v16~v19 0 → >0.3, progress PBRS 가 grasp 강화하는지가 핵심) ② noise_std<1.3 ③ over_bowl→placed 전이 ④ scratch.success→0.9. model_100/150 scratch eval.
+
+### T38. ❌ v20 progress-PBRS 실패 → v14 reward 복원 + demo-reset (v21, 2026-06-12)
+
+- **v20 결과(iter98)**: std 0.5→**1.76 폭주**(entropy 0.008), task_progress 0.003 **flat**, grasp_close **0.0**, scratch grasp 0. **progress PBRS 의 치명적 결함**: progress 만 보상하는데 grasp 가 안 일어나면 Φ 변화 0 → 보상 0 → **gradient 없음** → entropy 가 std 폭주시킴 → 정밀 grasp 불가 → grasp 영영 안 일어남(닭-달걀). PBRS 는 "이미 일어나는 진행"을 강화할 뿐 **초기 grasp 발견을 부트스트랩 못 함**.
+- **결정적 교훈(v16~v20 5런 통산)**: **dense downstream reward 는 제거하면 안 됨.** 그것이 (a) grasp 가 우연히 발생했을 때 즉시 강화(consolidation) (b) 전 구간 gradient 제공으로 std 안정 — 둘 다 담당. v14/v15(dense)는 grasp 0.83·over_bowl 0.75·std 안정을 **이미 달성**했고 유일 미해결은 placed 0.083. hover 잡으려 dense 를 없앤 게 grasp 와 std 를 깬 근본 실수.
+- **v21 = 검증된 v14 reward 전면 복원 + demo-reset(placed 전용)**:
+  - reward: reach 1 / grasp_align 1 / grasp_close 3 / grasp_contact 2 / pregrasp 0.2 / guided_lift 3 / grasp 1 / carry 1.5 / lift 2 / transport 3 / place_pbrs 50 / over_bowl_drop 12 / release 10 / success 200 / early 100 / 교정페널티 (= v14/v15 그대로).
+  - grasp_bootstrap 0.75 anneal 1000(v14), entropy 0.01(v14, dense 라 std 안정), 4096/48/6/4, RND grasp_focus.
+  - **신규 레버 = demo_reset 0.2 + reverse curriculum(anneal 400, 데모 끝=LOWER)** — v14 가 못 푼 over_bowl→placed(0.083)를 SM 데모 LOWER 상태 reset 으로 직접 공략. v18 에서 reverse curriculum 이 place_pbrs 양수·success 0.47 낸 것이 근거.
+  - run `lstm256_v21`. 판정: ① grasp 점화 재현(v14 처럼 model_150~650, 0.83) ② std 안정(<1.3) ③ **placed 가 v14 의 0.083 넘어 상승(demo-reset 효과)** ④ scratch.success→0.9. model_300+ deep eval.
+- **운영 메모**: 학습 outputs 는 main repo `$ROOT/outputs/rl/rsl_rl`(worktree 아님). pkill 시 bash exit144(시그널 cascade)은 무해.
+
 ---
+
+### T39. ✅ 근본 해결 경로 확정 — v14 grasp-solid resume + 단계적 anti-hover 트림 (v22~v24, 2026-06-12)
+
+**v22(v14 reward + demo_reset + entropy 0.005)**: model_300 scratch grasp **0** — 검증된 v14 reward 인데도 grasp 미점화. **디컨파운드**: v14(no demo_reset)=grasp 0.83 / v21(v14+demo_reset+ent0.01)=std 폭주 / v22(v14+demo_reset+ent0.005)=grasp 0. → **demo_reset 가 grasp 학습/std 를 교란**. demo_reset 폐기.
+
+**결정적 전환 — grasp 재학습 불필요**: 세션 시작 때 중단한 **v14 model_1600 체크포인트가 grasp 0.823·lift 0.892·over_bowl 0.838·placed 0.092 로 디스크에 보존**. = grasp+transport 는 이미 완성, **over_bowl→placed(11%) 만 문제**. → 처음부터 재학습(~3h) 말고 **resume + placed 외과수술**.
+
+**v23(resume v14 m1600 + 1차 anti-hover 트림: carry/lift/transport→0)**: grasp **0.833 보존**(트림이 grasp 안 깸 — grasp-solid 위에선 안전 ✅), reward 0.66→106 급등, but placed 0.092→**0.121**(미미). 잔존 hover income 발견.
+
+**핵심 발견 — hover income 의 전체 출처**: 큐브를 그릇 위에 **든 채 정지**해도 매 step 지급되는 보상 = **reach(1.0, 든 큐브=미배치@EE → reach_prog 1.0!) + grasp_contact(2.0, 접촉) + grasp_bonus(1.0) + guided_lift(1.0) + pregrasp(0.2) ≈ 5/step**. 300 step × 5 = 1500 ≫ terminal 200 → **hover 가 value 상 압도**(15차+v5~v23 placed 정체의 진짜 정량 원인). carry/lift/transport 만 0 으로는 부족.
+
+**v24(resume v23 m1675 + hold-income 전제거)**: reach/grasp_contact/grasp_bonus/pregrasp/guided_lift **모두 0**. 유지 = grasp_align(1)/grasp_close(3)(잡는 *행동*, hold 중 ≈0) + place_pbrs(50) + over_bowl_drop_pbrs(16↑) + release(20↑) + terminal(200/100) + 페널티. **hover income 0 → 떨구기(terminal+release+place_pbrs)만 보상 → placed 급등 기대.** grasp/lift/transport 는 weights(학습)+place_pbrs inside 가 instrumental 유도로 보존. entropy 0.005, override_std 0.8. run `lstm256_v24`.
+
+**통산 핵심 교훈(v16~v24)**:
+1. **entropy ≥0.008 → std 폭주, 0.005 → 통제**(dense 유무 무관).
+2. **dense reward 는 grasp *학습*에 필수**(제거 시 v16~v20 grasp 미점화). 단 **grasp 학습 후엔 제거해도 grasp 보존**(weights+align/close+instrumental). → **grasp-solid resume 위에서 anti-hover 트림**이 정답.
+3. **hover income = "든 채 정지"에 지급되는 모든 per-step 보상**(reach/contact/grasp_bonus/guided_lift/carry/lift/transport). placed 풀려면 이를 0 또는 PBRS화. terminal 만으로는 못 이김.
+4. **demo_reset(RFCL)는 grasp 학습을 교란** — place 점화엔 도움(v18)이나 grasp 단계와 충돌. 본 경로에선 미사용.
+5. **운영**: pkill 신뢰 불가(PID kill+GPU 검증), 학습 outputs=main repo `$ROOT/outputs`, 데모=worktree `outputs/demos/cube1`.
 
 ## 5. 조사 내용 (참고 구현·MCP)
 
@@ -379,24 +467,27 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 
 ---
 
-## 7. 현재 진행 (2026-06-11 세션, T33 v15 fresh)
+## 7. 현재 진행 (2026-06-12 세션, Opus 4.8 rl-expert — demonstration-bootstrapped 재설계 → v24 placed 외과수술)
 
-- **학습 중**: run `lstm256_stage1_grasp_v15`, 로그 `train_grasp_v15.log`. **fresh**, stage-1(단일 큐브), LSTM(256,1층)+PPO, **num_envs 4096 / horizon 48**, ~12s/iter, PID 3753492.
-- **v15 개입(T33)**: transport 0→**3.0** 복원 / place_pbrs xy_range 0.40→**0.60** / close_ref 0.35→**0.30** / **place 부트스트랩** 20%(그릇 위 든 채 시작).
-- **v14 달성 상태(model_1350)**: scratch.grasp **0.833** ✅, over_bowl **0.750** ✅, placed 0.083(전이율 11%). placed 전이율 병목.
-- 판정: `transport_cube`>0 + `over_bowl_drop_cube`>0 + **scratch.placed 25%+** → scratch.success ≥0.80 = 단일 큐브 통과.
-- 20분 cron(`cron_monitor_v15.sh`)이 scratch/full/pre/place 단계별 + 비디오 자동 생성. 상태: `/tmp/train_pid.txt`.
+> **요약**: 15차+v16~v22 의 placed valley(over_bowl→placed 11%)를 **v14 grasp-solid 체크포인트 resume + hover income 전제거 트림**(v23→v24)으로 공략 중. grasp 는 v14 model_1600 에 이미 0.823 보존, **placed 만 남은 문제**.
+
+- **학습 중**: run `lstm256_v24`, 로그 `logs/train_v24.log`. **resume v23 m1675**(=resume v14 m1600), stage-1 단일 큐브, LSTM(256,1)+PPO, 4096env/48horizon, entropy **0.005**, override_std 0.8, ~8s/iter. 학습 outputs=**main repo** `$ROOT/outputs/rl/rsl_rl/*lstm256_v24`.
+- **v24 개입(T39)**: hover income per-step 보상 **전부 0**(reach/grasp_contact/grasp_bonus/pregrasp/guided_lift/carry/lift/transport). 유지=grasp_align(1)/grasp_close(3)/place_pbrs(50)/over_bowl_drop(16)/release(20)/terminal(200·100)/페널티.
+- **확정 baseline(v14 m1600 scratch eval)**: reach 1.0 / grasp **0.823** / lift 0.892 / over_bowl **0.838** / placed **0.092**. → over_bowl→placed(11%)만 병목.
+- **판정**: scratch eval(monitor_eval `--bootstrap_prob 0`, 단일 큐브) 에서 **grasp 보존(over_bowl>0.7) + placed 급등(0.092→0.5+)** = 돌파. grasp 퇴화(over_bowl<0.5) = 트림 과함 → grasp_align/close 보강 revert.
+- **모니터**: Monitor task(25iter ckpt 핑, std 포함) + 수동 scratch eval. (구 cron_monitor_v15 는 제거됨.)
 
 ---
 
 ## 8. 진행 예정
 
-1. **v13 결과 확인** — `over_bowl_drop_cube`>0 + `placed` 상승 확인 후 **v14 시작**:
-   - over_bowl_drop PBRS화 + carry/guided_lift 절반 축소 (T32 권고)
-   - v14 설정: num_envs 4096, horizon 48, mini 4, lr 1e-4, entropy 0.01, epochs 6
-2. **stage-1 성공률 ≥0.90**(eval, 부트스트랩 없이) 도달 시 **커리큘럼 확장** 1→2→3→4.
-3. **(C) sim2real DR 강화**: actuator gain·joint friction 랜덤화(gear_assembly 핵심).
-4. **stage-4 ≥0.90 달성 = 최종 목표.** eval 영상으로 시각 확인.
+1. **v24 placed 돌파 확인**(진행 중): scratch eval 에서 placed 0.092→0.5+ & grasp 보존. 미달 시:
+   - grasp 퇴화면 → grasp_align/close 보강 또는 grasp 보상 gate(over_bowl 밖에서만 지급).
+   - placed 여전히 정체면 → require_open=True(release 강제) / over_bowl_drop·release weight↑ / place_pbrs Φ z-가중↑.
+2. **단일 큐브 scratch.success ≥0.90**(eval, bootstrap·demo 없이, DR-on) 도달 = stage-1 통과.
+3. **커리큘럼 1→2→3→4**: 멀티 큐브 demo 생성(SM `--record_demos --active_objects N`) + grasp_focus/bootstrap 의 CUBE_NAMES[0] 단일 전제 일반화. 4큐브 0.90=큐브당 97.4% 산술벽 → 에스컬레이션(success-gated 자동 진급, mid-sequence demo-reset).
+4. **VLA 데이터 생성**(최종 용도): 완성 정책 → `scripts/sim/rollout_to_lerobot.py`(3캠+success filter) 로 비전+궤적 데이터셋. require_open=True 로 실제 release 궤적 확보(VLA 품질).
+5. (선택) sim2real DR: VLA 가 전이 담당이라 RL 정책엔 저우선.
 
 ---
 
@@ -458,11 +549,13 @@ v14 실제 batch: rollout=4096×48=**196,608**, mini=196,608÷4=**49,152**, grad
 
 ## 11. 미해결 / 리스크 / 전망
 
-- **grasp**: scratch.grasp 0.828 달성(v4~v12 유지), 탐색 벽 완전 극복 ✅. grasp 신뢰성(reach→grasp 80%)는 cube_predisturb 패널티+cube_lost 종료로 개선됨.
-- **place(v14 진전 / v15 시도 중)**: v14 model_1350 over_bowl 0.750 달성 / placed 0.083(전이율 11%). Opus 4.8 진단: transport dense=0 + close_ref 높음 + over_bowl_drop PBRS 음수 3중 병목. v15에서 transport 3.0 복원 + close_ref 0.30 + place_pbrs xy_range 0.60 + place 부트스트랩(20%)으로 전이율 25%+ 목표.
-- **jitter(sim2real 리스크)**: v12 joint_vel raw 30.4/ep(심각). v13 smoothness -1e-2로 억제 중. 판정 지표: `joint_vel` 에피소드 기여 -0.15 이상.
-- **monitor_eval 장기 걸림 리스크**: 버그 시 CPU 100% 무한 루프 + flock 미해제로 cron skip 연쇄. 증상: cron 로그에 "이전 점검이 아직 실행 중" 반복. 대응: `kill $(pgrep -f monitor_eval)`.
-- **4큐브 ≥0.90 의 산술적 벽**: 한 에피소드 4개 순차 → success ≈ (큐브당 성공)⁴. 0.90 하려면 **큐브당 ~97.4%** 필요. 현실 목표 = 먼저 단일 큐브 0.90. 멀티 큐브 진입 시 grasp_focus/부트스트랩이 CUBE_NAMES[0] 단일 전제라 재설계 필요.
-- **sim2real**: actuator gain·joint friction DR 미포함(예정, gear_assembly 핵심).
-- **정밀 grasp 끝내 부족하면**: 모방학습(SmolVLA/GR00T) 또는 planning(cuMotion, PATH E) 병행 검토.
+- **grasp ✅ 해결·재현 가능**: v4 이래 scratch.grasp 0.82~0.83 안정. v14 m1600 체크포인트에 grasp 0.823·over_bowl 0.838 보존(재학습 불필요, resume 토대).
+- **placed = 유일 미해결 병목**(15차+v5~v23 내내, over_bowl 0.84→placed 0.09, 전이율 11%). **정량 원인 확정(T39)**: 큐브를 그릇 위에 든 채 정지해도 reach+contact+grasp_bonus+guided_lift 등 **per-step hover income ≈5/step** 지급 → 300step×5=1500 ≫ terminal 200 → hover 가 value 최대. **해법 = v24 hover income 전제거**(grasp-solid resume 라 grasp 안 깸). **현재 v24 로 검증 중** — 이게 풀리면 단일 큐브 성공률 급등.
+- **placed 미해결 시 대안 사다리**: require_open=True(release 강제) / grasp 보상 over_bowl-gate / place_pbrs Φ z-가중↑ / demo-reset 을 placed-only finetune 으로.
+- **std 폭주(해결)**: entropy ≥0.008 폭주(v16/v18/v20/v21), **0.005 통제**(v17/v19/v22~). 0.005 고정.
+- **4큐브 ≥0.90 산술벽**: 큐브당 ~97.4% 필요. 단일 큐브 0.90 먼저. 멀티 진입 시 grasp_focus/bootstrap CUBE_NAMES[0] 전제 일반화 + 멀티 demo + success-gated 자동 진급.
+- **jitter(sim2real)**: action_rate/joint_vel -1e-2 유지. VLA 용도라 sim2real 저우선.
+- **demo-reset(RFCL) 보류**: grasp 학습 교란(v22) → 현 경로 미사용. placed-only finetune 으로 재투입 가능.
+- **운영 함정**: pkill 신뢰 불가(PID kill+GPU 검증 필수). 학습 outputs=main repo `$ROOT/outputs`(worktree 아님). monitor_eval 은 학습과 kit-lock 경합 시 부팅 지연(정상).
+- **최종 용도 = VLA 데이터**: 단일 큐브 0.90 후 멀티 → rollout_to_lerobot(3캠) 데이터셋. RL 자체 sim2real 배포 아님.
 </content>
