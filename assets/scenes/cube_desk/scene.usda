@@ -16,9 +16,9 @@ def Xform "Scene"
             def Shader "Preview"
             {
                 uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor = (0.67, 0.51, 0.32)
+                color3f inputs:diffuseColor = (0.72, 0.64, 0.54)
                 float inputs:metallic = 0
-                float inputs:roughness = 0.78
+                float inputs:roughness = 0.72
                 token outputs:surface
             }
         }
@@ -72,6 +72,70 @@ def Xform "Scene"
             uniform token physxMaterial:frictionCombineMode = "average"
             uniform token physxMaterial:restitutionCombineMode = "min"
         }
+
+        def Material "DeskTopTex"
+        {
+            token outputs:surface.connect = </Scene/Looks/DeskTopTex/Preview.outputs:surface>
+
+            def Shader "stReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "DiffuseTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/desk_top.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </Scene/Looks/DeskTopTex/stReader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "Preview"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </Scene/Looks/DeskTopTex/DiffuseTex.outputs:rgb>
+                float inputs:metallic = 0
+                float inputs:roughness = 0.7
+                token outputs:surface
+            }
+        }
+
+        def Material "DeskMatTex"
+        {
+            token outputs:surface.connect = </Scene/Looks/DeskMatTex/Preview.outputs:surface>
+
+            def Shader "stReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "DiffuseTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./textures/desk_mat.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </Scene/Looks/DeskMatTex/stReader.outputs:result>
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float3 outputs:rgb
+            }
+
+            def Shader "Preview"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </Scene/Looks/DeskMatTex/DiffuseTex.outputs:rgb>
+                float inputs:metallic = 0
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+        }
     }
 
     def Cube "Ceiling" (
@@ -103,6 +167,28 @@ def Xform "Scene"
         double size = 1
         float3 xformOp:scale = (1.6, 0.8, 0.025)
         double3 xformOp:translate = (0.36, 0.355, 0.6925)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Mesh "DeskTopSurface" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform bool doubleSided = 1
+        float3[] extent = [(-0.5, -0.5, 0), (0.5, 0.5, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </Scene/Looks/DeskTopTex>
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "none"
+        float3 xformOp:scale = (1.6, 0.8, 1)
+        double3 xformOp:translate = (0.36, 0.355, 0.7052999999999999)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -171,6 +257,28 @@ def Xform "Scene"
         double size = 1
         float3 xformOp:scale = (0.86, 0.4, 0.004)
         double3 xformOp:translate = (0.08999999999999997, 0.245, 0.707)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Mesh "DeskMatTop" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform bool doubleSided = 1
+        float3[] extent = [(-0.5, -0.5, 0), (0.5, 0.5, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </Scene/Looks/DeskMatTex>
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        uniform token subdivisionScheme = "none"
+        float3 xformOp:scale = (0.86, 0.4, 1)
+        double3 xformOp:translate = (0.08999999999999997, 0.245, 0.7093999999999999)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 

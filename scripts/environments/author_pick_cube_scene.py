@@ -45,7 +45,7 @@ SCENE_OFFSET: tuple[float, float, float] = (0.36, 0.045, 0.705)
 
 # (diffuseColor, roughness, metallic)
 MATERIALS = {
-    "DeskWood": ((0.67, 0.51, 0.32), 0.78, 0.0),
+    "DeskWood": ((0.72, 0.64, 0.54), 0.72, 0.0),  # 밝은 자작 합판(다리·상판 측면). 윗면은 DeskTopTex 텍스처.
     "DeskMat": ((0.025, 0.026, 0.032), 0.93, 0.0),
     "GrayFoam": ((0.45, 0.46, 0.47), 0.92, 0.0),
     "BowlBlue": ((0.65, 0.83, 0.96), 0.28, 0.0),
@@ -195,6 +195,47 @@ def _visual_material(
     shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
     shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(metallic))
+    material.CreateSurfaceOutput().ConnectToSource(
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+    )
+    return mat_path
+
+
+def _textured_material(
+    stage: "Usd.Stage",
+    parent_path: str,
+    name: str,
+    texture_rel: str,
+    *,
+    roughness: float,
+) -> str:
+    """UsdPreviewSurface + UsdUVTexture 텍스처 머티리얼 생성, prim path 반환.
+
+    texture_rel: 레이어(scene.usda) 기준 상대 에셋 경로 (예: "./textures/desk_mat.png").
+    diffuseColor 를 텍스처 rgb 출력에 연결하고, st 는 PrimvarReader_float2("st") 로 읽는다.
+    """
+    mat_path = f"{parent_path}/{name}"
+    material = UsdShade.Material.Define(stage, mat_path)
+
+    st_reader = UsdShade.Shader.Define(stage, f"{mat_path}/stReader")
+    st_reader.CreateIdAttr("UsdPrimvarReader_float2")
+    st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+    st_out = st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+    tex = UsdShade.Shader.Define(stage, f"{mat_path}/DiffuseTex")
+    tex.CreateIdAttr("UsdUVTexture")
+    tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_rel)
+    tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_out)
+    tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB")
+    tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
+    tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
+    tex_rgb = tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+    shader = UsdShade.Shader.Define(stage, f"{mat_path}/Preview")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_rgb)
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
+    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
     material.CreateSurfaceOutput().ConnectToSource(
         shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
     )
@@ -591,6 +632,39 @@ def _static_cube(
             _bind_physics(cube.GetPrim(), physics_mat)
 
 
+def _textured_quad(
+    stage: "Usd.Stage",
+    path: str,
+    *,
+    translate: tuple[float, float, float],
+    scale: tuple[float, float, float],
+    mat_path: str,
+) -> None:
+    """텍스처용 평면 quad Mesh — +Z 향, primvars:st(vertex) 부여. 충돌 없음.
+
+    단위 quad(XY ±0.5, z=0)를 scale 로 키운다. st: u→+X, v→+Y 로 매핑해
+    텍스처 좌상단(꽃)이 매트 (-X,+Y) 쪽에 오도록 한다.
+    """
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    mesh.CreatePointsAttr([
+        Gf.Vec3f(-0.5, -0.5, 0.0), Gf.Vec3f(0.5, -0.5, 0.0),
+        Gf.Vec3f(0.5, 0.5, 0.0), Gf.Vec3f(-0.5, 0.5, 0.0),
+    ])
+    mesh.CreateFaceVertexCountsAttr([4])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    mesh.CreateExtentAttr([Gf.Vec3f(-0.5, -0.5, 0.0), Gf.Vec3f(0.5, 0.5, 0.0)])
+    mesh.CreateSubdivisionSchemeAttr().Set("none")
+    mesh.CreateDoubleSidedAttr(True)
+    normals = mesh.CreateNormalsAttr([Gf.Vec3f(0.0, 0.0, 1.0)] * 4)
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
+    st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex
+    )
+    st.Set([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(1, 1), Gf.Vec2f(0, 1)])
+    _set_xform(mesh, translate=translate, scale=scale)
+    _bind_visual(mesh.GetPrim(), mat_path)
+
+
 def _add_payload_ref(
     stage: "Usd.Stage",
     name: str,
@@ -639,6 +713,16 @@ def author_scene() -> "Usd.Stage":
         translate=_shift((0.0, 0.31, -0.0125)), scale=(1.60, 0.80, 0.025),
         visual_mat=mats["DeskWood"], collision=True, physics_mat=desk_friction,
     )
+    # 상판 윗면 나무 텍스처 (실사 자작 합판). Cube 는 UV 없어 윗면(scene-local z=0) 위 0.3mm 에
+    #   UV quad 를 얹는다. 매트가 덮는 부분은 매트 Cube(불투명)가 위에서 가린다.
+    desk_top_tex = _textured_material(
+        stage, looks, "DeskTopTex", "./textures/desk_top.png", roughness=0.7
+    )
+    _textured_quad(
+        stage, "/Scene/DeskTopSurface",
+        translate=_shift((0.0, 0.31, 0.0003)), scale=(1.60, 0.80, 1.0),
+        mat_path=desk_top_tex,
+    )
     # 다리 4개 (충돌 없음).
     for leg_name, pos in (
         ("DeskLegBackLeft", (-0.72, 0.64, -0.365)),
@@ -651,11 +735,21 @@ def author_scene() -> "Usd.Stage":
             translate=_shift(pos), scale=(0.025, 0.025, 0.68),
             visual_mat=mats["DeskWood"],
         )
-    # 매트: 860×400×4mm.
+    # 매트: 860×400×4mm. Cube 본체 = 충돌 + 어두운 측면.
     _static_cube(
         stage, "/Scene/DeskMat",
         translate=_shift((-0.27, 0.20, 0.002)), scale=(0.86, 0.40, 0.004),
         visual_mat=mats["DeskMat"], collision=True, physics_mat=desk_friction,
+    )
+    # 매트 윗면 텍스처 (Unity 데스크 매트 실사). Cube 는 UV 가 없어 텍스처 매핑 불가
+    #   → 윗면(scene-local z=0.004) 위 0.4mm 에 UV quad 를 얹는다. 충돌은 Cube 가 담당.
+    desk_mat_tex = _textured_material(
+        stage, looks, "DeskMatTex", "./textures/desk_mat.png", roughness=0.6
+    )
+    _textured_quad(
+        stage, "/Scene/DeskMatTop",
+        translate=_shift((-0.27, 0.20, 0.0044)), scale=(0.86, 0.40, 1.0),
+        mat_path=desk_mat_tex,
     )
 
     # 객체 payload 참조.
