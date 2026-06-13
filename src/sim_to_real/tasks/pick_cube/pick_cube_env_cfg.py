@@ -114,8 +114,9 @@ _WRIST_CAMERA_FOCAL = 23.0
 # pos/rot 은 --tune_cameras GUI 튜너로 실측한 shoulder local frame 값.
 #   rot_xyz_deg=(-90, 0, -90), rot_quat=(0, 0, 1, 0) wxyz
 _FRONT_CAMERA_POS = (-0.03, -0.005, 0.75)     # world ref (shoulder_pan=0, 기록용)
-_FRONT_CAM_LOCAL_POS = (0.050, 0.0, 0.0)         # shoulder local frame (tuner 실측 + 전방 2cm; 뒤로 가면 0.010)
-_FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (tuner 실측)
+# belly(front) 카메라 홀더(shoulder 앞면 -x)에 정합. 렌즈 tip ≈ shoulder local (-0.083).
+_FRONT_CAM_LOCAL_POS = (-0.083, 0.0, 0.0)        # shoulder local frame (front_cam_holder 렌즈 위치)
+_FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (fwd=local -x=world -Y)
 _FRONT_CAMERA_FOCAL = 23.0
 
 

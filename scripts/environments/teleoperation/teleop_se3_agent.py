@@ -178,9 +178,27 @@ parser.add_argument("--front_local_pos", type=_vec3, default=None, help="x,y,z s
 parser.add_argument("--front_local_rot", type=_quat, default=None, help="w,x,y,z shoulder_link local quaternion for front camera")
 parser.add_argument("--front_focal", type=float, default=None, help="front focal length in mm")
 
+# 원격 WebRTC livestream 관전용 공개 IP. pick_cube_state_machine.py 와 동일 패턴.
+parser.add_argument(
+    "--public_ip",
+    type=str,
+    default=None,
+    help="원격 WebRTC livestream 공개 IP. 지정 시 PUBLIC_IP env 설정 + livestream 을 mode 1(public "
+    "network)로 승격해 ICE candidate 로 이 IP 를 광고한다. 없으면(또는 --livestream 2) LAN IP 만 광고돼 "
+    "relay client 검은화면. 예: --public_ip 100.79.237.116",
+)
+
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 _resolve_camera_prim_paths(getattr(args_cli, "task", None))
+
+# WebRTC livestream 공개 IP 주입 — AppLauncher._resolve_livestream_settings 가 PUBLIC_IP env 를 읽어
+# `--/app/livestream/publicEndpointAddress` 로 넘긴다(livestream==1 'public network' 분기 전용; mode 2 는
+# 무시). 그래서 --public_ip 지정 시 mode 1 로 강제 승격한다. 근거: docs/TROUBLESHOOTING.md §원격 WebRTC livestream.
+if args_cli.public_ip:
+    os.environ["PUBLIC_IP"] = args_cli.public_ip
+    args_cli.livestream = 1  # WebRTC public network — publicEndpointAddress 주입 분기
+    print(f"[teleop] PUBLIC_IP={args_cli.public_ip} → livestream mode 1 (WebRTC public endpoint)")
 
 if args_cli.num_envs != 1:
     raise ValueError("This local GUI teleop script currently supports --num_envs=1 only.")

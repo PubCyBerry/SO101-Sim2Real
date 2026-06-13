@@ -289,40 +289,66 @@
     </collision>
   </link>
 
-  <!-- Link wrist_cam_mount (Hex-Nut Recess Wrist Camera Mount, 32x32 UVC module) -->
-  <!-- SO-ARM100/Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module 어댑터.    -->
-  <!-- 메시는 mm 단위(CAD 원본 프레임) → scale 0.001 로 m 환산. visual/collision     -->
-  <!-- origin 은 항등(링크 프레임 = 메시 프레임), 배치는 아래 fixed joint origin 으로.  -->
+  <!-- Link wrist_cam_mount (손목 카메라 홀더, 32x32 UVC). -->
+  <!-- 메시는 scripts/assets/build_cam_holders.py 가 gripper_link 프레임(미터)에      -->
+  <!-- 직접 생성 → scale 없음·joint origin 항등. 카메라 mount 면을 sim WristCamera    -->
+  <!-- pose(0,0.045,-0.04)에 맞춰 hex-nut 나사쌍 결합 + 전방-하향 grasp 시야.         -->
   <link name="wrist_cam_mount_link">
     <inertial>
-      <!-- 3D print(40% infill) 근사 질량/관성. 동역학 영향 미미(고정 링크). -->
-      <origin xyz="-0.03 -0.025 0.018" rpy="0 0 0"/>
+      <origin xyz="0 0.045 -0.03" rpy="0 0 0"/>
       <mass value="0.015"/>
       <inertia ixx="5e-6" ixy="0" ixz="0" iyy="5e-6" iyz="0" izz="5e-6"/>
     </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/wrist_cam_mount_so101_v1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="assets/wrist_cam_holder_so101.stl"/>
       </geometry>
       <material name="3d_printed"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/wrist_cam_mount_so101_v1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="assets/wrist_cam_holder_so101.stl"/>
       </geometry>
     </collision>
   </link>
 
-  <!-- Joint from gripper(wrist roll element) to wrist_cam_mount -->
-  <!-- 6D pose = STEP CAD 나사구멍 매칭으로 도출(GUI 튜닝 비의존, exact).             -->
-  <!--   홀더 M3 2구멍(R1.65, 간격 8.1mm) ↔ wrist_roll_follower hex-nut 나사쌍       -->
-  <!--   (R1.6, 간격 8.1mm). 홀더 접촉면(x=0) → follower 외측면(y=-24.22mm) 밀착.    -->
   <joint name="wrist_cam_mount_joint" type="fixed">
-    <origin xyz="-0.015 0.0240018 -0.0315503" rpy="-1.5707963 0 -1.5707963"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <parent link="gripper_link"/>
     <child link="wrist_cam_mount_link"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Link front_cam_mount (전면/belly 카메라 홀더, fork 브래킷). -->
+  <!-- shoulder_link 앞면(local -x, world -Y 작업공간측) 장착 → shoulder_pan 따라감. -->
+  <!-- 메시는 shoulder_link 프레임(미터) 직접 생성, 카메라 전방(-Y) 작업공간 부감.     -->
+  <link name="front_cam_mount_link">
+    <inertial>
+      <origin xyz="-0.065 0 0" rpy="0 0 0"/>
+      <mass value="0.020"/>
+      <inertia ixx="6e-6" ixy="0" ixz="0" iyy="6e-6" iyz="0" izz="6e-6"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="assets/front_cam_holder_so101.stl"/>
+      </geometry>
+      <material name="3d_printed"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="assets/front_cam_holder_so101.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="front_cam_mount_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="shoulder_link"/>
+    <child link="front_cam_mount_link"/>
     <axis xyz="0 0 0"/>
   </joint>
 

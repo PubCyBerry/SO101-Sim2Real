@@ -262,12 +262,12 @@ parser.add_argument("--profile_fps", action="store_true",
 parser.add_argument("--gui_decimation", type=int, default=0,
                     help="GUI/관전용 decimation 오버라이드 (0=cfg 기본 4 유지). physics substep/tick "
                          "를 줄여 관전 FPS↑ 효과 측정. **control 주기가 바뀌어 SM 거동 변함** — 관전 전용")
-# 원격(tailscale/ssh)에서 WebRTC livestream 관전할 때의 공개 IP. 지정 시 단독으로 webrtc 활성.
+# 원격에서 WebRTC livestream 관전할 때의 공개 IP. 지정 시 단독으로 webrtc 활성.
 parser.add_argument("--public_ip", type=str, default=None,
-                    help="원격 WebRTC livestream 공개 IP (tailscale 등). 지정 시 PUBLIC_IP env 설정 + "
+                    help="원격 WebRTC livestream 공개 IP. 지정 시 PUBLIC_IP env 설정 + "
                          "livestream 을 mode 1(public network)로 승격해 ICE candidate 로 이 IP 를 광고한다. "
                          "이게 없으면(또는 --livestream 2) LAN IP 만 광고돼 relay client 가 검은화면. "
-                         "'auto' = `tailscale ip -4` 자동탐지. 예: --public_ip 100.79.237.116")
+                         "예: --public_ip 100.79.237.116")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -277,17 +277,9 @@ args = parser.parse_args()
 # 근거·트러블슈팅: docs/TROUBLESHOOTING.md §원격 WebRTC livestream.
 if args.public_ip:
     import os as _os
-    import subprocess as _sp
-    _ip = args.public_ip
-    if _ip == "auto":
-        _out = _sp.run(["tailscale", "ip", "-4"], capture_output=True, text=True).stdout.strip()
-        _ip = _out.splitlines()[0] if _out else ""
-        if not _ip:
-            raise SystemExit("--public_ip auto: tailscale IP 탐지 실패 (tailscale up 확인)")
-        print(f"[SM] --public_ip auto → tailscale IP {_ip}")
-    _os.environ["PUBLIC_IP"] = _ip
+    _os.environ["PUBLIC_IP"] = args.public_ip
     args.livestream = 1  # WebRTC public network — publicEndpointAddress 주입 분기
-    print(f"[SM] PUBLIC_IP={_ip} → livestream mode 1 (WebRTC public endpoint)")
+    print(f"[SM] PUBLIC_IP={args.public_ip} → livestream mode 1 (WebRTC public endpoint)")
 
 # 녹화는 viewport rgb 렌더가 필요 → 카메라 활성화.
 if args.video:
@@ -680,8 +672,9 @@ class SO101PickPlace:
     """
 
     # 시작/대기 자세: shoulder_lift 최대 up, elbow_flex 최대 fold, wrist_flex -20°,
-    # wrist_roll +90°(기본 자세) — 작업영역 위로 높이 접은 ready pose.
-    HOME_Q = [0.0, -1.72, 1.66, math.radians(-20.0), math.radians(90.0)]
+    # wrist_roll -90°(= +90°에서 180° 회전) — 손목 카메라 마운트가 위로 가는 ready pose.
+    # (+90→270°는 wrist_roll upper limit 162.8° 초과 → 등가인 -90° 사용. limit 내.)
+    HOME_Q = [0.0, -1.72, 1.66, math.radians(-20.0), math.radians(-90.0)]
     HOME_GRIP = 0.0  # 대기 시 그리퍼 0°(닫힘)
     BIAS_KI = 0.06
     BIAS_MAX = 0.35
@@ -1152,9 +1145,9 @@ class SO101PickPlace:
     def _init_pose(self, e: int) -> None:
         """현재 명령 pose 를 실측 TCP 로 초기화(보간 시작점)."""
         t = self.tcp_meas(e)
-        # roll init = +90°(home wrist_roll 과 일치) → 첫 접근 wrist 스윙 제거
+        # roll init = -90°(home wrist_roll -90°과 일치) → 첫 접근 wrist 스윙 제거
         self.cur_pose[e] = Pose(float(t[0]), float(t[1]), float(t[2]),
-                                -math.pi / 2, 0.0, math.pi / 2)
+                                -math.pi / 2, 0.0, -math.pi / 2)
 
     def _log_grasp(self, e: int, cube: str) -> None:
         """close 직후 기하 진단: 큐브가 TCP(jaw gap) 근처에 있는지·slide 가 큐브를
