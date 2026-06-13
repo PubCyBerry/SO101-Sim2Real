@@ -109,19 +109,20 @@ def build_wrist():
 def build_belly():
     holder = Mesh(); cam = Mesh()
     xf = -0.050           # shoulder front face (local -x)
+    ZC = 0.0226           # 4 나사구멍 중심(0.0126) + 1cm 아래(local +z=world 아래)
     plate_th = CAM_TH*1.5 # backing 판 두께 = 카메라 1.5배 (6mm)
+    post_len = 0.019      # 좁은 기둥 길이 — 렌즈 끝이 숄더 표면(≈-0.0476)에서 ~4cm 앞에 오게.
     # right/up/fwd (카메라가 -x 향함)
     right=np.array([0,-1,0.0]); up=np.array([0,0,1.0]); fwd=np.array([-1,0,0.0])
     Rcam=np.column_stack([right,up,fwd])
-    # 1) 좁은 네모 기둥: shoulder 앞면에서 -x 로 1.5cm 융기
-    post_len = 0.015
-    holder.add(_box(center=(xf-post_len/2, 0.0, 0.0), axes=I3, half=(post_len/2+0.001, 0.006, 0.006)))
-    # 2) 넓고 얇은 backing 판: 카메라 PCB 크기(32x32), 카메라 뒤편
+    # 1) 좁은 네모 기둥: shoulder 앞면에서 -x 로 융기
+    holder.add(_box(center=(xf-post_len/2, 0.0, ZC), axes=I3, half=(post_len/2+0.001, 0.006, 0.006)))
+    # 2) backing 판: 카메라보다 살짝 크게(+1.5mm) → 동일 크기 coplanar z-fighting 방지.
     plate_x = xf - post_len - plate_th/2
-    holder.add(_box(center=(plate_x, 0.0, 0.0), axes=I3, half=(plate_th/2, CAM_HALF, CAM_HALF)))
-    # 3) 카메라 목업 (판 앞면에 노출 장착)
+    holder.add(_box(center=(plate_x, 0.0, ZC), axes=I3, half=(plate_th/2, CAM_HALF+0.0015, CAM_HALF+0.0015)))
+    # 3) 카메라 목업: PCB 뒷면을 판 속으로 묻어 coplanar 면 제거(앞면만 노출).
     plate_front = plate_x - plate_th/2
-    pcam = np.array([plate_front - CAM_TH/2, 0.0, 0.0])
+    pcam = np.array([plate_front - 0.003, 0.0, ZC])
     add_camera(cam, pcam, Rcam)
     return holder, cam, pcam, Rcam
 
