@@ -49,6 +49,7 @@ import json
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -248,6 +249,19 @@ parser.add_argument("--video_name", default="so101_pick_place",
                     help="docs/ 에 저장할 mp4 파일명 prefix")
 parser.add_argument("--taxonomy", default=None,
                     help="per-env outcome taxonomy JSON 저장 경로 (미지정 시 outputs/sm_scale_<N>_seed<S>.json)")
+# GUI/WebRTC livestream 관전 FPS 끌어올리기 (관전 모드 한정 — headless/--video 무영향).
+# 물리·IK·grasp 정확도는 불변, 시각 품질만 trade.
+parser.add_argument("--render_perf", action="store_true",
+                    help="RTX performance 프리셋 + DLSS Performance + reflections/translucency/GI/AO off "
+                         "로 관전 FPS 향상. 물리·IK 불변(시각 품질만↓)")
+parser.add_argument("--stream_res", type=str, default=None,
+                    help="GUI/livestream 렌더 해상도 'W,H' (예 1280,720 / 960,540). 미지정 시 기본"
+                         "(1920x1080) 유지. 픽셀 수가 렌더·인코딩 비용을 좌우하는 최대 레버")
+parser.add_argument("--profile_fps", action="store_true",
+                    help="관전 루프 per-tick env.step 시간·FPS 를 주기적으로 로그 (측정용)")
+parser.add_argument("--gui_decimation", type=int, default=0,
+                    help="GUI/관전용 decimation 오버라이드 (0=cfg 기본 4 유지). physics substep/tick "
+                         "를 줄여 관전 FPS↑ 효과 측정. **control 주기가 바뀌어 SM 거동 변함** — 관전 전용")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -255,12 +269,26 @@ args = parser.parse_args()
 if args.video:
     args.enable_cameras = True
 
+# GUI/livestream 렌더 해상도 하향 — boot-time carb 라 AppLauncher 부팅 전 kit_args 로 주입.
+# /app/renderer/resolution/* = RTX 렌더(=livestream 캡처) 해상도. headless/--video 엔 미적용.
+if args.stream_res and not args.headless and not args.video:
+    try:
+        _sw, _sh = (int(x) for x in args.stream_res.split(","))
+    except ValueError:
+        raise SystemExit(f"--stream_res 형식 오류: {args.stream_res!r} (예 1280,720)")
+    _res_args = (
+        f"--/app/renderer/resolution/width={_sw} "
+        f"--/app/renderer/resolution/height={_sh} "
+        f"--/app/window/width={_sw} --/app/window/height={_sh}"
+    )
+    args.kit_args = (args.kit_args + " " + _res_args).strip()
+
 # AppLauncher 부팅 (isaac 모듈 import 전에).
 # vars(args) 전체를 넘기면 view_eye 같은 tuple 커스텀 인자가 carb 설정으로 흘러가
 # Windows 에서 _prepare_ui access violation 발생 → 실제 사용 키만 화이트리스트 필터.
 _LAUNCHER_KEYS = {
     "headless", "enable_cameras", "experience", "device", "cpu",
-    "disable_fabric", "offscreen_render", "kit_args",
+    "disable_fabric", "offscreen_render", "kit_args", "livestream",
 }
 _launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
 app_launcher = AppLauncher(_launcher_args)
@@ -1327,24 +1355,55 @@ class SO101PickPlace:
 
     def _tick(self) -> None:
         """1 step: 스냅샷 → per-env executor → 배치 step."""
+        if not args.profile_fps:
+            self._snapshot()
+            qs, grips = [], []
+            for e in range(self.num_envs):
+                q, g = self._step_env(e)
+                qs.append(q)
+                grips.append(g)
+            self._act_all(qs, grips)
+            return
+        # --profile_fps: _tick 3단계(snapshot/py-loop/env.step) 벽시계 누적.
+        p = getattr(self, "_prof", None)
+        if p is None:
+            p = self._prof = {"snap": 0.0, "loop": 0.0, "step": 0.0, "n": 0}
+        t0 = time.perf_counter()
         self._snapshot()
+        t1 = time.perf_counter()
         qs, grips = [], []
         for e in range(self.num_envs):
             q, g = self._step_env(e)
             qs.append(q)
             grips.append(g)
+        t2 = time.perf_counter()
         self._act_all(qs, grips)
+        t3 = time.perf_counter()
+        p["snap"] += t1 - t0
+        p["loop"] += t2 - t1
+        p["step"] += t3 - t2
+        p["n"] += 1
 
     # ---- 메인 루프 (headless 배치) --------------------------------------
 
     def run(self) -> int:
         """전 env 완료 또는 step cap 까지 실행. 반환 = 사용한 step 수."""
         steps = 0
+        _pf_t0 = time.perf_counter()
         while not all(o == Outcome.DONE for o in self.outcome):
             if not simulation_app.is_running() or steps >= args.max_total_steps:
                 break
             self._tick()
             steps += 1
+            if args.profile_fps and self._prof["n"] >= 60:
+                _p, _n = self._prof, self._prof["n"]
+                _dt = time.perf_counter() - _pf_t0
+                log(f"[FPS] {_n / max(_dt, 1e-9):.1f} fps (tick avg {1000*_dt/_n:.1f} ms) "
+                    f"breakdown(ms): snapshot={1000*_p['snap']/_n:.1f} "
+                    f"py-loop={1000*_p['loop']/_n:.1f} env.step={1000*_p['step']/_n:.1f} "
+                    f"num_envs={self.num_envs}")
+                self._prof = {"snap": 0.0, "loop": 0.0, "step": 0.0, "n": 0}
+                _pf_t0 = time.perf_counter()
         if steps >= args.max_total_steps:
             log(f"[SM] step cap {args.max_total_steps} 도달 — 미완료 env 존재")
         self._snapshot()
@@ -1577,6 +1636,11 @@ def main() -> None:
     env_cfg.terminations.cube_lost = None
     env_cfg.viewer.eye    = args.view_eye
     env_cfg.viewer.lookat = args.view_lookat
+    # GUI/관전 decimation 오버라이드 (physics substep/tick ↓ → 관전 FPS↑ 측정용).
+    if args.gui_decimation > 0:
+        env_cfg.decimation = args.gui_decimation
+        env_cfg.sim.render_interval = args.gui_decimation
+        log(f"[SM] --gui_decimation={args.gui_decimation} (cfg 기본 4 오버라이드)")
     # 그리퍼 닫힘/열림 slew 가속 (인스턴스 override — 공유 RL cfg 불변)
     mv = dict(env_cfg.actions.arm.max_velocity)
     mv["gripper"] = args.gripper_speed
@@ -1589,6 +1653,20 @@ def main() -> None:
         px.gpu_found_lost_aggregate_pairs_capacity = max(
             px.gpu_found_lost_aggregate_pairs_capacity, 1024 * 1024 * 16)
         px.gpu_max_rigid_patch_count = max(px.gpu_max_rigid_patch_count, 32 * 2 ** 16)
+    # GUI/livestream 관전 FPS — RTX 품질 프리셋 하향 (물리·IK 불변, 인스턴스 override).
+    # headless/--video 엔 미적용(렌더 off라 무의미·품질 보존).
+    if args.render_perf and not args.headless and not args.video:
+        from isaaclab.sim import RenderCfg  # noqa: E402  (app 부팅 후 isaac 모듈 import)
+        env_cfg.sim.render = RenderCfg(
+            rendering_mode="performance",
+            antialiasing_mode="Off",         # DLSS/DLAA 의 AI 패스 고정비 제거 (해상도 무관 비용)
+            enable_dl_denoiser=False,        # DL denoiser AI 패스 고정비 제거
+            enable_reflections=False,
+            enable_translucency=False,
+            enable_global_illumination=False,
+            enable_ambient_occlusion=False,
+        )
+        log("[SM] --render_perf: RTX performance + AA Off + denoiser Off 적용")
     log("[SM] env_cfg built — calling gym.make.")
 
     env, base = _make_env(env_cfg)
@@ -1655,6 +1733,8 @@ def main() -> None:
         log(f"[SM] 키보드 구독 실패(무시): {exc}")
 
     spawn = _capture_spawn(sm)
+    _fps_t0 = time.perf_counter()
+    _fps_n = 0
     while simulation_app.is_running():
         if state["reset"] is not None:
             mode = state["reset"]
@@ -1676,6 +1756,20 @@ def main() -> None:
                         [sm.HOME_GRIP] * sm.num_envs)
         else:
             sm._tick()
+        if args.profile_fps:
+            _fps_n += 1
+            if _fps_n >= 60:
+                _dt = time.perf_counter() - _fps_t0
+                log(f"[FPS] {_fps_n / max(_dt, 1e-9):.1f} fps "
+                    f"(tick avg {1000.0 * _dt / _fps_n:.1f} ms, num_envs={sm.num_envs})")
+                _p = getattr(sm, "_prof", None)
+                if _p and _p["n"]:
+                    _n = _p["n"]
+                    log(f"[FPS] breakdown(ms/tick): snapshot={1000*_p['snap']/_n:.1f} "
+                        f"py-loop={1000*_p['loop']/_n:.1f} env.step={1000*_p['step']/_n:.1f}")
+                    sm._prof = {"snap": 0.0, "loop": 0.0, "step": 0.0, "n": 0}
+                _fps_t0 = time.perf_counter()
+                _fps_n = 0
 
     if kbd is not None:
         kbd.close()
