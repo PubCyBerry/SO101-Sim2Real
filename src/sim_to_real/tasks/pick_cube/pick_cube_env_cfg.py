@@ -40,44 +40,44 @@ from sim_to_real.tasks.pick_cube import mdp as task_mdp
 
 
 # World-frame (x, y) of the bowl at scene authoring time.
-# BOWL_LOCAL=(-0.58, 0.26) + SCENE_OFFSET=(2.2, -0.52) = (1.62, -0.26)
-BOWL_CENTER_XY: tuple[float, float] = (1.62, -0.26)
+# BOWL_LOCAL=(-0.58, 0.26) + SCENE_OFFSET=(0.36, 0.045) = (-0.22, 0.305)
+BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.305)
 BOWL_SUCCESS_RADIUS: float = 0.06
 BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
 
-# Robot base position.
-# x: desk_left_edge(1.40) + 440mm = 1.84
-# y: -0.565 (책상 앞 모서리 기준 10mm 뒤로 장착)
-# z: desk_top(0.705) - base_min_z(0.0301) = 0.6749
-_ROBOT_POS = (1.84, -0.565, 0.6749)
+# Robot base position — recenter 로 world 원점(XY)에 배치.
+# x: 0.0 (desk_left_edge=-0.44 + 440mm 장착)
+# y: 0.0 (책상 앞 모서리 world y=-0.045 기준 약간 뒤)
+# z: desk_top(0.705) - base_min_z(0.0301) = 0.6749 (z 불변)
+_ROBOT_POS = (0.0, 0.0, 0.6749)
 # Identity rotation; articulation USD already faces the desk objects.
 _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 
-# 큐브 world 좌표 = SCENE_OFFSET(2.2, -0.52, 0.705) + scene-local 위치.
+# 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치.
 # 매트 윗면 world z=0.709. z중심 = 0.709 + 반높이 + slack(0.001).
 #   작은(Cube1/2, 30mm): 0.709+0.015+0.001=0.725, 큰(Cube3/4, 40mm): 0.709+0.020+0.001=0.730.
 _CUBE_INIT_STATES = {
-    "Cube1": ((1.70, -0.44, 0.725), _yaw_quat(20.0)),
-    "Cube2": ((1.98, -0.46, 0.725), _yaw_quat(-35.0)),
-    "Cube3": ((1.74, -0.35, 0.730), _yaw_quat(50.0)),
-    "Cube4": ((1.93, -0.38, 0.730), _yaw_quat(-20.0)),
+    "Cube1": ((-0.14, 0.125, 0.725), _yaw_quat(20.0)),
+    "Cube2": ((0.14, 0.105, 0.725), _yaw_quat(-35.0)),
+    "Cube3": ((-0.10, 0.215, 0.730), _yaw_quat(50.0)),
+    "Cube4": ((0.09, 0.185, 0.730), _yaw_quat(-20.0)),
 }
-# BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(2.2, -0.52, 0.705) = (1.62, -0.26, 0.715)
-_BOWL_INIT_STATE = ((1.62, -0.26, 0.715), _yaw_quat(0.0))
+# BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(0.36, 0.045, 0.705) = (-0.22, 0.305, 0.715)
+_BOWL_INIT_STATE = ((-0.22, 0.305, 0.715), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
 # 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준
 # ---------------------------------------------------------------------------
 
 # 로봇 SO-101 도달(reach) 범위 안쪽으로 제한. reach 매핑 sweep(1큐브 full-scatter 12 ep,
-# robot base=(1.84,-0.565))으로 가장자리 실패 편향을 측정해 보수화:
-#   · x 극단(≤1.61, ≥2.06)에서 grasp 실패 편향 → x_range 를 [1.66, 2.04] 로 (±0.20 안쪽).
-#   · y 매트 뒤 가장자리(≤-0.465, base 에 너무 가까워 arm 이 접혀 top-down 자세 불리) 실패 →
-#     y_lo 를 -0.46 으로. y 상한 -0.345 는 그릇(y=-0.26)과 이격(min_bowl_sep 추가 보장).
+# robot base=(0,0))으로 가장자리 실패 편향을 측정해 보수화 (recenter delta=(-1.84,+0.565)):
+#   · x 극단(≤-0.23, ≥0.22)에서 grasp 실패 편향 → x_range 를 [-0.18, 0.20] 로 (±0.20 안쪽).
+#   · y 매트 뒤 가장자리(≤0.10, base 에 너무 가까워 arm 이 접혀 top-down 자세 불리) 실패 →
+#     y_lo 를 0.105 로. y 상한 0.22 는 그릇(y=0.305)과 이격(min_bowl_sep 추가 보장).
 # (가장자리 외 실패는 reach 가 아니라 joint_fk random-FK 의 marginal grasp 분산임 — CONTEXT 참고.)
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (1.66, 2.04)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (-0.46, -0.345)
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.18, 0.20)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (0.105, 0.22)
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
@@ -97,11 +97,11 @@ _CUBE_SCATTER_CENTER: tuple[float, float] = (
 # 값은 GUI 카메라 튜너(teleop_se3_agent.py)로 보정한 결과. rot 은 모두
 # wxyz, Isaac Lab world-convention(forward +X, up +Z).
 # top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique.
-_TOP_CAMERA_POS = (1.87, -0.58, 1.72)
+_TOP_CAMERA_POS = (0.03, -0.015, 1.72)
 # _TOP_CAMERA_ROT 가 None 이 아니면 이 quat 을 직접 쓰고, None 이면 _TOP_CAMERA_TARGET
 # 으로 look_at 을 계산한다(하위호환).
 _TOP_CAMERA_ROT = (0.5716, -0.4238, 0.4466, 0.5424)
-_TOP_CAMERA_TARGET = (2.14, -0.15, 0.76)
+_TOP_CAMERA_TARGET = (0.30, 0.415, 0.76)
 _TOP_CAMERA_FOCAL = 23.0
 
 # wrist: gripper 위/옆에 강결합된 카메라.
@@ -113,7 +113,7 @@ _WRIST_CAMERA_FOCAL = 23.0
 # (USD 컨벤션: URDF `shoulder_link` → USD `shoulder`, `_link` 접미사 제거)
 # pos/rot 은 --tune_cameras GUI 튜너로 실측한 shoulder local frame 값.
 #   rot_xyz_deg=(-90, 0, -90), rot_quat=(0, 0, 1, 0) wxyz
-_FRONT_CAMERA_POS = (1.81, -0.57, 0.75)       # world ref (shoulder_pan=0, 기록용)
+_FRONT_CAMERA_POS = (-0.03, -0.005, 0.75)     # world ref (shoulder_pan=0, 기록용)
 _FRONT_CAM_LOCAL_POS = (0.050, 0.0, 0.0)         # shoulder local frame (tuner 실측 + 전방 2cm; 뒤로 가면 0.010)
 _FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (tuner 실측)
 _FRONT_CAMERA_FOCAL = 23.0
@@ -975,15 +975,15 @@ class PickCubeEventCfg:
 
     # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
     #
-    # 제약 A — 매트 왼쪽 경계(world x=1.50):
-    #   bowl_center_x - r_top(0.075) >= 1.50 + 0.01(여유)
-    #   1.62 + 0.44*sin(a) >= 1.585  →  sin(a) >= -0.0795  →  a >= -4.56°
+    # 제약 A — 매트 왼쪽 경계(world x=-0.34):
+    #   bowl_center_x - r_top(0.075) >= -0.34 + 0.01(여유)
+    #   -0.22 + 0.44*sin(a) >= -0.255  →  sin(a) >= -0.0795  →  a >= -4.56°
     #   → 왼쪽 한계 -4°
     #
     # 제약 B — 그릇-Cube3 겹침:
     #   유효 충돌 반경 = r_top(0.075) + Cube3 half-diag(0.0354)
     #                   + cube_contactOffset(0.002) + bowl_contactOffset(0.004) = 0.1164m
-    #   Cube3 최악 위치 (1.79, -0.33) 기준 임계 각도 풀면 9.48°.
+    #   Cube3 최악 위치 (-0.05, 0.235) 기준 임계 각도 풀면 9.48°.
     #   → 안전 여유 포함 오른쪽 한계 +8°
     randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
 
@@ -1057,9 +1057,9 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_collision_stack_size = 2**29
         # 비디오/뷰포트 카메라(RecordVideo 가 이 viewer 를 씀) — 작업공간 정면·약간
         # 낮은 각도로 두어 머리 위 KeyLight 평면에 가리지 않게 한다. world 좌표(env0).
-        # robot base (1.84,-0.565,0.6749), 큐브/그릇 작업공간 x~1.6-2.1, y~-0.5~-0.2.
-        self.viewer.eye = (1.90, 0.95, 0.98)
-        self.viewer.lookat = (1.85, -0.32, 0.76)
+        # robot base (0,0,0.6749), 큐브/그릇 작업공간 x~-0.24~0.26, y~0.07~0.37.
+        self.viewer.eye = (0.06, 1.515, 0.98)
+        self.viewer.lookat = (0.01, 0.245, 0.76)
         self.viewer.resolution = (1280, 720)
 
 

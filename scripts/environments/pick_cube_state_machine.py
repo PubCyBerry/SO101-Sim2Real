@@ -100,7 +100,7 @@ parser.add_argument("--scatter_far", type=float, default=0.0,
                          "calibrated 한계를 넘겨 도달불가 spawn(build_plan None churn) 유발")
 parser.add_argument("--scatter_z", type=float, default=0.0,
                     help="큐브 spawn z 분산 상한 (m). 0~이값 띄워 낙하 → 쌓이는 경우 발생. "
-                         "**0 = flat(땅바닥)**. flat 분포 100% 달성 후 z-stacking 단계로 켠다")
+                         "**0 = flat(땅바닥)**. flat 분포 100%% 달성 후 z-stacking 단계로 켠다")
 parser.add_argument("--cube_sep", type=float, default=0.04,
                     help="큐브 간 최소 중심거리 (m). 작을수록 가까이/쌓임 가능 (0=DR 기본 유지)")
 parser.add_argument("--container_angle_scale", type=float, default=1.0,
@@ -170,14 +170,14 @@ parser.add_argument("--slide_stop", type=float, default=0.005,
 parser.add_argument("--slide_speed", type=float, default=0.30, help="SLIDE 수평 진입 속도 (m/s)")
 parser.add_argument("--jaw_grasp", action="store_true",
                     help="(실험·기본 OFF) jaw-aware top-down 직하강 grasp(slide 제거). **256-env 검증서 "
-                         "drooping 82mm jaw 가 center 하강 시 큐브 침 → descend-clip 7×·25.9% 로 실패**. "
+                         "drooping 82mm jaw 가 center 하강 시 큐브 침 → descend-clip 7×·25.9%% 로 실패**. "
                          "기본은 side-approach+slide(run7). jaw_offset 튜닝해도 top-down 은 구조적 한계")
 parser.add_argument("--jaw_offset", type=float, default=0.0,
                     help="(--jaw_grasp 전용) 직하강 grasp 의 ⊥ 보정 (m). 비대칭 moving jaw 상쇄 시도용")
 parser.add_argument("--mj_outer", type=float, default=0.6,
                     help="클러스터 grasp-face 선정 가중. >0 이면 **moving jaw 가 클러스터 바깥**(fixed "
                          "finger 가 안쪽)을 향하는 roll 선호 → 움직이는 jaw 가 이웃 큐브 안 쓸고 빈 공간으로 "
-                         "닫힘(사용자). clearance 1차(틈 없으면 빈 face)·mj_outer 2차. 0.6 검증(clip −37%·clean +8.6pt)")
+                         "닫힘(사용자). clearance 1차(틈 없으면 빈 face)·mj_outer 2차. 0.6 검증(clip −37%%·clean +8.6pt)")
 parser.add_argument("--blend_radius", type=float, default=0.03,
                     help="이동 WP(flythrough) 코너 곡선 blend 반경 (m). >0 이면 목표 blend_radius 안에서 "
                          "다음 WP 로 조향 시작 → 둥근 호(부드러운 곡선 동선). 0=직각. 0.03 검증(success 불변)")
@@ -238,9 +238,9 @@ parser.add_argument("--accel", type=float, default=6.0,
 parser.add_argument("--min_speed", type=float, default=0.04,
                     help="속도 프로파일 하한 (m/s). 감속 말단 creep-stall 방지 floor")
 # GUI 초기 카메라(사이드뷰) — world 좌표. headless 에선 무시됨.
-parser.add_argument("--view_eye", type=_vec3, default=(3.05, -0.78, 1.02),
+parser.add_argument("--view_eye", type=_vec3, default=(1.21, -0.215, 1.02),
                     help="GUI 카메라 위치 'x,y,z'")
-parser.add_argument("--view_lookat", type=_vec3, default=(1.74, -0.38, 0.74),
+parser.add_argument("--view_lookat", type=_vec3, default=(-0.10, 0.185, 0.74),
                     help="GUI 카메라 주시점 'x,y,z'")
 parser.add_argument("--video", action="store_true",
                     help="사이드뷰를 mp4 로 녹화해 docs/ 에 저장")
@@ -262,8 +262,32 @@ parser.add_argument("--profile_fps", action="store_true",
 parser.add_argument("--gui_decimation", type=int, default=0,
                     help="GUI/관전용 decimation 오버라이드 (0=cfg 기본 4 유지). physics substep/tick "
                          "를 줄여 관전 FPS↑ 효과 측정. **control 주기가 바뀌어 SM 거동 변함** — 관전 전용")
+# 원격(tailscale/ssh)에서 WebRTC livestream 관전할 때의 공개 IP. 지정 시 단독으로 webrtc 활성.
+parser.add_argument("--public_ip", type=str, default=None,
+                    help="원격 WebRTC livestream 공개 IP (tailscale 등). 지정 시 PUBLIC_IP env 설정 + "
+                         "livestream 을 mode 1(public network)로 승격해 ICE candidate 로 이 IP 를 광고한다. "
+                         "이게 없으면(또는 --livestream 2) LAN IP 만 광고돼 relay client 가 검은화면. "
+                         "'auto' = `tailscale ip -4` 자동탐지. 예: --public_ip 100.79.237.116")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+
+# WebRTC livestream 공개 IP 주입 — AppLauncher._resolve_livestream_settings 가 PUBLIC_IP env 를
+# 읽어 `--/app/livestream/publicEndpointAddress` 로 넘긴다(livestream==1 'public network' 분기 전용;
+# mode 2 는 이 값을 무시). 그래서 --public_ip 지정 시 mode 1 로 강제 승격한다.
+# 근거·트러블슈팅: docs/TROUBLESHOOTING.md §원격 WebRTC livestream.
+if args.public_ip:
+    import os as _os
+    import subprocess as _sp
+    _ip = args.public_ip
+    if _ip == "auto":
+        _out = _sp.run(["tailscale", "ip", "-4"], capture_output=True, text=True).stdout.strip()
+        _ip = _out.splitlines()[0] if _out else ""
+        if not _ip:
+            raise SystemExit("--public_ip auto: tailscale IP 탐지 실패 (tailscale up 확인)")
+        print(f"[SM] --public_ip auto → tailscale IP {_ip}")
+    _os.environ["PUBLIC_IP"] = _ip
+    args.livestream = 1  # WebRTC public network — publicEndpointAddress 주입 분기
+    print(f"[SM] PUBLIC_IP={_ip} → livestream mode 1 (WebRTC public endpoint)")
 
 # 녹화는 viewport rgb 렌더가 필요 → 카메라 활성화.
 if args.video:

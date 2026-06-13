@@ -55,6 +55,7 @@
 - [(PATH E) `pick_place.launch.py` ROS 스택 bringup 4대 함정](#path-e-pick_place-launchpy-ros-스택-bringup-4대-함정)
 - [(PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace](#path-e-cumotion-invalid_initial_cspace_position--start_state-관절-수--cspace-gripper-포함)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
+- [원격 WebRTC livestream 접속 실패 / 검은화면 (PUBLIC_IP 미설정 — LAN IP 만 ICE 광고)](#원격-webrtc-livestream-접속-실패--검은화면-public_ip-미설정--lan-ip-만-ice-광고)
 
 ---
 
@@ -3674,3 +3675,70 @@ roll_offset=roll_now)` 로 매 step 연속 자세 명령.
 
 1env DR 영상 3~5s 구간 프레임 — 솟구침/내리꽂힘 소멸, 부드러운 호.
 4env DR `[SM] TOTAL: 16/16 (100%)`.
+
+## 원격 WebRTC livestream 접속 실패 / 검은화면 (PUBLIC_IP 미설정 — LAN IP 만 ICE 광고)
+
+### 현상
+
+서버(헤드리스)에서 Isaac Sim 을 livestream 으로 띄우고 원격(tailscale+ssh 등) WebRTC
+Streaming Client 로 접속하면, 서버는 `Ready for connection` 인데도 **client 가 연결
+안 되거나 검은 화면**. signaling(TCP 49100/8011)은 닿아도 영상(media)이 안 옴.
+
+`--livestream 2` 로 띄웠을 때 발생. 같은 서버에서 예전에 `LIVESTREAM=1 PUBLIC_IP=...`
+로는 정상 접속됐었다.
+
+### 오류 메시지
+
+```
+(client 측 무에러 — 검은 화면 또는 "connecting" 정지. 서버 로그 정상:
+ curl http://127.0.0.1:8011/v1/streaming/ready → {"statusMessage":"Status: Ready for connection"})
+```
+
+### 원인
+
+WebRTC media 는 UDP. client 는 SDP/ICE candidate 에 실린 IP 로 media 를 연결하는데,
+서버가 **tailscale IP 가 아닌 자동탐지 LAN IP** 를 candidate 로 광고하면 relay(DERP)
+경유 client 는 그 IP 에 도달 못 해 media 가 안 흐른다.
+
+광고 IP 를 정하는 건 carb 설정 `/app/livestream/publicEndpointAddress`. 이건
+`isaaclab/app/app_launcher.py::_resolve_livestream_settings` 가 채운다:
+
+- **`livestream == 1`** ("WebRTC public network") → `--/app/livestream/publicEndpointAddress=$PUBLIC_IP` 주입
+  (`PUBLIC_IP` env, 기본 `127.0.0.1`). 소비처 = `omni.kit.streamsdk.plugins`.
+- **`livestream == 2`** ("WebRTC private network") → publicEndpointAddress **안 넣음**.
+  `PUBLIC_IP` 을 읽어도 **버린다** → LAN IP 광고 → 원격 client 실패.
+
+즉 `--livestream 2` 는 같은 LAN 전용. 원격은 mode 1 + `PUBLIC_IP` 필수.
+
+### 해결 방법
+
+mode 1 로 띄우고 공개 IP 를 명시한다. `pick_cube_state_machine.py` 에 `--public_ip`
+인자를 추가해 두었다(이 인자가 `PUBLIC_IP` env 설정 + livestream mode 1 승격을 자동 수행):
+
+```bash
+# 권장 — --public_ip 만으로 webrtc(mode 1) 활성 + 공개 IP 광고
+OMNI_KIT_ACCEPT_EULA=YES nohup uv run --group isaac python \
+  scripts/environments/pick_cube_state_machine.py --num_envs 1 \
+  --public_ip 100.79.237.116 > /tmp/sm_livestream.log 2>&1 &
+# (--public_ip auto = `tailscale ip -4` 자동탐지)
+
+# 동등한 raw env 방식 (인자 없는 다른 스크립트용)
+OMNI_KIT_ACCEPT_EULA=YES LIVESTREAM=1 PUBLIC_IP=100.79.237.116 nohup uv run --group isaac \
+  python scripts/environments/pick_cube_state_machine.py --num_envs 1 > /tmp/sm_livestream.log 2>&1 &
+```
+
+client(Isaac Sim WebRTC Streaming Client): Server `100.79.237.116`, port `49100`
+(`app.livestream.port`). 8011 = NVCF REST(접속용 아님). media UDP = 47998~48020.
+**client 버전은 Isaac Sim 버전(5.1)과 일치**해야 한다.
+
+### 확인 방법
+
+```bash
+# 서버 ready
+curl -sS http://127.0.0.1:8011/v1/streaming/ready   # → "Status: Ready for connection"
+# 포트
+ss -tln | grep -E ':49100|:8011'                     # 둘 다 0.0.0.0 LISTEN
+# 부팅 로그에 PUBLIC_IP 승격 출력
+grep PUBLIC_IP /tmp/sm_livestream.log                # [SM] PUBLIC_IP=... → livestream mode 1
+```
+원격 client 에서 영상이 뜨면 성공. FPS ~11 상한은 구조적(렌더 sync+물리 직렬).

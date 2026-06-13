@@ -23,10 +23,10 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 SCENE_USD = os.path.join(_REPO, "assets", "scenes", "cube_desk", "scene.usd")
 OUT_PNG = os.path.join(_REPO, "docs", "ovrtx_poc.png")
 
-# cube_desk world bbox center(2.2,-0.21,1.26) size(5,4,2.5) — usd-core 측정.
+# cube_desk world bbox center(0.36,0.355,1.26) size(5,4,2.5) — recenter 후(robot base→원점).
 # 카메라를 bbox 밖(앞·위)에 두고 책상면(z~0.75) 조준.
-EYE = np.array([2.2, -4.8, 2.2])
-LOOKAT = np.array([2.0, -0.3, 0.78])
+EYE = np.array([0.36, -4.235, 2.2])
+LOOKAT = np.array([0.16, 0.265, 0.78])
 UP = np.array([0.0, 0.0, 1.0])
 RES = (1280, 720)
 

@@ -97,9 +97,9 @@ parser.add_argument("--transport_height", type=float, default=0.20, help="그릇
 parser.add_argument("--place_height", type=float, default=0.07, help="그릇 바닥 기준 release 높이")
 parser.add_argument("--stack_increment", type=float, default=0.025, help="이미 담긴 큐브당 release 높이 증가")
 # GUI 초기 카메라(사이드뷰) — world 좌표. headless 에선 무시됨.
-parser.add_argument("--view_eye", type=_vec3, default=(3.05, -0.78, 1.02),
+parser.add_argument("--view_eye", type=_vec3, default=(1.21, -0.215, 1.02),
                     help="GUI 카메라 위치 'x,y,z' (기본: 책상 +X 측면 약간 위)")
-parser.add_argument("--view_lookat", type=_vec3, default=(1.74, -0.38, 0.74),
+parser.add_argument("--view_lookat", type=_vec3, default=(-0.10, 0.185, 0.74),
                     help="GUI 카메라 주시점 'x,y,z' (기본: 큐브·그릇 작업영역 중심)")
 parser.add_argument("--video", action="store_true",
                     help="현재 사이드뷰(viewer eye/lookat)를 mp4 로 녹화해 docs/ 에 저장")
@@ -232,7 +232,7 @@ class FrankaPickPlaceSM:
 
         # home_pos: env 0 의 robot root world 좌표 기준 상대 오프셋으로 보존.
         # Isaac Lab multi-env 는 robot 을 평행 이동만 하므로 오프셋이 모든 env 에 동일하게 적용된다.
-        _home_w  = torch.tensor([1.84, -0.40, DESK_TOP_Z + 0.25], device=self.device)
+        _home_w  = torch.tensor([0.0, 0.165, DESK_TOP_Z + 0.25], device=self.device)
         _root_0  = self.robot.data.root_pos_w[0, :3].clone()
         self.home_offset = _home_w - _root_0  # [3]
 

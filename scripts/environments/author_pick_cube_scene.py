@@ -37,9 +37,11 @@ SCENE_DIR = Path(__file__).resolve().parents[2] / "assets" / "scenes" / "cube_de
 SCENE_USD_PATH = SCENE_DIR / "scene.usd"
 OBJECTS_DIR = SCENE_DIR / "objects"
 
-# offset.y = -0.52: 책상 앞 모서리(scene-local y=-0.09)가 world y=-0.61 에 오도록.
+# 로봇 base 를 world 원점(XY)에 두기 위한 offset (recenter delta=(-1.84,+0.565,0) 반영).
+# offset.x = 0.36: 책상 중심(scene-local x=0)이 world x=0.36 → 로봇 발치 x=0 이 책상 위.
+# offset.y = 0.045: 책상 앞 모서리(scene-local y=-0.09)가 world y=-0.045 에 오도록.
 # offset.z = 다리(0.68) + 상판(0.025) = 0.705: leg bottoms on Isaac ground(z=0).
-SCENE_OFFSET: tuple[float, float, float] = (2.2, -0.52, 0.705)
+SCENE_OFFSET: tuple[float, float, float] = (0.36, 0.045, 0.705)
 
 # (diffuseColor, roughness, metallic)
 MATERIALS = {

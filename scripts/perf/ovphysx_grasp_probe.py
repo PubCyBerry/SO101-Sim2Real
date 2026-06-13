@@ -36,10 +36,10 @@ ROBOT_USD = os.path.join(_REPO, "assets", "robots", "so101_follower.usd")
 SCENE_USD = os.path.join(_REPO, "assets", "scenes", "cube_desk", "scene.usd")
 COMBINED_USD = os.path.join(_REPO, "outputs", "ovphysx_combined.usda")
 
-# ---- 큐브 위치 상수 (pick_cube_env_cfg.py) ----
+# ---- 큐브 위치 상수 (pick_cube_env_cfg.py, recenter: robot base → world 원점 XY) ----
 # 마지막 Cube1 고정 위치 (world frame)
-CUBE1_POS_W = np.array([1.70, -0.44, 0.725], dtype=np.float32)
-ROBOT_BASE_POS_W = np.array([1.84, -0.565, 0.6749], dtype=np.float32)
+CUBE1_POS_W = np.array([-0.14, 0.125, 0.725], dtype=np.float32)
+ROBOT_BASE_POS_W = np.array([0.0, 0.0, 0.6749], dtype=np.float32)
 
 # world → base frame 변환 상수
 # (robot 이 world 에서 고정 방향이라고 가정 — yaw=0 정렬)

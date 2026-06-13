@@ -70,11 +70,11 @@ parser.add_argument("--selftest_tol", type=float, default=0.06,
                     help="self-test 통과 임계 EE↔target 거리(m, ik 모드)")
 parser.add_argument("--settle_steps", type=int, default=120,
                     help="self-test 각 지점에서 추종 정착까지 step 수")
-parser.add_argument("--target_init", type=_vec3, default=(1.80, -0.42, 0.82),
+parser.add_argument("--target_init", type=_vec3, default=(-0.04, 0.145, 0.82),
                     help="target 초기 world 위치 'x,y,z'")
 # GUI 초기 뷰 — 작업영역을 측면 근접에서 본다.
-parser.add_argument("--view_eye", type=_vec3, default=(2.30, -0.72, 0.95))
-parser.add_argument("--view_lookat", type=_vec3, default=(1.80, -0.43, 0.78))
+parser.add_argument("--view_eye", type=_vec3, default=(0.46, -0.155, 0.95))
+parser.add_argument("--view_lookat", type=_vec3, default=(-0.04, 0.135, 0.78))
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -132,12 +132,13 @@ RMPFLOW_URDF_PATH = _REPO_ROOT / "assets" / "robots" / "urdf" / "so_arm101.urdf"
 EE_FRAME_NAME = "gripper_frame_link"
 
 # Lula base pose (USD world). cube_desk 씬에서 least-squares 로 정합한 검증값.
-RMPFLOW_BASE_POS_USD = np.array([1.81791970, -0.58952723, 0.70832908], dtype=np.float32)
+# recenter(robot base→원점, delta=(-1.84,+0.565,0)) 반영 — z·정합 게인은 불변.
+RMPFLOW_BASE_POS_USD = np.array([-0.02208030, -0.02452723, 0.70832908], dtype=np.float32)
 RMPFLOW_BASE_QUAT_USD = np.array([0.71116823, -0.00950808, 0.01529776, 0.70279110], dtype=np.float32)  # wxyz
 
 # Robot articulation root 배치 — pick_cube env (_ROBOT_POS/_ROBOT_ROT) 와 동일해야
 # RMPFLOW_BASE 정합값이 그대로 유효하다.
-ROBOT_POS = np.array([1.84, -0.565, 0.6749], dtype=np.float32)
+ROBOT_POS = np.array([0.0, 0.0, 0.6749], dtype=np.float32)
 ROBOT_QUAT = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # wxyz
 
 # Actuator soft-PD — pick_cube env(ImplicitActuatorCfg, leisaac 검증값) 과 동일.
@@ -164,10 +165,10 @@ _OBSTACLE_SCALES: dict[str, tuple[float, float, float]] = {
 
 # self-test 에서 target 을 옮길 reachable 지점들 (책상 위 작업영역).
 SELFTEST_TARGETS = [
-    np.array([1.80, -0.42, 0.82], dtype=np.float32),
-    np.array([1.90, -0.40, 0.80], dtype=np.float32),
-    np.array([1.74, -0.45, 0.78], dtype=np.float32),
-    np.array([1.86, -0.38, 0.84], dtype=np.float32),
+    np.array([-0.04, 0.145, 0.82], dtype=np.float32),
+    np.array([0.06, 0.165, 0.80], dtype=np.float32),
+    np.array([-0.10, 0.115, 0.78], dtype=np.float32),
+    np.array([0.02, 0.185, 0.84], dtype=np.float32),
 ]
 
 
@@ -300,7 +301,7 @@ def main() -> int:
     world = World(stage_units_in_meters=1.0, physics_dt=PHYSICS_DT, rendering_dt=PHYSICS_DT)
 
     # --tune: Lula Test Widget 의 IK/EE-viz 는 robot 이 world 원점에 있다고 가정한다
-    # (set_robot_base_pose 미호출). cube_desk 배치(1.84,…)면 위젯 솔버가 원점 기준으로 풀어
+    # (set_robot_base_pose 미호출). cube_desk 배치(원점 아닌 z=0.6749)면 위젯 솔버가 원점 기준으로 풀어
     # EE 프레임이 원점에 박히고 target 이 도달 밖이 된다. → 원점 + ground plane 으로 띄운다.
     # (게인·default_q 튜닝은 배치 무관이라 결과는 cube_desk 에 그대로 적용된다.)
     if args.tune:

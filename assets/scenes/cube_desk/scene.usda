@@ -82,7 +82,7 @@ def Xform "Scene"
         rel material:binding = </Scene/Looks/Ceiling>
         double size = 1
         float3 xformOp:scale = (5, 4, 0.05)
-        double3 xformOp:translate = (2.2, -0.21000000000000002, 2.5)
+        double3 xformOp:translate = (0.36, 0.355, 2.5)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -102,7 +102,7 @@ def Xform "Scene"
         float physxCollision:torsionalPatchRadius = 0.004
         double size = 1
         float3 xformOp:scale = (1.6, 0.8, 0.025)
-        double3 xformOp:translate = (2.2, -0.21000000000000002, 0.6925)
+        double3 xformOp:translate = (0.36, 0.355, 0.6925)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -114,7 +114,7 @@ def Xform "Scene"
         rel material:binding = </Scene/Looks/DeskWood>
         double size = 1
         float3 xformOp:scale = (0.025, 0.025, 0.68)
-        double3 xformOp:translate = (1.4800000000000002, 0.12, 0.33999999999999997)
+        double3 xformOp:translate = (-0.36, 0.685, 0.33999999999999997)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -126,7 +126,7 @@ def Xform "Scene"
         rel material:binding = </Scene/Looks/DeskWood>
         double size = 1
         float3 xformOp:scale = (0.025, 0.025, 0.68)
-        double3 xformOp:translate = (2.92, 0.12, 0.33999999999999997)
+        double3 xformOp:translate = (1.08, 0.685, 0.33999999999999997)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -138,7 +138,7 @@ def Xform "Scene"
         rel material:binding = </Scene/Looks/DeskWood>
         double size = 1
         float3 xformOp:scale = (0.025, 0.025, 0.68)
-        double3 xformOp:translate = (1.4800000000000002, -0.54, 0.33999999999999997)
+        double3 xformOp:translate = (-0.36, 0.024999999999999998, 0.33999999999999997)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -150,7 +150,7 @@ def Xform "Scene"
         rel material:binding = </Scene/Looks/DeskWood>
         double size = 1
         float3 xformOp:scale = (0.025, 0.025, 0.68)
-        double3 xformOp:translate = (2.92, -0.54, 0.33999999999999997)
+        double3 xformOp:translate = (1.08, 0.024999999999999998, 0.33999999999999997)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -170,7 +170,7 @@ def Xform "Scene"
         float physxCollision:torsionalPatchRadius = 0.004
         double size = 1
         float3 xformOp:scale = (0.86, 0.4, 0.004)
-        double3 xformOp:translate = (1.9300000000000002, -0.32, 0.707)
+        double3 xformOp:translate = (0.08999999999999997, 0.245, 0.707)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
@@ -178,7 +178,7 @@ def Xform "Scene"
         prepend payload = @./objects/Bowl/Bowl.usd@
     )
     {
-        double3 xformOp:translate = (1.62, -0.26, 0.715)
+        double3 xformOp:translate = (-0.21999999999999997, 0.305, 0.715)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
@@ -187,7 +187,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 20
-        double3 xformOp:translate = (1.7000000000000002, -0.44, 0.725)
+        double3 xformOp:translate = (-0.14, 0.125, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
         over "Box" (
@@ -205,7 +205,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -35
-        double3 xformOp:translate = (1.9800000000000002, -0.46, 0.725)
+        double3 xformOp:translate = (0.13999999999999999, 0.105, 0.725)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
         over "Box" (
@@ -223,7 +223,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 50
-        double3 xformOp:translate = (1.7400000000000002, -0.35, 0.73)
+        double3 xformOp:translate = (-0.10000000000000003, 0.21500000000000002, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
         over "Box" (
@@ -241,7 +241,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -20
-        double3 xformOp:translate = (1.9300000000000002, -0.38, 0.73)
+        double3 xformOp:translate = (0.08999999999999997, 0.185, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
         over "Box" (

@@ -13,8 +13,8 @@ ROBOT_USD = os.path.join(_REPO, "assets", "robots", "so101_follower.usd")
 SCENE_USD = os.path.join(_REPO, "assets", "scenes", "cube_desk", "scene.usd")
 OUTPUT_USD = os.path.join(_REPO, "outputs", "ovphysx_combined.usda")
 
-# pick_cube_env_cfg.py 의 초기 위치
-ROBOT_POS = (1.84, -0.565, 0.6749)
+# pick_cube_env_cfg.py 의 초기 위치 (recenter: robot base → world 원점 XY)
+ROBOT_POS = (0.0, 0.0, 0.6749)
 ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z) identity
 
 

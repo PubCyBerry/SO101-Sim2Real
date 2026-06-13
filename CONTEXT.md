@@ -13,6 +13,21 @@
 
 ---
 
+## 작업 인계 (2026-06-13 — 손목 카메라 홀더(Hex-Nut Mount) SO-101 부착: URDF+USD / ✅ 완료·미커밋)
+
+- **목표(사용자)**: `ref_repos/SO-ARM100/Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module` 의 카메라 홀더 STL 을 SO-101 URDF asset 으로 가져와 gripper 에 **올바른 6D pose** 로 부착. 사용자 확정: pose = **나사 구멍 매칭**(홀더 M3 2구멍 ↔ wrist_roll_follower hex-nut 나사쌍), URDF + 시뮬 USD 렌더 둘 다, cuMotion xrdf sphere 는 제외.
+- **6D pose 도출(STEP CAD, exact)**: STL 은 프린트 방향·triangle soup 라 구멍 추출 불안정 → **STEP 의 `CIRCLE` 엔티티**(ASCII 파싱, CAD 커널 불필요)에서 추출. 홀더 M3=R1.65 2구멍(간격 8.1mm) ↔ follower hex-nut 나사쌍 R1.6(간격 8.1mm) **간격 정확 일치**로 쌍 확정. 접촉면(홀더 x=0 ↔ follower 외측 y=-24.22mm) 밀착. flip = 홀더 body 가 gripper +y(카메라쪽)로 → 튜닝된 WristCamera(+y0.045) 와 부합(교차검증).
+  - 결과 transform(gripper_link 기준): `xyz=-0.015 0.0240018 -0.0315503`, `rpy=-π/2 0 -π/2`. R_joint=[[0,0,1],[-1,0,0],[0,-1,0]]. 검증: 두 나사구멍이 gripper frame 정확 좌표로 매핑(numpy+USD matrix 양쪽).
+- **변경 파일**(4):
+  - 신규 `assets/robots/urdf/assets/wrist_cam_mount_so101_v1.stl` (원본 mm 보존)
+  - 신규 `assets/robots/wrist_cam_mount.usd` (STL→UsdGeom.Mesh, visual-only, 10428 pts, 3d_printed gold)
+  - 수정 `assets/robots/urdf/so_arm101.urdf` — `wrist_cam_mount_link` + fixed joint(parent `gripper_link`), 메시 `scale 0.001`(mm→m)
+  - 수정 `assets/robots/so101_follower.usd` — `/so101_new_calib/gripper/WristCamMount` (wrist_cam_mount.usd reference + transform op). visual-only(물리 API 없음)→articulation 동역학 비간섭
+- **검증 완료**: URDF XML 파싱 OK(링크 9, joint 정상), 홀더 bbox gripper frame 에서 66mm·+y22~88mm(카메라 45mm 포함)·wrist 안착 확인. follower USD articulation 무결·reference 해석 OK. **URDF 소비처**=RMPFlow·cuMotion xrdf gen·MoveIt PATH E·FK ref(시뮬 렌더는 별도 USD라 URDF 무관 → 그래서 USD 도 베이크).
+- **남은 일**: 사용자 Windows GUI 최종 시각 스냅 확인(`teleop_se3_agent.py --tune_cameras` 또는 Isaac Robot Description Editor). 어긋나면 joint origin·USD transform 동시 미세조정. cuMotion 회피 필요 시 `so101.xrdf` gripper_link sphere 추가(이번 제외).
+
+---
+
 ## 작업 인계 (2026-06-12 후속 — SM 고도화: 소규모 검증 과대평가 판명, 2048 진짜 51.6%, root=descend-clip cascade / 진행중·미커밋)
 
 - **목표(사용자, 단계적 확정)**: ① **flat 큐브(z-stack OFF)·calibrated reach 범위·dense(cube_sep 0.04)를 먼저 100%**, 그 다음 z-stack/far 확장. ② GUI 관전 피드백 즉시 반영.
@@ -1644,3 +1659,104 @@ controllers + move_group + cuMotion + SM)을 서버에서 처음으로 end-to-en
     `ssh konan147 'cd /home/konan147/Workspaces/SO101-Sim2Real && jq -r .type outputs/train/so101_groot_n15_pick_pen/checkpoints/010000/pretrained_model/config.json'`
   - 서버 상태 확인:
     `ssh konan147 'cd /home/konan147/Workspaces/SO101-Sim2Real && docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server && docker compose --env-file .env -f docker/docker-compose.yaml logs -f policy-server'`
+
+---
+
+## 작업 인계 (2026-06-13 — Track B P1 (ovphysx 물리 데이터생성): robot USD 제어 검증, scene co-load 블로커)
+
+- **목표(P1 단계)**: ovphysx 에서 SO-101 robot + cube_desk scene 을 co-load 하고, 고정 위치 큐브 1개를 grasp→lift 시켜 contact 물리가 작동하는지 검증. grasp 거동이 IsaacLab(PhysX 5.6.1) 과 동등한지 판정.
+
+- **완료한 작업**:
+  1. **SO101Kinematics 순수 Python 모듈화**
+     - 경로: `/scripts/perf/so101_kin.py` (pick_cube_state_machine.py 에서 추출)
+     - FK/IK 로직 완전히 이식, IsaacLab/AppLauncher 의존성 제거
+     - 독립 테스트 성공: FK zero pose (0.3913, 0, 0.2265) 정확, ik_reach 작동 검증
+  2. **P1 grasp probe 스크립트 작성**
+     - 경로: `/scripts/perf/ovphysx_grasp_probe.py` (80% 완성)
+     - robot USD 로드, 6-DOF 제어 바인딩 수립, 좌표 변환 로직 구현
+     - 시뮬 시퀀스(접근→하강→close→lift) 뼈대 완성
+
+- **🔴 블로커 (게이트 미통과)**:
+
+  ### 1. robot + scene co-load 불가 (치명)
+  **증상**:
+  ```
+  RuntimeError: Failed to add USD: A USD file is already loaded. 
+  Only one stage is supported at a time currently.
+  ```
+  **이유**: ovphysx 0.4.13(PhysX 5.9.0) 은 한 번에 하나의 USD stage 만 지원
+
+  **시도한 우회**:
+  - (a) usd-core(pxr.Sdf) 로 robot+scene 합성 USD 제작 → venv-ovphysx 에서 pxr import 불가(openUSD 버전 미스매치)
+  - (b) robot 만 로드 후 scene 큐브를 rigid body tensor 로 직접 생성 → ovphysx API 가 USD rigid body 생성 미지원
+  - (c) USD payload merge API 확인 → 미제공 (단순 add_usd 만)
+
+  **현재 상태**: robot-only 모드로 IK/제어 로직만 검증 중. **scene USD 를 함께 로드해야 contact 물리 검증 가능.**
+
+  ### 2. IK_reach 호출 불일치 (심각하나 회피 가능)
+  **현상**: grasp_probe.py 에서는 ik_reach 가 모두 실패, 하지만 **동일 so101_kin 모듈을 bash 에서 테스트하면 작동**
+  ```
+  # bash: 성공
+  from so101_kin import SO101Kinematics
+  kin = SO101Kinematics()
+  result = kin.ik_reach((0.4, 0, 0.25), 0.0)  # ✓ 해 반환
+  
+  # grasp_probe.py 내: 실패
+  [P1] tcp_test_base = (0.40, 0.0, 0.25)
+  [P1] ❌ ik_reach 실패
+  ```
+  **가능한 원인**:
+  - 입력 타입 미스매치 (list vs tuple, float32 vs float64)
+  - 모듈 import 시점 캐싱
+  - grasp_probe.py 의 SO101Kinematics 복사본과 실행 환경의 인스턴스 불일치
+
+  **임시 회피**: ik_reach 대신 ik(..., pitch) 수동 루프로 대체 가능하나, 원인 파악 필요
+
+- **⚪ P1 현황(요약)**:
+  - robot-only 모드: SO-101 6-DOF position 제어 작동 ✅
+  - SO101Kinematics (IK) 모듈: 기본 동작 검증 ✅ (but grasp_probe 내 호출 미스터리)
+  - scene USD co-load: ❌ (ovphysx 한 stage 제약)
+  - contact 물리 검증: ❌ (scene 미로드)
+
+- **게이트 판정(현재)**:
+  - **게이트1 (설치·부팅·robot USD)**: ✅ P0 에서 통과, P1 에서도 유지
+  - **게이트2 (grasp 물리 동등성)**: ⏳ scene co-load 블로커로 불가, P1.5 이상 필요
+
+- **남은 일(우선순위)**:
+  1. ovphysx 메뉴얼 재확인 — scene merge/patch API 존재 여부, 또는 다중 stage 지원 미래 버전
+  2. ik_reach 호출 미스터리 진단 — 단순 타입 문제라면 간단히 고침
+  3. scene rigid body 수동 생성 대안 — ovphysx C++ API 또는 Python tensor 직접 조작
+  4. scene USD 별도 로드 불가하면 **P1 범위 축소**: IK 검증만 통과, contact 물리는 P2 이후
+
+- **결정사항**:
+  - SO101Kinematics 모듈화 = 재사용 가능, 향후 P2+ 에서도 사용
+  - P1 게이트 재정의 필요 — scene co-load 불가능하다면 "IK 기구학 작동 확인" 으로 스코프 축소 고려
+  - 다음 시도: 주말 또는 P2 초두에 ovphysx 문서 깊이 있게 읽기 (또는 NVIDIA 포럼 query)
+
+- **변경 파일**:
+  - `/scripts/perf/so101_kin.py` (NEW, 완성)
+  - `/scripts/perf/ovphysx_grasp_probe.py` (NEW, ~80% 완성, scene co-load 블로커)
+
+## 작업 인계 (2026-06-13 — cube_desk 좌표계 recenter: 로봇 base → world 원점(XY))
+
+- **목표**: cube_desk env 로드 시 로봇 base 가 world `(1.84,-0.565,0.6749)` 에 있던 것을 **world 원점(XY)** `(0,0,0.6749)` 으로 재정렬. scene 현실화 작업 전 좌표계 정리.
+
+- **방식 (사용자 선택)**: **XY-only recenter**. delta=`(-1.84,+0.565,0)` 로 모든 world 좌표 강체 평행이동. **z 전부 불변** (ground z=0·desk top z=0.705·DESK_TOP_Z·grasp 물리 임계 모두 유지). 상대 기하 100% 보존 → reward(DESK_TOP_Z+offset 비교)·DR(상대 좌표)·base-relative obs 성분 자동 정합.
+
+- **완료 (검증됨)**:
+  1. `author_pick_cube_scene.py` `SCENE_OFFSET (2.2,-0.52,0.705)→(0.36,0.045,0.705)` + scene.usd 재-author (exit 0). 재생성 USD 좌표 ↔ env_cfg init_state 정확 일치 확인.
+  2. `pick_cube/pick_cube_env_cfg.py` world 상수 14개 + 주석 shift: `_ROBOT_POS(0,0,0.6749)`, `BOWL_CENTER_XY(-0.22,0.305)`, cube init 4개, bowl init, scatter x`(-0.18,0.20)`/y`(0.105,0.22)`, top/front 카메라, viewer eye/lookat, bowl arc 주석(radius0.44·angle(-4,8) 는 상대량이라 불변).
+  3. `common/mdp/_geometry.py` `CONTAINER_DEFAULT_CENTER_XY→(0.36,0.395)` (dead default, 일관성). `DESK_TOP_Z=0.76` 불변.
+  4. `pick_cube_state_machine.py`·`pick_cube_franka_state_machine.py` `--view_eye/--view_lookat` default shift. franka `_home_w→(0,0.165,..)`. DESK_TOP_Z(0.705/0.709) 불변.
+  5. 보조: `follow_target_so101.py`(ROBOT_POS·RMPFLOW_BASE·target_init·view·SELFTEST 4개), `perf/author_combined_usd.py`(ROBOT_POS), `perf/ovphysx_grasp_probe.py`(CUBE1_POS_W·ROBOT_BASE_POS_W), `perf/ovrtx_probe.py`(EYE·LOOKAT·bbox 주석).
+
+- **검증 결과**:
+  - 9개 파일 py_compile OK.
+  - scene.usd 재-author exit 0, 재생성 좌표 정합(Bowl(-0.22,0.305,0.715)·Cube1(-0.14,0.125,0.725)·DeskTop(0.36,0.355,0.6925 z불변)). 로봇 발치(0,0) 책상 위.
+  - **cube SM 고정-spawn 4-env headless = 15/16 (93.8%, env0/2/3=4/4, env1=3/4), ~21.9s** — 문서화된 SM 천장(descend-clip 93%)과 동일. grasp 물리·해석적 IK·place 정상, recenter 기능 회귀 없음.
+
+- **남은 일 (사용자 디스플레이 머신에서)**: GUI teleop·follow_target(--selftest)·perf probe 시각 smoke (서버 헤드리스라 X 없음). 기능은 SM 회귀로 검증됨.
+
+- **⚠️ 주의 — RL 체크포인트**: `observations.py` 의 obs 는 env-local **절대** 성분(`cube_pos`/`grasp_pos`) 포함 → recenter 로 분포 이동(큐브 x ~1.7→~-0.14). **기존 학습 체크포인트 무효 → 재학습 필요** (grasp 미해결이라 영향 제한). `rel` 성분은 translation-invariant 불변.
+
+- **안 건드림**: ground_plane(z=0 무한), 조명, reward/termination 함수 signature dead default `(2.2,-0.17)`(env_cfg override), wrist/front cam LOCAL offset(link-relative), DR 함수 코드(전부 live 상대), pen_desk(독립 task).
