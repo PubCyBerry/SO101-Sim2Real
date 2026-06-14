@@ -1,111 +1,369 @@
-# SO-101 follower XRDF — cuMotion(curobo) robot config (PATH E, cuMotion+ROS).
-#
-# XRDF = URDF 보충 파일: collision sphere 근사 + c-space(계획 관절) + tool frame.
-# URDF 원본: ros2_ws/src/so101_description (variant=follower) / assets/robots/urdf/so_arm101.urdf.
-#
-# ⚠ collision sphere 는 근사 초기값이다. 실제 메시 기준 반경/중심은 Isaac Sim 의
-#   cuMotion "Robot Description Editor"(또는 curobo sphere fit)로 튜닝하고 여기 갱신할 것.
-#   c-space 한계는 URDF joint limit 과 일치(검증됨). frame 은 모두 link-local, 단위 m.
+collision:
+  buffer_distance: 0.0
+  geometry: collision_model
+cspace:
+  acceleration_limits:
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  jerk_limits:
+  - 500.0
+  - 500.0
+  - 500.0
+  - 500.0
+  - 500.0
+  - 500.0
+  joint_names:
+  - shoulder_pan
+  - shoulder_lift
+  - elbow_flex
+  - wrist_flex
+  - wrist_roll
+  - gripper
+default_joint_positions:
+  elbow_flex: 0.0
+  gripper: 0.7853984832763672
+  shoulder_lift: 0.0
+  shoulder_pan: 0.0
+  wrist_flex: 0.0
+  wrist_roll: 0.04867994785308838
 format: xrdf
 format_version: 1.0
-
-modifiers:
-  - set_base_frame: "base_link"
-
-# cuMotion 이 계획하는 5축(그리퍼 제외 — group "gripper" 는 별도 action 제어).
-# ⚠ cuMotion 은 cspace 를 tool_frame(gripper_frame_link) 으로 가는 kinematic chain 위의 관절로
-#   구조적으로 제한한다. gripper 관절(gripper_link→moving_jaw)은 그 chain 밖이라 cspace 에 넣어도
-#   무시된다(cspace=5 고정). 그런데 cuMotion MoveIt 플러그인은 MoveIt request 의 6관절 start_state
-#   (arm5+gripper)를 필터 없이 전달해 INVALID_INITIAL_CSPACE_POSITION(6 vs 5)으로 계획이 실패한다.
-#   → 해결은 플러그인이 start_state 를 planning group(manipulator,5) 으로 필터링하도록 패치하거나,
-#     MoveIt 계획용 robot_description 에서 gripper 를 fixed 로 분리해야 한다(docs/PATH_E §6).
-default_joint_positions:
-  shoulder_pan: 0.0
-  shoulder_lift: 0.0
-  elbow_flex: 0.0
-  wrist_flex: 0.0
-  wrist_roll: 0.0
-
-cspace:
-  joint_names:
-    - shoulder_pan
-    - shoulder_lift
-    - elbow_flex
-    - wrist_flex
-    - wrist_roll
-  # position/velocity limit 은 URDF 에서 읽는다. accel/jerk 은 STS3215 소형 서보 기준 보수값.
-  acceleration_limits: [8.0, 8.0, 8.0, 8.0, 8.0]
-  jerk_limits: [200.0, 200.0, 200.0, 200.0, 200.0]
-
-# IK/계획 목표 프레임. SRDF tip_link 과 일치(grasp 접점은 gripper_frame_link 기준 오프셋).
-tool_frames: ["gripper_frame_link"]
-
-collision:
-  geometry: "so101_spheres"
-  buffer_distance:
-    base_link: 0.005
-    shoulder_link: 0.005
-    upper_arm_link: 0.005
-    lower_arm_link: 0.005
-    wrist_link: 0.005
-    gripper_link: 0.004
-    moving_jaw_so101_v1_link: 0.004
-
-self_collision:
-  geometry: "so101_spheres"
-  buffer_distance:
-    base_link: 0.005
-    shoulder_link: 0.005
-    upper_arm_link: 0.005
-    lower_arm_link: 0.005
-    wrist_link: 0.005
-    gripper_link: 0.004
-    moving_jaw_so101_v1_link: 0.004
-  # SRDF disable_collisions 와 동일한 인접/불가능 쌍을 무시.
-  ignore:
-    base_link: ["shoulder_link", "upper_arm_link"]
-    shoulder_link: ["upper_arm_link"]
-    upper_arm_link: ["lower_arm_link"]
-    lower_arm_link: ["wrist_link", "gripper_link", "moving_jaw_so101_v1_link"]
-    wrist_link: ["gripper_link", "moving_jaw_so101_v1_link"]
-    gripper_link: ["moving_jaw_so101_v1_link"]
-
-# link-local sphere 근사(중심 m, 반경 m). 소형 팔이라 링크당 2~3개로 시작.
 geometry:
-  so101_spheres:
+  collision_model:
     spheres:
       base_link:
-        - center: [0.0, 0.0, 0.02]
-          radius: 0.045
-      shoulder_link:
-        - center: [0.0, 0.0, 0.0]
-          radius: 0.04
-        - center: [0.0, -0.03, 0.03]
-          radius: 0.035
-      upper_arm_link:
-        - center: [0.0, 0.0, 0.0]
-          radius: 0.035
-        - center: [0.0, -0.06, 0.0]
-          radius: 0.03
-        - center: [0.0, -0.11, 0.0]
-          radius: 0.03
-      lower_arm_link:
-        - center: [0.0, 0.0, 0.0]
-          radius: 0.03
-        - center: [0.0, -0.05, 0.0]
-          radius: 0.028
-        - center: [0.0, -0.10, 0.0]
-          radius: 0.028
-      wrist_link:
-        - center: [0.0, 0.0, 0.0]
-          radius: 0.028
-        - center: [0.0, -0.03, 0.0]
-          radius: 0.025
+      - center:
+        - 0.035675711929798126
+        - 0.0012749999295920134
+        - 0.04856160655617714
+        radius: 0.02027859352529049
+      - center:
+        - -0.014965790323913097
+        - 0.005371025763452053
+        - 0.05473936349153519
+        radius: 0.02265211008489132
+      - center:
+        - -0.01602618396282196
+        - -0.00970247108489275
+        - 0.05063831806182861
+        radius: 0.021256571635603905
+      - center:
+        - -0.005165121518075466
+        - -0.015943225473165512
+        - 0.028807073831558228
+        radius: 0.008807074278593063
+      - center:
+        - 0.011139847338199615
+        - 0.0052209654822945595
+        - 0.05978086590766907
+        radius: 0.017659494653344154
+      front_cam_mount_link:
+      - center:
+        - -0.06592680513858795
+        - 0.0006782247219234705
+        - 0.022179342806339264
+        radius: 0.02064945176243782
       gripper_link:
-        - center: [0.0, 0.0, 0.0]
-          radius: 0.025
-        - center: [0.0, -0.03, 0.0]
-          radius: 0.022
+      - center:
+        - 0.00827683974057436
+        - -0.0007560214726254344
+        - -0.01860366389155388
+        radius: 0.02717762067914009
+      - center:
+        - -0.017364250496029854
+        - -0.002137909410521388
+        - -0.022951116785407066
+        radius: 0.02731712907552719
+      - center:
+        - -0.019166279584169388
+        - 0.00044075812911614776
+        - -0.06640889495611191
+        radius: 0.014740467071533203
+      - center:
+        - -0.013824870809912682
+        - 0.0013615936040878296
+        - -0.09266863763332367
+        radius: 0.007684838026762009
+      lower_arm_link:
+      - center:
+        - -0.03729290887713432
+        - 0.0005487255984917283
+        - -0.0027551560197025537
+        radius: 0.013430707156658173
+      - center:
+        - -0.06096644699573517
+        - -0.0004633156640920788
+        - 0.031973399221897125
+        radius: 0.016781466081738472
+      - center:
+        - -0.008704262785613537
+        - -0.001045798766426742
+        - 0.04251142591238022
+        radius: 0.014811727218329906
+      - center:
+        - -0.03681126981973648
+        - 0.0014218160649761558
+        - 0.0390511117875576
+        radius: 0.01526833139359951
+      - center:
+        - -0.061560072004795074
+        - 0.00011705356882885098
+        - 0.003535212017595768
+        radius: 0.017661981284618378
+      - center:
+        - -0.09912589192390442
+        - 0.0033821191173046827
+        - 0.017980193719267845
+        radius: 0.03175373375415802
+      - center:
+        - -0.13447946310043335
+        - 0.0061965212225914
+        - 0.010128723457455635
+        radius: 0.012931731529533863
+      - center:
+        - -0.1331138163805008
+        - 0.005331958644092083
+        - 0.025099191814661026
+        radius: 0.014249521307647228
+      - center:
+        - -0.01770411618053913
+        - 1.4223498965293402e-06
+        - -0.005996625404804945
+        radius: 0.011291055008769035
+      - center:
+        - 0.0024523145984858274
+        - 0.0023903772234916687
+        - -0.005577178206294775
+        radius: 0.011285495012998581
       moving_jaw_so101_v1_link:
-        - center: [0.0, -0.02, 0.0]
-          radius: 0.015
+      - center:
+        - -0.0010946965776383877
+        - -0.016546892002224922
+        - 0.035872381180524826
+        radius: 0.009796193800866604
+      - center:
+        - -0.0005070100887678564
+        - -0.00032848049886524677
+        - -0.0030309304129332304
+        radius: 0.009672031737864017
+      - center:
+        - -0.0005295259761624038
+        - -0.023185744881629944
+        - 0.019078535959124565
+        radius: 0.014678949490189552
+      - center:
+        - -0.0019945530220866203
+        - -0.015611077658832073
+        - 0.0018467603949829936
+        radius: 0.009123221971094608
+      - center:
+        - -0.0005547162727452815
+        - -0.001177066471427679
+        - 0.03954826667904854
+        radius: 0.010645224712789059
+      - center:
+        - -0.007054558023810387
+        - -0.06980393826961517
+        - 0.01899830251932144
+        radius: 0.010524236597120762
+      - center:
+        - -0.0012324051931500435
+        - -0.048479367047548294
+        - 0.01774359680712223
+        radius: 0.01289411447942257
+      shoulder_link:
+      - center:
+        - -0.030278705060482025
+        - -0.0010412521660327911
+        - -0.051950156688690186
+        radius: 0.01859276182949543
+      - center:
+        - -0.034927599132061005
+        - -0.0008635717676952481
+        - 0.03169550374150276
+        radius: 0.02298227697610855
+      - center:
+        - -0.0016462831990793347
+        - -0.0005212734104134142
+        - 0.04059536010026932
+        radius: 0.011222283355891705
+      - center:
+        - 0.00498803798109293
+        - -0.0019430126994848251
+        - -0.005338343791663647
+        radius: 0.009673208929598331
+      - center:
+        - -0.03284396976232529
+        - -0.0006236981134861708
+        - -0.016064081341028214
+        radius: 0.03344219923019409
+      upper_arm_link:
+      - center:
+        - -0.06306853890419006
+        - 0.00035029268474318087
+        - 0.03461240977048874
+        radius: 0.01888323202729225
+      - center:
+        - -0.04072311148047447
+        - -0.00047975481720641255
+        - -0.002130719833076
+        radius: 0.014146816916763783
+      - center:
+        - -0.06229095533490181
+        - -0.00019757504924200475
+        - 0.0016364980256184936
+        radius: 0.016799019649624825
+      - center:
+        - -0.020378928631544113
+        - 0.00034778332337737083
+        - -0.007039067801088095
+        radius: 0.011825800873339176
+      - center:
+        - -0.01866743341088295
+        - 0.001541135716252029
+        - 0.044686250388622284
+        radius: 0.013012941926717758
+      - center:
+        - -0.040608976036310196
+        - -0.0009875722462311387
+        - 0.0391683429479599
+        radius: 0.012844383716583252
+      - center:
+        - -0.00042228304664604366
+        - -4.532576713245362e-05
+        - -0.0064220004715025425
+        radius: 0.012193969450891018
+      - center:
+        - -0.10554993152618408
+        - -0.007462579291313887
+        - 0.018663734197616577
+        radius: 0.03526047617197037
+      - center:
+        - 0.0009822332067415118
+        - 0.00016785527986939996
+        - 0.04289557412266731
+        radius: 0.012188409455120564
+      wrist_cam_mount_link:
+      - center:
+        - 0.010970614850521088
+        - 0.058699753135442734
+        - -0.04305359348654747
+        radius: 0.008323888294398785
+      - center:
+        - -0.007157429121434689
+        - 0.053849924355745316
+        - -0.04024264216423035
+        radius: 0.01138532254844904
+      - center:
+        - 0.008726251311600208
+        - 0.044350702315568924
+        - -0.03573288023471832
+        radius: 0.009261018596589565
+      - center:
+        - -0.011908173561096191
+        - 0.03278928995132446
+        - -0.02930760569870472
+        radius: 0.015323399566113949
+      - center:
+        - 0.008335066959261894
+        - 0.027955202385783195
+        - -0.027265895158052444
+        radius: 0.010237795300781727
+      wrist_link:
+      - center:
+        - -0.001958248671144247
+        - -0.033492859452962875
+        - 0.007732794154435396
+        radius: 0.022214585915207863
+      - center:
+        - 0.0003855908289551735
+        - -0.04416607692837715
+        - 0.022137479856610298
+        radius: 0.01909029483795166
+      - center:
+        - 0.0008244740893132985
+        - -0.02453514374792576
+        - 0.04261592775583267
+        radius: 0.018842164427042007
+      - center:
+        - -0.006795799359679222
+        - -0.009394769556820393
+        - -0.003457298269495368
+        radius: 0.007275275886058807
+      - center:
+        - -0.0009688716381788254
+        - -0.04780064895749092
+        - 0.03893446549773216
+        radius: 0.020586784929037094
+      - center:
+        - -0.0008025288116186857
+        - 0.004989669658243656
+        - -0.004953519906848669
+        radius: 0.010199159383773804
+      - center:
+        - 0.006082200910896063
+        - -0.009380074217915535
+        - -0.0034225836861878633
+        radius: 0.007265569642186165
+      - center:
+        - -3.972445847466588e-05
+        - 0.0004707380139734596
+        - 0.04009999707341194
+        radius: 0.01137559488415718
+modifiers:
+- set_base_frame: base_link
+self_collision:
+  buffer_distance:
+    base_link: 0.0
+    front_cam_mount_link: 0.0
+    gripper_link: 0.0
+    lower_arm_link: 0.0
+    moving_jaw_so101_v1_link: 0.0
+    shoulder_link: 0.0
+    upper_arm_link: 0.0
+    wrist_cam_mount_link: 0.0
+    wrist_link: 0.0
+  geometry: collision_model
+  ignore:
+    base_link:
+    - shoulder_link
+    - front_cam_mount_link
+    front_cam_mount_link:
+    - shoulder_link
+    gripper_frame_link:
+    - gripper_link
+    gripper_link:
+    - wrist_link
+    - wrist_cam_mount_link
+    - gripper_frame_link
+    - moving_jaw_so101_v1_link
+    lower_arm_link:
+    - upper_arm_link
+    - wrist_link
+    - gripper_link
+    - wrist_cam_mount_link
+    - moving_jaw_so101_v1_link
+    moving_jaw_so101_v1_link:
+    - gripper_link
+    shoulder_link:
+    - base_link
+    - upper_arm_link
+    - front_cam_mount_link
+    upper_arm_link:
+    - shoulder_link
+    - lower_arm_link
+    - front_cam_mount_link
+    wrist_cam_mount_link:
+    - gripper_link
+    - moving_jaw_so101_v1_link
+    wrist_link:
+    - lower_arm_link
+    - gripper_link
+    - wrist_cam_mount_link
+    - moving_jaw_so101_v1_link
+tool_frames:
+- gripper_frame_link

@@ -13,6 +13,126 @@
 
 ---
 
+## 작업 인계 (2026-06-14 — PickCube cuRobo P2 🟢 DONE: IPC 사이드카 + 4-큐브 pick-place ~18-20s 4/4 / 다음=multi-env 논의)
+
+- **결과**: single-env 4-큐브 cuRobo pick-place 완성. **headless DR 4/4·18~20s**(목표 <20s 달성), 장애물 회피·DR·livestream+3cam. 사용자 "완벽". **커밋 대상**(브랜치 후). 다음 = **multi-env 배치 확장 논의**.
+- **🔴 ABI — in-process 불가 확정(D10)**: cuRobo **warp 1.14** ↔ isaacsim **omni.warp.core 1.8.2** 상호배타. isaac-first→cuRobo import 死(`wp.func(module=)`), curobo-first→isaacsim core ext 死(`warp.types.array`). → **subprocess IPC**: cuRobo 플래너 별프로세스(warp 1.14, isaac 無) + Isaac env 메인, **ZMQ REQ/REP**. P0 트랩이 예고. **multi-env 도 이 구조 유지.**
+- **아키텍처 (2 프로세스)**:
+  - `scripts/planning/curobo_planner_server.py` — cuRobo 사이드카, ZMQ REP. cmd: `ik`(D9: 해석적 ik_reach→feasible orient+seed→cuRobo IK refine=정확 config), `plan`(plan_cspace traj), `set_world`(per-env world cuboid — **planner 만**, IK 충돌-free 유지=D11), `ping`/`shutdown`. collision_cache 위해 더미 scene(`assets/robots/curobo_empty_scene.yml`).
+  - `scripts/sim/pick_cube_curobo_demo.py` — Isaac env 클라이언트, ZMQ REQ. 4-큐브 순차 side-approach. 흐름: READY→(plan)pre→(직접)descend→(직접)slide→close→(직접)lift→(plan)bowl→release→다음큐브. **긴 transit 만 plan_cspace, grasp 미세동작은 직접 joint 보간**(D11). cube_yaw·clearance roll-선정·q_bias(C6)·해석적 IK(`so101_kinematics.py`).
+- **검증된 grasp 함정 8건**: ① side-approach(top-down center=fixed jaw 윗면 찌름) ② cube_yaw 사용(DR ±30°, 모서리 잡기 해소) ③ IK 충돌-free + plan_cspace 만 충돌-aware ④ grasp 미세동작 직접 실행 ⑤ bowl 먼 곳 pitch -10 ⑥ lift→bowl 직접 fallback ⑦ READY=[-1.3,1.2] self-collision 경계 backoff(sag)+cube1 exact-start ⑧ crisp=plan stride3+seq_exec 14~16step.
+- **신규 파일(커밋 대상)**: `scripts/planning/curobo_planner_server.py`, `scripts/sim/{pick_cube_curobo_demo,so101_kinematics,motion_plan_so101_viser,build_so101_xrdf,validate_so101_curobo,reactive_so101_viser}.py`, `assets/robots/{so101_curobo,so101_scene,curobo_empty_scene}.yml` + `so101.xrdf`(M), `docs/PICKCUBE_CUROBO_PROJECT.md`. 임시 `_probe_*.py` 삭제.
+- **실행**: 터미널A planner(`--port 5599`); 터미널B demo(`--headless --loop N` | `--public_ip 100.79.237.116 --cameras`). ⚠ 데모 재시작=python child 직접 kill(TaskStop 만으론 Isaac 좀비→49100 다중 LISTEN→WebRTC 검은화면). planner=ZMQ shutdown. livestream WebRTC mode1+PUBLIC_IP, port 49100, ~0.88Mbps.
+- **다음 — multi-env 논의 포인트**: ① `BatchMotionPlanner.plan_cspace(multi_env=True, max_batch_size=N)` per-env world ② per-env state 배치 ZMQ 직렬화 ③ phase 동기화 vs 독립 ④ side-approach/roll-선정 배치화 ⑤ throughput(VRAM 48GB·plan wall-clock).
+
+---
+
+## 작업 인계 (2026-06-14 — Workshop 권장 구조 채택 / P0 I/O contract 코드 완료)
+
+- **목표**: `docs/NVIDIA_WORKSHOP_PICKCUBE_COMPARISON.md` §7.7·§13을 목표 구조로 채택하고 §14 P0를 구현.
+- **완료**: `src/so101_contract/`에 canonical `PolicyFeature = arm degree + gripper [0,100]` codec, LeRobot 0.4.4 호환 action queue/aggregation, portable policy I/O snapshot을 추가. sim recorder·ROS VLA·teleop adapter가 같은 codec을 사용하고, Docker real 경로는 `ROBOT_USE_DEGREES=true`와 top/wrist/front 640x480@30 계약을 검사한다.
+- **결정**: sim gripper `[-10°,100°]`와 policy `[0,100]`는 affine mapping. 기존 `rad * 31.75`는 migration 전용 `legacy_*` 함수로만 보존. `.env`·`.env.example`·entrypoint 기본 task는 `"pick up the cube and place it in the bowl"`로 정합.
+- **실행 semantics**: ROS sim client는 receiver thread + `ActionChunkQueue`로 실기기 `RobotClient`와 동일하게 stale action 폐기, overlapping chunk aggregation, refill threshold, `must_go`를 처리한다. `AGGREGATE_FN_NAME`은 양쪽이 같은 `.env`를 읽는다.
+- **도구/문서**: `scripts/sim/validate_so101_io_contract.py`, `scripts/sim/replay_so101_policy_snapshot.py`, `docs/SO101_POLICY_IO_CONTRACT.md`. dataset validator는 codec version, 3-camera, task 문자열을 검사한다.
+- **검증 완료**: P0 validator PASS(설치된 LeRobot aggregation 함수와 직접 parity), schema self-test PASS(유효 1 + 오류 6), snapshot CLI offline decode `0.0 rad`, Python compile, Bash syntax, Docker Compose config, 로컬 문서 링크, `git diff --check` PASS.
+- **남은 runtime gate**: 실제 policy-server + Isaac Sim + 실기기를 함께 띄운 paired pose 10~20개, FK/그리퍼 aperture, same-snapshot online replay, timestamp 정렬 trajectory/latency 비교. 하드웨어를 실행하지 않았으므로 물리 동작 등가성까지 완료로 간주하지 않는다.
+
+---
+
+## 작업 인계 (2026-06-14 — NVIDIA Workshop vs PickCube 비교·VLA sim-real action 등가성 / ✅ 완료)
+
+- **목표**: NVIDIA Workshop의 SO-101 robot/camera/DR/grasp/place/LeRobot 구현을 현재 `cube_desk`와 `SimToReal-SO101-PickCube-v0`에 대조하고, 동일 VLA 출력이 sim과 real에서 같은 물리 동작을 뜻하게 만드는 기준을 정리.
+- **완료**: `docs/NVIDIA_WORKSHOP_PICKCUBE_COMPARISON.md` 신규. Workshop clone commit `1d62ec5`와 현재 source를 주제별로 연결하고 권장 구조, P0~P3 우선순위, 구현 완료 조건을 기록. `AGENTS.md`와 `CLAUDE.md`는 변경하지 않음.
+- **핵심 결론**: Workshop은 공통 canonical feature(arm `[-100,100]`, gripper `[0,100]`)를 real calibration range와 sim USD joint range에서 각각 decode해 **joint-range fraction 등가성**을 만든다. 단, paired joint/FK/trajectory 수치 검증은 제공하지 않는다.
+- **현재 상태**: 실기기 LeRobot 0.4.4 계약은 arm degree + gripper `[0,100]`; sim arm rad↔degree는 대체로 맞지만 gripper의 `rad * 31.75`는 `-10..100 deg` endpoint/midpoint를 `[0,100]`에 affine 대응시키지 못한다. 공식 real `RobotClient`의 overlapping chunk aggregation과 ROS sim client의 최신값 overwrite도 실행 action trace를 다르게 만든다.
+- **P0 권장**: canonical `PolicyFeature = arm degree + gripper [0,100]`를 명시하고 versioned codec으로 고정, sim gripper affine mapping 및 real `use_degrees=True`를 검증, real/sim에 동일 queue·aggregation·RTC semantics 적용, same-observation/action replay와 paired joint/FK calibration test 추가. 가장 강한 구조는 `IsaacSO101Robot`을 LeRobot `Robot` interface로 구현해 양쪽 모두 공식 `RobotClient`를 사용하는 방식.
+- **검증**: 문서 로컬 링크 33개 존재 확인, `git diff --check` 통과. source 비교 문서만 작성했으며 Isaac Sim/실기기 실행은 하지 않음.
+
+---
+
+## 작업 인계 (2026-06-14 — NVIDIA SO-101 Sim-to-Real 공식 자료 색인 / ✅ 완료)
+
+- **목표**: NVIDIA `Train an SO-101 Robot From Sim-to-Real With NVIDIA Isaac`의 전체 TOC, GitHub 저장소, Workshop 실제 source, upstream 공식 API를 Claude가 단일 페이지에 갇히지 않고 함께 조사하도록 색인.
+- **완료**: `docs/NVIDIA_SO101_SIM2REAL_INDEX.md` 신규. landing+본 과정 16개+Reference 3개+Workshop Code+Video Series, 관련 GitHub 6개 계열, commit `1d62ec5` 고정 source 경로, dataset/model, 주제별 필수 독서 묶음, 구현 전 8항목 확인 템플릿 포함.
+- **운영 규칙**: 관련 TOC 묶음 → Workshop 실제 코드 → 해당 release의 upstream 공식 API → 현재 저장소 버전·계약 비교 후 구현. 단일 강의 페이지만 보고 adapter/pipeline 독자 구현 금지.
+- **검증**: 문서 내 고유 URL 75개 `curl -LfsS` 전부 HTTP 200, `git diff --check` 통과. `CLAUDE.md`와 `AGENTS.md`는 변경하지 않음.
+
+---
+
+## 작업 인계 (2026-06-14 — PickCube cuRobo P1+: pose-goal 5-DOF 벽 확증 + joint-goal 데모 + 🔴 FK 발산 발견 / P2 선행조건 D9)
+
+- **세션 요약**: 공식 cuRobo motion planning 을 SO-101 로 띄워 5-DOF 거동 검증. **핵심 발견 = 해석적 FK 와 cuRobo FK 가 워크스페이스에서 최대 15mm 발산** → P2 grasp 정확도 선행조건 도출(D9). joint-goal 인터랙티브 데모 작동.
+- **① pose-goal 5-DOF 벽 (확증)**: 공식 `motion_planning.py --visualize` SO-101 = 첫 Move 1회 후 전부 fail. `plan_pose` 가 gizmo **full 6-DOF pose** 를 hard goal 로 줌 → 5축이 임의 orientation 불가. probe A/B/C(현재pose✅·45°회전❌·위치만✅) 결정적 증명. C4·D2 가 예고한 벽, 버그 아님.
+- **② MPC 는 왜 됨**: `reactive_so101_viser.py`(MPC)=soft-cost 연속 재최적화 + `update_goal_tool_poses(run_ik=False)` → orientation penalty 만, 5축 best-effort 자연수렴, 실패개념 없음. plan_pose=궤적opt **전에 exact 6-DOF IK 게이트**라 5축 못 맞추면 시작도 못 함. **cuRobo IK 도 position-only 불가**(`orientation_tolerance` 는 수렴게이트만 풀고 optimizer cost 못 끔 — reach 안 점도 실패).
+- **③ joint-goal 데모 (작동)**: `scripts/sim/motion_plan_so101_viser.py` 신규 — gizmo position → **해석적 IK** → `MotionPlanner.plan_cspace` → 실행. 해석적 IK=`scripts/sim/so101_kinematics.py`(SM `SO101Kinematics` 에서 **verbatim 추출** standalone, Isaac 불요). plan_cspace 0.05초 성공, 도달불가 정직거절, gizmo yaw→grasp_yaw(wrist_roll 반응). 실행 `uv run --no-sync --group isaac python scripts/sim/motion_plan_so101_viser.py --port 8088` (tailscale 100.79.237.116:8088).
+- **④ 🔴 FK 일관성 발견 (P2 핵심)**: `_probe_fk_consistency.py` — 해석적 fk_tcp ↔ cuRobo FK (2000 config) **mean 6.86mm·p95 14.9mm·max 15.4mm**(zero-pose 만 sub-mm). 해석적 FK=평면근사라 관절각↑ 발산. → **해석적 IK config 직접 plan_cspace 면 EE 최대 15mm 빗나감(grasp miss)**. 사용자가 데모서 "안 맞음" 직감한 정체.
+- **⑤ P2 수정안 D9 (검증됨)**: `_probe_p2_graspik.py` — cuRobo IK 는 feasible grasp pose 를 **0.00mm 정확** 해결(desk zone). **recipe**: 해석적 ik_reach → (a) 5-DOF **feasible orientation** + (b) **seed config** 공급 → cuRobo IK(goal=실제 큐브pos + feasible orient, seed=해석적q) → 정확 goal config → plan_cspace. cuRobo IK 의 5-DOF 한계는 orientation 을 해석적으로 가져와 회피. **P2 는 SM 의 해석적 grasp config 를 그대로 쓰지 말고 이 refine 거칠 것.**
+- **신규 파일(미커밋)**: `scripts/sim/motion_plan_so101_viser.py`(데모), `scripts/sim/so101_kinematics.py`(standalone 해석적 IK — P2 도 사용). 진단 probe `_probe_fk_consistency.py`·`_probe_p2_graspik.py` 보존(P2 게이트), `_probe_so101_{posegoal,reach}.py` 는 결론 문서화 후 삭제.
+- **다음(P2 착수 시)**: D9 recipe 로 grasp config 솔버 작성(해석적 seed+orientation → cuRobo IK refine) → `scripts/planning/so101_curobo_planner.py`(plan_cspace·per-env world·gripper lock·clip-free) → SM executor 교체. **so101_kinematics.py 와 SM SO101Kinematics 는 verbatim 동일 — P2 에서 SM 이 이 모듈 import 하도록 통합 권장(drift 방지).**
+- **문서 갱신**: `docs/PICKCUBE_CUROBO_PROJECT.md` §0 대시보드(P1+ 🟢)·§7 타임라인 4행·§8 D9·§9 트러블슈팅 4건.
+
+---
+
+## 작업 인계 (2026-06-14 — PickCube cuRobo 트랙: 배치 충돌 플래닝 SM + 양방향 VLA / 🟢 P0·P1 완료, P2 다음)
+
+- **목표(사용자)**: cube_desk 4-큐브 pick-place SM 을 **cuRobo GPU 배치 충돌 플래닝**으로 재구현. 2048-env
+  ~95–99%+clean·<20초. 해석적 SM 천장(descend-clip 55.8%, [`docs/PICKCUBE_SM_PROJECT.md`])을 그리퍼 실제
+  sphere 기하 인식으로 돌파. **양방향**: sim→real(VLA 데이터) + real→sim(VLA single-env ROS2+async 추론).
+- **문서**: 마스터 [`docs/PICKCUBE_CUROBO_PROJECT.md`] 생성(상태 대시보드·phase P0~P6·양방향 mermaid·확정
+  cuRobo API·결정로그·병렬전략·자가검증 루프). 승인 플랜 = `~/.claude/plans/so-101-pick-place-vla-federated-shannon.md`.
+- **확정 사실**: ① cuRobo(`ref_repos/curobo`)는 표준 pip 과 **다른 신버전**(`_src/` 레이아웃, 공개
+  `from curobo import BatchMotionPlanner, MotionPlannerCfg`/`from curobo.scene import Cuboid`). joint-goal
+  `plan_cspace`·`multi_env=True`(per-env world)·`attachment_manager.enable_obstacle(env_idx)`·`sphere_fit`
+  전부 실재 확인. 구버전 `curobo.org` docs/`MotionGen` 금지. ② **so101.xrdf 는 stale** — URDF 에
+  `wrist_cam_mount_link`(gripper)·`front_cam_mount_link`(shoulder) 있으나 xrdf 엔 두 홀더 전무 + sphere 미튜닝
+  (moving_jaw 82mm 손가락 미반영). P1 에서 검증·홀더 충돌 추가·sphere 재fit 필수(홀더=로봇 한몸, 사용자 지적).
+- **P0 완료 🟢**: `uv pip install -e "ref_repos/curobo[cu12]"` 성공(nvidia-curobo **0.8.0.post1.dev35**).
+  **nvcc 불요** — cuRobo setup.py `USE_PYBIND=0`(기본)이라 pybind CUDA 확장 안 빌드, 런타임에 cuda-core
+  (NVRTC)+warp 1.14 JIT(franka FK CUDA 실행 검증). **핀 보존 확인**(numpy 1.26·torch 2.7+cu128·pyarrow 18;
+  rich 15→14.3.4·websockets 12→16 만 변동, ABI 무관). cu12 extra 가 `nvidia-cuda-nvcc-cu12` wheel 도 격리
+  설치(호스트 무변경).
+  - **import 경로(중요)**: `from curobo.motion_planner import MotionPlanner, MotionPlannerCfg` ·
+    `from curobo.batch_motion_planner import BatchMotionPlanner` · `from curobo.scene import Scene, Cuboid,
+    Sphere, Mesh`(`Scene`=`SceneCfg`) · `from curobo.kinematics import Kinematics, KinematicsCfg` ·
+    `from curobo.types import JointState`. **`from curobo import …` ❌**(`__init__`=`__version__`만). FK 결과
+    =`KinematicsState.tool_poses`·`get_link_spheres()`.
+  - ⚠ **`uv run` 은 sync 로 curobo 삭제**(lock 미등재) → cuRobo 스크립트는 **`uv run --no-sync --group isaac`**
+    규약(lock 미변경=ABI 핀 안전). 필요 시 나중에 pyproject isaac 그룹 + `[tool.uv.sources]` editable 로
+    영속화(override-dependencies 가 핀 강제).
+- **P1 완료 🟢 (공식 RobotBuilder)**: 사용자 지시로 커스텀 sphere 수학 전부 폐기, **공식
+  `build_robot_model.py`(RobotBuilder API)만** 사용. 산출 = `assets/robots/so101.xrdf`(Isaac) +
+  `so101_curobo.yml`(cuRobo native·mesh_link_names 포함, MPC/Viser/planner 용). **54 spheres/9링크**
+  (카메라 홀더 wrist/front 자동 포함=로봇 한몸, geometry key=`collision_model`, self-collision ignore 자동).
+  - 빌드: `scripts/sim/build_so101_xrdf.py` — `fit_collision_spheres(sphere_density=2.0, clip_links={base:z,0})`
+    + thin/clip 링크만 `refit_link_spheres(sphere_density=4.0)`(front_cam·base) + 퇴화 구(r<0.005) 필터.
+    `--visualize` Viser. 검증 `validate_so101_curobo.py`(로드·54·FK·IK 81%). 동적검증
+    `reactive_so101_viser.py`(공식 reactive_control 적용 MPC, EE 드래그 추종+장애물 회피).
+  - **핵심 교훈**: 기본 MorphIt(density 1.0)은 얇은 moving_jaw(cover 0.4%)·front_cam plate·clip base 붕괴
+    → **density↑가 공식 해법**(moving_jaw density 2.0=91.7%, front_cam/base refit density 4.0). 커스텀
+    SURFACE/centerline은 "sparse/덕지덕지"라 폐기. 제거된 스크립트: fit_so101_spheres.py·build_so101_curobo_robot.py·
+    render_so101_spheres*.py. **gen_so101_xrdf.py(구 API/PATH E Docker)는 미변경**.
+  - cspace 6축(gripper 포함, 공식 그대로) → P2 planner `lock_joints` 로 5-DOF 계획.
+  - 신 API 키: import `from curobo.{motion_planner,batch_motion_planner,scene,kinematics,robot_builder} import …`
+    (`from curobo import` ❌). `st.tool_poses.get_link_pose(link)`→Pose, `st.get_link_spheres()`,
+    IK `InverseKinematicsCfg.create(max_batch_size=N)`, `RobotCfg`=`curobo._src.types.robot`. `--no-sync` 필수.
+    ViserVisualizer는 **.yml(robot_config_file) 필요**(xrdf는 mesh_link_names 없어 실패).
+- **P1 동적 검증 완료**: 공식 `reactive_control`(MPC)·`motion_planning`(plan_pose/grasp) Viser 를 SO-101
+  `so101_curobo.yml` 로 구동 확인. 스크립트 `scripts/sim/reactive_so101_viser.py` + 공식 motion_planning.py
+  직접(`--robot/--scene 절대경로`, `--no-sync`). **함정**: ① collision_test.yml=franka 크기 → SO-101 start
+  충돌 → Move/Grasp 무반응 → SO-101 크기 `assets/robots/so101_scene.yml`(작은 기둥) 신규로 해결 ② 5-DOF 라
+  임의 orientation pose-goal 실패 정상(P2 joint-goal). 재현 명령 전부 `docs/PICKCUBE_CUROBO_PROJECT.md` §11.
+- **P1+ 후속 TODO**(다음 세션): 공식 `forward_kinematics.py`/`inverse_kinematics.py` 예제로 SO-101 FK·IK 단독 검증.
+- **📌 새 세션 시작점(사용자)**: `docs/PICKCUBE_CUROBO_PROJECT.md`(마스터, §0 대시보드·§7 타임라인·§11 재현) 읽고
+  진행현황 파악 후 시작. 산출물 `assets/robots/{so101.xrdf, so101_curobo.yml, so101_scene.yml}`. 미커밋.
+- **다음 P2**(핵심 통합): `scripts/planning/so101_curobo_planner.py`(BatchMotionPlanner wrapper, plan_cspace
+  joint-goal, per-env world cuboid, target enable_obstacle 토글, gripper lock_joints, clip-free grasp 선정)
+  + SM executor 를 cuRobo trajectory 로 교체(해석적 grasp config·q_bias·판정 유지). 병렬: Track B(P4
+  cube_sep·P5 obs계약·recorder), Track C(P6 ROS2+async VLA), Track D(ovrtx/ovphysx probe)는 cuRobo 무관.
+- **uv 주의**: `uv run --group isaac` 중 robometrics.git 갱신 때 `Group isaac not defined` 일시 오류 1회 →
+  재실행 시 정상(무손상). 동일 증상 무시 가능.
+
+---
+
 ## 작업 인계 (2026-06-14 — cube_desk 큐브 현실화: 단색 샤프박스 → 라운드 펠트 큐브 + 흰 시접 무늬 / ✅ 완료·커밋 8fcf8ee)
 
 - **배경(사용자)**: 실물 큐브(회색 펠트 천 + 코너 둥근 쿠션형 + 흰 시접선)와 sim 큐브(단색 회색 0.45,0.46,0.47·26-face 3mm 베벨·UV없음) 시각 갭 큼. NVIDIA content-agents(ref_repos/content-agents) 적용 검토 → 큐브는 지오 단순(박스)이라 **hand-author로 충분, content-agents는 보류**(physics-tune·look_right·복잡에셋용으로 가치). 결정: 큐브 표면 hand-author.

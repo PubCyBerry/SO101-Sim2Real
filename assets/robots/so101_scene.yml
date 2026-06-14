@@ -1,0 +1,8 @@
+# SO-101 모션플래닝 검증용 장애물 씬 (작은 팔 스케일).
+# collision_test.yml(franka 크기 table 1.4m + box[0.4,0,0.3])은 SO-101 start 그리퍼와 겹쳐
+# "Start in collision" → 모든 계획 실패. SO-101 reach(~0.39m) 안, start EE[0.39,0,0.226] 와
+# 안 겹치는 위치에 작은 기둥 1개 → 회피 시연용.
+cuboid:
+  pillar:
+    dims: [0.04, 0.04, 0.04]  # x, y, z
+    pose: [0.26, 0.13, 0.07, 1, 0, 0, 0]  # x,y,z, qw,qx,qy,qz
