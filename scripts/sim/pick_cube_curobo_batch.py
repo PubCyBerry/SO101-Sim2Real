@@ -452,9 +452,15 @@ def main() -> int:
                 clear, cur_roll = meta[e]
                 q_s = rs["qs"][e]
                 clear_norm = max(0.0, min(1.0, clear / 0.04))
-                bias = 0.1 if abs(abs(roll) - math.pi / 2) < 1e-3 else 0.0
+                # roll 선호(사용자): free 큐브(clearance 동률)서 **-90° 우선**, +90 차선, 0/π 회피.
+                if abs(roll + math.pi / 2) < 1e-3:
+                    bias = 0.4
+                elif abs(roll - math.pi / 2) < 1e-3:
+                    bias = 0.2
+                else:
+                    bias = 0.0
                 flip = abs(q_s[4] - cur_roll)
-                # clearance 지배(1.5×) → 이웃 향한 closing 회피. flip 경감(0.15). 침투 강패널티.
+                # clearance 지배(1.5×) → 이웃 향한 closing 회피(클러스터). flip 경감(0.15). 침투 강패널티.
                 score = 1.5 * clear_norm + bias - 0.15 * flip + (-1.0 if clear < 0 else 0.0)
                 if best is None or score > best[0]:
                     best = (score, roll, rd["qs"][e], rs["qs"][e])

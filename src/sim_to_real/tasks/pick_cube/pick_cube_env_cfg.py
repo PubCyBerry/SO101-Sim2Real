@@ -110,12 +110,12 @@ _TOP_CAMERA_POS = (0.03, -0.005, 1.72)            # +y 0.01 (책상 따라 이�
 # 으로 look_at 을 계산한다(하위호환).
 _TOP_CAMERA_ROT = (0.5716, -0.4238, 0.4466, 0.5424)
 _TOP_CAMERA_TARGET = (0.30, 0.425, 0.76)          # +y 0.01
-_TOP_CAMERA_FOCAL = 23.0
+_TOP_CAMERA_FOCAL = 14.0
 
 # wrist: gripper 위/옆에 강결합된 카메라.
 _WRIST_CAM_LOCAL_POS = (0.0, 0.045, -0.04)
 _WRIST_CAM_LOCAL_ROT = (-0.3642, 0.6061, -0.6061, -0.3642)
-_WRIST_CAMERA_FOCAL = 23.0
+_WRIST_CAMERA_FOCAL = 14.0
 
 # front: shoulder 링크에 장착 — shoulder_pan 회전을 따라간다.
 # (USD 컨벤션: URDF `shoulder_link` → USD `shoulder`, `_link` 접미사 제거)
@@ -125,7 +125,7 @@ _FRONT_CAMERA_POS = (-0.03, -0.005, 0.75)     # world ref (shoulder_pan=0, 기�
 # belly(front) 카메라 홀더 = 4 나사구멍 중심 + 1cm 아래(y=0, z=0.0226). 렌즈 tip x≈-0.087(표면서 4cm).
 _FRONT_CAM_LOCAL_POS = (-0.090, 0.0, 0.0226)     # shoulder local frame (front_cam_holder 렌즈)
 _FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (fwd=local -x=world -Y)
-_FRONT_CAMERA_FOCAL = 23.0
+_FRONT_CAMERA_FOCAL = 14.0
 
 
 # ---------------------------------------------------------------------------

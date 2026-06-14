@@ -422,7 +422,13 @@ def main() -> int:
             if q_d is None or q_s is None:
                 continue
             clear_norm = max(0.0, min(1.0, clear / 0.04))
-            bias = 0.1 if abs(abs(roll) - math.pi / 2) < 1e-3 else 0.0
+            # roll 선호(사용자): free 큐브(clearance 동률)서 -90° 우선, +90 차선, 0/π 회피.
+            if abs(roll + math.pi / 2) < 1e-3:
+                bias = 0.4
+            elif abs(roll - math.pi / 2) < 1e-3:
+                bias = 0.2
+            else:
+                bias = 0.0
             flip = abs(q_s[4] - cur_roll)
             score = 1.5 * clear_norm + bias - 0.15 * flip + (-1.0 if clear < 0 else 0.0)
             if best is None or score > best[0]:
