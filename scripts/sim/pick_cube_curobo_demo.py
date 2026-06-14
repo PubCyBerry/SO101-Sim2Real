@@ -407,11 +407,11 @@ def main() -> int:
         best = None
         for roll in (math.pi / 2, -math.pi / 2, 0.0, math.pi):
             ax = closing_axis(cube_w, sn, cyaw, roll)
-            dx, dy = math.cos(ax), math.sin(ax)
-            fx, fy = -dy, dx
-            bx0, by0 = px - so * dx, py - so * dy
-            pts = [(px + fh * fx, py + fh * fy), (px - fh * fx, py - fh * fy),
-                   (bx0, by0), (0.5 * (bx0 + px), 0.5 * (by0 + py))]
+            dx, dy = math.cos(ax), math.sin(ax)      # 닫힘축(jaw 분리) 방향
+            bx0, by0 = px - so * dx, py - so * dy     # 근측 finger(접근점)
+            # clearance: finger 점을 **닫힘축 방향(dx,dy)**으로 → 이웃 향한 closing penalize
+            #   (수직 fx,fy 로 잡으면 X-나란 큐브서 X-close 우대되는 버그. batch client 와 동일 수정)
+            pts = [(px + fh * dx, py + fh * dy), (bx0, by0), (0.5 * (bx0 + px), 0.5 * (by0 + py))]
             clear = 1e9
             for cxx, cyy in pts:
                 clear = min(clear, math.hypot(cxx - bx, cyy - by) - args.bowl_clear)
@@ -424,7 +424,7 @@ def main() -> int:
             clear_norm = max(0.0, min(1.0, clear / 0.04))
             bias = 0.1 if abs(abs(roll) - math.pi / 2) < 1e-3 else 0.0
             flip = abs(q_s[4] - cur_roll)
-            score = clear_norm + bias - 0.30 * flip
+            score = 1.5 * clear_norm + bias - 0.15 * flip + (-1.0 if clear < 0 else 0.0)
             if best is None or score > best[0]:
                 best = (score, roll, q_d, q_s, clear)
         if best is None:
