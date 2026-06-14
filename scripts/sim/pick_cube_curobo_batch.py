@@ -47,6 +47,8 @@ parser.add_argument("--max_retry", type=int, default=1, help="큐브당 grasp �
 parser.add_argument("--order_mode", default="fixed", choices=["fixed", "isolated"],
                     help="픽 순서: fixed=인덱스순(92.8% 동치), isolated=가장 고립 먼저")
 parser.add_argument("--face_yaw", action="store_true", help="grasp yaw=수직면 azimuth(tumbled 정합)")
+parser.add_argument("--pop_speed", type=float, default=2.5,
+                    help="팝콘 판정 큐브 속도(m/s). 정상 그릇낙하≈1.5, 초과=폭발로 간주(성공률 제외)")
 parser.add_argument("--pre_z", type=float, default=0.10)
 parser.add_argument("--lift_z", type=float, default=0.16)
 parser.add_argument("--bowl_z", type=float, default=0.12, help="그릇 위 release 높이(m). 낮으면 rim 충돌·placement 실패")
@@ -207,7 +209,10 @@ def main() -> int:
     device = env.device
     robot = scene["robot"]
     cubes = list(CUBE_NAMES[: args.active_objects])
+    cube_assets = [scene[c] for c in cubes]
     q_bias = torch.zeros((N, 5), device=device)
+    # 팝콘 감지: 에피소드 중 각 큐브 max 선속도(m/s). 정상≈그릇낙하 1.5, 팝콘 폭발=수 m/s.
+    cube_vmax = torch.zeros((N, len(cubes)), device=device)
 
     pl = BatchPlanner(args.planner_host, args.planner_port)
     ping = pl.call({"cmd": "ping"})
@@ -233,6 +238,9 @@ def main() -> int:
         g = torch.as_tensor(np.asarray(grip, np.float32) - GRIPPER_ACTION_OFFSET,
                             device=device).reshape(N, 1)
         env.step(torch.cat([q_cmd + q_bias, g], dim=-1))
+        for ci, ca in enumerate(cube_assets):   # 팝콘 감지용 큐브 속도 max 추적(GPU)
+            v = ca.data.root_lin_vel_w[:, :3].norm(dim=-1)
+            cube_vmax[:, ci] = torch.maximum(cube_vmax[:, ci], v)
 
     def cur_arm():
         return robot.data.joint_pos[:, :5].detach().cpu().numpy()   # (N,5)
@@ -570,11 +578,13 @@ def main() -> int:
         return placed
 
     def run_round():
+        nonlocal cube_vmax
         placed = [[False] * len(cubes) for _ in range(N)]
         if fail_layouts is not None:                       # 덤프 layout 재현 → 주입 후 정착
             apply_fail_layouts(fail_layouts)
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 35)
         layout0 = capture_layout0()                        # 정착된 초기 layout(덤프용)
+        cube_vmax.zero_()                                  # 팝콘 추적 리셋(spawn-settle 제외)
         s0 = nstep[0]
         ncubes = len(cubes)
         failed = [[0] * ncubes for _ in range(N)]          # env별 큐브별 실패 횟수(retry 소진)
@@ -604,12 +614,17 @@ def main() -> int:
         total = sum(per_env)
         sim_t = (nstep[0] - s0) * CONTROL_DT
         log("=" * 64)
+        vmax_np = cube_vmax.detach().cpu().numpy()
+        n_pop = int((vmax_np > args.pop_speed).sum())
         log(f"[batch] ROUND 결과: placed 총 {total}/{N * len(cubes)} "
-            f"(env평균 {total / N:.2f}/{len(cubes)}) | {nstep[0]-s0} steps = {sim_t:.1f}s")
+            f"(env평균 {total / N:.2f}/{len(cubes)}) | {nstep[0]-s0} steps = {sim_t:.1f}s | "
+            f"팝콘 큐브 {n_pop} (vmax>{args.pop_speed})")
         log("=" * 64)
-        return per_env, layout0
+        return per_env, layout0, [list(p) for p in placed], vmax_np
 
     results = []
+    placed_all = []          # (rounds×N, ncubes) bool — popcorn 분류용
+    vmax_all = []            # (rounds×N, ncubes) float
     last_layout0 = None
     # livestream(public_ip) 면 사용자가 관전하도록 무한 반복
     watch = bool(getattr(args, "livestream", 0)) and not args.headless
@@ -621,8 +636,10 @@ def main() -> int:
             env.reset()
             q_bias = torch.zeros((N, 5), device=device)
         log(f"[batch] ===== ROUND {i+1} =====")
-        per_env, last_layout0 = run_round()
+        per_env, last_layout0, placed_r, vmax_r = run_round()
         results.append(per_env)
+        placed_all.extend(placed_r)
+        vmax_all.extend(vmax_r.tolist())
         i += 1
     wall = time.time() - t_wall0
 
@@ -631,13 +648,36 @@ def main() -> int:
     if flat:
         success_rate = sum(flat) / (len(flat) * n_cubes)
         full = sum(1 for v in flat if v == n_cubes)
-        log(f"[batch] ===== 종합: {len(flat)} env-round | cube 성공률 {success_rate*100:.1f}% | "
-            f"all-{n_cubes} env {full}/{len(flat)} ({full/len(flat)*100:.1f}%) | wall {wall:.1f}s =====")
+        # ── 팝콘 분류 ──
+        P = np.array(placed_all, bool)                 # (E, ncubes)
+        V = np.array(vmax_all, np.float32)             # (E, ncubes)
+        E = P.shape[0]
+        pop = V > args.pop_speed                       # 팝콘 큐브
+        popfail = (~P) & pop                           # 미placed & 팝콘 = 폭발로 실패(제외 대상)
+        n_total = P.size
+        n_placed = int(P.sum())
+        n_popfail = int(popfail.sum())
+        succ_excl = n_placed / max(1, n_total - n_popfail)
+        # all-4 (env 단위) — 팝콘 폭발 없던 env 만(clean)
+        env_clean = ~popfail.any(axis=1)               # popcorn-fail 없는 env
+        full_excl = int((P.all(axis=1) & env_clean).sum())
+        n_clean = int(env_clean.sum())
+        pct = np.percentile(V.reshape(-1), [50, 90, 95, 99, 100]).round(2).tolist()
+        log(f"[batch] ===== 종합: {len(flat)} env-round | cube {success_rate*100:.1f}% | "
+            f"all-{n_cubes} {full}/{len(flat)} ({full/len(flat)*100:.1f}%) | wall {wall:.1f}s =====")
+        log(f"[batch] 팝콘제외: cube {succ_excl*100:.1f}% ({n_placed}/{n_total-n_popfail}) | "
+            f"all-{n_cubes} {full_excl}/{n_clean} ({full_excl/max(1,n_clean)*100:.1f}%) | "
+            f"popcorn-fail 큐브 {n_popfail}/{n_total} ({n_popfail/n_total*100:.1f}%)")
+        log(f"[batch] 큐브 vmax(m/s) pctl[50,90,95,99,max]={pct}  (thresh={args.pop_speed})")
         if args.taxonomy:
             with open(args.taxonomy, "w") as fh:
                 json.dump({"num_envs": N, "loops": args.loop, "n_cubes": n_cubes,
                            "per_round_placed": results, "success_rate": success_rate,
-                           "full_success_envs": full, "wall_s": wall}, fh, indent=2)
+                           "full_success_envs": full, "wall_s": wall,
+                           "pop_speed": args.pop_speed, "popfail_cubes": n_popfail,
+                           "success_rate_excl_popcorn": succ_excl,
+                           "full_excl": full_excl, "n_clean_envs": n_clean,
+                           "vmax_pctl": pct}, fh, indent=2)
             log(f"[batch] taxonomy 저장: {args.taxonomy}")
 
     # 최악 실패 layout 덤프 (마지막 round 의 layout0 기준, placed 적은 순)
