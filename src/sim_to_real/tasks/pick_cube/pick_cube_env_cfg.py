@@ -76,8 +76,16 @@ _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
 #   · y 매트 뒤 가장자리(≤0.10, base 에 너무 가까워 arm 이 접혀 top-down 자세 불리) 실패 →
 #     y_lo 를 0.105 로. y 상한 0.22 는 그릇(y=0.305)과 이격(min_bowl_sep 추가 보장).
 # (가장자리 외 실패는 reach 가 아니라 joint_fk random-FK 의 marginal grasp 분산임 — CONTEXT 참고.)
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.18, 0.20)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (0.115, 0.23)   # +y 0.01 shift
+# 큐브 스폰 사각형 = 데스크 매트 위 사용자 지정 영역 (매트-local cm, 좌하단=(0,0)).
+#   매트(860×400mm) env-local center=(0.09,0.245) → 좌하단 = (-0.34, 0.045).
+#   매핑: env_x = -0.34 + Xcm/100, env_y = 0.045 + Ycm/100.
+#   사용자 지정: X∈[16,56]cm, Y∈[11,25]cm → 아래 env-local m 범위.
+#   이 범위는 **큐브 볼륨**의 사각형 경계 → DR 은 volume_inset 만큼 중심을 안쪽으로.
+_MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (_MAT_BL_ENV[0] + 0.16, _MAT_BL_ENV[0] + 0.56)  # (-0.18, 0.22)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1] + 0.11, _MAT_BL_ENV[1] + 0.25)  # (0.155, 0.295)
+# 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(40mm) face 대각 절반 ((s/2)·√2).
+_CUBE_VOLUME_INSET: float = 0.040 * 0.5 * (2 ** 0.5)  # ≈ 0.0283
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
@@ -965,17 +973,21 @@ class PickCubeEventCfg:
         },
     )
 
-    # 큐브 4개를 workspace 내에서 완전 무작위 배치 (rejection sampling)
+    # 큐브 4개를 매트 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
+    #   · 볼륨이 사각형 안: volume_inset(40mm face 대각 절반)
+    #   · 볼륨 비겹침: min_cube_sep=0.060 (40mm footprint 대각 절반 쌍 ≈0.057 + 여유),
+    #                  min_bowl_sep=0.14 (그릇 반경0.06 + 큐브0.029 + arc 이동 0.05)
+    #   · full_orient: 이산 stable-face + random yaw (face 다양·drift 0·z 띄움 불요)
     randomize_cubes = randomize_cubes_scattered(
         CUBE_NAMES,
         BOWL_NAME,
         x_range=_CUBE_SCATTER_X_RANGE,
         y_range=_CUBE_SCATTER_Y_RANGE,
-        yaw_range_deg=(-30.0, 30.0),
-        min_cube_sep=0.10,
-        min_bowl_sep=0.18,
-        # base 발치(inner-reach, r<~0.13)는 안전고도 접근 IK 부재로 수행 불가 —
-        # y_lo(-0.46)·x 중앙대 조합이 r≈0.105 까지 허용하므로 base 이격으로 차단.
+        full_orient=True,
+        volume_inset=_CUBE_VOLUME_INSET,
+        min_cube_sep=0.060,
+        min_bowl_sep=0.14,
+        # base 발치(inner-reach, r<~0.13)는 안전고도 접근 IK 부재로 수행 불가.
         min_base_sep=0.135,
     )
 

@@ -37,20 +37,6 @@ def Xform "Scene"
             }
         }
 
-        def Material "Ceiling"
-        {
-            token outputs:surface.connect = </Scene/Looks/Ceiling/Preview.outputs:surface>
-
-            def Shader "Preview"
-            {
-                uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor = (0.88, 0.86, 0.82)
-                float inputs:metallic = 0
-                float inputs:roughness = 0.95
-                token outputs:surface
-            }
-        }
-
         def Material "DeskFriction" (
             prepend apiSchemas = ["PhysicsMaterialAPI", "PhysxMaterialAPI"]
         )
@@ -136,18 +122,6 @@ def Xform "Scene"
                 token outputs:surface
             }
         }
-    }
-
-    def Cube "Ceiling" (
-        prepend apiSchemas = ["MaterialBindingAPI"]
-    )
-    {
-        float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
-        rel material:binding = </Scene/Looks/Ceiling>
-        double size = 1
-        float3 xformOp:scale = (5, 4, 0.05)
-        double3 xformOp:translate = (0.36, 0.355, 2.5)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
     def Cube "DeskTop" (

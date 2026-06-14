@@ -43,7 +43,7 @@ def Xform "Bowl" (
         )
         {
             float physics:dynamicFriction = 0.1
-            float physics:restitution = 0.3
+            float physics:restitution = 0
             float physics:staticFriction = 0.12
             uniform token physxMaterial:frictionCombineMode = "min"
             uniform token physxMaterial:restitutionCombineMode = "min"

@@ -176,12 +176,22 @@ def _randomize_cubes_scattered_fn(
     min_base_sep: float = 0.0,
     robot_cfg: SceneEntityCfg | None = None,
     z_range: tuple[float, float] = (0.0, 0.0),
+    full_orient: bool = False,
+    volume_inset: float = 0.0,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
     순차 rejection sampling: 큐브를 하나씩 놓으면서 이미 놓인 큐브·그릇과의
     최소 거리 조건이 깨지는 후보를 버린다.  max_attempts 내 조건을 충족 못하면
     해당 env 는 default_root_state 위치로 fallback 한다.
+
+    ``volume_inset`` 으로 x/y 범위를 안쪽으로 줄여 **큐브 볼륨(footprint)이 사각형
+    안**에 들어오게 한다(중심이 아니라 부피 기준). 보통 max 큐브의 face 대각 절반
+    ((size/2)·√2) 을 준다.
+
+    ``full_orient=True`` 면 yaw 만이 아니라 **full 6D orientation(uniform SO(3))** 을
+    샘플하고, ``z_range`` 로 살짝 띄워 떨궈 random face 로 안착하게 한다. (face 가 매
+    reset 마다 달라짐 — sim2real 다양성.)
 
     bowl 의 DR 은 이 함수 실행 전(reset_scene → randomize_bowl 순서)에 완료되지
     않으므로 bowl 기준점으로는 default_root_state 를 사용하고, min_bowl_sep 에
@@ -192,8 +202,9 @@ def _randomize_cubes_scattered_fn(
         return
 
     device = env.device
-    x_lo, x_hi = x_range
-    y_lo, y_hi = y_range
+    # 볼륨이 사각형 안에 들어오도록 중심 샘플 범위를 inset 만큼 축소
+    x_lo, x_hi = x_range[0] + volume_inset, x_range[1] - volume_inset
+    y_lo, y_hi = y_range[0] + volume_inset, y_range[1] - volume_inset
     yaw_lo = yaw_range_deg[0] * math.pi / 180.0
     yaw_hi = yaw_range_deg[1] * math.pi / 180.0
 
@@ -270,11 +281,25 @@ def _randomize_cubes_scattered_fn(
 
         placed_xy.append(torch.stack([final_x, final_y], dim=-1))
 
-        # 무작위 yaw
-        yaw_delta = torch.rand(n, device=device) * (yaw_hi - yaw_lo) + yaw_lo
-        zero = torch.zeros(n, device=device)
-        yaw_quat = math_utils.quat_from_euler_xyz(zero, zero, yaw_delta)
-        new_quat = math_utils.quat_mul(default[:, 3:7], yaw_quat)
+        # orientation: full_orient 면 **이산 stable-face + random yaw**.
+        #   평평한 매트 위 큐브는 6면 중 하나로만 안착 → 6 (roll,pitch) 중 택1 후 yaw 균등.
+        #   처음부터 안착 자세라 tumble drift=0(볼륨 in-rect 보장)·z 띄움 불요·면 다양.
+        #   uniform SO(3)+낙하 는 drift 로 사각형 이탈(9% OOB)해 폐기.
+        if full_orient:
+            faces = torch.tensor(
+                [[0.0, 0.0], [math.pi, 0.0], [math.pi / 2, 0.0],
+                 [-math.pi / 2, 0.0], [0.0, math.pi / 2], [0.0, -math.pi / 2]],
+                device=device,
+            )
+            pick = torch.randint(0, 6, (n,), device=device)
+            rp = faces[pick]
+            yaw = torch.rand(n, device=device) * (2.0 * math.pi)
+            new_quat = math_utils.quat_from_euler_xyz(rp[:, 0], rp[:, 1], yaw)
+        else:
+            yaw_delta = torch.rand(n, device=device) * (yaw_hi - yaw_lo) + yaw_lo
+            zero = torch.zeros(n, device=device)
+            yaw_quat = math_utils.quat_from_euler_xyz(zero, zero, yaw_delta)
+            new_quat = math_utils.quat_mul(default[:, 3:7], yaw_quat)
 
         # z 분산(쌓임 유발): default z 위로 [z_lo, z_hi] 띄워 spawn → 낙하·적재
         z_lo, z_hi = z_range
@@ -327,6 +352,8 @@ def randomize_cubes_scattered(
     min_base_sep: float = 0.0,
     robot_name: str = "robot",
     z_range: tuple[float, float] = (0.0, 0.0),
+    full_orient: bool = False,
+    volume_inset: float = 0.0,
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
 
@@ -365,6 +392,8 @@ def randomize_cubes_scattered(
             "min_base_sep": float(min_base_sep),
             "robot_cfg": SceneEntityCfg(robot_name) if min_base_sep > 0.0 else None,
             "z_range": z_range,
+            "full_orient": bool(full_orient),
+            "volume_inset": float(volume_inset),
         },
     )
 

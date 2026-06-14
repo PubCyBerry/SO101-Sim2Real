@@ -57,6 +57,8 @@ parser.add_argument("--view_eye", type=float, nargs=3, default=[0.9, -0.9, 1.15]
 parser.add_argument("--view_lookat", type=float, nargs=3, default=[0.20, 0.10, 0.70])
 parser.add_argument("--public_ip", default="", help="원격 WebRTC livestream 공개 IP(tailscale). 지정 시 livestream mode 1 강제")
 parser.add_argument("--cameras", action="store_true", help="top/wrist/front 카메라 리그 주입 + 3-패널 docking viewport")
+parser.add_argument("--layout", default="assets/layouts/pick_cube_3cam.json",
+                    help="viewport docking layout JSON(ui.Workspace dump). ROOT 상대경로. 없으면 수동 dock fallback")
 from isaaclab.app import AppLauncher  # noqa: E402
 
 AppLauncher.add_app_launcher_args(parser)
@@ -185,10 +187,27 @@ def dock_camera_viewports():
             log(f"[demo] viewport {title}: {path}")
         except Exception as exc:
             log(f"[demo] viewport {title} 실패: {exc}")
+    app = omni.kit.app.get_app()
+    for _ in range(3):
+        app.update()
+    # 저장된 layout JSON(ui.Workspace dump) 복원. window title 이 "SO101 Top/Wrist/Front Camera"
+    # 로 일치하므로 위치·크기가 그대로 복원된다. 실패 시 수동 dock_in fallback.
+    layout_path = os.path.join(ROOT, args.layout) if not os.path.isabs(args.layout) else args.layout
+    if os.path.isfile(layout_path):
+        try:
+            import json
+            with open(layout_path) as fh:
+                dump = json.load(fh)
+            ui.Workspace.restore_workspace(dump)
+            for _ in range(3):
+                app.update()
+            log(f"[demo] layout 복원: {layout_path}")
+            return
+        except Exception as exc:
+            log(f"[demo] layout 복원 실패({exc}) → 수동 dock fallback")
+    else:
+        log(f"[demo] layout 파일 없음({layout_path}) → 수동 dock fallback")
     try:
-        app = omni.kit.app.get_app()
-        for _ in range(3):
-            app.update()
         main_vp = ui.Workspace.get_window("Viewport")
         t, w, f = created.get("Top Camera"), created.get("Wrist Camera"), created.get("Front Camera")
         if main_vp is not None and t is not None:

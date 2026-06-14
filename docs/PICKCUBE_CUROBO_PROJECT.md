@@ -27,7 +27,7 @@
 | **P1** | so101 cuRobo config — 공식 RobotBuilder sphere fit (홀더 포함) | 🟢 DONE (54 spheres/9링크, so101.xrdf+so101_curobo.yml, IK 81%, Viser·MPC·MotionPlanner 검증) | A |
 | **P1+** | SO-101 FK·IK 단독 검증 + joint-goal 인터랙티브 데모 + FK 일관성 진단 | 🟢 DONE (pose-goal 5-DOF 벽 확증·MPC차이 규명·**해석적FK↔cuRoboFK 6.9mm 발산 발견**·joint-goal 데모 작동) | A |
 | **P2** | cuRobo 충돌 플래닝 ↔ pick-place 통합 (single-env) | 🟢 DONE (**IPC 사이드카**·4-큐브 side-approach·장애물 회피·DR·livestream+3cam, **~18–20초 4/4**) | A |
-| **P3** | **multi-env 배치** 스케일 (BatchMotionPlanner·multi_env world) · throughput | ⚪ TODO 🔥 (단일 plan → 배치 plan_cspace, 다음 논의) | A |
+| **P3** | **multi-env 배치** 스케일 (BatchMotionPlanner·multi_env world) · throughput | 🟢 DONE (서버 배치+청크·클라 lock-step·grasp-retry. **N=256 chunk=64 retry=1: cube 64.6%·all-4 18.8%·VRAM 20GB·3 epi/s**). all-4 상향 = P4 min_cube_sep | A |
 | **P4** | 큐브 간 최소거리 강화 (clustering 해소) | ⚪ TODO | B |
 | **P5** | 렌더 env + obs/action 공유 계약 · LeRobot 기록 | ⚪ TODO | B |
 | **P6** | VLA 시뮬 추론 (single-env · ROS2 + async · 인터랙티브) | ⚪ TODO | C |
@@ -203,17 +203,53 @@ cuRobo 의 full-gripper sphere 충돌모델이 이를 원리적으로 제공(해
 - [ ] 실행층: per-env traj buffer 전진 + q_bias(C6)
 - [ ] **검증**: 4-env GUI(R/N) — 큐브 안 건드림·그릇 안 밀침 영상 확인
 
-### P3 — 배치 스케일·청크 ⚪ (Track A)
-- [ ] `multi_env=True max_batch_size=2048` vs 청크(256–512), VRAM/throughput 실측
-- [ ] phase 경계 `update_world` (큐브 집을 때마다 장면 변화)
-- [ ] 256→2048 wall-clock·VRAM(48GB), OOM 시 청크 루프
+### P3 — 배치 스케일·청크 ⚪ 🔥 (Track A) — **계획 확정(2026-06-14)**
+**구조 = lock-step 벡터화 SM**(D12): 전 env 동일 phase tape(고정 순서 Cube1→4), 매 IK/plan/step 배치,
+per-env active/placed/failed 마스크. cuRobo `BatchMotionPlanner`(multi_env=True)가 "N문제 N world 1 GPU
+call" → lock-step 이 설계 의도. straggler 세금 미미(고정 horizon traj 일괄 반환, retry 단위만).
+- [x] **서버 additive 배치 엔드포인트**(`curobo_planner_server.py`) 🟢 — `BatchMotionPlanner`(multi_env,
+      max_batch_size) + 배치 `IKSolver`(collision-free) + `init_batch`/`world_batch`/`ik_batch`/`plan_batch`.
+      단일-env 엔드포인트(ik/plan/set_world) **무손상**. **N=4 GPU smoke 통과**: IK pos_err 0.05mm(D9 refine),
+      plan 4/4, traj trim H=61. 함정 2건: ① per-env world buffer N개는 **scene_model 이 길이 N 리스트**일 때만
+      할당(cache-only/단일 scene=1env) → 임시 YAML(N개 동일 스키마 scene 리스트) 경로 전달 ② batch
+      `interpolated_trajectory`=buffer 전체(Hbuf~5000, last_tstep 이후 미정의, `get_interpolated_plan`은
+      batch raise) → per-env `interpolated_last_tstep` trim + goal-pad 로 Hmax 균일화
+- [x] **서버 내부 청크** 🟢 — 단일배치 256 = **OOM**(peak 42.5GB, planner build ~40GB+Isaac 공유불가).
+      `init_batch(chunk)` 로 planner max_batch_size=chunk 빌드, `ik_batch`/`plan_batch` 가 n_envs 를 chunk
+      단위 분할(부분청크 패딩, plan 은 per-chunk world 로드 → 전역 Hmax goal-pad). 물리배치(Isaac n_envs)↔
+      planner 배치(chunk) 분리. **N=256 chunk=64 성공**: peak VRAM **20GB**, **3.04 epi/s**(wall 84s), cube
+      56.8%·all-4 17.2%. **chunk⊥성공률 확증**(N=16 chunk8 71.9% ≈ 비청크 65.6%) — 청크는 VRAM/throughput 전용
+- [x] **신규 클라이언트** `scripts/sim/pick_cube_curobo_batch.py` 🟢 — lock-step 벡터화. 스칼라 기하 헬퍼
+      (closing_axis·to_base·yaw_base·grasp 선정)는 데모서 복제 후 **per-env 루프로 요청 빌드**, GPU(ik_batch·
+      plan_batch)·env.step 만 배치. per-env active 마스크(grasp 도달/IK/plan 실패 env hold). q_bias(C6)·side-
+      approach·DR cube_yaw·per-env world 회피 동일. **GPU smoke**: N=4 고정 16/16(100%, 15.2s sim)·**N=16 DR
+      42/64(65.6%), all-4 5/16, wall 27.4s**. 단일-env 데모 무손상. 함정: numpy float32 JSON 직렬화 불가 →
+      to_base/yaw/roll float() 코어션
+- [x] **grasp-retry** 🟢 — `--max_retry`(기본 1). 큐브당 미placed env 만 bounded 재시도(성공/도달불가 env hold,
+      lock-step). 큐브별 attempt_mask 축소. **N=256 chunk=64 max_retry=1**: cube **56.8%→64.6%**(+7.8pp),
+      all-4 17.2%→18.8%, sim 20→40s·wall 84→173s(~2×). VRAM 무관(19.6GB). **all-4 천장은 retry 아님**(클러스터
+      hard layout) → P4 min_cube_sep
+- [ ] 추가 lever: `plan_attempts`(현 4 vs 단일-env 8)·`ik_seeds`(현 48 vs 64)↑, **P4 min_cube_sep**(all-4 천장)
+- [ ] **배치 크기 = 256 시작→실측 climb**(D13): max_batch_size 256 으로 VRAM/wall-clock 실측, OOM·여유 보고
+      512→2048 단계 상향. 물리배치(Isaac N) ↔ planner 배치(≤max_batch_size, 서버 청크) 분리. IPC 2048≈수 MB
+- [ ] **검증 ≥256-env**(C5) taxonomy(success/clean/steps/reason_histogram)
 
-### P4 — 큐브 간 최소거리 강화 ⚪ (Track B)
-> **방향 정정(사용자)**: workspace 안쪽 축소 ❌ → **`min_cube_sep` 상향**으로 뭉침 방지(뭉치면 grasp
-> pose 못 찾음 = 1↔4큐브 격차 근원).
-- [ ] DR `min_cube_sep`(현 0.10) 상향. SM `--cube_sep`(`pick_cube_state_machine.py:509`)로 노출됨
-- [ ] workspace **유지/소폭 확장**(축소 금지) — rejection sampling 실패율로 상한 판단
-- [ ] taxonomy reason_histogram + **clean(first-attempt)** 1차 지표
+### P4 — DR 영역·자세 재설계 + grasp 닫힘축 🟢 (Track B) — **2048: cube 87.9%·all-4 60.0%**(256: 95.3%·82.8%)
+> **방향(사용자, 2026-06-14)**: livestream 으로 실패 관전 → unreachable 있음 확인 → **큐브 스폰을 매트 위
+> 도달가능 사각형으로 한정 + 볼륨 비겹침 + 6D face 랜덤화**로 재설계.
+- [x] **매트 사각형 영역** 🟢 — 데스크 매트(860×400mm) 좌하단=env-local(-0.34,0.045) 기준 사용자 지정
+      매트-local cm 사각형(X[16,56]·Y[11,25]) → **env-local x[-0.18,0.22]·y[0.155,0.295]**. `volume_inset`
+      (=40mm face 대각 절반 0.0283)으로 **큐브 볼륨이 사각형 안**(중심 아니라 부피 기준). 옛 y[0.115,0.23]
+      대비 **+y 전진**(base 근접 unreachable 완화)
+- [x] **볼륨 비겹침** 🟢 — `min_cube_sep` **0.10→0.060**(40mm footprint 대각 쌍 ≈0.057+여유, **non-overlap
+      최소**·과분리 아님), `min_bowl_sep=0.14`(그릇 반경0.06+큐브0.029+arc0.05). 검증 N=64: 겹침 0쌍, OOB 0
+- [x] **6D face 랜덤화** 🟢 — `full_orient`: **이산 stable-face(6면) + random yaw**(uniform SO(3)+낙하는 tumble
+      drift 9% OOB → 폐기). drift 0·z 띄움 불요. 큐브는 면 동일해도 felt 텍스처 seam 이 달라 **VLA 시각 다양성**.
+      검증: 6면 균등(flat 33%)·볼륨 in-rect·비겹침
+- [x] **256 재측정** 🟢 — 새 DR 로 **cube 64.6%→92.8%(+28pp)·all-4 18.8%→74.2%(+55pp)**. 분포 {2:8,3:58,4:190}
+      — **0/1개 실패 env 전무**(옛 0개 37·1개 31). 전진 Y 도달가능 영역이 unreachable 완전 제거. sep 0.060 클러스터
+      우려 무효(reachability 이득이 압도). 남은 부족 = 1-2개 놓친 66 env(tight pack/marginal grasp)
+- [ ] 95%+ push lever: `plan_attempts` 4→8·`ik_seeds` 48→64↑, 잔여 66 env 진단(클러스터면 sep 소폭↑)
 
 ### P5 — 렌더 env + 공유 obs/action 계약 ⚪ (Track B)
 - [ ] **정확도 검증**: 2048-env state-only(`--headless --taxonomy`, 카메라 off)
@@ -261,6 +297,17 @@ Track D (독립):       ovrtx ‖ ovphysx 실측
 | 2026-06-14 | **P2 IPC 사이드카 + 1-큐브** | `scripts/planning/curobo_planner_server.py`(cuRobo 프로세스, ZMQ REP: ik/plan/set_world) + `scripts/sim/pick_cube_curobo_demo.py`(Isaac env, ZMQ REQ). 1-큐브 end-to-end: ready→pre→descend→slide→close→lift→bowl→release. 첫 grasp whiff(top-down center, fixed jaw 윗면 찌름) → **side-approach**(SM `_closing_axis` 이식)로 placed=True |
 | 2026-06-14 | **P2 4-큐브 + 장애물 회피** | 4-큐브 순차, **per-env world**(set_world: 나머지 큐브+그릇 cuboid, target 제외) → plan_cspace 회피. **clearance-aware roll 선정**(±90/0/π). 함정·수정 6건: ① IK 충돌-aware 과다기각 → **IK 충돌-free·plan_cspace 만 충돌-aware** ② grasp 미세동작 plan_cspace 과다기각 → **직접 joint 보간** ③ bowl 먼 곳 pitch -45→-10 ④ DR cube yaw(±30°) 무시 → **cube_yaw 사용**(모서리 잡기 해소) ⑤ lift→bowl 실패 → 직접 fallback ⑥ READY self-collision 경계 sag → backoff(-1.3,1.2)+cube1 exact-start |
 | 2026-06-14 | **P2 완료 — crisp·timed·cameras** | crisp: plan 궤적 subsample(stride3)+seq_exec 14~16step → **headless DR 4/4·4/4·4/4, 18~20초**(목표 <20s 달성, control 30Hz). 모션: READY 시작→bowl떨군뒤 다음큐브 직행(per-cube READY 복귀 제거)→끝 READY 복귀(droop 방지). livestream(WebRTC mode1, PUBLIC_IP, **0.88Mbps**)+top/wrist/front 3-cam docking viewport. 사용자 "완벽" |
+| 2026-06-14 | **카메라 focal 14mm + layout JSON** | 3-cam focal 23→**14mm**(`pick_cube_env_cfg._TOP/_WRIST/_FRONT_CAMERA_FOCAL`, teleop 튜너 기본값 정합). viewport layout 저장본 → `assets/layouts/pick_cube_3cam.json`, `pick_cube_curobo_demo.dock_camera_viewports()`가 수동 dock_in 대신 `ui.Workspace.restore_workspace(dump)` JSON 복원(window title 일치, 실패 시 dock fallback, `--layout` override) |
+| 2026-06-14 | **P3 계획 확정 🔵** | multi-env 논의 → **lock-step 벡터화 SM**(D12, async 기각: env.step 글로벌+cuRobo batch 정합), **신규 `pick_cube_curobo_batch.py`**(단일-env 데모 보존), **256→실측 climb**(D13, 서버 청크로 물리/planner 배치 분리). cuRobo batch API 소스 검증: `plan_cspace(goal_states(N,dof),current_state(N,dof))` 단일 GPU pass, per-env world=동일 스키마 N슬롯+`update_obstacle_pose`/`enable_obstacle(env_idx)`, multi_env→PRM off(cspace OK). 착수=서버 additive 배치 엔드포인트 |
+| 2026-06-14 | **P3 서버 배치 엔드포인트 🟢** | `curobo_planner_server.py` additive: `init_batch`(BatchMotionPlanner multi_env + 배치 IKSolver collision-free)·`world_batch`(per-env update_obstacle_pose+enable_obstacle)·`ik_batch`(per-env 해석적 seed→배치 cuRobo IK refine)·`plan_batch`(plan_cspace N + per-env trim/goal-pad). 단일-env 무손상. **N=4 GPU smoke 통과**(IK 0.05mm·plan 4/4·H=61). 함정: ① N-env world buffer = scene_model 길이 N 리스트 필수(임시 YAML) ② batch interpolated_trajectory 미trim(Hbuf~5000)→last_tstep trim. 다음=클라 `pick_cube_curobo_batch.py` |
+| 2026-06-14 | **P3 배치 클라이언트 🟢** | `pick_cube_curobo_batch.py` lock-step 벡터화(스칼라 기하 per-env 루프 + GPU·step 배치). **N=4 고정 16/16(100%, 15.2s sim)·N=16 DR 42/64(65.6%, all-4 5/16, wall 27.4s)** 크래시 없음·per-env 이질성 정상. 함정: numpy float32 JSON 불가→float() 코어션 |
+| 2026-06-14 | **P3 서버 청크 + 256 측정 🟢** | 단일배치 256 OOM(42.5GB)→**서버 내부 청크**(`init_batch(chunk)`, ik/plan chunk 분할+부분청크 패딩+per-chunk world 로드+전역 Hmax pad). **N=256 chunk=64**: peak VRAM **20GB**·**3.04 epi/s**(wall 84s)·cube 56.8%·all-4 17.2%·분포{0:37,1:31,2:57,3:87,4:44}. **chunk⊥성공률**(N16 chunk8 71.9%≈비청크). 사용자 VRAM 질문 정리: 주범=IK/trajopt seed 텐서(world_model 아님, depth는 늘림)·warp 통일 무의미(D10)·RL 16384는 가벼운 step이라 별개·16→256 cliff 없음(둘 다 ~65%, DR 난이도가 원인). 다음=grasp-retry(성공률 lever, 256서 검증) |
+| 2026-06-14 | **P3 grasp-retry 🟢 → P3 완료** | `--max_retry`(기본1) 큐브당 미placed env bounded 재시도(lock-step, attempt_mask 축소). **N=256 chunk=64 retry=1: cube 56.8%→64.6%(+7.8pp)·all-4 17.2%→18.8%·sim 40s·wall 173s(~2×)·VRAM 19.6GB**. N=16 seed0 retry=2 79.7%·all-4 50%. **all-4 천장은 retry 무관**(클러스터 hard layout, 37/256 env=0) → P4 min_cube_sep 가 진짜 lever. **P3 DONE** |
+| 2026-06-14 | **실패 관전 livestream + P4 DR 재설계 🟢** | `pick_cube_curobo_batch.py` 에 `--dump_fail`/`--load_fail`(worst-N 실패 layout 초기 pose env-origin 상대 덤프→재현, viewer/watch 무한루프) 추가. N=4 livestream 관전 → 사용자 "진짜 unreachable 있음" 확인(worst 4 중 3개 큐브간 40-43mm 클러스터, 1개 106mm reach-edge). → **DR 재설계**: ① 매트 사각형 영역(매트-local cm→env-local x[-0.18,0.22]·y[0.155,0.295], volume_inset 0.0283 으로 볼륨 in-rect) ② 볼륨 비겹침(min_cube_sep 0.10→0.060·min_bowl_sep 0.14) ③ full_orient=이산 stable-face+yaw(6면 균등·drift0, uniform SO(3)+낙하 9% OOB 폐기). N=64 검증: OOB 0·겹침 0·6면 균등. `domain_randomization._randomize_cubes_scattered_fn`(full_orient·volume_inset 추가)·`pick_cube_env_cfg`(_MAT_BL_ENV·rect 상수) |
+| 2026-06-14 | **새 DR 256 재측정 🟢** | N=256 chunk=64 retry=1 seed0: **cube 64.6%→92.8%(+28pp)·all-4 18.8%→74.2%(+55pp)**·sim 32s·wall 104s. 분포 {2:8,3:58,4:190} — **0/1개 실패 env 전무**(전진 Y 도달가능 영역이 unreachable 완전 제거). sep 0.060 클러스터 우려 무효. 성공기준(~95-99%) 근접. 잔여=1-2개 놓친 66 env. 다음 lever=plan_attempts/ik_seeds↑ |
+| 2026-06-14 | **천장 제거 + 회귀 디버깅 ⚠** | 사용자 livestream 피드백 3건. ① **천장 제거**(author scene.usd, 거슬림) 🟢. ② **팝콘(그릇서 큐브 충돌 폭발)**: restitution 은 원인 아님(bowl combine=min → 큐브0 과 min=0 이미 무반발). **maxDepenetrationVelocity 1.0→0.5 시도 = grasp grip 약화로 92.8→77% 회귀**(침투 분리 cap 이 jaw grip 방해) → **원복**. 팝콘=가벼운 큐브(20-35g) 그릇 다중 적재 솔버 불안정, maxDepen 으론 못 고침(grasp 비용 큼). ③ **grasp-face fix**(동적순서 isolated+free-side score+face-yaw): 토글 ON 시 89.5%/65.6% 회귀(isolated 가 reach-edge 큐브 먼저 집음) → **기본 OFF**(`--order_mode/-free_side/--face_yaw` 플래그 보존). **bowl_z 0.08 도 회귀(rim 충돌)→0.12 원복**. 물리 원복 후 **seed0 256 = 93.3%/all-4 76.2% 재확인**(baseline 안정). 팝콘·grasp-face 는 비회귀 방법 재설계 필요 |
+| 2026-06-14 | **닫힘축 clearance 버그 수정 🟢🎯** | 사용자 정밀 지적: "X-나란 큐브는 Y로 닫아야 하는데 X로 닫아 실패". 원인=select_grasp 의 finger clearance 점을 닫힘축 **수직**(fx,fy=-dy,dx)으로 잡아 → 이웃 향한 closing 이 오히려 clearance 높게 나와 우대(정반대 버그). **수정: finger 점을 닫힘축 방향(dx,dy)으로** → 이웃 향한 closing penalize → 수직 closing 선택. score=1.5×clear-0.15×flip. **seed0 256 = 95.3%/all-4 82.8%**(93.3/76.2 대비 +2/+6.6pp, retry↓로 24s 더 빠름). **성공기준 ~95% 달성**. 기본 적용(order fixed·naive yaw 유지). 남음=팝콘(maxDepen 불가→대안) |
+| 2026-06-14 | **2048 정확도 평가 🟢** | N=2048 chunk=64 retry=1 seed0(닫힘축 수정·물리원복): **cube 87.9%·all-4 60.0%**·sim 34s·wall 469s(7.8min). 분포 {1:5,2:165,3:649,4:1229} — **1개 놓침 32%(649)가 지배 실패**. 256(95.3%) 대비 낮음=소표본 과대평가(C5)+**팝콘(그릇서 큐브 튕겨 나가 placement 실패)**이 정확도도 깎음. **팝콘 = 미해결 핵심 문제**(아래) |
 
 > 진행 시 여기에 Phase별 실측(taxonomy success·clean·steps·reason_histogram, throughput)을 누적 기록.
 
@@ -281,6 +328,8 @@ Track D (독립):       ovrtx ‖ ovphysx 실측
 | D9 | **해석적 IK config 직접 사용 금지 — cuRobo IK 로 refine** (P2 선행) | 해석적 FK 는 평면근사라 cuRobo(실제 URDF) FK 와 mean 6.9mm·max 15mm 발산(`_probe_fk_consistency`). 직접 plan_cspace 면 grasp 가 큐브 빗나감. recipe: 해석적 ik_reach → (a) 5-DOF **feasible orientation** + (b) **seed config**/branch 공급 → cuRobo IK(goal=실제 큐브pos+feasible orient, seed=해석적q) → 정확 goal config(검증: feasible pose 0.00mm) → plan_cspace. cuRobo IK 의 5-DOF 한계(임의 orientation 실패)는 orientation 을 해석적해서 가져오므로 회피 |
 | D10 | **cuRobo+Isaac = subprocess IPC** (in-process 금지) | warp 1.14(cuRobo) ↔ omni.warp.core 1.8.2(isaacsim) 상호배타 — 한 프로세스 공존 물리적 불가(ABI 게이트 양방향 확증). cuRobo 플래너 = 별도 프로세스(warp 1.14, isaac 無), Isaac env = 메인, **ZMQ REQ/REP**(ik/plan/set_world). plan 은 phase 당 1회라 IPC 오버헤드 무시. P0 트랩이 예고. P3 배치도 이 구조 유지 |
 | D11 | **IK 충돌-free, plan_cspace 만 충돌-aware** + **grasp 미세동작 직접 joint 실행** | set_world 는 planner 만 갱신(IK 는 더미씬 유지). IK 에도 장애물 주면 이웃 근처 grasp config 를 그리퍼 sphere 스침으로 과다 기각(수동 가능한데 실패). 이웃 회피는 env clearance roll-선택 + plan_cspace. grasp 미세동작(descend·slide·lift)은 plan_cspace 가 target 근처서 과다기각 → 직접 보간(짧고 clearance 확보됨). 긴 transit(→pre·lift→bowl)만 plan_cspace |
+| D12 | **P3 = lock-step 벡터화 SM**(async per-env 기각) | env.step 은 글로벌 배치라 async 는 한 env 일시정지 불가 + cuRobo batch 모델(N문제 N world 1 GPU call)과 충돌 + bookkeeping 폭증. lock-step(전 env 동일 phase tape, 고정 순서 Cube1→4)이 batch 설계 의도와 정합·결정적. 세금=straggler 인데 고정 horizon traj 일괄 반환이라 waypoint 단위 straggler 없음(retry 단위뿐). per-env world = 동일 스키마 N슬롯 + `update_obstacle_pose`/`enable_obstacle(env_idx)`. **신규 `pick_cube_curobo_batch.py`**(단일-env 데모 100% 보존, 두 파일 중복 일부 수용 — 사용자) |
+| D13 | **배치 크기 256 시작→실측 climb**(2048 직행 기각) | max_batch_size 는 config 생성 시 고정. 첫 실측서 OOM/디버그 회피 위해 256(C5 검증 하한 충족)서 시작, VRAM/wall-clock 보고 512→2048 단계 상향. 물리배치(Isaac N)↔planner 배치(≤max_batch_size)는 **서버 내부 청크로 분리** → 클라는 항상 N개 전송 |
 
 ---
 
@@ -303,6 +352,8 @@ Track D (독립):       ovrtx ‖ ovphysx 실측
 | set_world 후 IK 도달가능한데 plan/grasp 실패 (수동 가능) | IK 가 충돌-aware 면 이웃 근처 config 과다 기각. **IK 는 충돌-free**(D11). grasp 미세동작은 **직접 joint 보간**(plan_cspace 미사용) |
 | 시작 자세서 안 움직임 (전 큐브 →pre plan 실패) | READY 가 cuRobo self-collision **경계 바로 안쪽**(-1.5,1.4)이면 q_bias sag 로 측정 config 가 경계 넘어 plan 시작 실패. **경계서 떨어진 fold(-1.3,1.2) backoff** + cube1 은 exact READY(측정값 말고) 서 plan |
 | 큐브 4개 후 팔이 흘러내림 | idle 시 `act(cur_arm())`(측정값 홀딩)=droop 강화. **`act(READY)`**(목표 명령)로 유지 |
+| **grasp 닫힘축이 이웃 향함(X-나란→X-close 실패)** | select_grasp clearance finger 점을 닫힘축 **수직** 잡으면 이웃 향한 closing 우대(버그). finger 점을 **닫힘축 방향(dx,dy)**으로 → 이웃 향한 closing penalize → 수직 closing 선택. 95.3%@256 |
+| **🔴 팝콘(그릇서 큐브 충돌 폭발) — 미해결** | 가벼운 큐브(20-35g) 미끌 그릇 다중 적재 → 솔버 침투 해소 불안정 → 폭발(2048서 1-miss 32% 의 큰 몫). **maxDepenVel↓ = grasp 15pp 회귀(폐기). restitution 무관(combine min). friction 변경=넘침위험(금지).** 후보(미검증, 비회귀 우선): ① **damping↑**(linear/angular 1.5→4~8: 충돌 에너지 소산, free-motion만 영향, grasp 무해 기대) ② **solverPos 32→64**(velocity cap 아님) ③ **adaptive release**(그릇 채워질수록 release 높이↑, 낙하 KE↓) ④ 큐브 mass↑(grasp 재검증 필요) ⑤ compliant contact. **각 후보 256 격리검증 필수**(maxDepen 처럼 회귀 가능) |
 
 ---
 

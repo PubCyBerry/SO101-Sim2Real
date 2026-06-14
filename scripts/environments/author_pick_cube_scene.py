@@ -116,7 +116,8 @@ BOWL_VOXEL_RESOLUTION: int = 500000    # 분해 정밀도(기본 500k)
 #   큐브=average, 그릇=min, 매트/책상=max 조합으로 그릇 내부만 미끌게 하고
 #   그릇-매트·큐브-매트 접촉(max 우세)은 마찰을 유지한다(밀림 방지 + 큐브 안정).
 FRICTION_CUBE = (1.8, 1.5, 0.0)     # combine=average → 그릇(min)과 접촉 시 낮은 쪽
-FRICTION_BOWL = (0.12, 0.10, 0.3)   # 미끌 — 매끈한 플라스틱 내부. combine=min
+FRICTION_BOWL = (0.12, 0.10, 0.0)   # 미끌 — 매끈한 플라스틱 내부. combine=min.
+#   restitution 0 (옛 0.3 = 큐브가 그릇서 튕겨 서로 충돌→솔버 폭발"팝콘". 반발 제거)
 FRICTION_DESK = (0.9, 0.8, 0.0)     # combine=max (그릇·큐브 안착)
 
 
@@ -588,7 +589,8 @@ def author_cube(name: str) -> "Usd.Stage":
         angular_damping=1.5,
         linear_damping=1.5,
         solver_position_iterations=32,
-        solver_velocity_iterations=8,
+        solver_velocity_iterations=8,          # 원복(16 시도→grasp 회귀 격리, maxDepen 이 주범)
+        max_depenetration_velocity=1.0,        # 원복(0.5 가 grasp grip 약화 92.8→77% 회귀)
     )
 
     looks = f"/{name}/Looks"
@@ -645,6 +647,7 @@ def author_bowl() -> "Usd.Stage":
         linear_damping=2.0,
         solver_position_iterations=16,
         solver_velocity_iterations=4,
+        max_depenetration_velocity=1.0,        # 원복(grasp 회귀 격리)
     )
 
     looks = "/Bowl/Looks"
@@ -782,7 +785,7 @@ def author_scene() -> "Usd.Stage":
     looks = "/Scene/Looks"
     UsdGeom.Scope.Define(stage, looks)
     mats: dict[str, str] = {}
-    for mat_name in ("DeskWood", "DeskMat", "Ceiling"):
+    for mat_name in ("DeskWood", "DeskMat"):   # Ceiling 제거
         color, roughness, metallic = MATERIALS[mat_name]
         mats[mat_name] = _visual_material(stage, looks, mat_name, color, roughness, metallic)
     desk_friction = _physics_material(stage, looks, "DeskFriction", FRICTION_DESK)
@@ -796,12 +799,7 @@ def author_scene() -> "Usd.Stage":
     # → 광원은 PickCubeSceneCfg 가 /World/Light·/World/KeyLight(env 계층 밖, 복제 안 됨)에
     #   단일로 author 한다. usdview 단독 검증 시엔 뷰어 기본 조명/헤드라이트를 쓴다.
 
-    # 천장.
-    _static_cube(
-        stage, "/Scene/Ceiling",
-        translate=_shift((0.0, 0.31, 1.795)), scale=(5.0, 4.0, 0.05),
-        visual_mat=mats["Ceiling"],
-    )
+    # 천장 제거(사용자) — 불필요·거슬림.
     # 상판: 1600×800×25mm, 윗면 = world z=0.705.
     _static_cube(
         stage, "/Scene/DeskTop",
