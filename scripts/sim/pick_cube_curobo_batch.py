@@ -243,7 +243,34 @@ def main() -> int:
     record_mode = bool(args.record_dir)
     rec_buf = [[] for _ in range(N)]   # per-env 라운드 프레임 [(action, state, images)]
     rec_capture = [False]
+    rec_freeze = [False] * N           # per-env 터미널(all-placed/진행불가) → 이후 idle frame 미기록(tail trim)
     successes_rec = [0]
+    # env action term offset(=init_state.joint_pos). slew-limited processed_actions 는 post-offset →
+    # raw-equiv 환원 위해 빼준다(arm 0·gripper 0.20). 기록 규약(pre-offset)·deploy 정합 보존.
+    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, GRIPPER_ACTION_OFFSET], np.float32)
+
+    def _resolve_arm_term():
+        """단일 'arm' action term(6축 전부 커버) 핸들. IsaacLab 버전별 접근 차이 흡수."""
+        am = env.action_manager
+        get = getattr(am, "get_term", None)
+        if callable(get):
+            try:
+                return get("arm")
+            except Exception:
+                pass
+        terms = getattr(am, "_terms", None)
+        if isinstance(terms, dict):
+            return terms.get("arm") or next(iter(terms.values()))
+        raise RuntimeError("action term 'arm' 을 찾지 못함 (slew-limited 기록 불가)")
+
+    arm_term = _resolve_arm_term() if record_mode else None
+
+    def _processed_actions_np():
+        """slew-limited 적용 target(post-offset) → raw-equiv(−offset) numpy [N,6]."""
+        proc_t = getattr(arm_term, "processed_actions", None)
+        if proc_t is None:
+            proc_t = arm_term._processed_actions
+        return proc_t.detach().cpu().numpy() - ACTION_OFFSET_NP
     writer = None
     if record_mode:
         writer = LeRobotV3DatasetWriter(
@@ -274,13 +301,17 @@ def main() -> int:
         g = torch.as_tensor(np.asarray(grip, np.float32) - GRIPPER_ACTION_OFFSET,
                             device=device).reshape(N, 1)
         action_input = torch.cat([q_cmd + q_bias, g], dim=-1)
+        pend = None
         if record_mode and rec_capture[0]:
-            # obs_t(측정 joint + 3캠, step 전=직전 렌더) + action_t(적용 입력). lock-step → 전 env 동일 T.
+            # obs_t(측정 joint + 3캠, step 전=직전 렌더)는 여기서 캡처. action_t 는 env 가 깎은
+            # slew-limited 적용값이라 env.step 뒤에 읽는다(아래). rec_freeze[e](터미널) env 는 skip → tail 미기록.
             jp = robot.data.joint_pos[:, :6].detach().cpu().numpy()           # [N,6]
-            act_np = action_input.detach().cpu().numpy()                      # [N,6]
             cam_np = {k: scene[CAMERA_SCENE_NAMES[k]].data.output["rgb"].detach().cpu().numpy()
                       for k in CAMERA_KEYS}                                    # 각 [N,H,W,C]
+            pend = []
             for e in range(N):
+                if rec_freeze[e]:
+                    continue
                 images = {}
                 for k in CAMERA_KEYS:
                     rgb = cam_np[k][e]
@@ -291,8 +322,14 @@ def main() -> int:
                                if np.issubdtype(rgb.dtype, np.floating)
                                else np.clip(rgb, 0, 255).astype(np.uint8))
                     images[k] = np.ascontiguousarray(rgb)
-                rec_buf[e].append((_to_lerobot_units(act_np[e]), _to_lerobot_units(jp[e]), images))
+                pend.append((e, _to_lerobot_units(jp[e]), images))
         env.step(action_input)
+        if pend:
+            # 기록 action = slew-limited 달성가능 target(raw-equiv). pre-slew raw command 의 phase-경계
+            # teleport·stride3·q_bias 점프가 cap(arm≈9.55°/step)으로 깎여 등속 ramp 가 됨 → jerky 제거.
+            proc = _processed_actions_np()                                    # [N,6]
+            for e, st, images in pend:
+                rec_buf[e].append((_to_lerobot_units(proc[e]), st, images))
         for ci, ca in enumerate(cube_assets):   # 팝콘 감지용 큐브 속도 max 추적(GPU)
             v = ca.data.root_lin_vel_w[:, :3].norm(dim=-1)
             cube_vmax[:, ci] = torch.maximum(cube_vmax[:, ci], v)
@@ -643,9 +680,10 @@ def main() -> int:
         placed = [[False] * len(cubes) for _ in range(N)]
         if fail_layouts is not None:                       # 덤프 layout 재현 → 주입 후 정착
             apply_fail_layouts(fail_layouts)
-        if record_mode:                                    # 버퍼 리셋 + 카메라 렌더 워밍업(미기록)
+        if record_mode:                                    # 버퍼·freeze 리셋 + 카메라 렌더 워밍업(미기록)
             for e in range(N):
                 rec_buf[e].clear()
+                rec_freeze[e] = False
             rec_capture[0] = False
             settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32),
                    max(0, args.record_warmup))
@@ -664,6 +702,10 @@ def main() -> int:
             sn_list = snap_all()
             tgt = select_targets(sn_list, placed, failed)
             active = np.array([t is not None for t in tgt], bool)
+            if record_mode:                                 # 터미널(미선정=all-placed/진행불가) env → 이후 idle frame 미기록
+                for e in range(N):
+                    if not active[e]:
+                        rec_freeze[e] = True
             if not active.any():
                 break
             if first:
@@ -677,9 +719,9 @@ def main() -> int:
                     ci = cubes.index(tgt[e])
                     if not placed[e][ci]:
                         failed[e][ci] += 1
-        settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 30)
-        if record_mode:
+        if record_mode:                                    # 끝 READY 복귀(retract/idle)는 미기록 → episode 는 마지막 release frame 에서 종료
             rec_capture[0] = False
+        settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 30)
         per_env = [sum(p) for p in placed]
         total = sum(per_env)
         sim_t = (nstep[0] - s0) * CONTROL_DT

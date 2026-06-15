@@ -13,6 +13,20 @@
 
 ---
 
+## 작업 인계 (2026-06-15 — VLA 데이터 jerky 결함 수정(slew-limited 기록)+녹화 tail-trim / 🔵 A/B 256-ep regen 진행중)
+
+- **발단(사용자)**: VLA eval 저조 → HF `visualize_dataset` 조회 → **Action Velocity Smoothness "Jerky"**(arm 3축, |Δ|max≈0.80). 데이터셋 이상 점검 요청.
+- **진단(코드 확정, 상세 `docs/PICKCUBE_CUROBO_PROJECT.md` §13)**: recorder 가 env slew limiter **이전** raw command(`q_cmd+q_bias`)를 action 으로 기록 → 데이터에 **물리 불가능 teleport**(240-ep 실측 arm 단일-step max sh_lift 124°·elbow 137°·**wr_roll 239°**, slew cap 9.55°/step 의 13~25×, >cap 0.2~0.9%=드묾=phase 경계). + 관측 불가 q_bias 적분기 → BC aliasing. + episode 끝 idle tail 평균 17.8 frame.
+- **수정(recorder-only)**: action 기록을 raw → **env action term slew-limited `processed_actions − ACTION_OFFSET([0,0,0,0,0,0.20])`**(달성가능 target). obs 는 step 전·action 은 step 후 캡처. 세 jerk 원천(pre-slew·stride3·q_bias) 동시 차단·deploy 정합 유지. **+ tail-trim**: per-env `rec_freeze`(터미널=select_targets None) + 끝 READY settle 미기록 → episode 가 release frame 종료. `pick_cube_curobo_{batch,demo}.py` 둘 다.
+- **smoke(8-ep) 실검증 통과**: arm max Δ **≤9.549°·>cap 0.00%**, gripper 28.6→5.3, all-4 16/16(오라클 무손상).
+- **🔵 진행중**: **256-ep regen**(`outputs/so101_sim_pick_cube_smooth`, log `outputs/p5_logs/regen256.log`) — 실측 **~1.9 ep/min → ~2시간**(render 병목, ~18:00 완료 예상). 그 후 → HF `taehunkim/so101_sim_pick_cube_smooth` → SmolVLA 20k(`_smooth` JOB, baseline 12.5% 대비 단일 변수 A/B) → bridge `--eval 10`.
+- **실행 중 프로세스**: cuRobo planner PID **2750460**(`:5599`, ping OK) + regen detached(setsid). ⚠ **regen 끝나면 finalize 후 Isaac python child 가 좀비 가능**(smoke 가 그랬음 → SIGKILL 했음) — 직접 kill. 학습 전 **planner shutdown**(VRAM 확보, GPU 1장 공유).
+- **속도·품질 조사 결정(웹)**: 생성 느림 정정(render-batch 도 256=2h, 병목=3캠 raytrace). **속도 레버=프레임워크 교체 말고 우리 코드 내 res 480→256·N 16→48**(다음 대량부터; 현 regen 은 A/B 정합 위해 480·N16 유지). **SkillGen(SkillMimicGen) 미채택**: Isaac Sim 6.0 필요(우리 5.1)·state-only(RGB 별도 렌더)·핵심(cuRobo transit+skill)을 이미 구현. **품질=RoboEngine 픽셀증강(공짜)+recovery 궤적+VLA-RFT(closed-loop drift 직격)**.
+- **커밋**: 이번 jerky fix(2 script + doc §13) 커밋. profiling/.gitignore 잔여는 별도 커밋.
+- **memory**: `vla-data-jerky-slew-record-fix` 신설.
+
+---
+
 ## 작업 인계 (2026-06-15 — PickCube cuRobo P5+ 🟢 sim→train→sim VLA 전체 루프 완료 / 코드 미커밋)
 
 - **목표(사용자)**: cuRobo PickCube 트랙을 **데이터 생성 → SmolVLA 학습 → sim closed-loop 추론**까지 한 번에. 게이트: 10-ep 생성·업로드 먼저 검증 후 진행. 상세·재현·함정 = **`docs/PICKCUBE_CUROBO_PROJECT.md` §0 대시보드·§13**(이 트랙의 단일 source of truth, post-compact 훅이 자동 주입).

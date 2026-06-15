@@ -326,13 +326,40 @@ def main() -> int:
     CONTROL_DT = 1.0 / 30.0  # decimation 4 × sim.dt(1/120)
     nstep = [0]
 
+    # env action term offset(=init_state.joint_pos, arm 0·gripper 0.20). slew-limited processed_actions
+    # 는 post-offset → raw-equiv 환원(−offset). 기록 규약(pre-offset)·deploy 정합 보존.
+    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, GRIPPER_ACTION_OFFSET], np.float32)
+
+    def _resolve_arm_term():
+        """단일 'arm' action term 핸들. IsaacLab 버전별 접근 차이 흡수."""
+        am = env.action_manager
+        get = getattr(am, "get_term", None)
+        if callable(get):
+            try:
+                return get("arm")
+            except Exception:
+                pass
+        terms = getattr(am, "_terms", None)
+        if isinstance(terms, dict):
+            return terms.get("arm") or next(iter(terms.values()))
+        raise RuntimeError("action term 'arm' 을 찾지 못함 (slew-limited 기록 불가)")
+
+    arm_term = _resolve_arm_term() if record_mode else None
+
+    def _processed_action_np():
+        """slew-limited 적용 target(post-offset) → raw-equiv(−offset) numpy [6]."""
+        proc_t = getattr(arm_term, "processed_actions", None)
+        if proc_t is None:
+            proc_t = arm_term._processed_actions
+        return (proc_t.detach().cpu().numpy() - ACTION_OFFSET_NP)[0]
+
     def act(q_arm, grip_target):
         """[q_arm(5)+q_bias, grip] 1 step. q_bias 중력보상(C6).
 
-        record 모드: step 직전 obs_t(측정 joint + 3캠 이미지)와 action_t(env.step 입력)를
-        버퍼에 캡처(표준 (s_t, a_t) 페어). action 은 실행된 입력 그대로 = q_cmd+q_bias(arm) +
-        grip-offset(gripper). q_bias·GRIPPER_ACTION_OFFSET 는 sim PD 보상/액추에이터 유물이나
-        rollout_to_lerobot 와 동일하게 '실행된 action' 을 기록한다(BC 인과 일치)."""
+        record 모드: step 직전 obs_t(측정 joint + 3캠 이미지)를 캡처하고, action_t 는 env 가 slew
+        limiter 로 깎은 '달성가능 target'(processed_actions − offset)을 env.step 뒤에 기록한다.
+        pre-slew raw command(q_cmd+q_bias)를 그대로 쓰면 phase-경계 teleport 등 물리 불가능 점프가
+        BC target 에 박혀 jerky → slew-limited 기록으로 평활. deploy 는 같은 action term 통과라 정합."""
         nonlocal q_bias
         nstep[0] += 1
         q_cmd = torch.tensor([q_arm], device=device, dtype=torch.float32)
@@ -340,12 +367,15 @@ def main() -> int:
         q_bias = torch.clamp(q_bias + BIAS_KI * (q_cmd - q_now), -BIAS_MAX, BIAS_MAX)
         grip = torch.tensor([[grip_target - GRIPPER_ACTION_OFFSET]], device=device)
         action_input = torch.cat([q_cmd + q_bias, grip], dim=-1)
+        pend = None
         if record_mode and rec_capture[0]:
             state_rec = _to_lerobot_units(robot.data.joint_pos[0, :6].detach().cpu().numpy())
             images = {k: read_camera_rgb_u8(base, CAMERA_SCENE_NAMES[k]) for k in CAMERA_KEYS}
-            action_rec = _to_lerobot_units(action_input[0].detach().cpu().numpy())
-            rec_buffer.append((action_rec, state_rec, images))
+            pend = (state_rec, images)
         env.step(action_input)
+        if pend is not None:
+            action_rec = _to_lerobot_units(_processed_action_np())
+            rec_buffer.append((action_rec, pend[0], pend[1]))
 
     def to_base(p_w, sn):
         return _world_to_base_np(np.asarray(p_w, float), sn["rp"], sn["ryaw"])
@@ -557,9 +587,9 @@ def main() -> int:
                 break
             if pick_cube(target, start_q=(READY if idx == 0 else None)):
                 placed.add(target)
-        settle(READY, args.grip_open, 30)   # 라운드 끝: 대기 자세 복귀(흘러내림 방지)
-        if record_mode:
+        if record_mode:                      # 끝 READY 복귀(retract/idle)는 미기록 → episode 는 마지막 release frame 에서 종료
             rec_capture[0] = False
+        settle(READY, args.grip_open, 30)   # 라운드 끝: 대기 자세 복귀(흘러내림 방지)
         sim_t = (nstep[0] - s0) * CONTROL_DT
         log("=" * 60)
         log(f"[demo] ===== ROUND 결과: {len(placed)}/{len(cubes)} placed | "

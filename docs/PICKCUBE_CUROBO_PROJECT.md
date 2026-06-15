@@ -392,6 +392,38 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
       ② **🔥 RTC 오적용** — `policy_server_rtc.py`(서버측 RTC)가 `prev_chunk_left_over` 를 **wall-clock 추정**하는데 공식 RTC(lerobot docs)는 ActionQueue **co-located** 로 실제 leftover 사용. 게다가 bridge **sim-time≠wall-clock(렌더 병목)** → 추정 붕괴. 같은 recorded obs open-loop: **non-RTC 3.9deg(=training 충실) vs RTC h8 15deg·h12 28deg**(execution_horizon↑일수록 악화). → **compose 기본 non-RTC 로 변경.** RTC 는 co-located ActionQueue 재설계 전까지 비권장.
       **진단 도구 신설**: `scripts/sim/replay_infer_overlay.py`(학습 입력방식 in-process predict_action_chunk vs recorded overlay, feed marker) · `scripts/sim/compare_train_vs_rtc.py`(training vs async±RTC gRPC overlay, MAE). 결과 PNG=`outputs/{vla_replay_overlay,compare_*}.png`.
       **eval ladder**(N=10, all-4 전부 0% — BC covariate shift 잔여): ever-in-bowl RTC+gripper미수정 ~0% → RTC+gripperfix 5% → **non-RTC+gripperfix 12.5%**. open-loop 충실하나 closed-loop 누적 drift 로 완주 불가 → 데이터 증설/RL 필요(보류).
+- [x] **🟢 데이터 jerky 결함 진단 + slew-limited 기록 수정 (2026-06-15, 🔵 A/B 검증 중)** — 사용자가 HF
+      `visualize_dataset` 의 Action Velocity Smoothness Proxy **"Jerky"**(arm 3축, |Δ|max≈0.80) 발견.
+      **근본 원인**: recorder 가 env slew limiter **이전** 의 raw command(`q_cmd+q_bias`)를 action 으로 기록
+      (`pick_cube_curobo_batch.py` act() → `env.step` → `common/mdp/actions.py:60-72` clamp). 즉 데이터에 든
+      거대 점프 = **로봇이 실제로 한 적 없는 물리 불가능 teleport**. 정책은 즉시 clamp 되는 점프 + 관측 불가
+      q_bias 적분기를 예측하라고 학습 → BC aliasing·closed-loop drift. **기존 240-ep 정량 확인**: arm 단일-step
+      max Δ = sh_lift **124°**·elbow **137°**·wr_roll **239°** (slew cap **9.55°/step** 의 13~25×), >cap
+      0.2~0.9%(드묾=phase 경계 teleport). episode 끝 near-idle tail 평균 17.8·max 29 frame.
+      **수정(recorder-only, 세 jerk 원천 동시 차단)**: action 기록을 raw → **env action term 의 slew-limited
+      `processed_actions − offset`**(달성가능 target)로. arm 점프 ≤cap 등속 ramp 화, stride3·q_bias 점프·
+      gripper 28.6→5.3 모두 흡수. gripper offset 규약(pre-offset)·deploy 정합 보존(무변경). **추가: 녹화 tail
+      제거** — per-env `rec_freeze`(터미널=all-placed/진행불가 시 이후 idle 미기록) + 끝 READY 복귀 settle 미기록
+      → episode 가 마지막 release(cube-in-bowl) frame 에서 종료. 동일 수정 demo 미러.
+      **smoke(8-ep) IsaacLab 실검증 통과**: arm max Δ **≤9.549°(=cap)·>cap 0.00%**, gripper 28.6→5.3, all-4
+      16/16(오라클 무손상), 마지막 frame gripper open=release. **🔵 256-ep regen 진행 중**(`so101_sim_pick_cube_smooth`,
+      `outputs/p5_logs/regen256.log`) → 업로드 `taehunkim/so101_sim_pick_cube_smooth` → SmolVLA 20k(`_smooth` JOB,
+      단일 변수 A/B) → bridge `--eval 10` 로 baseline(12.5%) 대비 측정. 게이트: 개선 시 대량 재생성, 미미 시
+      데이터 양·RL 이 주 lever 확정.
+- [ ] **🔵 데이터 생성 속도·품질 조사 + 방법 결정 (2026-06-15)** — 사용자 "생성 너무 오래·품질 기대 이하".
+      **속도 실측 정정**: render-batch N=16 도 **256-ep ≈ 2시간**(~1.9 ep/min, round당 ~7-8분). 병목 = **생성 중
+      매 step 3캠 raytrace 렌더**(cuRobo plan 은 phase당 1회라 무관). render-batch 는 single-env(80-ep 2.1h) 대비
+      빠르나 여전히 느림. **속도 레버(프레임워크 교체 불요, 우리 코드 내)**: ① 렌더 res 480×640→256(SmolVLA 다운샘플,
+      "480→256 <2deg" 확인 → 픽셀 0.2×·~3-5× 빠름) ② N 16→32-48(48GB VRAM 여유). 둘이면 ~20-30분. ⚠ **현 regen 은
+      baseline(480·N16) 정합 위해 그대로**, res/N 최적화는 **다음 대량 생성부터**.
+      **방법 서베이(웹)**: MimicGen/DexMimicGen(few demo→대량 궤적 변환)·DemoGen(1 demo→수백, 3D 씬편집)·**SkillGen
+      (SkillMimicGen, arXiv 2410.18907, CoRL24)**·RoboEngine(픽셀 증강)·GR00T-Dreams(Cosmos world-model)·VLA-RFT(RL).
+      **결정 = SkillGen 채택 ❌**: (a) **Isaac Sim 6.0 필요**(우리 5.1·ABI 핀) (b) **state-only 생성**(VLA용 RGB 별도
+      렌더 → 속도 안 풀림) (c) 핵심(cuRobo transit + skill stitch)을 **우리가 이미 구현**. 코드 위치=Isaac Lab 통합
+      (`scripts/imitation_learning/isaaclab_mimic/generate_dataset.py --use_skillgen`, `isaaclab_mimic/motion_planners/curobo/`),
+      독립 repo 아님. **채택 권장 = 우리 파이프라인 유지 + (속도) res↓·N↑ + (품질) RoboEngine 픽셀증강(공짜)·recovery/
+      perturbation 궤적·VLA-RFT(drift 직격)**. 품질 천장은 §13 audit 대로 **closed-loop drift**(open-loop 충실) →
+      BC 데이터 청결만으론 불충분, 복귀 데이터/RL 필요.
 
 ### 🎉 전체 루프 완료 요약 (2026-06-15)
 cuRobo(P0-P4) → **render-batch+시각DR 240-ep**(`taehunkim/so101_sim_pick_cube` v3.0) → **SmolVLA 20k fine-tune**
