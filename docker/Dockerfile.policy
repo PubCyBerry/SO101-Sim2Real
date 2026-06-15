@@ -153,6 +153,30 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
            "decord>=0.6.0,<1.0.0" \
            "ninja>=1.11.1,<2.0.0"
 
+# ── GR00T-N1.7 bridge ZMQ 클라이언트 의존성 ──────────────────────────────────
+# scripts/policy_server_groot_bridge.py (policy-server-groot 모드) 가 gr00t 컨테이너의
+# 네이티브 ZMQ 서버로 msgpack 요청을 보낸다. gr00t 패키지는 import 하지 않고
+# (transformers 충돌) wire 포맷만 vendoring → pyzmq + msgpack 만 있으면 된다.
+# transformers/torch 불변 → ABI 영향 없음. (bridge 는 flash-attn 미사용 — 로컬 정책을
+# 로드하지 않고 ZMQ 위임만 하므로, flash-attn 은 SmolVLA 로컬 추론용으로만 필요.)
+#
+# ⚠ from-scratch 빌드는 위 flash-attn 을 sm_120(Blackwell) 으로 소스 컴파일하느라 ~30-45분
+#   걸린다(공식 prebuilt wheel 은 sm_120 미포함 → 우리가 직접 빌드). 이미 sm_120 flash-attn 이
+#   포함된 policy-server:0.5.1 이미지가 있으면, 재컴파일 없이 아래 두 줄만 얹는 fast overlay 로
+#   동일 태그를 갱신할 수 있다(검증된 배포 단축 경로):
+#     docker build -t policy-server:0.5.1 - <<'E'
+#     FROM policy-server:0.5.1
+#     COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+#     RUN uv pip install --python /opt/venv/bin/python "pyzmq>=27.1.0" "msgpack>=1.0.0"
+#     E
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    ulimit -Sn 65536 \
+    && UV_HTTP_TIMEOUT=600 \
+       UV_CONCURRENT_DOWNLOADS=2 \
+       uv pip install \
+           "pyzmq>=27.1.0" \
+           "msgpack>=1.0.0"
+
 # ── flash-attn 소스 빌드 ─────────────────────────────────────────────────────
 # torch 가 이미 venv 에 설치된 상태에서 --no-build-isolation 으로 빌드.
 # flash-attn 2.x 의 공식 sm_120 화이트리스트 미포함 →

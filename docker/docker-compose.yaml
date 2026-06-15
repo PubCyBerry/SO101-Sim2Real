@@ -108,7 +108,7 @@ services:
       # 활성 모델은 .env 의 POLICY_PROFILE 로 선택 (groot | smolvla | ...). 나중 파일이 override.
       # 새 모델 추가 = env/<name>.env 작성 후 POLICY_PROFILE=<name>.
       - ../.env
-      - ../env/${POLICY_PROFILE:-groot}.env
+      - ../env/${POLICY_PROFILE:-groot_n17}.env
     environment:
       NVIDIA_VISIBLE_DEVICES:     all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -216,7 +216,7 @@ services:
       # 활성 모델은 .env 의 POLICY_PROFILE 로 선택 (groot | smolvla | ...). 나중 파일이 override.
       # 새 모델 추가 = env/<name>.env 작성 후 POLICY_PROFILE=<name>.
       - ../.env
-      - ../env/${POLICY_PROFILE:-groot}.env
+      - ../env/${POLICY_PROFILE:-groot_n17}.env
     environment:
       NVIDIA_VISIBLE_DEVICES:     all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -280,11 +280,71 @@ services:
     # 정책 파라미터는 policy-server 와 동일한 .env + 모델 프로필에서 읽는다.
     env_file:
       - ../.env
-      - ../env/${POLICY_PROFILE:-smolvla}.env
+      - ../env/${POLICY_PROFILE:-groot_n17}.env
     # repo 전체 마운트(/workspace): ros2_ws 빌드 + .env/env + so101_vla_policy 소스.
     volumes:
       - ..:/workspace
     entrypoint: ["bash", "/workspace/docker/vla-ros-entrypoint.sh"]
+    stdin_open: true
+    tty: true
+
+  # ── GR00T-N1.7 (NVIDIA Isaac-GR00T 네이티브) ──────────────────────────
+  # N1.7 은 transformers 4.57 / py3.10 을 요구해 policy-server:0.5.1(transformers 5.3)
+  # 과 한 venv 공존이 불가하다 → NVIDIA repo(ref_repos/Isaac-GR00T)를 **무수정**으로
+  # 빌드한 별도 이미지에서 학습·서빙한다. 우리 자산은 bind-mount(/host) + entrypoint
+  # override 로만 주입(repo·venv 는 /workspace 그대로).
+  #
+  # ■ 모드 (gr00t-entrypoint.sh): convert / finetune / zmq-server / bash / python
+  #   convert    : HF v3 → LeRobot v2.1 + meta/modality.json 주입
+  #   finetune   : examples/finetune.sh (nvidia/GR00T-N1.7-3B → SO-101)
+  #   zmq-server : run_gr00t_server.py — ZMQ(:5555) Gr00tPolicy (기본 command)
+  #
+  # ■ 추론 폐루프
+  #   vla_policy_node ─gRPC:8080─▶ policy-server(policy-server-groot bridge) ─ZMQ:5555─▶ 이 서비스
+  #
+  # ■ 예시
+  #   docker compose -f docker/docker-compose.yaml build gr00t
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm gr00t convert
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm gr00t finetune
+  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d gr00t          # zmq-server
+  gr00t:
+    build:
+      context: ../ref_repos/Isaac-GR00T
+      dockerfile: docker/Dockerfile
+    image: gr00t-n17:ea
+    container_name: so101_gr00t
+    restart: "no"
+    user: "${UID:-1000}:${GID:-1000}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ../datasets:/host/datasets
+      - ../outputs:/host/outputs
+      - ../logs:/host/logs
+      # 우리 entrypoint + GR00T 설정 자산 (repo 무수정 — bind-mount 로만 주입)
+      - ../docker/gr00t-entrypoint.sh:/host/gr00t-entrypoint.sh:ro
+      - ../configs/groot:/host/configs:ro
+      # convert 모드 별도 uv 환경(lerobot 핀)·캐시는 /host/outputs 하위(host UID 소유 bind-mount)에
+      # 둔다 — root 소유 named volume 회피. (entrypoint convert 모드 참조)
+      # 베이스 모델·데이터셋 HF 캐시: SmolVLA 서비스와 동일 명명 볼륨 공유
+      - hf_cache:/host/.cache/huggingface
+    environment:
+      HF_HOME:                    /host/.cache/huggingface
+      NVIDIA_VISIBLE_DEVICES:     all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video,graphics
+    env_file:
+      - ../.env
+      - ../env/${POLICY_PROFILE:-groot_n17}.env
+    network_mode: host       # ZMQ :5555 를 호스트 인터페이스로 노출 (bridge 접속)
+    ipc: host
+    shm_size: "16gb"         # torch dataloader / 멀티프로세스
+    entrypoint: ["bash", "/host/gr00t-entrypoint.sh"]
+    command: ["zmq-server"]
     stdin_open: true
     tty: true
 

@@ -9,6 +9,8 @@
 # ■ 실행 모드 (CMD 첫 번째 인자)
 #   prepare-model : hf download — 호스트 HF 캐시에 모델 받기
 #   policy-server : lerobot.async_inference.policy_server — gRPC 추론 서버
+#   policy-server-rtc   : RTC 통합 gRPC 서버 (scripts/policy_server_rtc.py)
+#   policy-server-groot : GR00T-N1.7 gRPC↔ZMQ bridge (scripts/policy_server_groot_bridge.py)
 #   train         : lerobot-train — Policy 학습 (인자 완전 위임, SmolVLA 등)
 #   eval          : lerobot-eval  — Policy 평가 (인자 완전 위임)
 #   info          : lerobot-info — LeRobot / Python / 시스템 정보 출력
@@ -64,6 +66,14 @@ POLICY_SERVER_EXTRA_ARGS="${POLICY_SERVER_EXTRA_ARGS:-}"
 RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-10}"
 RTC_MAX_GUIDANCE_WEIGHT="${RTC_MAX_GUIDANCE_WEIGHT:-10.0}"
 RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
+
+# ── policy-server-groot 환경 변수 ────────────────────────────────────────────
+# scripts/policy_server_groot_bridge.py (GrootBridgeServer) 기동 시 사용.
+# 위 policy-server 변수(HOST/PORT/FPS/...)를 공유하고 GR00T ZMQ 백엔드 주소만 추가.
+# gr00t 컨테이너(zmq-server, run_gr00t_server.py)가 ZMQ :5555 로 listen → bridge 가 접속.
+GROOT_ZMQ_HOST="${GROOT_ZMQ_HOST:-127.0.0.1}"
+GROOT_ZMQ_PORT="${GROOT_ZMQ_PORT:-5555}"
+GROOT_ZMQ_TIMEOUT_MS="${GROOT_ZMQ_TIMEOUT_MS:-60000}"
 
 # ── train 환경 변수 ──────────────────────────────────────────────────────────
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
@@ -320,6 +330,47 @@ case "$CMD" in
       --rtc_execution_horizon=${RTC_EXECUTION_HORIZON} \
       --rtc_max_guidance_weight=${RTC_MAX_GUIDANCE_WEIGHT} \
       --rtc_prefix_attention_schedule=${RTC_PREFIX_ATTENTION_SCHEDULE} \
+      ${POLICY_SERVER_EXTRA_ARGS} \
+      "$@"
+    ;;
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # policy-server-groot — GR00T-N1.7 gRPC↔ZMQ bridge 서버
+  #
+  # scripts/policy_server_groot_bridge.py (GrootBridgeServer) 를 기동한다.
+  # PolicyServer 를 서브클래싱해 gRPC 컨트랙트는 동일(vla_policy_node 무수정)하게 두고,
+  # 추론만 gr00t 컨테이너의 ZMQ 서버(run_gr00t_server.py, Gr00tPolicy N1.7)에 위임한다.
+  #   vla_policy_node ─gRPC:8080─▶ [이 bridge] ─ZMQ:5555─▶ gr00t 이미지
+  #
+  # [env var → CLI arg 매핑]
+  #   POLICY_SERVER_HOST/PORT/FPS/INFERENCE_LATENCY/OBS_QUEUE_TIMEOUT (policy-server 공유)
+  #   GROOT_ZMQ_HOST       → --groot_zmq_host       (기본 127.0.0.1)
+  #   GROOT_ZMQ_PORT       → --groot_zmq_port       (기본 5555)
+  #   GROOT_ZMQ_TIMEOUT_MS → --groot_zmq_timeout_ms (기본 60000)
+  #
+  # 전제: gr00t 컨테이너가 zmq-server 모드로 먼저 기동되어 있어야 한다.
+  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d gr00t
+  #
+  # 예시:
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  #     -e POLICY_PROFILE=groot_n17 policy-server policy-server-groot
+  # ────────────────────────────────────────────────────────────────────────────
+  policy-server-groot)
+    info "── Policy Server (GR00T bridge) 시작 (gRPC↔ZMQ) ──"
+    info "  gRPC Bind   → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
+    info "  FPS         → ${POLICY_FPS}"
+    info "  GR00T ZMQ   → tcp://${GROOT_ZMQ_HOST}:${GROOT_ZMQ_PORT}  (timeout ${GROOT_ZMQ_TIMEOUT_MS}ms)"
+    info "  ※ 추론은 gr00t 컨테이너(Gr00tPolicy N1.7)에 위임. 먼저 'gr00t' 서비스 기동 필요."
+    shift || true
+    exec python /workspace/scripts/policy_server_groot_bridge.py \
+      --host=${POLICY_SERVER_HOST} \
+      --port=${POLICY_SERVER_PORT} \
+      --fps=${POLICY_FPS} \
+      --inference_latency=${INFERENCE_LATENCY} \
+      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
+      --groot_zmq_host=${GROOT_ZMQ_HOST} \
+      --groot_zmq_port=${GROOT_ZMQ_PORT} \
+      --groot_zmq_timeout_ms=${GROOT_ZMQ_TIMEOUT_MS} \
       ${POLICY_SERVER_EXTRA_ARGS} \
       "$@"
     ;;

@@ -13,6 +13,39 @@
 
 ---
 
+## 작업 인계 (2026-06-15 — GR00T-N1.7 통합 🟢 마일스톤 완료: 1k finetune + 폐루프 라이브 / 미커밋)
+
+- **마일스톤 달성(사용자 지정 = 1k-step finetune + 추론 파이프라인 배포)**: 전부 검증.
+  ① **convert**: HF v3 `taehunkim/so101_sim_pick_cube` → v2.1 + modality.json (`datasets/groot/.../meta/`, 240ep·143072frame·6dim·3cam).
+  ② **finetune 1k**: `gr00t finetune`(batch 8) → `outputs/train/so101_groot_n17_pick_cube/checkpoint-1000/`(403s, train_loss 0.82, trainable 1.62B=projector+diffusion).
+  ③ **추론 서버**: `gr00t` zmq-server(:5555, Gr00tPolicy) + `policy_groot` bridge(gRPC :8080).
+  ④ **e2e smoke**: gRPC→bridge→ZMQ→GR00T→action (16,6) 정합, roundtrip 438ms.
+  ⑤ **폐루프**: Isaac bridge(`run_cube_desk_ros_bridge.sh`) + vla-ros(policy client) → vla-ros roundtrip ~100ms·bridge chunk 170+·robot 구동. eval 성공률 0%(1k 스모크 예상; plumbing 완전 정합).
+  ⑥ **livestream**: PUBLIC_IP=10.10.16.147 `--livestream 1 --enable_cameras`(no headless) → :8011 webrtc / :49100 signaling.
+- **빌드 함정·해결(중요)**:
+  - flash-attn **소스빌드 회피**: 공식 wheel 은 Blackwell sm_120 미포함 → 기존 policy-server:0.5.1(sm_120 컴파일됨)에 **overlay**(pyzmq/msgpack + 갱신 entrypoint COPY). bridge 는 flash-attn 미사용.
+  - gr00t 이미지 flash-attn = **2.7.4.post1 wheel**(소스빌드 X). 빌드 동시실행 부하폭주 주의(직렬화).
+  - **gr00t-entrypoint 수정 3건**: ① CMD 후 `shift`(안 하면 finetune.sh `Unknown argument`) ② non-root HOME/캐시(`/host/outputs/.gr00t-home`, TRITON_CACHE_DIR 등 — `/.triton` PermissionError) ③ convert 는 로컬 프로젝트 빌드 금지(egg-info root 소유 /workspace 쓰기 실패)→deps 직접 설치, uv env 는 `/host/outputs/.uv-cache`.
+- **현재 떠있는 컨테이너**: so101_gr00t · policy_groot · so101_vla_ros · isaac livestream(BG task). 정지법 = doc/위 명령.
+- **남은 일**: 본 학습(TRAIN_STEPS↑ + GROOT_CHECKPOINT step 갱신). git 커밋(사용자 요청 대기). 빌드 로그 `logs/groot_build/`.
+- 상세 실행/아키텍처 = `docs/PATH_GROOT_N17.md`.
+
+---
+
+## 작업 인계 (2026-06-15 — GR00T-N1.7 정책 통합: 별도 이미지 finetune + gRPC↔ZMQ bridge / 🔵 빌드 진행중·미커밋)
+
+- **목표(사용자)**: GR00T-N1.7(`ref_repos/Isaac-GR00T`)을 정책으로 등록 — docker finetune + docker policy-server, SO-101 pick-place, 기존 Isaac Sim bridge+ROS VLA+gRPC policy-server 폐루프 호환. **검증 마일스톤**: 1k-step finetune + 추론 파이프라인 배포(policy server + client + isaac bridge).
+- **확정 사실**: LeRobot 내장 `groot`=N1.5 전용. N1.7 은 NVIDIA repo 에만(transformers 4.57/py3.10 → policy-server:0.5.1[5.3/3.12] 공존 불가) → **별도 `gr00t` 이미지 필수**. NVIDIA `run_gr00t_server.py`=ZMQ:5555, ROS 노드=gRPC:8080. `get_action` 반환=절대 action(unapply_action). 데이터=v3→v2.1 변환+modality.json(convert 가 안 만듦→주입).
+- **결정(사용자)**: ① gRPC↔ZMQ **bridge**(gr00t 네이티브 ZMQ 무수정 + policy-server 에 bridge 모드, ROS 노드 불변) ② 기존 v3 데이터셋 재사용 ③ N1.5 폐기(`env/groot.env` 삭제).
+- **branch `feat/groot-n17-policy`**. 신규: `configs/groot/{so101_config.py,so101_modality.json}`·`scripts/policy_server_groot_bridge.py`·`docker/gr00t-entrypoint.sh`·`env/groot_n17.env`·`docs/PATH_GROOT_N17.md`. 수정: `docker/docker-compose.yaml`(+gr00t 서비스+gr00t_uv_cache+POLICY_PROFILE 기본 groot_n17)·`docker/policy-entrypoint.sh`(+policy-server-groot)·`docker/Dockerfile.policy`(+pyzmq,msgpack)·`.env`(POLICY_PROFILE=groot_n17)·`AGENTS.md`. 삭제: `env/groot.env`. **미커밋**.
+- **bridge 핵심**: `GrootBridgeServer(PolicyServer)` — `SendPolicyInstructions`(lerobot 정책 로드 생략, ZMQ 연결) + `_predict_action_chunk(observation_t)`(raw obs→GR00T modality dict→ZMQ get_action→`_time_action_chunk`) 오버라이드. lerobot 0.5.1 메서드명은 v0.5.1 GitHub 소스로 검증. gr00t 패키지 미import(msgpack ndarray 훅만 vendoring).
+- **정적 검증 통과**: compose config·py_compile·json·bash -n 전부 OK.
+- **🔵 진행중**: `docker compose build gr00t`(BG, logs/groot_build/gr00t_build.log) + `build policy-server`(BG, policy_rebuild.log). 환경: Blackwell 48GB(37GB 여유, 공유), HF_USER=taehunkim, x86_64(flash-attn/torchcodec PyPI).
+- **남은 일**: 빌드완료→`gr00t convert`→`gr00t finetune`(1k→checkpoint-1000)→`gr00t` up(zmq:5555)→`policy-server policy-server-groot`(gRPC:8080)→폐루프(`run_cube_desk_ros_bridge.py --eval`+vla-ros). 상세 `docs/PATH_GROOT_N17.md` §실행.
+- **리스크**: GPU 공유 OOM(3B ~25-40GB, 여유 37GB tight→BATCH_SIZE↓). convert 1회성(v2.1 됨). 커밋은 사용자 요청 대기.
+
+---
+
 ## 작업 인계 (2026-06-15 — VLA 데이터 jerky 결함 수정(slew-limited 기록)+녹화 tail-trim / 🔵 A/B 256-ep regen 진행중)
 
 - **발단(사용자)**: VLA eval 저조 → HF `visualize_dataset` 조회 → **Action Velocity Smoothness "Jerky"**(arm 3축, |Δ|max≈0.80). 데이터셋 이상 점검 요청.

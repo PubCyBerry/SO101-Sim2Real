@@ -13,6 +13,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
 | `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
 | `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
+| `docs/PATH_GROOT_N17.md` | GR00T-N1.7 네이티브 정책 (별도 gr00t 이미지 finetune + ZMQ 서버 + gRPC↔ZMQ bridge → 기존 sim 폐루프) |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
@@ -26,7 +27,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | **진입점** | `lerobot` / `policy-server` 두 서비스 | `SimToReal-SO101-PickPen-v0` Gym 환경 |
 | **담당** | 텔레옵·데이터 수집·학습·추론·시각화 | Isaac Lab `ManagerBasedRLEnv` |
 | **스택** | LeRobot 0.4.4 / 0.5.1 | Isaac Sim 5.1 / IsaacLab 2.3 / leisaac 0.4.0 (git tag) |
-| **기본 정책** | SmolVLA (GR00T N1.5 는 policy-server 이미지에만) | — |
+| **기본 정책** | SmolVLA · **GR00T-N1.7**(별도 gr00t 이미지+bridge, `docs/PATH_GROOT_N17.md`) | — |
 
 - 시뮬 경로는 `src/sim_to_real/` 가 Gym 환경을 등록하고 `scripts/environments/teleoperation/teleop_se3_agent.py` 등이 진입한다. `isaac` 의존성 그룹으로 설치.
 - Docker 시뮬 이미지는 현재 미연결 (`Dockerfile.leisaac` 부활 시 별도 진입점 신설 예정).
@@ -50,10 +51,12 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
 | `lerobot` | `lerobot-so101:0.4.4` / `Dockerfile.lerobot` | Python 3.11 + LeRobot 0.4.4 (teleop deps) | teleop / record / replay / train / eval / dataset-viz |
-| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async deps) | async inference gRPC 서버 |
+| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async deps) | async inference gRPC 서버 (+ `policy-server-groot` bridge) |
+| `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 |
+| `gr00t` | `gr00t-n17:ea` / `ref_repos/Isaac-GR00T/docker/Dockerfile`(무수정) | Python 3.10 + transformers 4.57 + gr00t | GR00T-N1.7 convert / finetune / ZMQ 추론(:5555) |
 
-- 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. 두 이미지는 torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
-- 의존성 격리 이유: GR00T 의 flash-attn / 원격 inference(H100 ↔ Windows) 확장 대비.
+- 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
+- 의존성 격리 이유: GR00T-N1.7 은 transformers 4.57/py3.10 으로 policy-server(5.3/3.12)와 공존 불가 → `gr00t` 별도 이미지(NVIDIA 네이티브, bind-mount+entrypoint override). 추론은 `policy-server-groot` gRPC↔ZMQ bridge 가 잇는다(`docs/PATH_GROOT_N17.md`).
 
 ### compose 설정
 
@@ -72,10 +75,14 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 - `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 구동. `async` 그룹(grpcio + protobuf)이 teleop 이미지에도 설치됨. 실제로는 `policy-client-shim.py` 경유 (아래 참조).
 
 **`policy-entrypoint.sh`** (policy-server 서비스, CMD 기본값 `policy-server`):
-`prepare-model` · `policy-server` · `policy-server-rtc` · `train` · `eval` · `info` · `bash` · `python`
+`prepare-model` · `policy-server` · `policy-server-rtc` · `policy-server-groot` · `train` · `eval` · `info` · `bash` · `python`
 
 - `policy-server-rtc` 는 `policy_server_rtc.py` 로 서버 측 Real-Time Chunking(RTC) 가이던스를 주입한 async 서버 (gRPC 프로토콜·클라이언트 변경 없음, `RTC_*` env 튜닝).
-- **train/eval 은 이쪽 서비스**: SmolVLA 학습이 쓰는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지엔 미설치.
+- `policy-server-groot` 는 `policy_server_groot_bridge.py` (`GrootBridgeServer`, PolicyServer 서브클래스)로 gRPC 컨트랙트를 유지한 채 추론만 `gr00t` 컨테이너의 ZMQ 서버(Gr00tPolicy N1.7)에 위임한다. `GROOT_ZMQ_*` env, `vla_policy_node` 무수정.
+- **train/eval 은 이쪽 서비스**: SmolVLA 학습이 쓰는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지엔 미설치. (GR00T-N1.7 학습은 lerobot-train 이 아니라 `gr00t` 서비스 `finetune` 모드.)
+
+**`gr00t-entrypoint.sh`** (gr00t 서비스, CMD 기본값 `zmq-server`):
+`convert`(v3→v2.1+modality.json) · `finetune`(examples/finetune.sh) · `zmq-server`(run_gr00t_server.py) · `bash` · `python`
 
 모드별 env var 매핑은 각 스크립트 상단 `${VAR:-default}` 블록과 case 분기 주석에 정리됨.
 
@@ -90,9 +97,10 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 ### `.env` / 모델 프로필
 
 - **주입 경로**: 서비스 `env_file: [../.env, ../env/${POLICY_PROFILE}.env]` 가 컨테이너에 주입(나중 파일이 override). `entrypoint.sh` 가 기본값을 채워 `lerobot-*` CLI 인자로 매핑. `--env-file .env` 는 compose 보간용.
-- **모델 프로필**: 모델 간 값이 다른 변수는 `env/<name>.env` 로 분리하고, `.env` 의 `POLICY_PROFILE` 한 줄로 활성 모델 선택. 새 모델 = 프로필 파일 추가.
+- **모델 프로필**: 모델 간 값이 다른 변수는 `env/<name>.env` 로 분리하고, `.env` 의 `POLICY_PROFILE` 한 줄로 활성 모델 선택. 새 모델 = 프로필 파일 추가. 현재: `smolvla` · `groot_n17` · `act`.
   - 분리 변수: `POLICY_TYPE` / `TRAIN_POLICY_TYPE` / `POLICY_BASE_MODEL_PATH` / tokenizer·embodiment·chunk·n_action_steps / `ACTIONS_PER_CHUNK` / `POLICY_REPO_ID` / `JOB_NAME`
   - train 출발 모델 라우팅: `POLICY_BASE_MODEL_PATH` 단일 변수 + `TRAIN_POLICY_TYPE` 유무로 `--policy.path`(체크포인트) ↔ `--policy.type` + `--policy.base_model_path`(native 베이스).
+  - **`groot_n17`(GR00T-N1.7)은 lerobot-train/policy-server 경로가 아니다**: `GROOT_*` 변수(`GROOT_BASE_MODEL`/`GROOT_CHECKPOINT`/`GROOT_MODALITY_CONFIG`/`GROOT_ZMQ_*`)로 `gr00t` 이미지(convert/finetune/zmq-server) + `policy-server-groot` bridge 를 구동한다. `RENAME_MAP` 비움(raw top/wrist/front). 상세 `docs/PATH_GROOT_N17.md`.
 
 ## 시뮬레이션 구조 (Isaac Lab 경로)
 
