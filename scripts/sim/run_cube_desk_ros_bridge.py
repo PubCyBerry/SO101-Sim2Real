@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -764,13 +765,27 @@ def main() -> None:
         return
 
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
+    # ── step 프로파일: world.step wall-time 누적, N step 마다 min/mean/max + 유효 step/s 출력.
+    #    reset step 은 scene 재구성이라 skew → 타이밍에서 제외(reset 직후 윈도 초기화).
+    _step_ms: list[float] = []
+    _STEP_REPORT_EVERY = 120  # ~4s @ render_dt 30fps
     while simulation_app.is_running():
         if reset_req["mode"] is not None:
             if reset_req["mode"] == "random":
                 current_seed["v"] = int.from_bytes(os.urandom(4), "little")  # 새 무작위 seed
             reset_scene(current_seed["v"])   # R=동일 seed 재현 · N=새 seed
             reset_req["mode"] = None
+            _step_ms.clear()  # reset 후 윈도 초기화(첫 step skew 제외)
+        _ts = time.perf_counter()
         world.step(render=True)
+        _step_ms.append((time.perf_counter() - _ts) * 1e3)
+        if len(_step_ms) >= _STEP_REPORT_EVERY:
+            n = len(_step_ms)
+            mean = sum(_step_ms) / n
+            print(f"[bridge] world.step ms (n={n}): "
+                  f"min/mean/max={min(_step_ms):.1f}/{mean:.1f}/{max(_step_ms):.1f} "
+                  f"→ ~{1000.0 / mean:.1f} step/s (목표 33.3ms / 30fps)", flush=True)
+            _step_ms.clear()
 
 
 if __name__ == "__main__":

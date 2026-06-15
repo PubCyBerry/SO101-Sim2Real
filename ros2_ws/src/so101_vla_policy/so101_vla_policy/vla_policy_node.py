@@ -92,6 +92,10 @@ class PolicyServerSession:
                  policy_device, lerobot_features, poll_timeout):
         self._poll_timeout = float(poll_timeout)
 
+        # gRPC roundtrip 프로파일 윈도. N콜마다 total/obs_send/recv_wait min·mean·max 출력.
+        self._rt_window: list[tuple[float, float]] = []  # (total_ms, obs_send_ms)
+        self._rt_report_every = 10
+
         # ⚠ rename 은 **클라가 직접 적용**(features·obs 키를 policy 키로) → server rename_map 은 비움.
         # 이유: 0.5.1 server 는 raw_observation_to_observation 의 resize 에서
         # policy.config.image_features[key] 를 lerobot_features 키로 조회하는데, 이 단계는
@@ -114,6 +118,7 @@ class PolicyServerSession:
               flush=True)
 
     def predict_chunk(self, raw_obs: dict, timestep: int) -> list:
+        _t0 = time.perf_counter()
         timed_obs = TimedObservation(
             timestamp=time.time(), timestep=timestep, observation=raw_obs, must_go=True
         )
@@ -121,13 +126,35 @@ class PolicyServerSession:
             pickle.dumps(timed_obs), services_pb2.Observation, log_prefix="[vla] obs", silent=True
         )
         self.stub.SendObservations(observation_iterator)
+        _t_send = time.perf_counter()  # obs 직렬화+업로드(SendObservations 블로킹) 종료점
         deadline = time.perf_counter() + self._poll_timeout
         while time.perf_counter() < deadline:
             chunk = self.stub.GetActions(services_pb2.Empty())
             if len(chunk.data) > 0:
+                self._record_roundtrip(_t0, _t_send)
                 return pickle.loads(chunk.data)  # nosec
             time.sleep(0.005)
         return []
+
+    def _record_roundtrip(self, t0: float, t_send: float) -> None:
+        """gRPC 왕복 분해 기록. total = obs_send + recv_wait.
+        recv_wait = 서버 추론 + action chunk 다운로드 + 폴 granularity(5ms 단위)."""
+        now = time.perf_counter()
+        self._rt_window.append(((now - t0) * 1e3, (t_send - t0) * 1e3))
+        if len(self._rt_window) < self._rt_report_every:
+            return
+        tot = [a for a, _ in self._rt_window]
+        snd = [b for _, b in self._rt_window]
+        recv = [a - b for a, b in self._rt_window]
+        n = len(tot)
+        print(
+            f"[vla] gRPC roundtrip ms (n={n}): "
+            f"total min/mean/max={min(tot):.1f}/{sum(tot) / n:.1f}/{max(tot):.1f} · "
+            f"obs_send mean={sum(snd) / n:.1f} · "
+            f"recv_wait(infer+dl+poll) mean={sum(recv) / n:.1f}",
+            flush=True,
+        )
+        self._rt_window.clear()
 
     def close(self):
         try:

@@ -2,6 +2,8 @@ datasets
 outputs
 models
 
+NvStreamer-*.etli
+
 
 
 # Byte-compiled / optimized / DLL files
