@@ -20,6 +20,8 @@ import time
 from typing import Callable
 import weakref
 
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
 from isaaclab.app import AppLauncher
 
 
@@ -119,6 +121,11 @@ parser.add_argument(
     action="store_true",
     help="카메라 보정 모드: top/wrist/front viewport 3단 수직 분할 docking + 실시간 튜너 위젯을 띄운다. "
     "미지정 시 메인 viewport 만 렌더해 실시간 제어 성능을 확보한다(카메라 sensor 는 30fps 유지).",
+)
+parser.add_argument(
+    "--layout",
+    default="assets/layouts/pick_cube_3cam.json",
+    help="viewport docking layout JSON(ui.Workspace dump). ROOT 상대경로. 없으면 수동 dock fallback",
 )
 parser.add_argument("--use_lerobot_recorder", action="store_true", help="Accepted for CLI compatibility; ignored.")
 parser.add_argument("--lerobot_dataset_repo_id", type=str, default=None, help="Accepted for CLI compatibility; ignored.")
@@ -727,14 +734,31 @@ def create_camera_viewports() -> list[object]:
         except Exception as exc:
             print(f"[viewport] failed to open {title} ({prim_path}): {exc}")
 
-    # 메인 Perspective viewport + 카메라 3개를 수직 분할로 docking.
+    # 저장된 layout JSON(ui.Workspace dump) 복원. 실패 시 수동 dock_in fallback.
+    app = omni.kit.app.get_app()
+    for _ in range(3):
+        app.update()  # 새 window 들이 dock space 에 mount 될 시간을 준다
+
+    layout_path = os.path.join(ROOT, args_cli.layout) if not os.path.isabs(args_cli.layout) else args_cli.layout
+    if os.path.isfile(layout_path):
+        try:
+            with open(layout_path) as fh:
+                dump = json.load(fh)
+            ui.Workspace.restore_workspace(dump)
+            for _ in range(3):
+                app.update()
+            print(f"[viewport] layout 복원: {layout_path}")
+            return windows
+        except Exception as exc:
+            print(f"[viewport] layout 복원 실패({exc}) → 수동 dock fallback")
+    else:
+        print(f"[viewport] layout 파일 없음({layout_path}) → 수동 dock fallback")
+
+    # 수동 dock_in fallback:
     #   top   → 메인 오른쪽 절반  (좌:메인, 우:top)
     #   wrist → top 아래 절반     (우:top → 우상:top, 우하:wrist)
     #   front → wrist 아래 절반   (우하:wrist → 우중:wrist, 우하:front)
     try:
-        app = omni.kit.app.get_app()
-        for _ in range(3):
-            app.update()  # 새 window 들이 dock space 에 mount 될 시간을 준다
         main_vp = ui.Workspace.get_window("Viewport")
         top = created.get("top_camera")
         wrist = created.get("wrist_camera")
