@@ -16,7 +16,7 @@ FrontCamera)에 맞춰 holder 모양과 카메라 위치가 동시에 정합되�
 from __future__ import annotations
 import os, struct, math
 import numpy as np
-from pxr import Usd, UsdGeom, UsdShade, Gf, Vt, Sdf
+from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Gf, Vt, Sdf
 
 REPO = "/home/konan147/Workspaces/SO101-Sim2Real"
 URDF_ASSETS = os.path.join(REPO, "assets", "robots", "urdf", "assets")
@@ -141,6 +141,16 @@ def author_mesh(stage, path, mesh, color, bind_mat=None):
         UsdShade.MaterialBindingAPI.Apply(m.GetPrim()).Bind(bind_mat)
     return m
 
+def apply_collision(prim, approximation="convexHull", contact_offset=0.002, rest_offset=0.0):
+    """Mesh prim 에 PhysicsCollisionAPI + PhysicsMeshCollisionAPI 부여."""
+    col_api = UsdPhysics.CollisionAPI.Apply(prim)
+    col_api.CreateCollisionEnabledAttr(True)
+    mesh_col_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
+    mesh_col_api.CreateApproximationAttr(approximation)
+    prim.CreateAttribute("physxCollision:contactOffset", Sdf.ValueTypeNames.Float).Set(contact_offset)
+    prim.CreateAttribute("physxCollision:restOffset", Sdf.ValueTypeNames.Float).Set(rest_offset)
+
+
 def ensure_black_material(stage):
     p="/so101_new_calib/Looks/material_black"
     if stage.GetPrimAtPath(p): return UsdShade.Material(stage.GetPrimAtPath(p))
@@ -169,13 +179,15 @@ def main():
     for old in ["/so101_new_calib/gripper/WristCamMount"]:
         if st.GetPrimAtPath(old): st.RemovePrim(old)
     UsdGeom.Xform.Define(st,"/so101_new_calib/gripper/WristCamMount")
-    author_mesh(st,"/so101_new_calib/gripper/WristCamMount/holder",wrist_h,PURPLE,matp)
+    wrist_holder_m = author_mesh(st,"/so101_new_calib/gripper/WristCamMount/holder",wrist_h,PURPLE,matp)
+    apply_collision(wrist_holder_m.GetPrim())
     author_mesh(st,"/so101_new_calib/gripper/WristCamMount/camera",wrist_c,BLACK,matk)
     # ---- belly : shoulder front ----
     for old in ["/so101_new_calib/shoulder/BellyCamMount"]:
         if st.GetPrimAtPath(old): st.RemovePrim(old)
     UsdGeom.Xform.Define(st,"/so101_new_calib/shoulder/BellyCamMount")
-    author_mesh(st,"/so101_new_calib/shoulder/BellyCamMount/holder",belly_h,PURPLE,matp)
+    belly_holder_m = author_mesh(st,"/so101_new_calib/shoulder/BellyCamMount/holder",belly_h,PURPLE,matp)
+    apply_collision(belly_holder_m.GetPrim())
     author_mesh(st,"/so101_new_calib/shoulder/BellyCamMount/camera",belly_c,BLACK,matk)
     st.GetRootLayer().Save()
     print("baked WristCamMount + BellyCamMount into follower USD")
