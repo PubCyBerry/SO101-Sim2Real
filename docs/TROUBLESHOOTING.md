@@ -56,6 +56,8 @@
 - [(PATH E) cuMotion `INVALID_INITIAL_CSPACE_POSITION` — start_state 관절 수 ≠ cspace](#path-e-cumotion-invalid_initial_cspace_position--start_state-관절-수--cspace-gripper-포함)
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 - [원격 WebRTC livestream 접속 실패 / 검은화면 (PUBLIC_IP 미설정 — LAN IP 만 ICE 광고)](#원격-webrtc-livestream-접속-실패--검은화면-public_ip-미설정--lan-ip-만-ice-광고)
+- [sim VLA 추론 동작 이상 — 서버측 RTC 오적용 (wall-clock leftover 추정 붕괴)](#sim-vla-추론-동작-이상--서버측-rtc-오적용-wall-clock-leftover-추정-붕괴)
+- [sim VLA 그리퍼 0.20rad 덜 열림 — use_default_offset 미복제](#sim-vla-그리퍼-020rad-덜-열림--use_default_offset-미복제)
 
 ---
 
@@ -3801,3 +3803,94 @@ ss -tln | grep -E ':49100|:8011'                     # 둘 다 0.0.0.0 LISTEN
 grep PUBLIC_IP /tmp/sm_livestream.log                # [SM] PUBLIC_IP=... → livestream mode 1
 ```
 원격 client 에서 영상이 뜨면 성공. FPS ~11 상한은 구조적(렌더 sync+물리 직렬).
+
+---
+
+## sim VLA 추론 동작 이상 — 서버측 RTC 오적용 (wall-clock leftover 추정 붕괴)
+
+### 현상
+
+sim closed-loop VLA 추론(`run_cube_desk_ros_bridge` + `policy-server-rtc` + `vla-ros`)에서 팔이 obs 를
+따라 움직이긴 하나 grasp 를 못 완성. cube-in-bowl 0%. 학습 데이터로 open-loop replay 하면 정책은
+expert action 을 정확히 재현(feed-step MAE ~1-2deg)하는데 배포만 망가짐.
+
+### 오류 메시지
+
+명시적 에러 없음. 정량 진단(`scripts/sim/compare_train_vs_rtc.py`, 같은 recorded obs ep0):
+
+```
+non-RTC  (async만)      : B-vs-recorded MAE = 3.9 deg   (= training in-process 4.0)
+RTC execution_horizon=4 : 9.7 deg
+RTC execution_horizon=8 : 15.0 deg   ← 배포 기본값이던 값
+RTC execution_horizon=12: 28.1 deg   ← horizon↑일수록 단조 악화
+```
+
+### 원인
+
+공식 RTC(lerobot `docs/lerobot/rtc`)는 `ActionQueue` 를 추론과 **co-located** 해
+`prev_chunk_left_over = action_queue.get_left_over()` 로 **실제 미실행 action** 을 guidance 에 쓴다.
+우리 `scripts/policy_server_rtc.py` 는 **서버측 RTC + 클라(vla_policy_node) 별도 큐** 구조라 서버가
+클라 큐 상태를 모른다. 대신 `leftover_start = (경과 wall-clock) × fps` 로 **추정**한다. 두 가지가 깨짐:
+
+1. 클라(vla node)는 timestep merge + refill-threshold 로 소비 — 서버가 가정하는 순차 실행과 다름.
+2. **🔥 Isaac bridge 는 렌더 병목으로 sim-time ≪ wall-clock.** 서버의 `wall × 30fps` 는 로봇이 실제
+   실행한 sim step 을 크게 과대추정 → `prev_chunk_left_over` 오정렬 → guidance 가 **틀린 reference**
+   로 새 chunk 의 overlap(`inference_delay`~`execution_horizon`)을 당김 → action 오염. horizon 이
+   클수록 더 많은 step 을 틀린 reference 에 묶어 악화(위 표).
+
+### 해결 방법
+
+`docker/docker-compose.yaml` policy-server `command` 를 **`["policy-server"]`(non-RTC) 기본**으로 변경.
+async chunking 자체는 무해(non-RTC = training 충실 3.9deg). RTC 는 비권장 — 살리려면 공식대로
+**ActionQueue 를 추론과 co-located**(정책 client-side 실행) 하거나 클라가 실제 leftover 를 서버로
+전송해야 한다. sim 은 wall-clock 못 쓰므로 **sim-step 기반 leftover** 필요.
+
+### 확인 방법
+
+```bash
+# non-RTC 서버로 비교 재현 — B(deploy) 가 training(A) 수준으로 붙어야 정상
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm -d --name pserver_nortc \
+  policy-server policy-server   # non-RTC
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm --no-deps \
+  --entrypoint bash policy-server -lc \
+  'python /workspace/scripts/sim/compare_train_vs_rtc.py --episode 0'
+# overall: A-vs-rec ≈ B-vs-rec ≈ 4deg (non-RTC). RTC 면 B 가 15-28deg.
+```
+
+---
+
+## sim VLA 그리퍼 0.20rad 덜 열림 — use_default_offset 미복제
+
+### 현상
+
+sim VLA 배포에서 그리퍼가 학습 때보다 항상 살짝 닫힘. 큐브 받을 만큼 안 벌어져 접근 중 침/놓침.
+
+### 오류 메시지
+
+없음. dataset gripper action 범위 `[-7.94, 20.64]` [0,100] = `[-0.25, 0.65]` rad = `grip_target − 0.20`
+(grip_target ∈ [-0.05, 0.85] = 데모 grip_close/open). 즉 기록 action 에 −0.20 baked.
+
+### 원인
+
+학습 env action term `SlewLimitedJointPositionActionCfg(use_default_offset=True)` 가 실제 target =
+`action + default_offset`. default_offset = init_state.joint_pos (**arm 0.0, gripper 0.20**). recorder 는
+pre-offset action(`grip_target − 0.20`)을 기록 → 학습 env 가 +0.20 재적용해 grip_target 도달. **bridge
+배포는 action term 을 안 거치고 raw 적용** → 그리퍼만 0.20rad 덜 열림(arm 은 offset 0 이라 무사).
+replay(action-vs-action 비교)는 못 잡음 — action→target **적용** 단계 버그.
+
+### 해결 방법
+
+`vla_policy_node` 에 `gripper_cmd_offset`(ROS param / `GRIPPER_CMD_OFFSET` env) 추가 →
+`from_lerobot_units` 후 그리퍼 target 에 offset 을 **다시 더한다(제거 아님 — +0.20 재적용 = use_default_offset
+복제)**. ⚠ 방향 주의: offset 을 **빼는** 게 아니라 **더해야** sim 이 잘 된다(없으면 0.20rad 덜 열림).
+**`env/smolvla.env` 에 `GRIPPER_CMD_OFFSET=0.2` 박아 sim 모델 자동 적용** — vla-ros 가 프로필서 읽음(매번
+`-e` 불요). 실기기 모델(teleop 절대각 기록)로 바꾸면 0 으로.
+
+### 확인 방법
+
+```bash
+# smolvla.env 에 GRIPPER_CMD_OFFSET=0.2 가 있으면 -e 없이도 자동 적용:
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm vla-ros
+# (override 시) docker compose ... run --rm -e GRIPPER_CMD_OFFSET=0 vla-ros   # 실기기 모델
+# eval ever-in-bowl: 0% → 5%(이 fix) → 12.5%(+non-RTC). all-4 잔여 0% 는 BC covariate shift.
+```

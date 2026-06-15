@@ -215,4 +215,4 @@ SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose(위치+방향 동시)를
 
 ### sim 진입 스크립트 AppLauncher 인자 필터
 
-GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `pick_cube_state_machine.py`.
+GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `pick_cube_state_machine.py`, `run_cube_desk_ros_bridge.py`. ⚠ Linux 에선 access violation 대신 **livestream viewport docking 이 조용히 실패**(커스텀 인자가 UI 초기화 방해)하는 형태로도 나타난다 — bridge livestream 3-cam 레이아웃 미적용 버그가 이 케이스(2026-06-15 수정).

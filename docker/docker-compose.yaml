@@ -227,9 +227,18 @@ services:
     network_mode: host
 
     # ── 기본 명령 ────────────────────────────────────────────────────────
-    # policy-server     : 표준 Async Inference gRPC 서버 (RTC 없음)
-    # policy-server-rtc : RTC 통합 서버 (scripts/policy_server_rtc.py 경유)
-    command: ["policy-server-rtc"]
+    # policy-server     : 표준 Async Inference gRPC 서버 (RTC 없음) — **기본**
+    # policy-server-rtc : RTC 통합 서버 (scripts/policy_server_rtc.py 경유) — opt-in
+    #
+    # 기본이 non-RTC 인 이유 (2026-06-15 정량 검증, sim VLA closed-loop):
+    #   서버측 RTC(policy_server_rtc.py)는 prev_chunk_left_over 를 wall-clock 으로 추정하는데,
+    #   공식 RTC(lerobot docs/rtc)는 ActionQueue 를 추론과 co-located 해 실제 leftover 를 쓴다.
+    #   우리 구조(서버측 RTC + 클라(vla_policy_node) 별도 큐)는 leftover 가 어긋나고, 특히
+    #   Isaac bridge 의 sim-time≠wall-clock(렌더 병목) 때문에 추정이 깨진다. 같은 recorded obs
+    #   open-loop 비교: non-RTC=3.9deg(=training 충실) vs RTC h8=15deg·h12=28deg(execution_horizon
+    #   ↑일수록 악화). RTC 는 co-located ActionQueue 로 재설계하기 전까지 비권장.
+    #   상세 = docs/PICKCUBE_CUROBO_PROJECT.md §13 · docs/TROUBLESHOOTING.md.
+    command: ["policy-server"]
 
     # ── 헬스체크 ─────────────────────────────────────────────────────────
     # `import lerobot.async_inference.policy_server` 은 transformers 포함 전체 임포트라

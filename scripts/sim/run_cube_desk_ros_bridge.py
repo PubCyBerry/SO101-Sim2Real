@@ -41,6 +41,8 @@ from __future__ import annotations
 import argparse
 import os
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
 # DDS 전송 설정 — fastdds 가 participant 를 만들 때(첫 ROS2 노드 tick, python 시작 이후) 읽으므로
 # 여기서 setdefault 해도 유효하다. UDPv4 강제는 host(브리지)↔container(ROS 스택)의 cross-UID
 # SHM 공유 실패를 우회한다(브리지=일반 유저, 컨테이너=root → /dev/shm fastrtps 세그먼트 lock 충돌).
@@ -60,6 +62,27 @@ parser.add_argument(
     action="store_true",
     help="top/wrist/front 카메라 ROS publish 비활성화 (기본은 publish — VLA obs 용).",
 )
+# GUI 뷰포트 레이아웃 — pick_cube_curobo_demo.py 와 동일(Perspective + top/wrist/front 3-패널 dock).
+parser.add_argument("--view_eye", type=float, nargs=3, default=[0.9, -0.9, 1.15],
+                    help="GUI Perspective 카메라 eye(world). demo 기본값과 동일.")
+parser.add_argument("--view_lookat", type=float, nargs=3, default=[0.20, 0.10, 0.70],
+                    help="GUI Perspective 카메라 lookat(world). demo 기본값과 동일.")
+parser.add_argument("--layout", default="assets/layouts/pick_cube_3cam.json",
+                    help="viewport docking layout JSON(ui.Workspace dump). REPO_ROOT 상대경로. "
+                         "없으면 수동 dock fallback. demo 와 동일 파일·window title 공유.")
+# ── VLA 성공률 eval 모드 ─────────────────────────────────────────────────────
+parser.add_argument("--eval", type=int, default=0,
+                    help=">0 이면 VLA 성공률 eval: N 에피소드 auto-reset + cube-in-bowl 카운트 후 종료. "
+                         "VLA(policy-server+vla-ros)는 별도 실행 중이어야 함(bridge 만 reset/카운트).")
+parser.add_argument("--eval_seconds", type=float, default=30.0,
+                    help="eval 에피소드당 sim 시간(초). PickCubeEnvCfg episode_length_s=30 매칭.")
+parser.add_argument("--eval_settle", type=float, default=1.5,
+                    help="reset 후 카운트 시작 전 settle 시간(초) — 큐브 안정 + VLA RTC 재정렬.")
+parser.add_argument("--eval_warmup", type=float, default=25.0,
+                    help="첫 에피소드 전 1회 warmup 시간(초) — vla-ros 가 obs 받아 /isaac_joint_commands "
+                         "구동 시작할 때까지 대기(미구동 시 ep1 거짓 실패 방지).")
+parser.add_argument("--eval_out", default="outputs/vla_eval.json",
+                    help="eval 결과 JSON 경로(REPO_ROOT 상대).")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -68,7 +91,18 @@ args = parser.parse_args()
 # isaaclab.python.headless.rendering.kit(풀 렌더 + OmniGraph USD authoring)를 로드해 OmniGraph 가
 # 동작한다. 카메라 자체는 쓰지 않는다 — 렌더 experience 만 필요.
 args.enable_cameras = True
-app_launcher = AppLauncher(vars(args))
+
+# ⚠ AppLauncher 에는 **화이트리스트 키만** 전달한다(AGENTS.md). vars(args) 통째로 넘기면 커스텀
+# 인자(--view_eye/--layout/--eval/--num_cubes/…)가 AppLauncher 의 UI/viewport 초기화(_prepare_ui)를
+# 깨뜨려 livestream 에서 카메라 viewport docking 이 적용되지 않는다(데모 pick_cube_curobo_demo 와
+# 동일 패턴으로 정합). C-레벨 크래시 추적용 faulthandler 도 부팅 전에 켠다.
+import faulthandler  # noqa: E402
+os.makedirs(os.path.join(REPO_ROOT, "outputs"), exist_ok=True)
+faulthandler.enable(open(os.path.join(REPO_ROOT, "outputs/bridge_faulthandler.txt"), "w"))
+_LAUNCHER_KEYS = {"headless", "livestream", "enable_cameras", "device", "kit_args",
+                  "experience", "rendering_mode"}
+_launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+app_launcher = AppLauncher(_launcher_args)
 simulation_app = app_launcher.app
 
 # ---------------------------------------------------------------------------
@@ -101,6 +135,8 @@ from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
 
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_USD_PATH, ROBOT_USD_PATH  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
+    BOWL_HEIGHT_RANGE,
+    BOWL_SUCCESS_RADIUS,
     _CUBE_SCATTER_X_RANGE,
     _CUBE_SCATTER_Y_RANGE,
     _FRONT_CAM_LOCAL_POS,
@@ -115,6 +151,9 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     _WRIST_CAM_LOCAL_ROT,
     _WRIST_CAMERA_FOCAL,
 )
+# 성공 판정 z 기준 — terminations.task_done 과 동일(DESK_TOP_Z + height_range). VLA eval 의
+# cube-in-bowl 카운트가 학습 env 의 success 정의를 그대로 쓰도록 import(하드코딩 금지).
+from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z  # noqa: E402
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
 # 순수 isaacsim 경로의 stage prim 레이아웃 (env 네임스페이스 없음).
@@ -142,12 +181,24 @@ CAMERA_SPECS = [
      "/camera/front/image_raw", "front_camera_optical_frame"),
 ]
 
-# Isaac Lab PickCubeEnvCfg 의 검증된 actuator gain (leisaac SO101_FOLLOWER_CFG).
-DRIVE_STIFFNESS = 17.8
-DRIVE_DAMPING = 0.6
-# 그리퍼는 큐브를 꽉 잡으려면 더 강한 grip force 필요(arm 17.8 은 위치추종 검증값 유지). close 가 큐브에
-# 접촉(grip -0.018)해도 stiffness 17.8 이면 grip 토크 ~2.5Nm 로 약해 lift 시 미끄러짐 → gripper 만 상향.
-GRIPPER_STIFFNESS = 80.0
+# ── 물리 parity: PickCubeEnvCfg(=VLA 학습 env) 와 동일 actuator/물리 ──────────────
+# cuRobo demo/batch 가 데이터를 이 물리로 생성했으므로 VLA closed-loop 추론도 동일하게 맞춘다
+# (sim2sim parity). 이전 GRIPPER_STIFFNESS=80 은 PATH E cuMotion position-control 용이었으나
+# VLA parity 와 충돌 → 학습 env 와 동일한 soft PD 17.8 + gentle effort 로 통일. cuMotion(PATH E)
+# grasp 거동 변화는 사용자 결정에 따라 감수(둘 다 이 물리 공유).
+DRIVE_STIFFNESS = 17.8        # arm·gripper 공통 (PickCubeEnvCfg actuator stiffness)
+DRIVE_DAMPING = 0.6           # PickCubeEnvCfg actuator damping
+ARM_EFFORT_LIMIT = 10.0       # PickCubeEnvCfg arm/gripper effort_limit_sim (정적 cap)
+# 그리퍼 effort = leisaac dynamic_reset_gripper_effort_limit: clamp(nearest_mass/0.15, 0.5, 10).
+# 우리 큐브(20·35g): 0.020~0.035/0.15 = 0.13~0.23 < 0.5 → 전부 하한 0.5Nm 으로 클램프되므로
+# static 0.5 가 동치(>0.5 는 그릇 0.25kg 근접 시뿐, 그땐 grip 불요 → grasp 거동 동일). gentle =
+# 가벼운 큐브 안 으깸·sim2real.
+GRIPPER_EFFORT_LIMIT = 0.5
+# SlewLimitedJointPositionAction(gripper 2.5·arm 5.0 rad/s) 근사 = 물리 joint 최대속도 상한.
+# bridge 는 OmniGraph 로 raw position 을 주입해 Python slew 불가 → 학습 데이터의 모션 envelope
+# (빠른 close = 큐브 튕김 방지)을 joint max velocity 로 강제한다.
+ARM_MAX_JOINT_VEL = 5.0
+GRIPPER_MAX_JOINT_VEL = 2.5
 
 
 def _set_local_pose(prim, pos: tuple[float, float, float], quat_wxyz: tuple[float, float, float, float]) -> None:
@@ -215,6 +266,87 @@ def setup_cameras(stage) -> list[tuple[str, str, str]]:
         specs.append((rp.path, topic, frame_id))
         print(f"[bridge] camera {prim_path} → {topic} (focal={focal})", flush=True)
     return specs
+
+
+# GUI 뷰포트 docking 대상 (window title, 카메라 prim 경로). title 은 demo 와 동일하게
+# "SO101 {…}" 로 만들어 assets/layouts/pick_cube_3cam.json 의 저장된 window 와 일치시킨다
+# (레이아웃 복원은 title 매칭이므로 카메라 prim 경로 차이는 무관).
+_BRIDGE_CAM_VIEWS = [
+    ("Top Camera", "/World/TopCamera"),
+    ("Wrist Camera", f"{ROBOT_PRIM}/gripper/WristCamera"),
+    ("Front Camera", f"{ROBOT_PRIM}/shoulder/FrontCamera"),
+]
+
+
+def dock_camera_viewports() -> None:
+    """top/wrist/front 카메라 viewport 3개 생성 + Perspective 와 수직 분할 docking.
+
+    pick_cube_curobo_demo.dock_camera_viewports() 와 동일 패턴: 저장된 layout JSON
+    (ui.Workspace dump)을 복원해 데모와 같은 4-패널 배치(L=Perspective, R=top/wrist/front)를
+    만든다. window title 이 "SO101 Top/Wrist/Front Camera" 로 일치하므로 위치·크기 그대로
+    복원되고, 실패 시 수동 dock_in fallback. GUI 모드(not headless)에서만 호출한다.
+    """
+    try:
+        import omni.kit.app
+        import omni.ui as ui
+        from pxr import Sdf
+        em = omni.kit.app.get_app().get_extension_manager()
+        for e in ("omni.kit.viewport.window", "omni.kit.viewport.utility"):
+            try:
+                if not em.is_extension_enabled(e):
+                    em.set_extension_enabled_immediate(e, True)
+            except Exception:
+                pass
+        from omni.kit.viewport.utility import create_viewport_window
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] viewport 모듈 불가: {exc}", flush=True)
+        return
+
+    created = {}
+    for title, path in _BRIDGE_CAM_VIEWS:
+        try:
+            created[title] = create_viewport_window(name=f"SO101 {title}", camera_path=Sdf.Path(path))
+            print(f"[bridge] viewport {title}: {path}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] viewport {title} 실패: {exc}", flush=True)
+
+    app = omni.kit.app.get_app()
+    for _ in range(3):
+        app.update()
+
+    layout_path = (os.path.join(REPO_ROOT, args.layout)
+                   if not os.path.isabs(args.layout) else args.layout)
+    if os.path.isfile(layout_path):
+        try:
+            import json
+            with open(layout_path) as fh:
+                dump = json.load(fh)
+            ui.Workspace.restore_workspace(dump)
+            for _ in range(3):
+                app.update()
+            print(f"[bridge] layout 복원: {layout_path}", flush=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] layout 복원 실패({exc}) → 수동 dock fallback", flush=True)
+    else:
+        print(f"[bridge] layout 파일 없음({layout_path}) → 수동 dock fallback", flush=True)
+
+    try:
+        main_vp = ui.Workspace.get_window("Viewport")
+        t = created.get("Top Camera")
+        w = created.get("Wrist Camera")
+        f = created.get("Front Camera")
+        if main_vp is not None and t is not None:
+            t.dock_in(main_vp, ui.DockPosition.RIGHT, 0.5)
+        if t is not None and w is not None:
+            w.dock_in(t, ui.DockPosition.BOTTOM, 0.5)
+        if w is not None and f is not None:
+            f.dock_in(w, ui.DockPosition.BOTTOM, 0.5)
+        for _ in range(3):
+            app.update()
+        print("[bridge] 카메라 viewport docked (L=Perspective, R=top/wrist/front)", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] docking 실패: {exc}", flush=True)
 
 
 def build_ros_graph(object_prims: list[str], camera_specs: list[tuple[str, str, str]] | None = None):
@@ -295,6 +427,18 @@ def main() -> None:
     world = World(physics_dt=1.0 / 120.0, rendering_dt=1.0 / 30.0, stage_units_in_meters=1.0)
     world.scene.add_default_ground_plane()
 
+    # PhysX solver parity (PickCubeEnvCfg.__post_init__): 접촉/마찰 안정성을 학습 env 와 맞춘다.
+    # (gpu_* 버퍼는 GPU multi-env scale 전용 → CPU single-env 무관. enable_external_forces_every_
+    #  iteration 은 외력 미사용이라 무관 → 생략.) backend 는 CPU 유지(A안 device-1 회피, 구조적).
+    try:
+        pc = world.get_physics_context()
+        pc.set_solver_type("TGS")
+        pc.set_bounce_threshold(0.01)
+        pc.set_friction_correlation_distance(0.00625)
+        print("[bridge] PhysX parity: TGS · bounce 0.01 · friction_corr 0.00625", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] PhysX 설정 실패: {exc}", flush=True)
+
     # cube_desk scene.usd: SCENE_OFFSET 가 baked 돼 큐브/그릇이 이미 world 좌표에 author 됨.
     add_reference_to_stage(CUBE_DESK_USD_PATH, SCENE_PRIM)
 
@@ -338,56 +482,153 @@ def main() -> None:
     # reset: 물리 뷰 초기화 + timeline play → OnPlaybackTick 시작.
     world.reset()
 
-    # 검증된 actuator gain 적용(USD drive gain 은 micro 라 cuMotion 위치 명령 추종 불가).
-    # gripper(마지막 dof)만 강한 stiffness 로 grip force 확보 — 큐브 꽉 잡아 lift 시 미끄러짐 방지.
+    # ── actuator parity (PickCubeEnvCfg = VLA 학습 env) ──
+    # USD drive gain 은 micro 라 위치 명령 추종 불가 → 학습 env 와 동일 soft PD 로 덮어쓴다.
+    # arm·gripper 모두 stiffness 17.8·damping 0.6 (이전 gripper 80 은 cuMotion 용 → VLA parity 로 통일).
     n_dof = robot.num_dof
     kps = np.full(n_dof, DRIVE_STIFFNESS, dtype=np.float32)
     kds = np.full(n_dof, DRIVE_DAMPING, dtype=np.float32)
     try:
-        gi = list(robot.dof_names).index("gripper")
-    except (ValueError, AttributeError, TypeError):
+        gi = robot.get_dof_index("gripper")
+    except (ValueError, AttributeError, TypeError, KeyError):
         gi = n_dof - 1  # fallback: gripper 가 마지막 dof (/isaac_joint_states 순서 확인됨)
-    kps[gi] = GRIPPER_STIFFNESS
-    print(f"[bridge] gripper grip force: dof[{gi}] kps={GRIPPER_STIFFNESS} (arm kps={DRIVE_STIFFNESS})", flush=True)
-    robot.get_articulation_controller().set_gains(kps=kps, kds=kds)
+    ctrl = robot.get_articulation_controller()
+    ctrl.set_gains(kps=kps, kds=kds)
+    # dof_names 순서 = /isaac_joint_states publish 순서 = recorder joint_pos[:6] 순서.
+    # 학습 state(joint_pos[:6])↔추론 state(vla node name-reorder→SO101_JOINT_ORDER) 정합 확인용.
+    try:
+        print(f"[bridge] dof_names order: {list(robot.dof_names)}", flush=True)
+    except Exception:
+        pass
+    print(f"[bridge] actuator parity: stiffness={DRIVE_STIFFNESS} damping={DRIVE_DAMPING} "
+          f"(arm·gripper 공통), gripper dof[{gi}]", flush=True)
 
-    # 큐브 rigid prim 핸들 캐시 (DR·R/N 리셋에서 재사용).
+    # effort 상한 (PickCubeEnvCfg parity): arm 10Nm, gripper gentle 0.5Nm(leisaac dynamic 동치).
+    efforts = np.full(n_dof, ARM_EFFORT_LIMIT, dtype=np.float32)
+    efforts[gi] = GRIPPER_EFFORT_LIMIT
+    try:
+        ctrl.set_max_efforts(values=efforts)
+        print(f"[bridge] effort 상한: arm={ARM_EFFORT_LIMIT}Nm · gripper={GRIPPER_EFFORT_LIMIT}Nm", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] set_max_efforts 실패: {exc}", flush=True)
+
+    # joint 최대속도 상한 (slew 근사): arm 5.0 · gripper 2.5 rad/s.
+    max_vel = np.full(n_dof, ARM_MAX_JOINT_VEL, dtype=np.float32)
+    max_vel[gi] = GRIPPER_MAX_JOINT_VEL
+    try:
+        robot._articulation_view.set_max_joint_velocities(np.array([max_vel], dtype=np.float32))
+        print(f"[bridge] joint max vel: arm={ARM_MAX_JOINT_VEL} · gripper={GRIPPER_MAX_JOINT_VEL} rad/s", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] set_max_joint_velocities 실패: {exc}", flush=True)
+
+    # 큐브 rigid prim 핸들 캐시 (DR·R/N·eval 리셋에서 재사용).
     cube_handles: dict[str, SingleRigidPrim] = {}
     for name in active_cubes:
         h = SingleRigidPrim(f"{SCENE_PRIM}/{name}")
         h.initialize()
         cube_handles[name] = h
+    # 그릇 핸들 (eval cube-in-bowl 판정의 컨테이너 xy 기준).
+    bowl_handle = SingleRigidPrim(f"{SCENE_PRIM}/{BOWL_NAME}")
+    try:
+        bowl_handle.initialize()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] bowl handle init 실패: {exc}", flush=True)
     home_q = np.zeros(n_dof, dtype=np.float32)
 
-    def randomize_cubes() -> None:
-        """활성 큐브를 scatter 범위로 무작위 재배치 + 속도 0 (DR)."""
-        for h in cube_handles.values():
-            pos, quat = h.get_world_pose()
-            pos = np.asarray(pos, dtype=np.float32).copy()
-            pos[0] = float(np.random.uniform(*_CUBE_SCATTER_X_RANGE))
-            pos[1] = float(np.random.uniform(*_CUBE_SCATTER_Y_RANGE))
-            h.set_world_pose(position=pos, orientation=quat)
+    # ── DR (학습 randomize_cubes_scattered / randomize_object_on_arc 정합) ──
+    _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
+    _MIN_BOWL_SEP = 0.14         # 큐브-그릇
+    _MIN_BASE_SEP = 0.135        # 큐브-base 발치(inner-reach)
+    _VOLUME_INSET = 0.040 * 0.5 * (2 ** 0.5)   # ≈0.0283 = max 큐브 face 대각 절반(볼륨 in-rect)
+    _BOWL_ARC_RADIUS = 0.44
+    _BOWL_ARC_DEG = (-4.0, 8.0)
+    _MAX_ATTEMPTS = 50
+    # 6 stable face (roll,pitch) — 학습 _randomize_cubes_scattered_fn 와 동일
+    _STABLE_FACES = [(0.0, 0.0), (np.pi, 0.0), (np.pi / 2, 0.0),
+                     (-np.pi / 2, 0.0), (0.0, np.pi / 2), (0.0, -np.pi / 2)]
+
+    # authored default pose 캡처(DR 전 1회) — arc center·cube z 기준점.
+    _bp, _bq = bowl_handle.get_world_pose()
+    bowl_default_xy = np.asarray(_bp[:2], dtype=np.float64)
+    bowl_default_z = float(_bp[2])
+    bowl_default_quat = np.asarray(_bq, dtype=np.float32)
+    cube_default_z = {n: float(h.get_world_pose()[0][2]) for n, h in cube_handles.items()}
+    base_xy = np.array([_ROBOT_POS[0], _ROBOT_POS[1]], dtype=np.float64)
+
+    def _face_quat(rng) -> np.ndarray:
+        """6 stable face 중 1택 + random yaw → wxyz (Isaac Lab quat_from_euler_xyz 동일 공식)."""
+        roll, pitch = _STABLE_FACES[int(rng.integers(0, 6))]
+        yaw = float(rng.random()) * 2.0 * np.pi
+        cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+        cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
+        cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+        return np.array([cy * cr * cp + sy * sr * sp, cy * sr * cp - sy * cr * sp,
+                         cy * cr * sp + sy * sr * cp, sy * cr * cp - cy * sr * sp], dtype=np.float32)
+
+    def randomize_cubes(rng) -> None:
+        """학습 _randomize_cubes_scattered_fn 정합: rejection(inset rect·bowl_default·base·placed 회피)
+        + 6 stable-face + random yaw. 그릇 기준=bowl_default(학습 동일, arc 이동 전)."""
+        x_lo = _CUBE_SCATTER_X_RANGE[0] + _VOLUME_INSET
+        x_hi = _CUBE_SCATTER_X_RANGE[1] - _VOLUME_INSET
+        y_lo = _CUBE_SCATTER_Y_RANGE[0] + _VOLUME_INSET
+        y_hi = _CUBE_SCATTER_Y_RANGE[1] - _VOLUME_INSET
+        placed: list[tuple[float, float]] = []
+        for name, h in cube_handles.items():
+            fx, fy = float(bowl_default_xy[0]), float(bowl_default_xy[1])  # fallback(드묾)
+            for _ in range(_MAX_ATTEMPTS):
+                cx = float(rng.uniform(x_lo, x_hi))
+                cy = float(rng.uniform(y_lo, y_hi))
+                if (cx - bowl_default_xy[0]) ** 2 + (cy - bowl_default_xy[1]) ** 2 < _MIN_BOWL_SEP ** 2:
+                    continue
+                if (cx - base_xy[0]) ** 2 + (cy - base_xy[1]) ** 2 < _MIN_BASE_SEP ** 2:
+                    continue
+                if any((cx - px) ** 2 + (cy - py) ** 2 < _MIN_CUBE_SEP ** 2 for px, py in placed):
+                    continue
+                fx, fy = cx, cy
+                break
+            placed.append((fx, fy))
+            pos = np.array([fx, fy, cube_default_z[name]], dtype=np.float32)
+            h.set_world_pose(position=pos, orientation=_face_quat(rng))
             try:
                 h.set_linear_velocity(np.zeros(3, dtype=np.float32))
                 h.set_angular_velocity(np.zeros(3, dtype=np.float32))
             except Exception:
                 pass
 
-    def reset_scene() -> None:
-        """장면 초기화 + DR — 큐브 재배치 후 팔 home(0)으로. 직후 VLA 명령이 다시 구동한다."""
-        randomize_cubes()
+    def randomize_bowl(rng) -> None:
+        """학습 _randomize_object_on_arc_fn 정합: 전방 호(radius 0.44, angle[-4,8]°) 위 xy 재배치.
+        center = (default_x, default_y − radius). +angle→+x. orientation 은 default 유지."""
+        ang = np.radians(float(rng.uniform(_BOWL_ARC_DEG[0], _BOWL_ARC_DEG[1])))
+        cx = bowl_default_xy[0]
+        cy = bowl_default_xy[1] - _BOWL_ARC_RADIUS
+        pos = np.array([cx + _BOWL_ARC_RADIUS * np.sin(ang),
+                        cy + _BOWL_ARC_RADIUS * np.cos(ang), bowl_default_z], dtype=np.float32)
+        bowl_handle.set_world_pose(position=pos, orientation=bowl_default_quat)
+        try:
+            bowl_handle.set_linear_velocity(np.zeros(3, dtype=np.float32))
+            bowl_handle.set_angular_velocity(np.zeros(3, dtype=np.float32))
+        except Exception:
+            pass
+
+    def reset_scene(seed: int) -> None:
+        """seed 로 DR 재현(큐브 scatter+6D face → 그릇 arc, 학습 순서) + 팔 home.
+        동일 seed = 동일 spawn 레이아웃(post-settle 은 PhysX 미세변동). np 전역 무관(default_rng)."""
+        rng = np.random.default_rng(int(seed))
+        randomize_cubes(rng)   # 학습 순서: 큐브(vs bowl_default) → 그릇 arc
+        randomize_bowl(rng)
         try:
             robot.set_joint_positions(home_q)
             robot.set_joint_velocities(home_q)
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] arm home reset 실패: {exc}", flush=True)
-        print("[bridge] scene reset + DR", flush=True)
+        print(f"[bridge] scene reset + DR (seed={seed})", flush=True)
 
-    if args.dr:
-        randomize_cubes()
+    # 시작 시 DR 1회(학습 reset=DR 정합). 이후 R/N 으로 재리셋.
+    current_seed = {"v": int(args.seed)}
+    reset_scene(current_seed["v"])
 
-    # 키보드 R/N → 장면 초기화 + DR (teleop 과 동일 키). GUI 모드에서만.
-    should_reset = {"flag": False}
+    # 키보드: R = 동일 seed 리셋(재현) · N = 무작위 seed 리셋. GUI 모드만.
+    reset_req = {"mode": None}   # "same" | "random" | None
     kbd_sub = None
     if not args.headless:
         try:
@@ -398,14 +639,28 @@ def main() -> None:
             _kbd = omni.appwindow.get_default_app_window().get_keyboard()
 
             def _on_kbd(event, *_a):
-                if event.type == carb.input.KeyboardEventType.KEY_PRESS and event.input.name in ("R", "N"):
-                    should_reset["flag"] = True
+                if event.type == carb.input.KeyboardEventType.KEY_PRESS:
+                    if event.input.name == "R":
+                        reset_req["mode"] = "same"
+                    elif event.input.name == "N":
+                        reset_req["mode"] = "random"
                 return True
 
             kbd_sub = _inp.subscribe_to_keyboard_events(_kbd, _on_kbd)
-            print("[bridge] keyboard: R 또는 N = 장면 초기화 + DR", flush=True)
+            print("[bridge] keyboard: R = 동일 seed 리셋(재현) · N = 무작위 seed 리셋", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] keyboard sub 실패(리셋 키 비활성): {exc}", flush=True)
+
+    # GUI 뷰포트 — demo 와 동일 레이아웃(Perspective 초기 부감 + top/wrist/front 3-패널 dock).
+    # livestream WebRTC 가 kit 창 전체를 캡처하므로 원격에서도 카메라 피드가 보인다.
+    if not args.headless:
+        try:
+            from isaacsim.core.utils.viewports import set_camera_view  # noqa: PLC0415
+            set_camera_view(eye=args.view_eye, target=args.view_lookat)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] Perspective view 설정 실패: {exc}", flush=True)
+        if not args.no_cameras:
+            dock_camera_viewports()
 
     print(f"[bridge] ready. cubes={active_cubes}  dof={n_dof}", flush=True)
     cam_topics = " / ".join(t for _, t, _ in camera_specs) if camera_specs else "(none)"
@@ -413,11 +668,108 @@ def main() -> None:
           f"  (TF base_link→{active_cubes + [BOWL_NAME]})", flush=True)
     print(f"[bridge] camera topics: {cam_topics}", flush=True)
 
+    # ── VLA 성공률 eval 모드 ─────────────────────────────────────────────────
+    # terminations.task_done 과 동일한 cube-in-bowl 판정(컨테이너 xy=그릇 root, z=DESK_TOP_Z+range).
+    # bridge 는 env origin=0 이라 world pose == env-local pose.
+    def cube_in_bowl(cube_h) -> tuple[bool, float, float]:
+        cp = np.asarray(cube_h.get_world_pose()[0], dtype=np.float64)
+        bp = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
+        dxy = float(np.hypot(cp[0] - bp[0], cp[1] - bp[1]))
+        z = float(cp[2])
+        in_xy = dxy < BOWL_SUCCESS_RADIUS
+        in_z = (DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]) < z < (DESK_TOP_Z + BOWL_HEIGHT_RANGE[1])
+        return (in_xy and in_z), dxy, z
+
+    if args.eval > 0:
+        import json
+        control_hz = 30
+        ep_steps = max(1, int(args.eval_seconds * control_hz))
+        settle_steps = max(0, int(args.eval_settle * control_hz))
+        n_active = len(active_cubes)
+        episodes: list[dict] = []
+        print(f"[bridge] 🎯 EVAL 시작: {args.eval} 에피소드 × {args.eval_seconds}s "
+              f"(settle {args.eval_settle}s) · {n_active} 큐브 · success radius "
+              f"{BOWL_SUCCESS_RADIUS}m · z∈[{DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]:.3f},"
+              f"{DESK_TOP_Z + BOWL_HEIGHT_RANGE[1]:.3f}]", flush=True)
+        # 1회 warmup — vla-ros 연결·구동 시작 대기(obs publish 하며 step). 미구동 시 ep1 거짓 실패 방지.
+        warmup_steps = max(0, int(args.eval_warmup * control_hz))
+        if warmup_steps:
+            print(f"[bridge] eval warmup {args.eval_warmup}s (vla-ros 구동 대기)…", flush=True)
+            for _ in range(warmup_steps):
+                if not simulation_app.is_running():
+                    break
+                world.step(render=True)
+        for ep in range(args.eval):
+            if not simulation_app.is_running():
+                break
+            reset_scene(args.seed + ep)   # 에피소드별 재현 가능 seed (학습 DR)
+            for _ in range(settle_steps):
+                if not simulation_app.is_running():
+                    break
+                world.step(render=True)
+            ever = {n: False for n in active_cubes}     # 한 번이라도 그릇 안(진단용)
+            for _ in range(ep_steps):
+                if not simulation_app.is_running():
+                    break
+                world.step(render=True)
+                for n, h in cube_handles.items():
+                    if cube_in_bowl(h)[0]:
+                        ever[n] = True
+            # 에피소드 종료 시점 판정(엄격 = task_done 정의)
+            final = {n: cube_in_bowl(h) for n, h in cube_handles.items()}
+            n_final = sum(1 for v in final.values() if v[0])
+            n_ever = sum(ever.values())
+            all_ok = (n_final == n_active)
+            episodes.append({
+                "episode": ep,
+                "n_final": n_final, "n_ever": n_ever, "all_ok": all_ok,
+                "cubes": {n: {"in_bowl": bool(final[n][0]),
+                              "xy_mm": round(final[n][1] * 1000, 1),
+                              "z": round(final[n][2], 4),
+                              "ever": bool(ever[n])} for n in active_cubes},
+            })
+            per_cube = " ".join(f"{n}:{'O' if final[n][0] else 'x'}"
+                                f"({final[n][1] * 1000:.0f}mm,z{final[n][2]:.3f})" for n in active_cubes)
+            print(f"[eval] ep {ep + 1}/{args.eval}: {n_final}/{n_active} placed "
+                  f"(ever {n_ever}) all_ok={all_ok} | {per_cube}", flush=True)
+
+        n_ep = len(episodes)
+        if n_ep:
+            all_rate = sum(e["all_ok"] for e in episodes) / n_ep
+            cube_rate = sum(e["n_final"] for e in episodes) / (n_ep * n_active)
+            avg_placed = sum(e["n_final"] for e in episodes) / n_ep
+            ever_rate = sum(e["n_ever"] for e in episodes) / (n_ep * n_active)
+            summary = {
+                "model": "taehunkim/so101_smolvla_sim_pick_cube",
+                "n_episodes": n_ep, "n_active_cubes": n_active,
+                "eval_seconds": args.eval_seconds, "eval_settle": args.eval_settle,
+                "all_cubes_success_rate": round(all_rate, 4),
+                "per_cube_placement_rate": round(cube_rate, 4),
+                "avg_cubes_placed": round(avg_placed, 3),
+                "per_cube_ever_rate": round(ever_rate, 4),
+                "success_radius_m": BOWL_SUCCESS_RADIUS,
+                "z_window": [DESK_TOP_Z + BOWL_HEIGHT_RANGE[0], DESK_TOP_Z + BOWL_HEIGHT_RANGE[1]],
+                "episodes": episodes,
+            }
+            out_path = os.path.join(REPO_ROOT, args.eval_out) if not os.path.isabs(args.eval_out) else args.eval_out
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w") as fh:
+                json.dump(summary, fh, indent=2)
+            print("=" * 64, flush=True)
+            print(f"[eval] 🎬 결과 ({n_ep} ep): all-{n_active} 성공률 = {all_rate * 100:.1f}% · "
+                  f"per-cube 배치율 = {cube_rate * 100:.1f}% · 평균 {avg_placed:.2f}/{n_active} placed "
+                  f"(ever {ever_rate * 100:.1f}%)", flush=True)
+            print(f"[eval] JSON → {out_path}", flush=True)
+            print("=" * 64, flush=True)
+        return
+
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
     while simulation_app.is_running():
-        if should_reset["flag"]:
-            should_reset["flag"] = False
-            reset_scene()
+        if reset_req["mode"] is not None:
+            if reset_req["mode"] == "random":
+                current_seed["v"] = int.from_bytes(os.urandom(4), "little")  # 새 무작위 seed
+            reset_scene(current_seed["v"])   # R=동일 seed 재현 · N=새 seed
+            reset_req["mode"] = None
         world.step(render=True)
 
 

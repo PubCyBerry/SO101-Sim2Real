@@ -228,8 +228,10 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 #   PUBLIC_IP=<ip> LIVESTREAM=1 scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 4 --livestream 1  (WebRTC :49100)
 scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1
 
-# ③ VLA policy-client (컨테이너, so101_vla_policy ROS 노드). RTC 든 표준이든 동일.
-#   추론 모델은 config/vla_policy.yaml::pretrained_name_or_path 로 고정(profile 이 -e 덮음 — §7.6 함정).
+# ③ VLA policy-client (컨테이너, so101_vla_policy ROS 노드).
+#   ⚠ policy-server 는 non-RTC(compose 기본 `policy-server`) 권장 — 서버측 RTC 오적용으로 sim action
+#     오염(docs/TROUBLESHOOTING.md). ⚠ sim 모델은 그리퍼 GRIPPER_CMD_OFFSET=0.2 필요(use_default_offset
+#     재적용) — env/smolvla.env 에 박혀 자동. 실기기 모델이면 0.
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm vla-ros
 ```
 
