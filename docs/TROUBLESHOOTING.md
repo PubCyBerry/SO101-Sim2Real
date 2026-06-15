@@ -1406,6 +1406,65 @@ uv run python -c "from lerobot.policies.smolvla.modeling_smolvla import SmolVLAP
 
 ---
 
+## 직접 만든 LeRobot v3 데이터셋으로 train/추론 시 3가지 함정 (sim 데이터 생성 경로)
+
+**현상**: `upload_folder` 로 직접 올린 LeRobot v3 데이터셋(예: cuRobo sim recorder 산출 `taehunkim/so101_sim_pick_cube`)으로 `lerobot-train` 을 돌리면 데이터셋 로드/샘플 단계에서 연쇄 실패한다. (`LeRobotDataset.create` 가 아니라 pyarrow/pandas 로 메타를 직접 쓴 경우 발생.)
+
+**오류 메시지** (3가지, 순차 등장):
+
+```
+# ① revision 태그 없음
+TypeError: HfHubHTTPError.__init__() missing 1 required keyword-only argument: 'response'
+#   (실인은 lerobot.datasets.utils.get_safe_version 의 RevisionNotFoundError — codebase_version 태그 미존재)
+# ② task 매핑 깨짐
+ValueError: Task cannot be None
+# ③ 학습 출력 디렉터리 충돌
+FileExistsError: Output directory outputs/train/<job> already exists and resume is False.
+```
+
+### 원인
+
+1. **revision 태그**: LeRobot 은 dataset repo 의 `codebase_version`(예: `v3.0`)을 **git 태그/revision** 으로 찾는다. `LeRobotDataset.create` 는 push 시 이 태그를 달지만, `huggingface_hub.upload_folder` 는 안 단다 → `get_safe_version` 이 revision 못 찾고 raise(+ hf_hub 버전 조합에 따라 `HfHubHTTPError` 2차 에러로 가림).
+2. **tasks.parquet 스키마**: LeRobot 은 `meta/tasks.parquet` 을 **pandas DataFrame(인덱스=task 문자열, 컬럼=task_index)**으로 읽어 task_index→문자열 매핑한다. pyarrow 로 직접 `pa.table({...})` 쓰면 pandas index 메타데이터가 없어 매핑이 None → `Task cannot be None`.
+3. **출력 dir**: `lerobot-train` 은 같은 `--output_dir`(=`outputs/train/<JOB_NAME>`)가 있으면 `resume=False` 일 때 거부한다. 이전 동명 학습 산출물이 남아 있으면 충돌.
+
+### 해결 방법
+
+1. 업로드 후 codebase_version 태그를 만든다(재업로드 시 **최신 HEAD 로 이동** — delete+create, `exist_ok` 만으론 옛 커밋에 고정):
+   ```python
+   api.delete_tag(repo, tag="v3.0", repo_type="dataset")   # 있으면
+   api.create_tag(repo, tag="v3.0", repo_type="dataset", revision="main")
+   ```
+   `scripts/sim/upload_to_huggingface.py` 가 info.json 의 `codebase_version` 으로 자동 수행.
+2. tasks.parquet 을 pandas 로 쓴다: `pd.DataFrame({"task_index":[0]}, index=[task_name]).to_parquet(path)`. `scripts/sim/lerobot_recorder.py::_write_tasks` 반영.
+3. 학습 JOB/출력/모델 repo 를 **고유 이름**으로(`-e JOB_NAME=... -e OUTPUT_DIR=outputs/train/... -e POLICY_REPO_ID=...`) 분리하거나 `--resume=true`.
+
+### 확인 방법
+
+```bash
+# 태그 확인
+python -c "from huggingface_hub import HfApi; print([t.name for t in HfApi().list_repo_refs('<repo>',repo_type='dataset').tags])"  # ['v3.0']
+# tasks.parquet pandas 인덱스 확인
+python -c "import pyarrow.parquet as pq; print(b'pandas' in (pq.read_table('meta/tasks.parquet').schema.metadata or {}))"          # True
+# smoke train: config.type==smolvla 면 데이터·rename·학습 OK
+```
+
+---
+
+## sim VLA 추론 노드가 잘못된 모델을 로드 (profile 이 -e override 를 덮음)
+
+**현상**: `docker compose run --rm -e POLICY_REPO_ID=<내 모델> vla-ros` 로 추론 모델을 바꿔도, 노드가 **profile(`env/smolvla.env`) 의 `POLICY_REPO_ID`** 를 쓴다(`sent instructions (model=...)` 가 의도한 모델과 다름).
+
+**원인**: `so101_vla_policy` 노드는 시작 시 `.env → env/<POLICY_PROFILE>.env` 를 **os.environ 으로 재로드(나중 파일 override)** 한다. 그래서 `docker run -e POLICY_REPO_ID=...` 로 준 값이 profile 값으로 덮인다. 모델 우선순위 = `ROS param pretrained_name_or_path > POLICY_REPO_ID > POLICY_BASE_MODEL_PATH`.
+
+**해결 방법**: 추론 모델은 **ROS param `pretrained_name_or_path`**(env reload 에 안 덮임, 최우선)로 고정 — `ros2_ws/src/so101_vla_policy/config/vla_policy.yaml`:
+```yaml
+pretrained_name_or_path: "taehunkim/so101_smolvla_sim_pick_cube"
+```
+**확인**: 노드 로그 `sent instructions (..., model=<의도한 모델>...)` + policy_server `action shape torch.Size([1, N, 6])`.
+
+---
+
 ## 카메라 sensor 가 raytracing pipeline 생성 실패 (RT 코어 없는 GPU)
 
 > ⚠ **H100/A100은 Isaac Sim 5.1 공식 미지원이다.** NVIDIA 공식 [System Requirements](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/requirements.html)가 다음과 같이 명시:

@@ -13,6 +13,36 @@
 
 ---
 
+## 작업 인계 (2026-06-15 — PickCube cuRobo P5+ 🟢 sim→train→sim VLA 전체 루프 완료 / 코드 미커밋)
+
+- **목표(사용자)**: cuRobo PickCube 트랙을 **데이터 생성 → SmolVLA 학습 → sim closed-loop 추론**까지 한 번에. 게이트: 10-ep 생성·업로드 먼저 검증 후 진행. 상세·재현·함정 = **`docs/PICKCUBE_CUROBO_PROJECT.md` §0 대시보드·§13**(이 트랙의 단일 source of truth, post-compact 훅이 자동 주입).
+- **완료(전 5단계)**: ① 공유 writer `scripts/sim/lerobot_recorder.py`(rollout_to_lerobot writer 추출, pyarrow/imageio 지연 import) ② **success-only render-batch**(`pick_cube_curobo_batch.py` 에 카메라 N-env 배치 렌더+per-env 기록 훅; single-env 매 step 3캠 렌더 병목 회피, N=16 ~2.3x/ep) + **시각 DR**(`domain_randomization.py::randomize_lights`·`randomize_camera_focal`, Workshop resets.py 참고, oracle 무영향) → **240 ep·143072 frame** → HF `taehunkim/so101_sim_pick_cube`(v3.0) ③ SmolVLA 20k fine-tune(Docker policy-server train, `-e HF_DATASET_REPO_ID` override) → HF `taehunkim/so101_smolvla_sim_pick_cube`(wandb pubcyberry/lerobot/oh1gs82t) ④ **sim closed-loop 추론**(ROS2 3-process, PATH_E §7.4): bridge+기존 policy_server+vla-ros → action [1,8,6]·`/isaac_joint_commands` 17.7Hz arm 구동. livestream(PUBLIC_IP=10.10.16.147 `--livestream 1`, port 49100) 으로 시각 관전 가능.
+- **함정 4건(→`docs/TROUBLESHOOTING.md` 신규 2섹션)**: ① HF v3.0 태그 미생성(`upload_folder`)→train RevisionNotFound, 재업로드 시 태그 이동 ② tasks.parquet pandas 인덱스 필요→`Task cannot be None` ③ train output dir 충돌→고유 JOB ④ vla 노드가 profile 로 `-e POLICY_REPO_ID` 덮음→`config/vla_policy.yaml::pretrained_name_or_path` 로 고정.
+- **신규/수정 파일(미커밋)**: 신규 `scripts/sim/{lerobot_recorder,upload_to_huggingface}.py`; 수정 `scripts/sim/{pick_cube_curobo_demo,pick_cube_curobo_batch,rollout_to_lerobot}.py`·`src/sim_to_real/{utils/domain_randomization,tasks/pick_cube/pick_cube_env_cfg}.py`·`ros2_ws/src/so101_vla_policy/config/vla_policy.yaml`·`.claude/settings.json`(post-compact 훅)·`docs/{PICKCUBE_CUROBO_PROJECT,TROUBLESHOOTING,PATH_E_CUMOTION_ROS}.md`·`AGENTS.md`.
+- **미완·다음**: 정성 grasp 성공률은 headless proxy(arm 구동 확정)까지만 — 실제 집기 완성도는 livestream/GUI 사용자 관찰 권장(240 demo·20k step, 데이터/스텝↑ 개선 여지). 코드 git 커밋은 사용자 요청 대기.
+- ⚠ **운영 사고**: 초반 single-env 80-ep 중단 시 `pgrep -f "pick_cube_curobo_demo.py"` 광범위 매칭으로 세션 이전부터 돌던 동명 leftover 프로세스 동반 종료. 이후 kill 은 numeric PID 로. 사용자 `policy_server`(Up 3d) 컨테이너는 보존.
+
+---
+
+## 작업 인계 (2026-06-15 - Isaac Sim 6 / Isaac Lab 3 + 제어 생태계 + digital twin 종합 검토 / 조사 완료)
+
+- 목표: Isaac Sim 5.1.0에서 6.0, Isaac Lab 2.3.2에서 3.0으로 이전할 때의 장단점, Breaking Changes, 공개 이슈, SO-101 5-DOF 제어, Isaac ROS/cuRobo/cuMotion/PINK 연계, Sim-to-Real digital twin 구축 관점을 종합 검토.
+- 완료: `docs/ISAAC_SIM_6_LAB_3_MIGRATION_REVIEW.md` 신규 작성(1,494줄). 코드와 의존성은 변경하지 않음.
+- 핵심 판단:
+  - Isaac Sim 5.1은 공식 지원 종료, Isaac Sim 6.0은 2026-06-04 GA이므로 장기 이전은 필요.
+  - Isaac Lab 3은 2026-06-15 현재 `v3.0.0-beta`이며 공식 3.0 wheel이 없어 즉시 전면 교체는 비권장.
+  - camera/SDG, ROS 2, multi-tick rendering, cuMotion/PINK는 기대 이점이 크지만 일반 scene/physics 성능은 공식 benchmark에서 회귀 사례가 있음.
+  - 현재 cuRobo `v0.8.0-35-gec2bfa9`에는 `ToolPoseCriteria` partial-pose API가 있음. SO-101 GPU probe에서 동일 reachable position의 임의 orientation full-pose IK는 실패했지만 position-only IK는 성공했고 FK 위치 오차는 `0.42-0.58 mm`.
+  - position-only만 쓰면 wrist roll이 임의로 갈 수 있으므로 transit/hover에는 적합하지만 grasp에는 필요한 orientation 1-2축 또는 posture seed가 필요.
+  - policy/action은 arm 5 + gripper 1의 6-dim이지만 planner c-space는 arm 5개여야 함. 현재 `so101_curobo.yml`의 gripper 포함 c-space를 planner용 5-joint config로 분리하는 것이 우선.
+  - Sim 6 내장 cuMotion graph planner는 공식 translation-only target, PINK는 orientation cost 0을 지원. 반면 Isaac ROS cuMotion 4.4 MoveIt pose-goal은 position+orientation을 모두 요구하고 direct action의 partial-pose hold도 미지원이라 ROS 경로는 5-joint goal + C-space planning 유지 권장.
+  - digital twin 최우선 gap은 real 3-camera calibration. 현재 camera YAML 다수의 `camera_info_url`이 비어 있어 intrinsic/distortion이 contract에 미포함. AprilTag/checkerboard calibration을 먼저 하고 depth camera 도입 후 nvblox/FoundationPose를 검토.
+  - 저장소 정적 검색: `.data.*` 217건, 구형 write API 38건, WXYZ 관련 텍스트 69건, AppLauncher 파일 37개.
+  - 주요 전환: WXYZ에서 XYZW, ProxyArray `.torch`/`.warp`, write `_index`/`_mask`, Core/Lula/ROS/camera deprecated API, Python 3.12/NumPy 2/PyTorch 2.10.
+  - 권장 전략은 기존 5.1/2.3.2 기준선을 보존하고 Linux 별도 환경에서 Sim 6.0.0.1 + Lab beta2 고정 SHA + PhysX pilot을 수행하는 것.
+- 검증: 문서의 외부 URL 65개 응답 정상, 문서 `git diff --check` 통과. cuRobo probe는 현재 GPU/uv 환경에서 실행.
+- 다음 작업 우선순위: ① 현재 cuRobo partial-pose production probe ② planner 5-joint config 분리 ③ 3-camera intrinsic/extrinsic bundle ④ Sim 6 PINK/translation-only pilot ⑤ dependency migration.
+
 ## 작업 인계 (2026-06-14 — PickCube cuRobo P2 🟢 DONE: IPC 사이드카 + 4-큐브 pick-place ~18-20s 4/4 / 다음=multi-env 논의)
 
 - **결과**: single-env 4-큐브 cuRobo pick-place 완성. **headless DR 4/4·18~20s**(목표 <20s 달성), 장애물 회피·DR·livestream+3cam. 사용자 "완벽". **커밋 대상**(브랜치 후). 다음 = **multi-env 배치 확장 논의**.

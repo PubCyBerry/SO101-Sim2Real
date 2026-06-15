@@ -29,8 +29,12 @@
 | **P2** | cuRobo 충돌 플래닝 ↔ pick-place 통합 (single-env) | 🟢 DONE (**IPC 사이드카**·4-큐브 side-approach·장애물 회피·DR·livestream+3cam, **~18–20초 4/4**) | A |
 | **P3** | **multi-env 배치** 스케일 (BatchMotionPlanner·multi_env world) · throughput | 🟢 DONE (서버 배치+청크·클라 lock-step·grasp-retry. **N=256 chunk=64 retry=1: cube 64.6%·all-4 18.8%·VRAM 20GB·3 epi/s**). all-4 상향 = P4 min_cube_sep | A |
 | **P4** | 큐브 간 최소거리 강화 (clustering 해소) | ⚪ TODO | B |
-| **P5** | 렌더 env + obs/action 공유 계약 · LeRobot 기록 | ⚪ TODO | B |
-| **P6** | VLA 시뮬 추론 (single-env · ROS2 + async · 인터랙티브) | ⚪ TODO | C |
+| **P5** | LeRobot v3 데이터(render-batch+시각DR 240-ep) + HF | 🟢 DONE (`taehunkim/so101_sim_pick_cube` v3.0, 143072 frame) | B |
+| **P5T** | SmolVLA fine-tune (Docker policy-server train 20k) | 🟢 DONE (`taehunkim/so101_smolvla_sim_pick_cube`, wandb oh1gs82t) | B |
+| **P6** | VLA 시뮬 closed-loop 추론 (ROS2 3-process) | 🟢 DONE (action [1,8,6]·17.7Hz arm 구동; 정성 grasp 는 livestream 관찰 권장) | C |
+
+> **🔁 전체 루프(사용자 2026-06-14 확장)**: cuRobo 데이터 → HF → SmolVLA 학습 → sim VLA 추론까지 한 번에
+> 검증. 게이트: **10-ep 생성·업로드 먼저 확인 후 80-ep + 학습 + 추론**. 상세·재개 가이드 = **§13**.
 | **PD** | ovrtx/ovphysx throughput 실측 (옵션) | ⚪ TODO | D |
 
 > 🎯 **성공 기준**: 2048-env 4-큐브 **~95–99% + clean↑**(knocking 없는 자연 궤적), 에피소드 **<20초**
@@ -312,6 +316,92 @@ Track D (독립):       ovrtx ‖ ovphysx 실측
 | 2026-06-14 | **세션 마무리: focal 재적용·roll -90·grasp-effort·contactOffset 🟢** | ① focal 14mm 가 초반 변경 유실로 23.0 으로 커밋됐던 것 발견 → **재적용·grep 검증**(8d15fff). ② **roll -90° 선호**(free 큐브 clearance 동률서 bias 0.4, 클러스터는 clearance 지배). ③ **grasp-effort 확인**: leisaac `dynamic_reset_gripper_effort_limit` 우리도 보유(`utils/gripper_effort.py`), **PickCubeEnv.step 이 매 step 배선**(flag True) → batch/demo/SM 모두 자동 적용. 그리퍼 effort=`clamp(mass/0.15,0.5,10)`=큐브 **0.5Nm**(gentle). ④ **그리퍼 contactOffset 0.002·restOffset 0**(큐브와 매칭, 이전 미설정=큰 skin) → finger-큐브 빈 공간(gentle grip 이 skin 안 눌러서 생김) 축소. **256 검증: cube 95.3→96.4%·all-4 82.8→86.7%·popcorn-fail 2.1→1.1%**(회귀 없음·개선). 커밋 8d15fff·0824be3 |
 
 > 진행 시 여기에 Phase별 실측(taxonomy success·clean·steps·reason_histogram, throughput)을 누적 기록.
+
+---
+
+## 13. P5+ VLA 전체 루프 — 진행·재개 가이드 (🔵 자율 진행 중, 2026-06-14)
+
+> **목표(사용자)**: cuRobo single-env pick-place 로 expert 데이터 생성 → HF → SmolVLA fine-tune →
+> cube_desk 시뮬 closed-loop 추론. **게이트**: 10-ep 생성·업로드 확인 후 80-ep + 학습 + 추론.
+> **승인 플랜**: `~/.claude/plans/curious-hopping-lampson.md`.
+> **결정**: 에피소드 = full-round(4큐브, all-4 성공만 기록) · 학습 = smoke→full 20k 단계 · 추론 = 검증된
+> ROS2 경로 재사용. **repo**: 데이터 `taehunkim/so101_sim_pick_cube`(신규, 실기기 `so101_pick_cube` 와 분리) ·
+> 모델 `taehunkim/so101_smolvla_pick_cube`.
+
+### 불변 계약 (North Star)
+LeRobot v3.0 · robot_type `so_follower` · action/state 6-dim(arm 5축 deg + gripper [0,100], scale 31.75) ·
+`observation.images.{top,wrist,front}` 480×640×3 h264 yuv420p · fps 30 · task `"pick up the cube and place
+it in the bowl"`. 참고 실기기 데이터셋 = `datasets/pick_cube`.
+
+### 구현된 코드 (P5, 완료·검증)
+| 파일 | 내용 |
+|---|---|
+| `scripts/sim/lerobot_recorder.py` (신규) | `LeRobotV3DatasetWriter` — rollout_to_lerobot writer 추출(스키마 동일). `add_frame`·`commit_episode(success, task)`·`finalize`. pyarrow/imageio **지연 import**(ABI). 더미 데이터 end-to-end 검증 완료(v3.0·so_follower·3 mp4) |
+| `scripts/sim/rollout_to_lerobot.py` (수정) | inline writer 제거 → 공유 모듈 import (RL 경로 의미 보존) |
+| `scripts/sim/pick_cube_curobo_demo.py` (수정) | `--record_dir/--record_episodes/--record_overwrite/--record_max_attempts/--record_warmup`. record 모드: cameras 강제 ON, act() 에서 (state 측정+3캠+action=env.step 입력) 캡처, run_round 단위 에피소드, all-4 성공만 commit, N 성공까지 반복 |
+| `scripts/sim/upload_to_huggingface.py` (신규) | `huggingface_hub.upload_folder` (Isaac 무의존, 호스트 uv). HF_TOKEN/HF_USER `.env` 파싱. dataset repo 자동 생성 |
+
+action 기록 = **실행된 env.step 입력**(arm q_cmd+q_bias, gripper grip-offset). q_bias(C6 중력보상)·
+GRIPPER_ACTION_OFFSET 은 sim 유물이나 rollout_to_lerobot 와 동일하게 실행 action 기록(BC 인과 일치).
+
+### 실행 명령 (재현·재개)
+```bash
+# 1) cuRobo planner 사이드카 (ready 신호 = "[planner] ZMQ REP bind")
+nohup env OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync --group isaac python \
+  scripts/planning/curobo_planner_server.py --port 5599 > outputs/p5_logs/planner.log 2>&1 &
+# 2) recorder (10-ep 게이트 → 80-ep 본생성). headless + cameras 강제.
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync --group isaac python scripts/sim/pick_cube_curobo_demo.py \
+  --headless --planner_port 5599 --active_objects 4 \
+  --record_dir outputs/so101_sim_pick_cube --record_episodes 10 --record_overwrite   # 80→--record_episodes 80
+# 3) HF 업로드 (호스트 uv, --group isaac 불요)
+uv run --no-sync python scripts/sim/upload_to_huggingface.py \
+  --dataset_dir outputs/so101_sim_pick_cube --repo_id taehunkim/so101_sim_pick_cube
+# 4) SmolVLA 학습 (Docker; ⚠ HF_DATASET_REPO_ID 를 sim repo 로 override — .env 는 실기기 repo)
+#    smoke(100): -e TRAIN_STEPS=100 -e BATCH_SIZE=16 -e WANDB_ENABLE=false ... --policy.push_to_hub=false
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e HF_DATASET_REPO_ID=taehunkim/so101_sim_pick_cube policy-server train   # full 20k, push_to_hub
+# 5) 추론(ROS2): run_cube_desk_ros_bridge(호스트 Isaac GUI) + so101_vla_policy 노드(Docker) + policy-server gRPC
+```
+- 산출물: 데이터 `outputs/so101_sim_pick_cube/`, 학습 `outputs/train/so101_smolvla_pick_cube/`, 로그 `outputs/p5_logs/`.
+- ⚠ 데모 재시작 = python child 직접 kill(TaskStop 만으론 Isaac 좀비). planner = ZMQ `{"cmd":"shutdown"}`.
+
+### 진행 상태 (자율 갱신 — compaction 후 여기부터 이어서)
+- [x] **P5 코드 + 검증** (writer 더미 end-to-end, py_compile 4파일, huggingface_hub 0.35.3 확인)
+- [x] **🟢 10-ep 게이트 통과** — 10/10 all-4(폐기0, 5520 frame), 스키마 v3.0·so_follower·3cam OK,
+      **HF 업로드 확인**(`taehunkim/so101_sim_pick_cube`, 9파일 184MB). 데이터 실경로 `/DISK1/so101-sim2real/lerobot_outputs/so101_sim_pick_cube`(outputs/ 심링크)
+- [x] **⚙ 아키텍처 전환(사용자)**: single-env 느림(매 step 3캠 렌더) → **success-only + render-batch**. 80-ep single-env 중단,
+      `pick_cube_curobo_batch.py` 에 카메라 N-env 배치 렌더 + per-env 기록 훅 추가(all-4 성공 env 만 commit). render-batch 검증 N=4 all-4 4/4 1라운드.
+- [x] **🟢 시각 DR 확장(Workshop resets.py 참고)**: `domain_randomization.py` 에 `randomize_lights`(/World/Light·/World/KeyLight intensity+warmth, 글로벌)·`randomize_camera_focal`(top/wrist/front focalLength, IsValid 가드) 추가 → `pick_cube_env_cfg.PickCubeEventCfg` reset-mode 배선. robot color·mat 회전은 fragile/geometry 위험이라 보류. cuRobo oracle 무영향(visual only)
+- [x] **🟢 240-ep 생성+재업로드 완료** — render-batch N=16, 18라운드 ~14/round, **240 ep·143072 frame**·DR 작동 확인(라운드별 밝기 132-151·warm→cool). HF 재업로드(`taehunkim/so101_sim_pick_cube` v3.0, 9파일 ~4.8GB). planner 종료(GPU 확보).
+      ⚠ **함정: LeRobot train 은 dataset repo 의 codebase_version 태그(`v3.0`) 를 revision 으로 찾음** — `upload_folder` 는 태그 미생성 → `RevisionNotFoundError`. 해결: `api.create_tag(repo,"v3.0",repo_type="dataset")`(upload 스크립트에 자동화 반영). 실기기셋엔 LeRobotDataset 가 태그를 달아둠.
+- [x] **🟢 SmolVLA smoke(100) 통과** — config.type==smolvla, 체크포인트 저장, ~4 step/s. **함정 2건 해결**: ① tasks.parquet 은 pandas 인덱스(task 문자열) 필요(pyarrow 직접 write=`Task cannot be None`) → writer `_write_tasks` pandas 화 ② dataset task linkage 확인.
+- [ ] **🔵 full 20k 진행 중**(`outputs/p5_logs/full_train.log`, PID full_train.pid) — wandb `pubcyberry/lerobot/oh1gs82t`, batch32, push→`taehunkim/so101_smolvla_sim_pick_cube`, save_freq 4000, ETA ~1.5-2h.
+      ⚠ **출력 dir 충돌**: 이전 `so101_smolvla_pick_cube` run 존재 → 별도 JOB `so101_smolvla_sim_pick_cube`(+ POLICY_REPO_ID 동명 repo)로 분리. 명령: `docker compose --env-file .env -f docker/docker-compose.yaml run --rm -e HF_DATASET_REPO_ID=taehunkim/so101_sim_pick_cube -e JOB_NAME=so101_smolvla_sim_pick_cube -e OUTPUT_DIR=outputs/train/so101_smolvla_sim_pick_cube -e POLICY_REPO_ID=taehunkim/so101_smolvla_sim_pick_cube policy-server train`
+- [x] **🟢 sim VLA closed-loop 추론 검증 완료** (ROS2 3-process, PATH_E §7.4). bridge(headless, 3캠 52Hz+joint publish) + 기존 `policy_server`(재사용, 모델-agnostic) + `vla-ros`(my sim 모델). policy_server: **inference 0.12s, action [1,8,6]**. `/isaac_joint_commands` **17.7Hz·값 변화**(arm 실제 구동). 전체 sim→train→sim 루프 동작.
+      ⚠ **함정: vla 노드가 profile(`POLICY_REPO_ID`)를 내부 env reload 로 -e override 위에 덮음** → 모델은 ROS param `pretrained_name_or_path`(최우선)로 고정. `config/vla_policy.yaml` 에 `taehunkim/so101_smolvla_sim_pick_cube` 설정.
+      재현 — headless proxy: ① `docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server`(또는 기존 재사용) ② `scripts/sim/run_cube_desk_ros_bridge.sh --headless --num_cubes 4` ③ `docker compose --env-file .env -f docker/docker-compose.yaml run --rm vla-ros`.
+      재현 — **livestream 시각 관찰**(검증됨): ② 를 `PUBLIC_IP=10.10.16.147 LIVESTREAM=1 scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 4 --livestream 1` 로(`--headless` 빼고) → WebRTC client 를 **`<PUBLIC_IP>:49100`** 접속. `--livestream 2` 만 쓰면 LAN IP 광고로 검은화면(memory `isaac-livestream-tailscale-publicip`). 모델은 `config/vla_policy.yaml::pretrained_name_or_path`(현 `actions_per_chunk:24`).
+      **RTC 변형(검증됨, 권장)**: ①을 `docker compose ... run --rm policy-server policy-server-rtc`(RTCPolicyServer, horizon8·guidance_w10·EXP, RTC_* env)로 → 서버 로그 `[RTC] chunk #N | guidance ✅ | leftover=… (horizon=8)` action [1,24,6], `/isaac_joint_commands` 20.8Hz. 클라/bridge 동일(RTC=서버측). 구조: Async+RTC policy-server + Isaac bridge + VLA policy-client(vla-ros). PATH_E §7.4 ①(b).
+      미완: **정성 grasp 성공률**(headless proxy 만 확인 — 팔이 obs 따라 움직임 확정, 실제 집기 완성은 livestream/GUI 로 사용자 관찰 권장. 240 demo·20k step 이라 grasp 완성도는 데이터/스텝↑로 개선 여지).
+
+### 🎉 전체 루프 완료 요약 (2026-06-15)
+cuRobo(P0-P4) → **render-batch+시각DR 240-ep**(`taehunkim/so101_sim_pick_cube` v3.0) → **SmolVLA 20k fine-tune**
+(`taehunkim/so101_smolvla_sim_pick_cube`, wandb oh1gs82t) → **sim closed-loop 추론**(action [1,8,6]·17.7Hz arm 구동).
+신규/수정 파일 미커밋(사용자 커밋 요청 대기): `scripts/sim/{lerobot_recorder,upload_to_huggingface}.py`(신규),
+`scripts/sim/{pick_cube_curobo_demo,pick_cube_curobo_batch,rollout_to_lerobot}.py`·`src/sim_to_real/{utils/domain_randomization,tasks/pick_cube/pick_cube_env_cfg}.py`·`ros2_ws/.../config/vla_policy.yaml`·`.claude/settings.json`(수정).
+
+### 스루풋 분석 (느림 원인·스케일 경로 — 2026-06-14 사용자 진단)
+- **병목 = single-env 매 control step 3캠(480×640) raytrace 렌더**. cuRobo plan 은 phase당 1회라 거의 무관.
+  80-ep ≈ ~1.6min/ep(=2.1h). 성공률 ~100%(폐기 0).
+- ⚠ **state-replay "성공분만 렌더" 이득이 우리는 ≈0**: 성공률 ~100%라 실패 렌더 낭비가 없고, 재렌더도
+  80 에피소드 동일 렌더량. **렌더 총량이 안 줆**.
+- **진짜 레버 = 렌더 배치(TiledCamera N-env 동시)**: N 에피소드 프레임을 step당 병렬 렌더 → ~Nx wall.
+  = **배치 replay-render**(N env 각자 다른 궤적 재생 + 카메라 ON). 신규 빌드: full scene state(robot q +
+  Cube1~4 + Bowl root pose) per-frame dump(batch client) + 가변길이 per-env 재생 + N-env writer. **2048
+  스케일 재생성 시 도입**(80-ep 엔 빌드시간>이득이라 미적용). ovrtx 렌더 probe = 그 단계서 측정 후 교체 후보.
+- **현 80-ep 결정**: single-env recorder 완주(리스크 0). 배치 replay-render 는 스케일 트랙으로 분리.
+
+> **재개 절차(compaction 후)**: ① 이 §13 진행 상태 체크박스 확인 ② `outputs/p5_logs/*.log` tail(planner.log·record80.log·train*.log) 로 현재 단계 파악 ③ `nvidia-smi` + `ps -ef|grep -E "curobo_planner_server|pick_cube_curobo_demo|lerobot-train"` 로 실행 중 작업 확인 ④ 미완 단계의 위 명령 이어서 실행. GPU 1장 공유 → 단계 **순차**(데이터→학습→추론 동시 금지). planner 사이드카(port 5599)는 데이터 단계 끝나면 ZMQ `{"cmd":"shutdown"}` 또는 PID kill.
 
 ---
 

@@ -66,6 +66,14 @@ parser.add_argument("--load_fail", default="", help="덤프된 실패 layout 재
 parser.add_argument("--view_eye", type=float, nargs=3, default=[2.2, -2.2, 2.4])
 parser.add_argument("--view_lookat", type=float, nargs=3, default=[0.4, 0.4, 0.75])
 parser.add_argument("--public_ip", default="", help="원격 WebRTC livestream(선택, 보통 headless)")
+# ── LeRobot v3 데이터 기록 (P5: success-only + render-batch) ──
+parser.add_argument("--record_dir", default=None,
+                    help="지정 시 LeRobot v3 기록 모드. 카메라 N-env 배치 렌더 + all-4 성공 env 만 기록")
+parser.add_argument("--record_episodes", type=int, default=240, help="기록할 성공(all-4) 에피소드 수")
+parser.add_argument("--record_overwrite", action="store_true", help="record_dir 있으면 삭제 후 재생성")
+parser.add_argument("--record_max_attempts", type=int, default=0,
+                    help="기록 모드 최대 라운드 시도(0=auto: ceil(record_episodes/(0.6*N))+4)")
+parser.add_argument("--record_warmup", type=int, default=8, help="라운드 시작 카메라 렌더 워밍업 step(미기록)")
 from isaaclab.app import AppLauncher  # noqa: E402
 
 AppLauncher.add_app_launcher_args(parser)
@@ -82,6 +90,8 @@ faulthandler.enable(open(os.path.join(ROOT, "outputs/curobo_batch_faulthandler.t
 _LAUNCHER_KEYS = {"headless", "livestream", "enable_cameras", "device", "kit_args",
                   "experience", "rendering_mode"}
 _launcher_args = {k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS}
+if args.record_dir:
+    _launcher_args["enable_cameras"] = True   # 카메라 N-env 배치 렌더
 app_launcher = AppLauncher(_launcher_args)
 simulation_app = app_launcher.app
 
@@ -96,11 +106,24 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     BOWL_HEIGHT_RANGE,
     BOWL_SUCCESS_RADIUS,
     PickCubeEnvCfg,
+    add_pick_cube_cameras,
 )
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from so101_kinematics import SO101Kinematics  # noqa: E402
+
+# LeRobot v3 기록(공유 writer + 단위 헬퍼). numpy-only → ABI 안전.
+from lerobot_recorder import LeRobotV3DatasetWriter  # noqa: E402
+from lerobot_units import (  # noqa: E402
+    CAMERA_KEYS,
+    CAMERA_SCENE_NAMES,
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    to_lerobot_units as _to_lerobot_units,
+)
+
+CUBE_TASK_NAME = "pick up the cube and place it in the bowl"
 
 # ── SM 검증분 복제 상수/스칼라 헬퍼 (단일-env 데모와 동일) ─────────────────
 DESK_TOP_Z = 0.705
@@ -195,6 +218,8 @@ def main() -> int:
     if args.no_dr:
         env_cfg.events.randomize_cubes = None
         env_cfg.events.randomize_bowl = None
+    if args.record_dir:
+        add_pick_cube_cameras(env_cfg.scene)   # top/wrist/front N-env 배치 카메라
     env_cfg.viewer.eye = tuple(args.view_eye)
     env_cfg.viewer.lookat = tuple(args.view_lookat)
     mv = dict(env_cfg.actions.arm.max_velocity)
@@ -213,6 +238,17 @@ def main() -> int:
     q_bias = torch.zeros((N, 5), device=device)
     # 팝콘 감지: 에피소드 중 각 큐브 max 선속도(m/s). 정상≈그릇낙하 1.5, 팝콘 폭발=수 m/s.
     cube_vmax = torch.zeros((N, len(cubes)), device=device)
+
+    # ── LeRobot v3 기록 상태 (record 모드 전용, success-only + render-batch) ──
+    record_mode = bool(args.record_dir)
+    rec_buf = [[] for _ in range(N)]   # per-env 라운드 프레임 [(action, state, images)]
+    rec_capture = [False]
+    successes_rec = [0]
+    writer = None
+    if record_mode:
+        writer = LeRobotV3DatasetWriter(
+            args.record_dir, overwrite=args.record_overwrite, enable_videos=True)
+        log(f"[batch] 🎥 RECORD → {args.record_dir} (목표 {args.record_episodes} all-4, N={N})")
 
     pl = BatchPlanner(args.planner_host, args.planner_port)
     ping = pl.call({"cmd": "ping"})
@@ -237,7 +273,26 @@ def main() -> int:
         q_bias = torch.clamp(q_bias + BIAS_KI * (q_cmd - q_now), -BIAS_MAX, BIAS_MAX)
         g = torch.as_tensor(np.asarray(grip, np.float32) - GRIPPER_ACTION_OFFSET,
                             device=device).reshape(N, 1)
-        env.step(torch.cat([q_cmd + q_bias, g], dim=-1))
+        action_input = torch.cat([q_cmd + q_bias, g], dim=-1)
+        if record_mode and rec_capture[0]:
+            # obs_t(측정 joint + 3캠, step 전=직전 렌더) + action_t(적용 입력). lock-step → 전 env 동일 T.
+            jp = robot.data.joint_pos[:, :6].detach().cpu().numpy()           # [N,6]
+            act_np = action_input.detach().cpu().numpy()                      # [N,6]
+            cam_np = {k: scene[CAMERA_SCENE_NAMES[k]].data.output["rgb"].detach().cpu().numpy()
+                      for k in CAMERA_KEYS}                                    # 각 [N,H,W,C]
+            for e in range(N):
+                images = {}
+                for k in CAMERA_KEYS:
+                    rgb = cam_np[k][e]
+                    if rgb.shape[-1] == 4:
+                        rgb = rgb[..., :3]
+                    if rgb.dtype != np.uint8:
+                        rgb = (np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+                               if np.issubdtype(rgb.dtype, np.floating)
+                               else np.clip(rgb, 0, 255).astype(np.uint8))
+                    images[k] = np.ascontiguousarray(rgb)
+                rec_buf[e].append((_to_lerobot_units(act_np[e]), _to_lerobot_units(jp[e]), images))
+        env.step(action_input)
         for ci, ca in enumerate(cube_assets):   # 팝콘 감지용 큐브 속도 max 추적(GPU)
             v = ca.data.root_lin_vel_w[:, :3].norm(dim=-1)
             cube_vmax[:, ci] = torch.maximum(cube_vmax[:, ci], v)
@@ -588,6 +643,13 @@ def main() -> int:
         placed = [[False] * len(cubes) for _ in range(N)]
         if fail_layouts is not None:                       # 덤프 layout 재현 → 주입 후 정착
             apply_fail_layouts(fail_layouts)
+        if record_mode:                                    # 버퍼 리셋 + 카메라 렌더 워밍업(미기록)
+            for e in range(N):
+                rec_buf[e].clear()
+            rec_capture[0] = False
+            settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32),
+                   max(0, args.record_warmup))
+            rec_capture[0] = True
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 35)
         layout0 = capture_layout0()                        # 정착된 초기 layout(덤프용)
         cube_vmax.zero_()                                  # 팝콘 추적 리셋(spawn-settle 제외)
@@ -616,6 +678,8 @@ def main() -> int:
                     if not placed[e][ci]:
                         failed[e][ci] += 1
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 30)
+        if record_mode:
+            rec_capture[0] = False
         per_env = [sum(p) for p in placed]
         total = sum(per_env)
         sim_t = (nstep[0] - s0) * CONTROL_DT
@@ -634,10 +698,16 @@ def main() -> int:
     last_layout0 = None
     # livestream(public_ip) 면 사용자가 관전하도록 무한 반복
     watch = bool(getattr(args, "livestream", 0)) and not args.headless
-    loop_n = (10 ** 9 if watch else max(1, args.loop))
+    if record_mode:
+        loop_n = (args.record_max_attempts if args.record_max_attempts > 0
+                  else math.ceil(args.record_episodes / max(1.0, 0.6 * N)) + 4)
+    else:
+        loop_n = (10 ** 9 if watch else max(1, args.loop))
     t_wall0 = time.time()
     i = 0
     while i < loop_n and simulation_app.is_running():
+        if record_mode and successes_rec[0] >= args.record_episodes:
+            break
         if i > 0:
             env.reset()
             q_bias = torch.zeros((N, 5), device=device)
@@ -646,8 +716,32 @@ def main() -> int:
         results.append(per_env)
         placed_all.extend(placed_r)
         vmax_all.extend(vmax_r.tolist())
+        if record_mode:                              # all-4 성공 env 만 commit
+            for e in range(N):
+                if successes_rec[0] >= args.record_episodes:
+                    break
+                if all(placed_r[e]) and len(rec_buf[e]) > 0:
+                    for (a, s, im) in rec_buf[e]:
+                        writer.add_frame(a, s, im)
+                    writer.commit_episode(True, CUBE_TASK_NAME)
+                    successes_rec[0] += 1
+            n_all4 = sum(1 for e in range(N) if all(placed_r[e]))
+            log(f"[batch] 기록 누적 {successes_rec[0]}/{args.record_episodes} "
+                f"(round {i+1}, 이번 all-4 {n_all4}/{N})")
+            for e in range(N):
+                rec_buf[e].clear()
         i += 1
     wall = time.time() - t_wall0
+
+    if record_mode:
+        summary = writer.finalize(CUBE_TASK_NAME)
+        log(f"[batch] 🎬 데이터셋 완료: {summary['output_dir']} "
+            f"episodes={summary['total_episodes']} frames={summary['total_frames']} (라운드 {i})")
+        if summary["total_episodes"] < args.record_episodes:
+            log(f"[batch] ⚠ 목표 {args.record_episodes} 미달({summary['total_episodes']}) "
+                f"— max_attempts({loop_n}) 소진")
+        env.close()
+        return 0
 
     flat = [v for r in results for v in r]
     n_cubes = len(cubes)

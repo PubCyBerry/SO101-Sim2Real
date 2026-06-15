@@ -59,10 +59,22 @@ parser.add_argument("--public_ip", default="", help="원격 WebRTC livestream �
 parser.add_argument("--cameras", action="store_true", help="top/wrist/front 카메라 리그 주입 + 3-패널 docking viewport")
 parser.add_argument("--layout", default="assets/layouts/pick_cube_3cam.json",
                     help="viewport docking layout JSON(ui.Workspace dump). ROOT 상대경로. 없으면 수동 dock fallback")
+# ── LeRobot v3 데이터 기록 (P5: sim→real expert 데이터) ──
+parser.add_argument("--record_dir", default=None,
+                    help="지정 시 LeRobot v3 데이터셋 기록 모드. 카메라 강제 ON, all-4 성공 라운드만 기록")
+parser.add_argument("--record_episodes", type=int, default=10, help="기록할 성공(all-4) 에피소드 수")
+parser.add_argument("--record_overwrite", action="store_true", help="record_dir 이미 있으면 삭제 후 재생성")
+parser.add_argument("--record_max_attempts", type=int, default=0,
+                    help="기록 모드 최대 라운드 시도(0=auto: max(record_episodes*5, 30))")
+parser.add_argument("--record_warmup", type=int, default=8, help="라운드 시작 카메라 렌더 워밍업 step(미기록)")
 from isaaclab.app import AppLauncher  # noqa: E402
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+
+# record 모드: 카메라 강제 ON(이미지 obs 필요). headless 권장(viewport docking 생략).
+if args.record_dir:
+    args.cameras = True
 
 # 원격 WebRTC livestream — PUBLIC_IP env + mode 1 (mode 2 는 PUBLIC_IP 무시 → LAN IP 검은화면).
 # 근거: pick_cube_state_machine.py 동일 패턴 + memory isaac-livestream-tailscale-publicip.
@@ -106,6 +118,17 @@ from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from so101_kinematics import SO101Kinematics  # noqa: E402  (PAN_X·_fold_45 — closing-axis)
+
+# LeRobot v3 기록(공유 writer + 단위/카메라 헬퍼). numpy-only → ABI 안전.
+from lerobot_recorder import LeRobotV3DatasetWriter  # noqa: E402
+from lerobot_units import (  # noqa: E402
+    CAMERA_KEYS,
+    CAMERA_SCENE_NAMES,
+    read_camera_rgb_u8,
+    to_lerobot_units as _to_lerobot_units,
+)
+
+CUBE_TASK_NAME = "pick up the cube and place it in the bowl"
 
 # ── SM 검증분 복제 상수/헬퍼 (frame 정합) ──────────────────────────────────
 DESK_TOP_Z = 0.705
@@ -269,6 +292,18 @@ def main() -> int:
     CUBE_SIZES = {"Cube1": 0.030, "Cube2": 0.030, "Cube3": 0.040, "Cube4": 0.040}
     q_bias = torch.zeros((1, 5), device=device)
 
+    # ── LeRobot v3 기록 상태 (record 모드 전용) ──
+    record_mode = bool(args.record_dir)
+    rec_buffer: list = []      # 현재 라운드 프레임 [(action, state, images)]
+    rec_capture = [False]      # act() 캡처 게이트(워밍업/라운드밖 미기록)
+    successes_rec = [0]
+    writer = None
+    if record_mode:
+        writer = LeRobotV3DatasetWriter(
+            args.record_dir, overwrite=args.record_overwrite, enable_videos=True)
+        log(f"[demo] 🎥 RECORD 모드 → {args.record_dir} "
+            f"(목표 {args.record_episodes} all-4 에피소드, {len(cubes)}큐브)")
+
     pl = Planner(args.planner_host, args.planner_port)
     ping = pl.call({"cmd": "ping"})
     log(f"[demo] planner ping: {ping.get('ok')}  joints={ping.get('joints')}")
@@ -292,14 +327,25 @@ def main() -> int:
     nstep = [0]
 
     def act(q_arm, grip_target):
-        """[q_arm(5)+q_bias, grip] 1 step. q_bias 중력보상(C6)."""
+        """[q_arm(5)+q_bias, grip] 1 step. q_bias 중력보상(C6).
+
+        record 모드: step 직전 obs_t(측정 joint + 3캠 이미지)와 action_t(env.step 입력)를
+        버퍼에 캡처(표준 (s_t, a_t) 페어). action 은 실행된 입력 그대로 = q_cmd+q_bias(arm) +
+        grip-offset(gripper). q_bias·GRIPPER_ACTION_OFFSET 는 sim PD 보상/액추에이터 유물이나
+        rollout_to_lerobot 와 동일하게 '실행된 action' 을 기록한다(BC 인과 일치)."""
         nonlocal q_bias
         nstep[0] += 1
         q_cmd = torch.tensor([q_arm], device=device, dtype=torch.float32)
         q_now = robot.data.joint_pos[:, :5]
         q_bias = torch.clamp(q_bias + BIAS_KI * (q_cmd - q_now), -BIAS_MAX, BIAS_MAX)
         grip = torch.tensor([[grip_target - GRIPPER_ACTION_OFFSET]], device=device)
-        env.step(torch.cat([q_cmd + q_bias, grip], dim=-1))
+        action_input = torch.cat([q_cmd + q_bias, grip], dim=-1)
+        if record_mode and rec_capture[0]:
+            state_rec = _to_lerobot_units(robot.data.joint_pos[0, :6].detach().cpu().numpy())
+            images = {k: read_camera_rgb_u8(base, CAMERA_SCENE_NAMES[k]) for k in CAMERA_KEYS}
+            action_rec = _to_lerobot_units(action_input[0].detach().cpu().numpy())
+            rec_buffer.append((action_rec, state_rec, images))
+        env.step(action_input)
 
     def to_base(p_w, sn):
         return _world_to_base_np(np.asarray(p_w, float), sn["rp"], sn["ryaw"])
@@ -496,6 +542,14 @@ def main() -> int:
         """4 큐브 전부 시도. placed 수 반환."""
         nonlocal placed
         placed = set()
+        if record_mode:                      # 라운드 시작: 버퍼 비우고 카메라 렌더 워밍업(미기록)
+            rec_buffer.clear()
+            rec_capture[0] = False
+            for _ in range(max(0, args.record_warmup)):
+                if not simulation_app.is_running():
+                    return 0
+                act(READY, args.grip_open)
+            rec_capture[0] = True
         settle(READY, args.grip_open, 35)   # 라운드 시작: READY 수렴(cube1 plan start)
         s0 = nstep[0]
         for idx, target in enumerate(cubes):
@@ -504,6 +558,8 @@ def main() -> int:
             if pick_cube(target, start_q=(READY if idx == 0 else None)):
                 placed.add(target)
         settle(READY, args.grip_open, 30)   # 라운드 끝: 대기 자세 복귀(흘러내림 방지)
+        if record_mode:
+            rec_capture[0] = False
         sim_t = (nstep[0] - s0) * CONTROL_DT
         log("=" * 60)
         log(f"[demo] ===== ROUND 결과: {len(placed)}/{len(cubes)} placed | "
@@ -519,19 +575,49 @@ def main() -> int:
                 break
             act(READY, args.grip_open)
 
-    loop_n = args.loop if args.loop > 0 else (10**9 if watch else 1)
+    if record_mode:
+        rec_max = args.record_max_attempts if args.record_max_attempts > 0 else max(args.record_episodes * 5, 30)
+        loop_n = rec_max
+    else:
+        loop_n = args.loop if args.loop > 0 else (10**9 if watch else 1)
     i = 0
     while i < loop_n and simulation_app.is_running():
+        if record_mode and successes_rec[0] >= args.record_episodes:
+            break
         if i > 0:
-            env.reset()
+            env.reset()           # DR 재샘플(매 라운드 다른 레이아웃)
             q_bias = torch.zeros((1, 5), device=device)
-        log(f"[demo] ===== ROUND {i+1} 시작 =====")
+        log(f"[demo] ===== ROUND {i+1} 시작 ====="
+            + (f" (기록 {successes_rec[0]}/{args.record_episodes})" if record_mode else ""))
         run_round()
+        if record_mode:
+            ok_all = (len(placed) == len(cubes)) and len(rec_buffer) > 0
+            if ok_all:
+                for (a, s, im) in rec_buffer:
+                    writer.add_frame(a, s, im)
+                writer.commit_episode(True, CUBE_TASK_NAME)
+                successes_rec[0] += 1
+                log(f"[demo] ✅ 에피소드 기록 {successes_rec[0]}/{args.record_episodes} "
+                    f"(frames={len(rec_buffer)})")
+            else:
+                log(f"[demo] ✗ 라운드 {len(placed)}/{len(cubes)} placed — 폐기(미기록)")
+            rec_buffer.clear()
         for _ in range(40):   # 라운드 간 대기 — READY 유지(cur_arm 홀딩=droop 방지)
             if not simulation_app.is_running():
                 break
             act(READY, args.grip_open)
         i += 1
+
+    if record_mode:
+        summary = writer.finalize(CUBE_TASK_NAME)
+        log(f"[demo] 🎬 데이터셋 완료: {summary['output_dir']} "
+            f"episodes={summary['total_episodes']} frames={summary['total_frames']} "
+            f"(시도 {i} 라운드)")
+        if summary["total_episodes"] < args.record_episodes:
+            log(f"[demo] ⚠ 목표 {args.record_episodes} 미달({summary['total_episodes']}) "
+                f"— max_attempts({loop_n}) 소진")
+        env.close()
+        return 0
 
     if watch:
         log("[demo] 종료 — 창 닫을 때까지 idle (READY 유지)")

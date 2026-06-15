@@ -16,6 +16,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
+| `docs/PICKCUBE_CUROBO_PROJECT.md` | cuRobo PickCube 마스터(P0~P6) — 배치 충돌 플래닝 + **sim→train→sim VLA 전체 루프**(render-batch 데이터 → SmolVLA 학습 → ROS2 추론). §13=재현·함정 |
 
 ## 두 실행 경로
 
@@ -130,6 +131,10 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
 | `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽 |
 | `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |
+| `planning/curobo_planner_server.py` · `sim/pick_cube_curobo_{demo,batch}.py` | **cuRobo 트랙** — ZMQ planner 사이드카 + single-env 데모 / multi-env lock-step 배치. `--record_dir` 지정 시 **LeRobot v3 기록 모드**(demo=single-env, batch=success-only render-batch N-env 카메라). 상세 `docs/PICKCUBE_CUROBO_PROJECT.md` |
+| `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
+| `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
+| `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼 |
 
 > **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.
 

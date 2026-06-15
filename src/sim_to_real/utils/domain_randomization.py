@@ -454,3 +454,116 @@ def randomize_object_mass(
             "recompute_inertia": True,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# 시각 도메인 랜덤화 (sim2real) — NVIDIA Workshop resets.py 참고.
+# cuRobo oracle 은 큐브 world pose 만 쓰므로 시각 변화는 grasp 기하에 무영향(C-안전).
+# 라이트는 글로벌 /World/Light·/World/KeyLight(per-env 아님) → reset 당 전 env 공통값.
+# 카메라 focal 은 per-env prim. 모든 USD set 은 IsValid 가드(속성 없으면 no-op, 무크래시).
+# ---------------------------------------------------------------------------
+
+
+def _randomize_lights_fn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    dome_prim_path: str,
+    key_prim_path: str,
+    dome_intensity_range: tuple[float, float],
+    key_intensity_range: tuple[float, float],
+    warmth_range: tuple[float, float],
+) -> None:
+    """Dome/Key 라이트 intensity + 색온도(warmth) 무작위화. reset 당 1 샘플(전 env 공통)."""
+    from isaaclab.sim import get_current_stage
+    from pxr import Gf, Sdf
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    stage = get_current_stage()
+
+    def _u(lo: float, hi: float) -> float:
+        return float(torch.empty(1).uniform_(float(lo), float(hi)).item())
+
+    dome_i = _u(*dome_intensity_range)
+    key_i = _u(*key_intensity_range)
+    t = _u(*warmth_range)  # 0=cool(푸른) ~ 1=warm(주황)
+    cool = (0.82, 0.90, 1.0)
+    warm = (1.0, 0.88, 0.72)
+    rgb = tuple(cool[i] * (1.0 - t) + warm[i] * t for i in range(3))
+
+    with Sdf.ChangeBlock():
+        for path, inten in ((dome_prim_path, dome_i), (key_prim_path, key_i)):
+            prim = stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                continue
+            ia = prim.GetAttribute("inputs:intensity")
+            if ia.IsValid():
+                ia.Set(float(inten))
+            ca = prim.GetAttribute("inputs:color")
+            if ca.IsValid():
+                ca.Set(Gf.Vec3f(float(rgb[0]), float(rgb[1]), float(rgb[2])))
+
+
+def randomize_lights(
+    dome_prim_path: str = "/World/Light",
+    key_prim_path: str = "/World/KeyLight",
+    *,
+    dome_intensity_range: tuple[float, float] = (1400.0, 2700.0),
+    key_intensity_range: tuple[float, float] = (1100.0, 2400.0),
+    warmth_range: tuple[float, float] = (0.0, 1.0),
+) -> EventTerm:
+    """라이트(밝기·색온도) 무작위화 EventTerm(reset). sim2real 시각 다양성."""
+    return EventTerm(
+        func=_randomize_lights_fn,
+        mode="reset",
+        params={
+            "dome_prim_path": dome_prim_path,
+            "key_prim_path": key_prim_path,
+            "dome_intensity_range": dome_intensity_range,
+            "key_intensity_range": key_intensity_range,
+            "warmth_range": warmth_range,
+        },
+    )
+
+
+def _randomize_camera_focal_fn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    camera_prim_globs: list[str],
+    focal_range: tuple[float, float],
+) -> None:
+    """카메라 focalLength 무작위화(FOV 변화). 카메라별 1 샘플(전 env 공통), 카메라 없으면 no-op."""
+    import isaaclab.sim as sim_utils
+    from pxr import Sdf
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+    with Sdf.ChangeBlock():
+        for glob in camera_prim_globs:
+            f = float(torch.empty(1).uniform_(float(focal_range[0]), float(focal_range[1])).item())
+            prims = sim_utils.find_matching_prims(glob)
+            for prim in prims:
+                if not prim.IsValid():
+                    continue
+                fa = prim.GetAttribute("focalLength")
+                if fa.IsValid():
+                    fa.Set(f)
+
+
+def randomize_camera_focal(
+    *,
+    focal_range: tuple[float, float] = (12.0, 16.0),
+    camera_prim_globs: list[str] | None = None,
+) -> EventTerm:
+    """top/wrist/front 카메라 focalLength 무작위화 EventTerm(reset). 카메라 리그 없으면 no-op."""
+    if camera_prim_globs is None:
+        camera_prim_globs = [
+            "/World/envs/env_.*/TopCamera",
+            "/World/envs/env_.*/Robot/gripper/WristCamera",
+            "/World/envs/env_.*/Robot/shoulder/FrontCamera",
+        ]
+    return EventTerm(
+        func=_randomize_camera_focal_fn,
+        mode="reset",
+        params={"camera_prim_globs": camera_prim_globs, "focal_range": focal_range},
+    )

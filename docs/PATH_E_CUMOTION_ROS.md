@@ -216,13 +216,21 @@ SM 노드가 `/cube_poses`·`/bowl_pose` 를 받으면 근접순으로 큐브를
 
 ```bash
 # ① policy-server (메인 루트). POLICY_PROFILE=smolvla|act, POLICY_REPO_ID=fine-tuned 확인.
+#   (a) 표준 Async Inference:
 docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
+#   (b) ★ Async Inference + RTC(Real-Time Chunking) 가이던스 — flow-matching(SmolVLA) 권장:
+#       CMD 를 policy-server-rtc 로 override. scripts/policy_server_rtc.py(RTCPolicyServer) 기동.
+#       RTC_EXECUTION_HORIZON=8 / RTC_MAX_GUIDANCE_WEIGHT=10.0 / RTC_PREFIX_ATTENTION_SCHEDULE=EXP (.env §6).
+#       서버측만 바뀌고 클라/bridge 동일. 로그에 `[RTC] chunk #N | guidance ✅ | leftover=… (horizon=8)`.
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server policy-server-rtc
 
-# ② Isaac Sim bridge 상주 (호스트, 카메라 publish 포함 — 기본 on)
+# ② Isaac Sim bridge 상주 (호스트, 카메라 publish 포함 — 기본 on). 시각 관전 livestream:
+#   PUBLIC_IP=<ip> LIVESTREAM=1 scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 4 --livestream 1  (WebRTC :49100)
 scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1
 
-# ③ VLA 추론 노드 (컨테이너). .env 의 정책 파라미터 자동 사용.
-docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
+# ③ VLA policy-client (컨테이너, so101_vla_policy ROS 노드). RTC 든 표준이든 동일.
+#   추론 모델은 config/vla_policy.yaml::pretrained_name_or_path 로 고정(profile 이 -e 덮음 — §7.6 함정).
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm vla-ros
 ```
 
 - 정책 파라미터(`POLICY_SERVER_ADDRESS`/`POLICY_TYPE`/`POLICY_REPO_ID`/`ACTIONS_PER_CHUNK`/
@@ -250,6 +258,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
 | **numpy ABI** | cv_bridge(apt)=system numpy 1.26 빌드. torch 가 numpy 2.x 로 올리면 import 깨짐 → `numpy<2` 핀(Dockerfile 반영) |
 | **vendored lerobot** | 실 lerobot 미설치 — `vendor/lerobot/` shim. server(0.5.1) 의 RemotePolicyConfig/TimedObservation/TimedAction 필드가 바뀌면 shim 도 갱신. pb2 는 `lerobot/transport/services.proto` 변경 시 재복사. 양방향 pickle 호환 검증됨 |
 | **${HF_USER} 미보간** | host 에서 `POLICY_REPO_ID=${HF_USER}/…` 미해결 시 노드 경고 → param `pretrained_name_or_path` 지정 |
+| **추론 모델이 profile 값으로 고정** | 노드가 시작 시 `.env`+`env/<profile>.env` 를 os.environ 재로드(override)해 `docker run -e POLICY_REPO_ID=<내 모델>` 을 **profile 의 `POLICY_REPO_ID` 로 덮음**. 추론 모델은 ROS param `pretrained_name_or_path`(`config/vla_policy.yaml`, 최우선·env reload 무관)로 고정. 확인=노드 로그 `sent instructions (model=...)`. (예: sim 모델 `taehunkim/so101_smolvla_sim_pick_cube`) |
 | **카메라 convention** | gym TiledCamera offset(convention="world")와 동일 view 위해 bridge 가 world→opengl 변환 후 USD prim author |
 
 ### 7.7 실기기 배포
