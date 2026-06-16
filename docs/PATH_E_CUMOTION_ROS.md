@@ -3,6 +3,10 @@
 Isaac Sim 이 `cube_desk` 씬을 시뮬하고, **NVIDIA cuMotion**(GPU collision-free 모션 플래너)을
 **MoveIt 2** 에 붙여 ROS 2 로 SO-101 5DOF 팔을 제어해 4개 큐브를 그릇에 담는 경로.
 
+> **cuMotion = cuRobo + MoveIt/ROS 래퍼** (코어 플래너 동일). cuRobo-직접 트랙(PICKCUBE)과의 관계·
+> 역할 분담·warp 분리 패턴(ZMQ vs ROS DDS, 둘 다 같은 D10 이유)은 `PICKCUBE_CUROBO_PROJECT.md` §15 참조.
+> 요지: 데이터 생성=cuRobo 배치(직접), 실기기 제어=cuMotion(여기). 5-DOF·grasp 한계는 둘 다 동일.
+
 - NVIDIA [Isaac ROS pick-and-place 튜토리얼](https://nvidia-isaac-ros.github.io/reference_workflows/isaac_for_manipulation/tutorials/pick_and_place/tutorial_pick_and_place.html) 구조를 따르되 **perception 은 생략**하고 시뮬 ground-truth 물체 포즈를 쓴다.
 - 기존 in-process Lula IK SM(`scripts/environments/pick_cube_state_machine.py`)의 grasp 미완 원인(Lula↔USD 좌표 정합 잔차)을 **cuMotion 이 articulation frame 에서 직접 계획**해 구조적으로 제거한다.
 - PATH C(Isaac Lab 시뮬)·PATH D(WSL2 MoveIt 실기기)와 독립. ROS 스택은 `ros2_ws/` 에 내재화.
