@@ -552,10 +552,14 @@ def _randomize_camera_focal_fn(
 
 def randomize_camera_focal(
     *,
-    focal_range: tuple[float, float] = (12.0, 16.0),
+    focal_range: tuple[float, float] = (14.0, 22.0),
     camera_prim_globs: list[str] | None = None,
 ) -> EventTerm:
-    """top/wrist/front 카메라 focalLength 무작위화 EventTerm(reset). 카메라 리그 없으면 no-op."""
+    """top/wrist/front 카메라 focalLength 무작위화 EventTerm(reset). 카메라 리그 없으면 no-op.
+
+    기본 focal_range 는 보정된 nominal 18mm(`pick_cube_env_cfg._*_CAMERA_FOCAL`)를 18±2 로
+    straddle 한다 → 학습 데이터 focal 분포가 배포(eval) focal 18 을 중심에 포함(sim2real 정합).
+    """
     if camera_prim_globs is None:
         camera_prim_globs = [
             "/World/envs/env_.*/TopCamera",

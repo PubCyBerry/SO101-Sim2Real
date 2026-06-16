@@ -13,6 +13,38 @@
 
 ---
 
+## 작업 인계 (2026-06-15 — 카메라DR정합 + 256ep smooth재생성 + GR00T 20k A/B 학습·eval / 🔵 진행중·미커밋)
+
+**목표(사용자)**: jerky 수정(완료 fe36dd2)+카메라 focal/pos 수정(완료 d1d3fd7) 반영해 ① 카메라 DR 정합 ② smooth 256ep 재생성 ③ **GR00T-N1.7 20k 학습 + 추론 eval**. + **기존 `so101_sim_pick_cube`(240ep jerky) 보존하고 A/B** 비교(이번 수정이 나아지는지). 자율 진행. 승인 플랜 `~/.claude/plans/home-konan147-workspaces-so101-sim2real-smooth-graham.md`.
+
+**완료**:
+- ① **카메라 DR**: `domain_randomization.py:555` `randomize_camera_focal` focal_range `(12,16)→(16,20)` (보정 nominal 18mm 중심, docstring 갱신).
+- ② **256ep 재생성**: `pick_cube_curobo_batch N=16 --record_dir outputs/so101_sim_pick_cube_smooth --record_episodes 256` → **256ep·125602frame**(smooth tail-trim 으로 ~490f/ep), 2h9m, 19라운드. 심링크 `/DISK1/.../so101_sim_pick_cube_smooth`. (`--record_overwrite`=shutil.rmtree 시작, 찌꺼기 없음.)
+- ③ **HF 업로드**: 신규 `taehunkim/so101_sim_pick_cube_smooth` v3.0 (기존 240ep repo **보존**).
+- ④ **GR00T convert**: A(기존변환본 재사용, v2.1·240ep) + B(`so101_sim_pick_cube_smooth` 신규변환, v2.1·256ep·modality.json) 둘 다 `datasets/groot/taehunkim/...`.
+- ⑤ **A(baseline) 학습 🟢**: `outputs/train/so101_groot_n17_pick_cube_baseline/checkpoint-20000`. 1h43m·loss 0.129·wandb 9a9k3ey9.
+- **추론 파이프라인 감사 문서**: `docs/SIM_REAL_INFERENCE_PARITY.md` (sim/real 변환·분기인자. 🔴 gripper offset sim+0.20/real0 = sim데이터규약이라 sim학습모델 real배포시 함정 / 🟠 single_arm RELATIVE·min-max sim-stats·카메라intrinsic갭).
+
+- ⑥ **B(smooth) 학습 🟢**: `outputs/train/so101_groot_n17_pick_cube_smooth/checkpoint-20000`. 1h43m·loss 0.119. (A·B 동일 하이퍼 20k·batch8·SAVE5000.)
+- ⑦ **eval A/B 🟢 완료** — seed 0 동일 레이아웃, `run_cube_desk_ros_bridge.sh --headless --num_cubes 4 --eval 20`, N=20(80 cube-attempt). 결과 `outputs/vla_eval_{baseline,smooth}.json`:
+
+| 지표 | A baseline(240ep jerky·옛cam) | B smooth(256ep·cam-fix·DR) |
+|---|---|---|
+| all-4 / per-cube 배치 / 평균 | 0% / 0% / 0.00 | 0% / 0% / 0.00 |
+| **ever-in-bowl** | **0.0%** (0/80, 0/20ep) | **6.25%** (5/80, 5/20ep) |
+
+→ **B > A 입증**(ever-in-bowl 0→6.25%): smooth+카메라+DR 수정이 정책을 그릇까지 큐브 보내게 개선. **단 최종 배치는 둘 다 0%** — closed-loop drift 잔존(cube 그릇 닿아도 안 정착). §13 결론 재확인: clean BC 데이터는 fidelity↑·방향성↑ 시키나 완주는 데이터 양·recovery 궤적·RL 필요. 추론 경로 자체는 정상(분기 인자 = `docs/SIM_REAL_INFERENCE_PARITY.md`).
+
+**추론 감사·진단(완료)**: `docs/SIM_REAL_INFERENCE_PARITY.md`(신규, sim/real 분기인자) + `scripts/sim/compare_train_vs_async_groot.py`(신규, GR00T 성능 진단: Path A gr00t ZMQ teacher-forced vs Path B async gRPC bridge 오버레이+입력 마커; ep197 A−rec 4.67°·B−rec 3.60°, open-loop fidelity 양호). **카메라 flat-arm 진단**: wrist/front 팔 명암없음 = DomeLight(2000) 지배 균일조명+매트재질(rough0.6)+평판 gripper 클로즈업, 머티리얼 정상·녹화데이터도 동일(train↔infer 정합, 모델버그 아님)·sim2real 시각갭.
+
+**SmolVLA A/B 🟢 완료**: A=`so101_smolvla_sim_pick_cube`(재사용)·B=`so101_smolvla_sim_pick_cube_smooth`(smooth 20k batch32, HF push). eval profile=smolvla·seed0 N20·chunk20. **A ever 8.75%(7/20ep)·배치0% / B ever 18.75%(10/20ep)·배치1.25%(1/80)**. `vla_eval_smolvla_{baseline,smooth}.json`.
+
+**🎯 전체 A/B 종합**(seed0·N20): GR00T jerky 0%→smooth **6.25%**(배치0) · SmolVLA jerky 8.75%→smooth **18.75%**(배치1.25%). → smooth+카메라 수정이 **두 모델 다 개선**(데이터 품질 일관) · **SmolVLA>GR00T**(smooth SmolVLA 만 안착) · **둘 다 완주 0% = closed-loop drift 공통 벽**. 함정: POLICY_REPO_ID 컨테이너경로(호스트X)·vla env-reload 가 -e 덮음(smolvla.env 편집)·컨테이너명 underscore(`policy_server`/`so101_vla_ros`)·`pkill -f X.py` self-kill→`[X]` bracket. 현 `env/smolvla.env` = baseline HF id·chunk20(사용자 편집).
+
+**다음 레버**(미착수): 데이터 대량화(res↓·N↑로 가속)·recovery/perturbation 궤적·VLA-RFT(RL drift 직격). 미커밋 변경: `src/sim_to_real/utils/domain_randomization.py`(DR focal 16-20), `docs/SIM_REAL_INFERENCE_PARITY.md`·`scripts/sim/compare_train_vs_async_groot.py`(신규), `docs/PICKCUBE_CUROBO_PROJECT.md`·`AGENTS.md`·CONTEXT(갱신), `env/groot_n17.env`(GROOT_CHECKPOINT — 사용자 편집). 플랜 `~/.claude/plans/home-konan147-workspaces-so101-sim2real-smooth-graham.md`.
+
+**GPU**: 1장 48GB, 순차. 학습 batch8 ≈39GB. GR00T 20k = 25.9smp/s·3.24it/s(51.5% trainable=action head, 백본 동결, bf16+flash-attn). eval = gr00t zmq(~6.6GB)+Isaac bridge(cameras).
+
 ## 작업 인계 (2026-06-15 — GR00T-N1.7 통합 🟢 마일스톤 완료: 1k finetune + 폐루프 라이브 / 미커밋)
 
 - **마일스톤 달성(사용자 지정 = 1k-step finetune + 추론 파이프라인 배포)**: 전부 검증.

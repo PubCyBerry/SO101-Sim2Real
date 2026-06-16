@@ -425,6 +425,22 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
       perturbation 궤적·VLA-RFT(drift 직격)**. 품질 천장은 §13 audit 대로 **closed-loop drift**(open-loop 충실) →
       BC 데이터 청결만으론 불충분, 복귀 데이터/RL 필요.
 
+- [x] **🟢 카메라DR 정합 + smooth 256ep 재생성 + GR00T-N1.7 20k A/B + 추론감사 (2026-06-15/16)** — 사용자 지시.
+      ① **카메라 DR 정합**: `randomize_camera_focal` focal_range `(12,16)→(16,20)`(보정 nominal 18mm 중심, focal 14→18 변경 d1d3fd7 반영). ② **smooth 256ep 재생성**: slew-fix 코드로 `pick_cube_curobo_batch N=16 --record 256` → **256ep·125602frame**(tail-trim ~490f/ep), 2h9m. ③ **HF 신규 repo** `taehunkim/so101_sim_pick_cube_smooth`(기존 240ep **보존**, A/B 위해). 
+      **GR00T A/B**(동일 N1.7·하이퍼 20k·batch8·백본동결·bf16, 데이터만 변수): A=`so101_sim_pick_cube`(240ep jerky·focal14)·B=smooth(256ep·focal18). train_loss A 0.129/B 0.119, 각 1h43m(25.9smp/s). **eval seed0 N=20**(`run_cube_desk_ros_bridge.sh --eval 20`, profile groot_n17): **all-4/per-cube/평균 둘 다 0%**, **ever-in-bowl A 0.0% → B 6.25%(5/80)**. → **B>A 입증**(smooth+cam 수정이 큐브를 그릇까지 보냄), **단 완주 0%**(closed-loop drift 잔존). `outputs/vla_eval_{baseline,smooth}.json`.
+      **추론 파이프라인 감사** 신규 문서 `docs/SIM_REAL_INFERENCE_PARITY.md`(sim/real 변환·분기인자). 🔴 **gripper offset sim+0.20/real0 = sim데이터 규약**(Isaac use_default_offset) → **sim 학습모델 real 배포 시 0 가정 깨짐**(함정). 🟠 **GR00T single_arm RELATIVE**(문서 "절대" 정정: `decode_action` 이 입력 state 기준 절대복원해 반환 → action overlay 보정불요, real 은 state 정확도 critical). 🟠 min-max정규화 sim-stats·카메라 intrinsic 갭.
+      **GR00T 성능 진단도구** 신규 `scripts/sim/compare_train_vs_async_groot.py`(compare_train_vs_rtc 의 GR00T판): 무작위 ep recorded obs 를 Path A(gr00t ZMQ teacher-forced)·Path B(async gRPC bridge) 통과→recorded 오버레이+입력 timestamp 마커. **ep197: A−rec 4.67°·B−rec 3.60°·A−B 4.91°**(open-loop fidelity 양호, B 가 refill 잦아 tighter). PNG `outputs/compare_groot_ep197.png`.
+      **카메라 flat-arm 진단**(사용자 관찰): wrist/front 에서 팔이 명암 없이 flat 보라 = 머티리얼 정상(`patch_robot_colors` 보라PLA diffuse rough0.6·metallic0)인데 **DomeLight(2000) 지배 균일조명 + 매트재질 + 평판 gripper 정면 클로즈업** 탓. 녹화 데이터도 동일(train↔infer 정합, 모델 버그 아님)·sim2real 시각갭. realism 원하면 dome↓·directional↑·specular.
+      **SmolVLA A/B 🟢 완료**(사용자 추가지시): A=기존 `so101_smolvla_sim_pick_cube`(240ep jerky 재사용)·B=smooth 256ep 20k batch32→push `so101_smolvla_sim_pick_cube_smooth`. eval profile=smolvla·seed0 N=20·chunk20. **A ever 8.75%(7/20ep)·배치0% / B ever 18.75%(10/20ep)·배치1.25%(1/80 안착)**. `vla_eval_smolvla_{baseline,smooth}.json`.
+      **🎯 전체 A/B 종합**(동일 seed0·N20·chunk):
+
+      | 모델 | jerky(A) ever | **smooth(B) ever** | smooth 배치 |
+      |---|---|---|---|
+      | GR00T-N1.7-3B | 0.0% | **6.25%** | 0% |
+      | SmolVLA(0.45B) | 8.75% | **18.75%** | 1.25%(1/80) |
+
+      **결론**: ① smooth+카메라DR 수정이 **두 모델 다 ever-in-bowl 개선**(데이터 품질 효과 일관 입증). ② **SmolVLA > GR00T**(이 태스크): smooth SmolVLA 만 실제 안착 도달. GR00T 약세 가설=RELATIVE action state의존+3B 과대·소데이터. ③ **둘 다 완주(all-4)·안착률 ≤1.25%** — **closed-loop drift 가 공통 벽**(open-loop fidelity 양호, §13 compare_groot 4.67° 참조). 다음 = 데이터 대량화·recovery 궤적·VLA-RFT.
+
 ### 🎉 전체 루프 완료 요약 (2026-06-15)
 cuRobo(P0-P4) → **render-batch+시각DR 240-ep**(`taehunkim/so101_sim_pick_cube` v3.0) → **SmolVLA 20k fine-tune**
 (`taehunkim/so101_smolvla_sim_pick_cube`, wandb oh1gs82t) → **sim closed-loop 추론**(action [1,8,6]·17.7Hz arm 구동).

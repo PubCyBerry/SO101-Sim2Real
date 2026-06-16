@@ -14,6 +14,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
 | `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
 | `docs/PATH_GROOT_N17.md` | GR00T-N1.7 네이티브 정책 (별도 gr00t 이미지 finetune + ZMQ 서버 + gRPC↔ZMQ bridge → 기존 sim 폐루프) |
+| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🔴 gripper offset=sim데이터규약·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic) |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
@@ -143,6 +144,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
 | `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
 | `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼 |
+| `sim/compare_train_vs_rtc.py` · `sim/compare_train_vs_async_groot.py` · `sim/replay_infer_overlay.py` | VLA 추론 진단 — recorded ep 를 학습방식 vs 배포(async/RTC·gRPC bridge) 통과시켜 정책출력 오버레이+입력 timestamp 마커+per-joint MAE. `_rtc`=SmolVLA(RTC), `_groot`=GR00T-N1.7(ZMQ teacher-forced vs gRPC bridge). policy-server 컨테이너서 실행, 서버 기동 필요 |
 
 > **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.
 
