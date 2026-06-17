@@ -13,6 +13,64 @@
 
 ---
 
+## 작업 인계 (2026-06-16 — cube_desk 실사 배경 3DGS(NuRec) 합성 PoC / 🔵 docker 빌드 중)
+
+**목표(사용자)**: sim-real visual gap 축소 → 실제 작업공간 배경을 3D Gaussian Splatting 으로 재구성 → USDZ 로 cube_desk 씬에 정적 배경 레이어 합성. Isaac Sim 5.1 NuRec USDZ 렌더 지원·Blackwell sm_120 호환 검증. 
+
+**확정 결정(사용자)**:
+- **범위**: 배경 환경만(벽·바닥·주변). 조작 대상(큐브·그릇·책상)은 물리 USD 유지.
+- **입력**: 스마트폰 직접 촬영(경량 경로 COLMAP → 3DGRUT → USDZ).
+- **산출**: PoC 먼저(1곳 재구성 → 합성 → sim 카메라 검증).
+
+**진행**:
+- ① 3dgrut repo clone: `/DISK1/so101-sim2real/3dgrut` (submodule 전부) ✓
+- ② Docker 빌드 🔵: `docker build --build-arg CUDA_VERSION=12.8.1 -t 3dgrut:cuda12` background 진행 중 (ETA ~20-40분). log: `/DISK1/so101-sim2real/visual_gap_recon/docker_build.log`.
+- ③ export format 결정: **NuRec USDZ** (Isaac Sim 5.0–6.0 지원. ParticleField/standard 는 6.0+만).
+- ④ 촬영 준비: NVIDIA 가이드라인 정리(60% 오버랩, 여러 높이·각도, ≥1/100s 셔터). 사용자가 top/front 카메라 frustum 안의 배경 촬영 중.
+
+**Plan 파일**: `~/.claude/plans/sim-to-real-visual-gap-encapsulated-sutherland.md`(검증 끝, 승인됨). 하위 타스크: COLMAP(별도 컨테이너)→3DGRUT 학습·export→합성(PickCubeSceneCfg)→정합·검증.
+
+**남은 일**: Docker 완료 → COLMAP SfM → 학습·USDZ → 코드 슬롯 추가(A안 런타임 cfg) → 정합 반복(top/front frustum 정렬) → 회귀 확인(고정 spawn 4/4).
+
+---
+
+## 작업 인계 (2026-06-16/17 — 1큐브 전체루프 완주·closed-loop 0%·pose-fix·env-diff 진단 / 🟢 코드커밋, drift 미해결)
+
+**목표(사용자)**: 4큐브 VLA closed-loop 가 벽(ever-in-bowl SmolVLA 18.75%·GR00T 6.25%, all-4 완주 0%, 진단=단일 pick-place+drift)
+→ **큐브 1개로 줄여 고정확도 우선**(커리큘럼 0단계). + **데이터셋 1024ep**, **큐브 크기 대/소 2종 무작위**(Cube1/2=30mm·Cube3/4=40mm),
++ **생성 가속**(256ep 2-3h 너무 느림), + **큐브 6D pose uniform 분포 검증·수정**. 승인 플랜 `~/.claude/plans/docs-pickcube-curobo-project-md-context-vivid-turtle.md`.
+
+**결정/확인**:
+- 해상도 480 유지·rendering_mode 그대로(검증된 레버만)·SmolVLA 우선·동시실행(GPU 안 죽임, 사용자가 본인 Isaac 종료함).
+- **6D pose(face+yaw) 이미 됨**: `full_orient=True`(`pick_cube_env_cfg.py:987`) = 6면 균등 + yaw 360°. 추가작업 0.
+- **VLA 경로는 n_active 동적** → env_cfg 하드코딩 CUBE_NAMES(=RL 전용)는 안 걸림. eval/학습/생성 다 동적.
+
+**완료 코드(`scripts/sim/pick_cube_curobo_batch.py` 신규 `--mix_sizes`)**:
+- env별 1큐브 무작위 배정(4중 균등→크기~50/50)+비배정 z=-1 park(카메라 밖). `placed` 비배정 슬롯 pre-True 로 기존 멀티큐브 머신(select_targets/push_world/commit) 무수정 재사용.
+- ⚠ **잠재버그 보정**: 기존 batch 는 active<4 일 때 비활성 큐브 미park(카메라 노출) — `assign_and_park` 가 CUBE_NAMES 전체 기준 park.
+- **uniform 분포 수정**: DR 4큐브 순차배치는 cube1·2·3 marginal 비균일(이전 큐브 회피)+default 폴백 스파이크 → mix 는 배정 큐브 XY 를 **직사각형 위 uniform 재샘플**(bowl0.14/base0.135 rejection, cube-cube 없음). orientation·z 보존.
+  - **수학 검증**(standalone): 새 방식 완전-내부 셀 CV **2.0%**·chi2 154≈dof123(균일) vs 기존 4큐브-keep1 CV 16.3%·chi2 981(비균일). 64회 중 소진 0/400k.
+
+**검증 통과**: func smoke(N16) 안착 16/16(Cube3 40mm 포함)·record smoke(N16) 16ep·2352frame(~147/ep vs 4큐브 490)·top 프레임 6장 = bowl+arm+**큐브 1개만**(distractor 없음)·위치 다양. N=32 본 생성 round1 32/32·VRAM 25.9/48.9GB(OOM 없음).
+
+**🔵 진행 중**: 본 생성 `pick_cube_curobo_batch --headless --planner_port 5599 --num_envs 32 --mix_sizes --record_dir outputs/so101_sim_pick_cube_1cube --record_episodes 1024`
+(log `outputs/p5_logs/gen_1cube_1024.log`, planner 사이드카 port 5599). ~32라운드 예상.
+
+**🎯 전체 루프 완주 결과(2026-06-16)**: ① 1024ep 생성(150905f·N=32·~2.8h) → HF `taehunkim/so101_sim_pick_cube_1cube`(v3.0) ② SmolVLA 20k(`so101_smolvla_sim_pick_cube_1cube`, HF) ③ GR00T-N1.7 convert+20k batch8(`outputs/train/so101_groot_n17_sim_pick_cube_1cube/checkpoint-20000`, loss 0.101) ④ **eval(--num_cubes 1, N=20): SmolVLA 30·40mm·GR00T 30mm 셋 다 0%**(all-1/per-cube/ever, 큐브 z 불변=미접촉).
+
+**결정 진단**: GR00T open-loop(녹화 ep0 147f→action vs recorded) MAE **2.77°**(gripper 0.55)=양호 → **모델·데이터 정상, 0%=closed-loop drift 벽(§13)**. 4큐브 ever 18.75% 는 다객체 우발접촉 inflation, 1큐브는 민낯 0%. **1큐브+clean+짧은horizon 으로 drift 미해소**(plan gate-5 위험 적중). 다음 레버=recovery/perturbation 궤적·VLA-RFT.
+
+**bridge 패치(eval용)**: `run_cube_desk_ros_bridge.py` `--cube_name`(크기별 활성)·비활성 큐브 z=-1 park(기존 active<4 노출 버그 보정)·`home_q`=학습 frame-0 정합·`--dump_obs`(annotator 3캠+joint 진단). **⚠ config 변경됨**: `.env POLICY_PROFILE`(eval 시 smolvla↔groot 토글)·`env/groot_n17.env GROOT_CHECKPOINT=...1cube/checkpoint-20000`·`vla_policy.yaml pretrained`(eval 모델 토글, 끝나면 "" 복원). 결과 `outputs/eval_1cube_posefix/`·`outputs/compare_1cube/`(open-loop overlay).
+
+**🔬 후속 진단(2026-06-17)**:
+- **시작자세 정합 수정 → 여전히 0%**: bridge `home_q` zeros→학습 frame-0 state `[0,-1.235,1.262,-0.381,-1.234,0.848]`rad(+velocity버그·PD target hold). 적용 확인했으나 SmolVLA·GR00T 둘 다 0% 불변.
+- **open-loop overlay**(`compare_train_vs_async_groot`/`_rtc`, ep0/243): GR00T 2.6-2.8°·SmolVLA 1.3° = 양호 → 모델·데이터 정상.
+- **arm 움직임**(`--dump_obs`): 정적 아님 — home_q(팔 책상향)서 즉시 위/딴데로 큼. 정책이 큐브 반대로 몬다. **카메라/렌더 동일**(bridge 가 env_cfg 카메라 상수 import·top캠 렌더 육안 일치; front 차이는 shoulder장착캠+arm pose 교란).
+- **🎯 env-diff(bridge eval ↔ recorder)**: data·camera·render·물리·제어율·단위·시작자세 다 정합. 남은 차이=**① 액션 적용**(recorder=`SlewLimitedJointPositionAction` target ramp+offset / bridge=ROS2 raw position·vel-cap 근사) **② 제어 타이밍**(recorder=env.step 동기 lock-step / bridge=ROS2 async + sim-time≠wall desync, §13 라이브 전용·prime suspect) ③ 이미지(h264 mp4 vs raw rgb·렌더러 다름). 상세 표 = `docs/PICKCUBE_CUROBO_PROJECT.md §16`(별도 세션과 doc 경합으로 미반영 가능 — 본 핸드오프가 1차 기록).
+- **다음 레버**: ① vla node `create_timer` 의 `use_sim_time` 준수 확인 → bridge lock-step/sim-time-aware 소비 ② bridge Python slew ③ deploy 이미지 h264 round-trip ④ recovery 궤적·VLA-RFT.
+
+---
+
 ## 작업 인계 (2026-06-15 — 카메라DR정합 + 256ep smooth재생성 + GR00T 20k A/B 학습·eval / 🔵 진행중·미커밋)
 
 **목표(사용자)**: jerky 수정(완료 fe36dd2)+카메라 focal/pos 수정(완료 d1d3fd7) 반영해 ① 카메라 DR 정합 ② smooth 256ep 재생성 ③ **GR00T-N1.7 20k 학습 + 추론 eval**. + **기존 `so101_sim_pick_cube`(240ep jerky) 보존하고 A/B** 비교(이번 수정이 나아지는지). 자율 진행. 승인 플랜 `~/.claude/plans/home-konan147-workspaces-so101-sim2real-smooth-graham.md`.

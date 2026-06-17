@@ -55,6 +55,9 @@ parser.add_argument("--bowl_z", type=float, default=0.12, help="그릇 위 relea
 parser.add_argument("--grasp_dz", type=float, default=0.0)
 parser.add_argument("--side_offset", type=float, default=0.035)
 parser.add_argument("--active_objects", type=int, default=4)
+parser.add_argument("--mix_sizes", action="store_true",
+                    help="크기 DR: env별 1큐브 무작위 배정(Cube1/2=30mm·Cube3/4=40mm, 4중 균등→크기 ~50/50)."
+                         " 나머지는 z=-1 park(카메라 밖). active_objects 무시(1-per-env).")
 parser.add_argument("--cube_clear", type=float, default=0.022)
 parser.add_argument("--bowl_clear", type=float, default=0.055)
 parser.add_argument("--no_dr", action="store_true", help="DR 끄고 고정 spawn")
@@ -107,6 +110,9 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     BOWL_SUCCESS_RADIUS,
     PickCubeEnvCfg,
     add_pick_cube_cameras,
+    _CUBE_SCATTER_X_RANGE,
+    _CUBE_SCATTER_Y_RANGE,
+    _CUBE_VOLUME_INSET,
 )
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
@@ -134,6 +140,9 @@ BASE_YAW_OFFSET = math.pi / 2
 BIAS_KI = 0.06
 BIAS_MAX = 0.35
 CUBE_SIZES = {"Cube1": 0.030, "Cube2": 0.030, "Cube3": 0.040, "Cube4": 0.040}
+# mix 단일-큐브 uniform 재샘플의 bowl/base 최소 이격(DR randomize_cubes 값과 일치).
+MIX_BOWL_SEP = 0.14
+MIX_BASE_SEP = 0.135
 READY = [0.0, -1.3, 1.2, math.radians(-20.0), math.radians(-90.0)]
 
 
@@ -233,7 +242,10 @@ def main() -> int:
     scene = env.scene
     device = env.device
     robot = scene["robot"]
-    cubes = list(CUBE_NAMES[: args.active_objects])
+    # 크기 DR(mix_sizes): planner 는 4 큐브 다 알되 env별 1개만 배정·나머지 park → per-env 크기 무작위.
+    mix = bool(args.mix_sizes)
+    cubes = list(CUBE_NAMES) if mix else list(CUBE_NAMES[: args.active_objects])
+    rng = np.random.default_rng(args.seed)   # per-round env별 큐브 배정(재현 가능)
     cube_assets = [scene[c] for c in cubes]
     q_bias = torch.zeros((N, 5), device=device)
     # 팝콘 감지: 에피소드 중 각 큐브 max 선속도(m/s). 정상≈그릇낙하 1.5, 팝콘 폭발=수 m/s.
@@ -429,6 +441,78 @@ def main() -> int:
                            rb[2] + float(orig[e, 2]), rb[3], rb[4], rb[5], rb[6]])
         scene[BOWL_NAME].write_root_pose_to_sim(torch.tensor(bposes, device=device, dtype=torch.float32))
         scene[BOWL_NAME].write_root_velocity_to_sim(zero_v)
+
+    def assign_and_park():
+        """env별 활성 큐브 배정 + 비배정 큐브 park(z=-1, 카메라 밖). 반환 asg_sets[e]=배정 cube index set.
+
+        mix: 4 큐브 중 env별 1개 무작위(크기 ~50/50). 배정 큐브 XY 를 직사각형 위 **uniform 재샘플**
+        (bowl/base 거리 rejection, cube-cube 없음=단일)로 옮긴다 — DR 의 4큐브 순차배치 편향(이전 큐브
+        회피·default 폴백 스파이크)을 제거해 단일 큐브를 수학적으로 균일 분포. orientation(face+yaw,
+        이미 균일)·z(매트 위 settle)는 보존. non-mix: cubes(=앞 active_objects)만 유지·재샘플 없음
+        (cube0 는 DR 가 이미 균일), 나머지 CUBE_NAMES distractor 는 park(기존 batch <4 미park 버그 보정).
+        write_root_pose_to_sim(env_ids=) 로 env 부분집합만 갱신."""
+        if mix:
+            asg_idx = rng.integers(0, len(cubes), size=N)
+            kept_names = [{cubes[int(asg_idx[e])]} for e in range(N)]
+            asg_sets = [{int(asg_idx[e])} for e in range(N)]
+        else:
+            keep = set(cubes)
+            kept_names = [keep for _ in range(N)]
+            asg_sets = [set(range(len(cubes))) for _ in range(N)]
+        orig = scene.env_origins
+
+        # mix: 배정 큐브 XY 를 직사각형(inset) 위 uniform 재샘플. env-local 프레임은 DR 와 동일 규약
+        # (default_root_state[:, :2] 기준 비교, 최종 world = local + env_origins).
+        nx = ny = None
+        if mix:
+            x_lo = _CUBE_SCATTER_X_RANGE[0] + _CUBE_VOLUME_INSET
+            x_hi = _CUBE_SCATTER_X_RANGE[1] - _CUBE_VOLUME_INSET
+            y_lo = _CUBE_SCATTER_Y_RANGE[0] + _CUBE_VOLUME_INSET
+            y_hi = _CUBE_SCATTER_Y_RANGE[1] - _CUBE_VOLUME_INSET
+            bxy = scene[BOWL_NAME].data.default_root_state[:, :2].detach().cpu().numpy()
+            rxy = robot.data.default_root_state[:, :2].detach().cpu().numpy()
+            nx = np.empty(N, np.float32)
+            ny = np.empty(N, np.float32)
+            ok = np.zeros(N, bool)
+            for _ in range(64):   # 단일 큐브·넓은 가용영역 → 수회면 채택. rejection=가용영역 위 균일.
+                need = ~ok
+                if not need.any():
+                    break
+                cx = rng.uniform(x_lo, x_hi, N).astype(np.float32)
+                cy = rng.uniform(y_lo, y_hi, N).astype(np.float32)
+                good = (((cx - bxy[:, 0]) ** 2 + (cy - bxy[:, 1]) ** 2) >= MIX_BOWL_SEP ** 2) & \
+                       (((cx - rxy[:, 0]) ** 2 + (cy - rxy[:, 1]) ** 2) >= MIX_BASE_SEP ** 2)
+                take = need & good
+                nx[take] = cx[take]
+                ny[take] = cy[take]
+                ok |= take
+            if (~ok).any():   # 소진(거의 없음) → 직사각형 중심 폴백
+                nx[~ok] = 0.5 * (x_lo + x_hi)
+                ny[~ok] = 0.5 * (y_lo + y_hi)
+
+        for c in CUBE_NAMES:   # scene 엔 4 큐브 항상 등록(cubes 슬라이스 밖도 접근 가능)
+            asg_e = [e for e in range(N) if c in kept_names[e]]
+            park_e = [e for e in range(N) if c not in kept_names[e]]
+            if park_e:   # 비배정 → park(z=-1)
+                ids = torch.tensor(park_e, device=device, dtype=torch.long)
+                pos = orig[ids].clone()
+                pos[:, 2] = -1.0
+                quat = torch.zeros((len(park_e), 4), device=device)
+                quat[:, 0] = 1.0
+                scene[c].write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=ids)
+                scene[c].write_root_velocity_to_sim(
+                    torch.zeros((len(park_e), 6), device=device), env_ids=ids)
+            if mix and asg_e:   # 배정 → uniform XY 로 이동(z·quat 유지)
+                ids = torch.tensor(asg_e, device=device, dtype=torch.long)
+                cur_pos = scene[c].data.root_pos_w[ids].clone()
+                cur_quat = scene[c].data.root_quat_w[ids].clone()
+                wx = torch.tensor([nx[e] for e in asg_e], device=device, dtype=torch.float32) + orig[ids, 0]
+                wy = torch.tensor([ny[e] for e in asg_e], device=device, dtype=torch.float32) + orig[ids, 1]
+                pos = torch.stack([wx, wy, cur_pos[:, 2]], dim=-1)
+                scene[c].write_root_pose_to_sim(torch.cat([pos, cur_quat], dim=-1), env_ids=ids)
+                scene[c].write_root_velocity_to_sim(
+                    torch.zeros((len(asg_e), 6), device=device), env_ids=ids)
+        return asg_sets
 
     def to_base(p_w, sn):
         return _world_to_base_np(p_w, sn["rp"], sn["ryaw"])
@@ -677,7 +761,6 @@ def main() -> int:
 
     def run_round():
         nonlocal cube_vmax
-        placed = [[False] * len(cubes) for _ in range(N)]
         if fail_layouts is not None:                       # 덤프 layout 재현 → 주입 후 정착
             apply_fail_layouts(fail_layouts)
         if record_mode:                                    # 버퍼·freeze 리셋 + 카메라 렌더 워밍업(미기록)
@@ -687,6 +770,12 @@ def main() -> int:
             rec_capture[0] = False
             settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32),
                    max(0, args.record_warmup))
+        # per-env 큐브 배정 + 비배정 park (capture **전**: 첫 기록 frame 부터 배정 큐브만 보이게).
+        # mix=크기 무작위(env별 1개), non-mix=cubes 슬라이스 유지·distractor park. placed 의 비배정
+        # 슬롯을 미리 True 로 두면 select_targets/push_world/commit 이 기존대로 동작(배정 큐브만 픽·집계).
+        asg_sets = assign_and_park()
+        placed = [[ci not in asg_sets[e] for ci in range(len(cubes))] for e in range(N)]
+        if record_mode:
             rec_capture[0] = True
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 35)
         layout0 = capture_layout0()                        # 정착된 초기 layout(덤프용)
@@ -728,9 +817,14 @@ def main() -> int:
         log("=" * 64)
         vmax_np = cube_vmax.detach().cpu().numpy()
         n_pop = int((vmax_np > args.pop_speed).sum())
-        log(f"[batch] ROUND 결과: placed 총 {total}/{N * len(cubes)} "
-            f"(env평균 {total / N:.2f}/{len(cubes)}) | {nstep[0]-s0} steps = {sim_t:.1f}s | "
-            f"팝콘 큐브 {n_pop} (vmax>{args.pop_speed})")
+        if mix:   # mix 는 비배정 슬롯이 미리 True → all() = 배정 큐브 안착. per_env/total 은 무의미.
+            done = sum(1 for p in placed if all(p))
+            log(f"[batch] ROUND 결과(mix): 배정 큐브 안착 {done}/{N} | "
+                f"{nstep[0]-s0} steps = {sim_t:.1f}s | 팝콘 큐브 {n_pop} (vmax>{args.pop_speed})")
+        else:
+            log(f"[batch] ROUND 결과: placed 총 {total}/{N * len(cubes)} "
+                f"(env평균 {total / N:.2f}/{len(cubes)}) | {nstep[0]-s0} steps = {sim_t:.1f}s | "
+                f"팝콘 큐브 {n_pop} (vmax>{args.pop_speed})")
         log("=" * 64)
         return per_env, layout0, [list(p) for p in placed], vmax_np
 
@@ -758,7 +852,7 @@ def main() -> int:
         results.append(per_env)
         placed_all.extend(placed_r)
         vmax_all.extend(vmax_r.tolist())
-        if record_mode:                              # all-4 성공 env 만 commit
+        if record_mode:                              # 성공 env 만 commit (mix=배정 큐브 안착, else all-4)
             for e in range(N):
                 if successes_rec[0] >= args.record_episodes:
                     break
@@ -767,9 +861,9 @@ def main() -> int:
                         writer.add_frame(a, s, im)
                     writer.commit_episode(True, CUBE_TASK_NAME)
                     successes_rec[0] += 1
-            n_all4 = sum(1 for e in range(N) if all(placed_r[e]))
+            n_ok = sum(1 for e in range(N) if all(placed_r[e]))
             log(f"[batch] 기록 누적 {successes_rec[0]}/{args.record_episodes} "
-                f"(round {i+1}, 이번 all-4 {n_all4}/{N})")
+                f"(round {i+1}, 이번 성공 {n_ok}/{N})")
             for e in range(N):
                 rec_buf[e].clear()
         i += 1

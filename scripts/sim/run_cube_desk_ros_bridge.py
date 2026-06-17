@@ -56,6 +56,9 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="cube_desk Isaac Sim ROS 2 bridge")
 parser.add_argument("--num_cubes", type=int, default=4, choices=[1, 2, 3, 4])
+parser.add_argument("--cube_name", default="",
+                    help="단일 활성 큐브 직접 지정(크기별 eval: Cube1/2=30mm·Cube3/4=40mm). "
+                         "빈값=CUBE_NAMES[:num_cubes]. 비활성 큐브는 z=-1 park(카메라 밖).")
 parser.add_argument("--dr", action="store_true", help="큐브 위치를 scatter 범위로 무작위화")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument(
@@ -84,6 +87,9 @@ parser.add_argument("--eval_warmup", type=float, default=25.0,
                          "구동 시작할 때까지 대기(미구동 시 ep1 거짓 실패 방지).")
 parser.add_argument("--eval_out", default="outputs/vla_eval.json",
                     help="eval 결과 JSON 경로(REPO_ROOT 상대).")
+parser.add_argument("--dump_obs", default="",
+                    help="진단: 지정 시 eval ep0 에서 bridge 렌더 3캠 프레임 + arm joint 를 이 디렉터리에 저장"
+                         "(학습 recorder 프레임과 시각 비교용).")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -420,7 +426,7 @@ def build_ros_graph(object_prims: list[str], camera_specs: list[tuple[str, str, 
 def main() -> None:
     np.random.seed(args.seed)
 
-    active_cubes = CUBE_NAMES[: args.num_cubes]
+    active_cubes = [args.cube_name] if args.cube_name else CUBE_NAMES[: args.num_cubes]
 
     # World — 순수 isaacsim.core. backend="numpy"(CPU) → OmniGraph 물리노드가 simulation
     # view 를 단독 소유해 device 정합(A안 device -1 회피). cuMotion 제어엔 단일 로봇 +
@@ -534,7 +540,41 @@ def main() -> None:
         bowl_handle.initialize()
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] bowl handle init 실패: {exc}", flush=True)
-    home_q = np.zeros(n_dof, dtype=np.float32)
+    # 초기/리셋 팔 자세 = 학습 데이터(cuRobo recorder) frame-0 state 정합.
+    # recorder 는 episode 를 READY([0,-1.3,1.2,-20°,-90°]) settle + gripper open 에서 시작 → 녹화 첫
+    # frame state(1024ep 평균, rad)가 정책이 학습한 시작 obs. 기존 home_q=zeros 는 완전 OOD 시작이라
+    # 정책 첫 obs 불일치 → 즉시 drift. name→rad 매핑이라 dof 순서 무관.
+    _START_POSE_RAD = {
+        "shoulder_pan": 0.0, "shoulder_lift": -1.235, "elbow_flex": 1.2623,
+        "wrist_flex": -0.3814, "wrist_roll": -1.2342, "gripper": 0.8483,
+    }
+    try:
+        home_q = np.array([_START_POSE_RAD.get(n, 0.0) for n in robot.dof_names], dtype=np.float32)
+    except Exception:  # noqa: BLE001  dof_names 접근 실패 시 dof 순서 가정(SO101_JOINT_ORDER)
+        home_q = np.array([0.0, -1.235, 1.2623, -0.3814, -1.2342, 0.8483], dtype=np.float32)[:n_dof]
+    print(f"[bridge] 초기 팔 자세(학습 frame-0 정합): {[round(float(x), 3) for x in home_q]}", flush=True)
+
+    # 비활성 큐브(active 아님)를 z=-1 로 park — 단일-큐브 학습 데이터 정합(카메라 밖).
+    # 기존 bridge 는 active 만 핸들링해 비활성 큐브가 authored default 위치에 노출됐다(버그).
+    inactive_handles: dict[str, SingleRigidPrim] = {}
+    for name in CUBE_NAMES:
+        if name in cube_handles:
+            continue
+        try:
+            h = SingleRigidPrim(f"{SCENE_PRIM}/{name}")
+            h.initialize()
+            inactive_handles[name] = h
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] inactive cube {name} handle 실패: {exc}", flush=True)
+
+    def park_inactive() -> None:
+        for h in inactive_handles.values():
+            try:
+                h.set_world_pose(position=np.array([0.0, 0.0, -1.0], dtype=np.float32))
+                h.set_linear_velocity(np.zeros(3, dtype=np.float32))
+                h.set_angular_velocity(np.zeros(3, dtype=np.float32))
+            except Exception:
+                pass
 
     # ── DR (학습 randomize_cubes_scattered / randomize_object_on_arc 정합) ──
     _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
@@ -617,9 +657,14 @@ def main() -> None:
         rng = np.random.default_rng(int(seed))
         randomize_cubes(rng)   # 학습 순서: 큐브(vs bowl_default) → 그릇 arc
         randomize_bowl(rng)
+        park_inactive()        # 비활성 큐브 카메라 밖 유지(단일-큐브 정합)
         try:
             robot.set_joint_positions(home_q)
-            robot.set_joint_velocities(home_q)
+            robot.set_joint_velocities(np.zeros(n_dof, dtype=np.float32))   # ← home_q 아님(속도=0)
+            try:   # PD target 도 home_q 로 → 첫 /isaac_joint_commands 도착 전 stale target sag 방지
+                robot.set_joint_position_targets(home_q)
+            except (AttributeError, TypeError):
+                pass
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] arm home reset 실패: {exc}", flush=True)
         print(f"[bridge] scene reset + DR (seed={seed})", flush=True)
@@ -692,6 +737,45 @@ def main() -> None:
               f"(settle {args.eval_settle}s) · {n_active} 큐브 · success radius "
               f"{BOWL_SUCCESS_RADIUS}m · z∈[{DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]:.3f},"
               f"{DESK_TOP_Z + BOWL_HEIGHT_RANGE[1]:.3f}]", flush=True)
+        # 진단 dump: bridge 렌더 3캠 annotator(render_product 직결 = 정책이 받는 이미지와 동일).
+        _dump_annots = []
+        if args.dump_obs:
+            import os as _os
+            _os.makedirs(args.dump_obs, exist_ok=True)
+            try:
+                import omni.replicator.core as _rep
+                for rp_path, topic, _fid in camera_specs:
+                    a = _rep.AnnotatorRegistry.get_annotator("rgb")
+                    a.attach(rp_path)
+                    _dump_annots.append((topic.strip("/").split("/")[-2], a))  # top/wrist/front (image_raw 충돌 회피)
+                print(f"[bridge] dump_obs: {len(_dump_annots)} cam annotator → {args.dump_obs}", flush=True)
+            except Exception as _e:  # noqa: BLE001
+                print(f"[bridge] dump_obs annotator 실패: {_e}", flush=True)
+
+        def _save_dump(tag):
+            try:
+                jp = np.asarray(robot.get_joint_positions()).ravel()[:6]
+                print(f"[bridge] dump[{tag}] arm joints(rad)={[round(float(x), 3) for x in jp]}", flush=True)
+            except Exception:
+                pass
+            try:
+                import imageio.v2 as _imageio
+            except Exception:  # noqa: BLE001
+                _imageio = None
+            for cname, a in _dump_annots:
+                try:
+                    arr = np.asarray(a.get_data())
+                    if arr.size == 0:
+                        continue
+                    if arr.shape[-1] == 4:
+                        arr = arr[..., :3]
+                    arr = arr.astype(np.uint8)
+                    p = f"{args.dump_obs}/{tag}_{cname}.png"
+                    (_imageio.imwrite(p, arr) if _imageio is not None
+                     else np.save(p.replace('.png', '.npy'), arr))
+                except Exception as _e:  # noqa: BLE001
+                    print(f"[bridge] dump {cname} 실패: {_e}", flush=True)
+
         # 1회 warmup — vla-ros 연결·구동 시작 대기(obs publish 하며 step). 미구동 시 ep1 거짓 실패 방지.
         warmup_steps = max(0, int(args.eval_warmup * control_hz))
         if warmup_steps:
@@ -709,10 +793,12 @@ def main() -> None:
                     break
                 world.step(render=True)
             ever = {n: False for n in active_cubes}     # 한 번이라도 그릇 안(진단용)
-            for _ in range(ep_steps):
+            for si in range(ep_steps):
                 if not simulation_app.is_running():
                     break
                 world.step(render=True)
+                if ep == 0 and _dump_annots and si in (1, ep_steps // 2, ep_steps - 2):
+                    _save_dump(f"ep0_s{si:03d}")   # bridge 렌더 + arm joint (start/mid/end)
                 for n, h in cube_handles.items():
                     if cube_in_bowl(h)[0]:
                         ever[n] = True

@@ -314,6 +314,8 @@ Track D (독립):       ovrtx ‖ ovphysx 실측
 | 2026-06-14 | **2048 정확도 평가 🟢** | N=2048 chunk=64 retry=1 seed0(닫힘축 수정·물리원복): **cube 87.9%·all-4 60.0%**·sim 34s·wall 469s(7.8min). 분포 {1:5,2:165,3:649,4:1229} — **1개 놓침 32%(649)가 지배 실패**. 256(95.3%) 대비 낮음=소표본 과대평가(C5)+**팝콘(그릇서 큐브 튕겨 나가 placement 실패)**이 정확도도 깎음. **팝콘 = 미해결 핵심 문제**(아래) |
 | 2026-06-14 | **팝콘 측정(속도 스파이크) + 팝콘제외 성공률 🟢** | batch client 에 **큐브 max 선속도 추적**(`--pop_speed` 2.5, act 매 step GPU 갱신) + 분류(success/grasp-fail/popcorn-fail=미placed&spike). vmax **명확 bimodal**: p50≈1.2(정상 그릇낙하), 꼬리 p99 28~34·max **126(256)~265(2048) m/s**(폭발). **팝콘제외: 256 cube 97.0%·all-4 88.9% / 2048 cube 88.5%·all-4 56.0%**. **N-의존 시사**(단정 못함, N당 1run·변동큼): popcorn-fail 256 **2.1%**→2048 **4.8%**(~2×), raw all-4 2048 run간 60%↔45.8% 큰 변동. buffer 는 16384 대비 충분(overflow 아닐 듯) → 팝콘 비결정성+적재 chaos. 팝콘제외 256↔2048 격차(97↔88.5)는 hard-layout(C5)+**팝콘 collateral**(폭발 큐브가 이웃 침→이웃은 grasp-fail 로 계상, excl 이 collateral 미제거) |
 | 2026-06-14 | **세션 마무리: focal 재적용·roll -90·grasp-effort·contactOffset 🟢** | ① focal 14mm 가 초반 변경 유실로 23.0 으로 커밋됐던 것 발견 → **재적용·grep 검증**(8d15fff). ② **roll -90° 선호**(free 큐브 clearance 동률서 bias 0.4, 클러스터는 clearance 지배). ③ **grasp-effort 확인**: leisaac `dynamic_reset_gripper_effort_limit` 우리도 보유(`utils/gripper_effort.py`), **PickCubeEnv.step 이 매 step 배선**(flag True) → batch/demo/SM 모두 자동 적용. 그리퍼 effort=`clamp(mass/0.15,0.5,10)`=큐브 **0.5Nm**(gentle). ④ **그리퍼 contactOffset 0.002·restOffset 0**(큐브와 매칭, 이전 미설정=큰 skin) → finger-큐브 빈 공간(gentle grip 이 skin 안 눌러서 생김) 축소. **256 검증: cube 95.3→96.4%·all-4 82.8→86.7%·popcorn-fail 2.1→1.1%**(회귀 없음·개선). 커밋 8d15fff·0824be3 |
+| 2026-06-16 | **🎯 5-DOF native pose-goal 부활 — D2/C4/D9 정정** | 옛 "5축 cuRobo pose-goal 비가능" 은 **오진단**. cuRobo V2 소스 커널까지 검증: position-only 진짜 API = **`ToolPoseCriteria.track_position()`**(회전 weight=0 → `wp_tool_pose.compute_rotation_error_axis_angle` 에서 `angular_distance=0`·gradient=0 → orientation 게이트 무조건 통과 + optimizer 자세 무시). 옛 probe 는 `orientation_tolerance`(수렴 게이트)만 풀어봐 cost 못 끔 = 오진단 근원. 주입 = **`MotionPlanner.update_tool_pose_criteria({tool: track_position()})`**(warmup 후 안전, plan_grasp 도 동일 패턴). **정량 probe `_probe_posonly.py`**(N=200, orientation_tolerance=0.05 고정): full-pose+임의자세 **0.0%** vs track_position+임의자세 **97.5%**(Δ+97.5pp), plan_pose 9/10 궤적. **`motion_plan_so101_viser.py` 를 native `plan_pose`(position-only)로 재작성**(해석적 IK·FK 15mm 발산 우회 제거). 다음 = SM 을 plan_pose(transit)+goal-set(grasp)로 재구성(Stage 2) |
+| 2026-06-16 | **viser 인터랙티브 Move/Grasp/Home 완성 + 5-DOF grasp 자세 지식** | `motion_plan_so101_viser.py` 를 공식 `--visualize` 구조(궤적 plot + Move + Grasp + status)로 재작성. 함정·지식 다수(§14 신설). 요지: ① **Move=position-only plan_pose**(자세 무시, feasible 90%·graph_attempt=1 유지·**graph 즉시(=0)는 5축서 악화** 90→62.5%) ② **Grasp=holder-up swoop 3단계**(grasp config 먼저→hover 도 같은 자세→plan_cspace transit→직접보간 descend/lift) — 단일 plan_pose "찌르기"·중간 wrist flip 방지 ③ **카메라 홀더 up = wrist_roll −90°**(측정: −90 Δz+0.044 up·+90 down, 중립 홀더=+y) ④ grasp 후보 = top-down+tilt(0-90°)×roll(6)×**uniform azimuth(12)**(centered az 는 악화), collision-sphere FK(`get_sphere_index_from_link_name`)로 **holder-up(Δz>0) 강제·없으면 거부**(충돌모델에 ground plane 없어 IK 가 홀더-바닥 허용→스코어링으로 차단) ⑤ **current_state stuck**: 도달 config 체이닝이 self-collision 경계 안착→"Start in collision" 영구 stuck→**실패 시 home 복귀 재시도**+Home 버튼 ⑥ 함정: IKSolver 두 batch 크기→CUDA graph 깨짐(`use_cuda_graph=False`)·viser websockets≥13.1(isaacsim==12.0 충돌)·pkill self-kill. reach-edge(dist>~0.42·저z)는 5축 물리한계로 거부 |
 
 > 진행 시 여기에 Phase별 실측(taxonomy success·clean·steps·reason_histogram, throughput)을 누적 기록.
 
@@ -467,14 +469,14 @@ cuRobo(P0-P4) → **render-batch+시각DR 240-ep**(`taehunkim/so101_sim_pick_cub
 | # | 결정 | 근거 |
 |---|---|---|
 | D1 | **cuRobo 채택**(Isaac ROS·SDG·depth-planning 기각) | ROS=비배치, SDG=박스라 자명, depth=sim ground-truth 있음. cuRobo 만 배치 충돌 플래닝 |
-| D2 | **joint-goal(`plan_cspace`)만**, pose-goal 금지 | 5-DOF 는 pose-goal 비가능(PATH E 확증). 해석적 IK 가 config 제공 |
+| D2 | ⚠️**정정(2026-06-16)**: pose-goal **가능**. ~~joint-goal 만~~ | ~~5-DOF 는 pose-goal 비가능~~ → **오진단**. `ToolPoseCriteria.track_position()`(회전 weight=0)로 native position-only `plan_pose` 작동(probe 0%→97.5%). 옛 근거는 `orientation_tolerance`(게이트)만 풀어본 것. TROUBLESHOOTING §cuRobo 5-DOF position-only 참조. 기존 joint-goal SM(95%)은 유지, 신규 경로는 plan_pose |
 | D3 | 해석적 IK·q_bias **유지**(C3), executor 만 교체 | `--calibrate` 검증 1.5mm, 재작성 위험 |
 | D4 | **scatter 축소 대신 큐브 간격↑**(사용자) | 천장은 reach 아니라 clustering. 뭉치면 grasp 못 찾음 |
 | D5 | 카메라 홀더를 **충돌 모델에 포함**(사용자) | fixed joint 강체 → 모르면 transit 중 큐브/그릇 침 |
 | D6 | VLA sim 추론 = **single-env ROS2+async 인터랙티브**(사용자) | GUI drag 추종 확인 목적. multi-env 정량 eval 은 후순위 |
 | D7 | VLA deps **격리**(policy-server gRPC), in-process 금지 | transformers/torch ↔ isaac 핀 ABI 위험. + real/sim parity |
 | D8 | literal 100% 비목표, **~95–99%+clean**(사용자) | PhysX 비결정성·reach-edge 노이즈. 데이터는 실패 episode 버림 |
-| D9 | **해석적 IK config 직접 사용 금지 — cuRobo IK 로 refine** (P2 선행) | 해석적 FK 는 평면근사라 cuRobo(실제 URDF) FK 와 mean 6.9mm·max 15mm 발산(`_probe_fk_consistency`). 직접 plan_cspace 면 grasp 가 큐브 빗나감. recipe: 해석적 ik_reach → (a) 5-DOF **feasible orientation** + (b) **seed config**/branch 공급 → cuRobo IK(goal=실제 큐브pos+feasible orient, seed=해석적q) → 정확 goal config(검증: feasible pose 0.00mm) → plan_cspace. cuRobo IK 의 5-DOF 한계(임의 orientation 실패)는 orientation 을 해석적해서 가져오므로 회피 |
+| D9 | **해석적 IK config 직접 사용 금지 — cuRobo IK 로 refine** (P2 선행) ⚠️**일부 정정(2026-06-16)**: 해석적 IK 자체가 불필요해짐 | 해석적 FK 는 평면근사라 cuRobo(실제 URDF) FK 와 mean 6.9mm·max 15mm 발산(`_probe_fk_consistency`). 직접 plan_cspace 면 grasp 가 큐브 빗나감. ~~recipe: 해석적 ik_reach → feasible orientation+seed → cuRobo IK refine~~. **정정**: native `plan_pose`(`track_position` position-only 또는 goal-set 자세후보)면 cuRobo IK 가 EE position 을 5mm tol 내 정확 해결 → **해석적 IK·FK 발산 우회 불요**(D2 정정 연쇄). 기존 joint-goal SM 은 D9 recipe 로 작동 중이라 유지, 신규 SM(Stage 2)은 plan_pose 경로 |
 | D10 | **cuRobo+Isaac = subprocess IPC** (in-process 금지) | warp 1.14(cuRobo) ↔ omni.warp.core 1.8.2(isaacsim) 상호배타 — 한 프로세스 공존 물리적 불가(ABI 게이트 양방향 확증). cuRobo 플래너 = 별도 프로세스(warp 1.14, isaac 無), Isaac env = 메인, **ZMQ REQ/REP**(ik/plan/set_world). plan 은 phase 당 1회라 IPC 오버헤드 무시. P0 트랩이 예고. P3 배치도 이 구조 유지 |
 | D11 | **IK 충돌-free, plan_cspace 만 충돌-aware** + **grasp 미세동작 직접 joint 실행** | set_world 는 planner 만 갱신(IK 는 더미씬 유지). IK 에도 장애물 주면 이웃 근처 grasp config 를 그리퍼 sphere 스침으로 과다 기각(수동 가능한데 실패). 이웃 회피는 env clearance roll-선택 + plan_cspace. grasp 미세동작(descend·slide·lift)은 plan_cspace 가 target 근처서 과다기각 → 직접 보간(짧고 clearance 확보됨). 긴 transit(→pre·lift→bowl)만 plan_cspace |
 | D12 | **P3 = lock-step 벡터화 SM**(async per-env 기각) | env.step 은 글로벌 배치라 async 는 한 env 일시정지 불가 + cuRobo batch 모델(N문제 N world 1 GPU call)과 충돌 + bookkeeping 폭증. lock-step(전 env 동일 phase tape, 고정 순서 Cube1→4)이 batch 설계 의도와 정합·결정적. 세금=straggler 인데 고정 horizon traj 일괄 반환이라 waypoint 단위 straggler 없음(retry 단위뿐). per-env world = 동일 스키마 N슬롯 + `update_obstacle_pose`/`enable_obstacle(env_idx)`. **신규 `pick_cube_curobo_batch.py`**(단일-env 데모 100% 보존, 두 파일 중복 일부 수용 — 사용자) |
@@ -493,7 +495,7 @@ cuRobo(P0-P4) → **render-batch+시각DR 240-ep**(`taehunkim/so101_sim_pick_cub
 | cuRobo kinematic traj ↔ PD sag | q_bias 보상 유지(C6) |
 | ROS2 환경(P6) | LD_LIBRARY_PATH·`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`·inotify (PATH E 함정 재사용) |
 | **해석적 FK↔cuRobo FK 발산(15mm)** | 해석적 IK config 직접 plan_cspace 금지. cuRobo IK refine(D9). zero-pose 만 일치한다고 전 워크스페이스 가정 금물 |
-| cuRobo IK position-only 안 됨 | `orientation_tolerance` 키워도 optimizer orientation cost 살아있어 5축이 position 못 맞춤. orientation 은 해석적으로 공급(D9), cuRobo 엔 feasible pose 만 |
+| cuRobo IK position-only 안 됨 | ⚠️**정정(2026-06-16)**: `orientation_tolerance`(수렴 게이트)는 cost 못 끔(맞음) — 하지만 진짜 API 는 **`ToolPoseCriteria.track_position()`**(회전 weight=0)다. `update_tool_pose_criteria` 로 주입 → angular_distance·gradient 0 → native position-only `plan_pose` 작동(probe 0%→97.5%). 해석적 공급(D9) 불요. TROUBLESHOOTING §cuRobo 5-DOF position-only |
 | pose-goal Viser 무반응 ≠ stuck flag | `plan_pose` plan 실패(5-DOF). 단, daemon-thread 예외 시 `is_moving` stuck 별도 위험 → try/finally. PYTHONUNBUFFERED=1 로 런타임 print 봐야(background pipe block-buffered) |
 | pkill self-kill (exit 144) | `pkill -f "X.py"` 를 `X.py` 실행과 **한 bash 명령**에 합치면 자기 명령줄 매칭→자살. kill 과 launch 분리 |
 | TaskStop 해도 Isaac 좀비 (49100 다중 LISTEN→WebRTC 검은화면) | TaskStop 은 bash 만 죽이고 Isaac python child 생존 → 좀비 누적. **python child PID 직접 kill**(`ps…|grep…|awk` 후 kill) |
@@ -580,3 +582,157 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync --group isaac python \
   rollout_to_lerobot,lerobot_units,run_cube_desk_ros_bridge}.py`, `assets/robots/so101.xrdf`
 - 실기기 추론: `docker/policy-client-shim.py`, `docker/policy-entrypoint.sh`, `scripts/policy_server_rtc.py`
 - perf probe: `scripts/perf/{tiled_camera_throughput_bench,ovrtx_probe,ovphysx_probe,isaac_env_step_throughput}.py`
+
+---
+
+## 14. cuRobo native pose-goal + 인터랙티브 viser 지식 (2026-06-16, Stage 1)
+
+> `scripts/sim/motion_plan_so101_viser.py` (공식 `motion_planning.py --visualize` 5-DOF 판). Move·
+> Grasp·Home 버튼 + 궤적 plot. 여기 모은 지식은 **Stage 2 cuRobo-native SM** 설계에 직접 재사용.
+> 실행: `uv run --no-sync --group isaac python scripts/sim/motion_plan_so101_viser.py --port 8088`
+> (tailscale `100.79.237.116:8088`).
+
+### 14.1 핵심 API (D2/C4/D9 정정의 실체)
+
+| 용도 | API |
+|---|---|
+| **position-only**(자세 무시) | `planner.update_tool_pose_criteria({tool: ToolPoseCriteria.track_position()})` → `plan_pose`. 회전 weight `[1,1,1,0,0,0]` → `wp_tool_pose` 커널서 `angular_distance=0`·gradient=0. **`orientation_tolerance`(수렴 게이트)와 다름** — 게이트만 풀면 cost 살아 5축 실패(옛 오진단). |
+| **자세 후보 선택** | `GoalToolPose`(num_goalset>1) 또는 후보별 독립 batch IK. `ToolPoseCriteria`(public `curobo.types`). |
+| **joint-goal transit** | `planner.plan_cspace(goal_state, current_state, max_attempts)` — 충돌회피, 자세 이슈 없음. |
+| **임의 링크 FK** | `get_link_poses` 는 cam mount 미지원 → `kin.config.kinematics_config.get_sphere_index_from_link_name("wrist_cam_mount_link")` + `compute_kinematics(q).get_link_spheres()` 로 sphere 월드좌표. |
+
+### 14.2 Move (position-only plan_pose)
+
+- feasible 큐브존 타깃 **~90%**(probe N=40). 실패 = 그 위치가 5축이 충돌-free 로 못 가는 **내재
+  infeasible**(IK collision-aware 인데 해 없음) — 튜닝 버그 아님.
+- 노브: `num_trajopt_seeds=8`·`optimizer_collision_activation_distance=0.025`. **`enable_graph_attempt=1`
+  유지**(기본). ⚠ **graph 즉시(=0)는 5축 cramped 에서 오히려 악화**(90%→62.5%, probe). graph 는
+  retry 단계에서만.
+
+### 14.3 Grasp (holder-up swoop 3단계) — 공식 `plan_grasp` 가 5축서 안 되는 이유 + 대체
+
+- 공식 `plan_grasp` 는 approach/grasp/lift 내부에서 `linear_motion`·full-pose criteria 로 풀어
+  **5축이 orientation 못 맞춰 실패**(+ 끝에 standard_criteria 복원해 다음 Move 도 깸). → 직접 구현.
+- **3단계**: ① 후보 자세 배치 IK → reachable 중 **카메라 홀더 최상(Δz↑)** config q* 채택 ② **같은
+  자세 q\*** 로 hover(큐브 +OFF) IK → `plan_cspace`(joint-goal)로 이동 ③ hover↔grasp **직접 joint 보간**
+  (D11: 짧은 grasp 미세동작은 trajopt 과다기각) + gripper open→close.
+- **hover 와 grasp 를 같은 q\* 로** 해야 함. 안 그러면(approach 자세 자유) optimizer 가 holder-down
+  골라 **모션 중 wrist 180° flip**(사용자 지적). hover=grasp 자세 동일 → 내내 holder-up.
+
+### 14.4 5-DOF grasp 자세 manifold (측정값)
+
+- **낮은 큐브존(z~0.05) = top-down**(tool-z↓), **먼 타깃(dist↑) = 수평**(tilt↑). reachable 자세는
+  approach 방위각이 위치에 묶인 좁은 manifold.
+- **카메라 홀더 up = `wrist_roll −90°`**(측정: 수평 reach 자세서 −90→holder Δz **+0.044(up)**·+90→
+  down·0→side). 중립(q=0) 홀더 = gripper **+y(왼쪽)**, holder-grip=(-0.015,+0.043,+0.014).
+- 후보 goal-set = **top-down([0,1,0,0]) → roll(approach축, 홀더 up/down) → tilt(0-90° pitch) →
+  uniform world-z azimuth**. tilt `[0,25,50,75,90]`·roll `[-90,-45,0,45,90,180]`·**azimuth 12 uniform**
+  = 360. ⚠ **azimuth 를 타깃방향(atan2)에 centered 하면 오히려 악화** — 내 파라미터 azimuth 가 pan
+  방향과 직접 대응 안 함. uniform 미세(30°)가 정답.
+- **holder-up 강제**: collision 모델에 **ground/table plane 이 없어** IK 가 홀더-바닥 관통 config 허용
+  → holder-gripper Δz>0.005 인 reachable 후보만 채택, **없으면 grasp 거부**(바닥 박기 금지). 거의 모든
+  큐브존서 holder-up reachable(74/80 등), **reach-edge(dist>~0.42·저z)만 거부**(5축 물리한계).
+  - 미래: ground plane 을 충돌모델에 추가하면 더 물리적(단 base_link 가 z=0 mount 라 충돌 — base sphere
+    disable 필요). 현재는 스코어링으로 대체.
+
+### 14.5 함정 (Stage 2 재사용 주의)
+
+| 함정 | 대응 |
+|---|---|
+| **current_state stuck** — 도달 config 체이닝이 self-collision 경계 안착 → 이후 모든 plan "Start in collision" 영구 stuck(사용자: "어느 시점부터 어디든 다 안돼") | 실패 시 **home(default) 복귀 후 재시도**(home 은 항상 clean). + 수동 **Home 버튼**. headless 30회 체이닝 최대 연속실패 5+(stuck)→1(복구) |
+| **IKSolver 두 batch 크기 호출 → CUDA context 깨짐** | `use_cuda_graph=False`(가변 batch). graph on 이면 batch 360→1 시 "CUDA graph reset is not available"→illegal memory cascade(viser 먹통). TROUBLESHOOTING 참조 |
+| **viser 안 뜸** (`No module named 'websockets.asyncio'`) | isaacsim `websockets==12.0` 핀 vs viser≥13.1 → `uv pip install 'websockets>=13.1,<14'`(post-sync 보강). TROUBLESHOOTING 참조 |
+| **pkill self-kill**(exit 144) | pkill 과 launch 분리. 또는 `ss -ltnp ':8088'` 로 PID 추출 후 kill |
+| grasp 자세 IK 가 holder 방향 안 봄 | IK 는 reachability 만 최적화 → 홀더 up/down 은 후보 자세로 주고 FK 로 사후 스코어링(Δz). collision-aware 라도 ground 없으면 바닥 관통 허용 |
+| reach-edge grasp 0 reachable | position-only Move 는 닿아도 orientation-constrained grasp 자세는 manifold 0 → 정직 거부. 5축 본질 |
+
+---
+
+## 15. cuRobo(직접) vs cuMotion(Path E) — 관계·역할 분담
+
+> 자주 헷갈림: "cuRobo 버리고 cuMotion 으로 갈아탈까?" → **비추천**. 둘은 같은 코어, 다른 포장.
+
+### 15.1 관계: cuMotion = cuRobo + MoveIt/ROS 래퍼
+
+- **cuRobo** = NVIDIA GPU 모션플래닝 **라이브러리**(Python/CUDA/warp). 독립 설치(`ref_repos/curobo`, pip).
+- **cuMotion**(`isaac_ros_cumotion`) = cuRobo 를 **MoveIt 2 planner plugin** 으로 감싼 ROS 2 패키지
+  (빌드 시 cuRobo CUDA 빌드). **코어 플래너는 동일 cuRobo.**
+- 즉 cuRobo 가 원본, cuMotion 은 add-on. "cuMotion 에서 cuRobo 추출"은 개념 오류 — 우리는 이미
+  cuRobo 를 standalone 직접 사용 중(PICKCUBE 트랙). cuMotion 은 ROS 가 필요할 때의 창구.
+
+### 15.2 두 트랙 역할 분담 (둘 다 유지)
+
+| | **cuRobo 직접** (PICKCUBE, Track A) | **cuMotion** (PATH E) |
+|---|---|---|
+| 접근 | Python API 직접, ZMQ 사이드카 | ROS 2 / MoveIt 2 (MoveItPy) |
+| 배치 | **`BatchMotionPlanner(multi_env)`** = N문제 1 GPU call(256~2048 env) | 불가(단일 arm·ROS 페이스) |
+| 용도 | **sim 배치 데이터 생성 + sim 폐루프 추론** (throughput·커스텀) | **실기기-지향 ROS 제어**(ros2_control·trajectory) |
+| 5-DOF 우회 | `ToolPoseCriteria.track_position()`·goal-set (Python 직접, §14) | MoveIt `kinematics.yaml`(rotation_scale·orientation_threshold)·joint-goal FK 샘플 |
+| 현재 코드 | `curobo_planner_server.py`(single ik/plan + batch init/ik/plan), `pick_cube_curobo_{demo,batch}.py`, `motion_plan_so101_viser.py` | `ros2_ws/` cuMotion config + SM 노드 |
+
+- **공유**: `so101.xrdf`·cube_desk 씬·GRASP_PHYSICS 물리 튜닝. (Stage 2 에서 grasp 자세 선정 로직도 공통 모듈화 후보.)
+- **5-DOF 한계·grasp 어려움은 둘 다 동일**(같은 코어 + 같은 로봇 물리). 플래너 갈아타기로 안 풀림 — Path E
+  블로커도 grasp 물리. → 갈아타기는 지름길 아님. cuMotion 이 이기는 영역 = **실기기 배포**(ROS 표준).
+
+### 15.3 warp 분리 패턴 (둘 다 같은 이유)
+
+cuRobo(warp 1.14) ↔ Isaac Sim(omni.warp.core 1.8.2)는 한 프로세스 공존 불가(D10). **두 트랙 다 동일
+패턴으로 회피** — cuRobo-stack 과 Isaac-stack 을 별 프로세스로 두고 IPC:
+
+```
+cuRobo 직접 :  [cuRobo proc · warp1.14] ──ZMQ──►   [Isaac env · omni.warp]
+cuMotion    :  [ROS 컨테이너: move_group+cuMotion(cuRobo·warp)] ──ROS DDS──► [Isaac Sim bridge · omni.warp]
+```
+
+차이 = IPC 전송(ZMQ vs ROS DDS)뿐. cuMotion 이 ROS 2 인 건 **본성**(MoveIt 플러그인, 실로봇 표준)이지
+warp 회피용 워크어라운드가 아님 — 단, 프로세스 분리 자체는 같은 ABI 이유. Path E 는 추가로
+rclpy(py3.12) ↔ lerobot/isaac(py3.11) 런타임도 분리.
+
+---
+
+## 16. 1큐브 고정확도 트랙 + closed-loop 0% 진단 (2026-06-16/17)
+
+> **동기**: 4큐브 VLA closed-loop 벽(ever-in-bowl SmolVLA 18.75%·GR00T 6.25%, all-4 완주 0%). 병목 =
+> 멀티객체 순서가 아니라 **단일 pick-place + closed-loop drift**(ever 낮음 = 1개도 드묾) → 큐브 1개로 줄여
+> 고정확도 우선(커리큘럼 0단계).
+
+### 16.1 전체 루프 실행 (완주)
+- **데이터 `taehunkim/so101_sim_pick_cube_1cube`**(v3.0·1024ep·150905f·480): `pick_cube_curobo_batch.py
+  --mix_sizes` 신설 — env별 1큐브 무작위 배정(Cube1/2=30mm·Cube3/4=40mm 4중 균등→크기~50/50)+비배정 z=-1
+  park(기존 batch 는 active<4 시 비활성 큐브 미park=카메라 노출 버그). 배정 큐브 XY=**직사각형 uniform 재샘플**
+  (bowl/base rejection, cube-cube 없음) — DR 4큐브 순차배치 편향(이전 큐브 회피·default 폴백 스파이크) 제거.
+  수학검증: 새 방식 완전-내부 셀 CV **2.0%**·chi²≈dof(균일) vs 기존 4큐브-keep1 CV 16.3%·chi² 981. 6D pose
+  (바닥 face 6면 균등+z-yaw 360°)는 `full_orient=True` 로 이미 정합. 생성 N=32 ~2.8h(1024×147f≈150k > 256×490,
+  해상도 480 유지라 가속 기대 무산).
+- **학습**: SmolVLA 20k batch32(`so101_smolvla_sim_pick_cube_1cube` HF) · GR00T-N1.7 convert+20k batch8
+  (`outputs/train/so101_groot_n17_sim_pick_cube_1cube/checkpoint-20000`, loss 0.101).
+
+### 16.2 eval — closed-loop 0% (🔴 벽 지속)
+- `run_cube_desk_ros_bridge.py --num_cubes 1 --eval 20`(`--cube_name` 크기별 활성·비활성 park):
+  **SmolVLA 30·40mm·GR00T 30mm 셋 다 0%**(all-1/per-cube/ever, 큐브 z 불변=미접촉).
+- **open-loop**(`compare_train_vs_async_groot`/`_rtc`, ep0/243): MAE GR00T 2.6-2.8°·SmolVLA 1.3°=양호 → **모델·데이터 정상**.
+- **시작자세 정합**(bridge `home_q` zeros→학습 frame-0 `[0,-1.235,1.262,-0.381,-1.234,0.848]`rad + velocity버그 fix +
+  PD target hold): 적용 확인됐으나 **재평가 여전히 0%**.
+- **arm 움직임**(`--dump_obs` annotator+joint): 정적 아님 — home_q(팔 책상향)서 즉시 위/딴데로 큼(정책이 큐브 반대로).
+  **카메라/렌더 동일**: bridge 가 env_cfg 카메라 상수 import(공유)·top캠(world고정) 렌더 육안 일치(front 차이는
+  shoulder장착캠+arm pose 교란, 카메라 불일치 아님).
+
+### 16.3 sim bridge(eval) ↔ recorder(데이터생성) 환경 차이 (closed-loop OOD 후보)
+data·camera·render·시작자세·물리(stiffness 17.8·damping 0.6·effort)·제어율(120/30Hz)·joint순서·단위 **다 정합**. 남은 차이(영향순):
+
+| 차이 | recorder(`pick_cube_curobo_batch`, ManagerBasedRLEnv) | bridge(`run_cube_desk_ros_bridge`, isaacsim.core+ROS2) | 비고 |
+|---|---|---|---|
+| 🔴 액션 적용 | `SlewLimitedJointPositionAction` — target 을 이전 target 기준 ±(5rad/s÷30) ramp(내부 integrator)+`use_default_offset`(arm0·grip0.20) | ROS2 raw position 직주입(slew term 없음), 물리 `max_joint_velocities`(arm5·grip2.5) 근사만 | target-ramp ↔ joint-vel-cap 메커니즘 차 |
+| 🔴 제어 루프/타이밍 | `env.step()` 동기 lock-step(1 action→4 physics→obs, 결정적) | ROS2 async — vla node `create_timer(1/30)` chunk 소비, bridge 3캠 raytrace 로 world.step 느림 → sim-time≠wall 이면 chunk 소비율 desync(§13 라이브 전용·offline 재현불가) | **prime suspect** |
+| 🟠 이미지 | TiledCamera → h264 mp4 인코딩→디코딩(학습 입력) | Replicator render_product → raw rgb ROS2·렌더러 다름 | 픽셀 분포 차 |
+| 🟡 gripper 속도 | slew 5.0 rad/s | vel cap 2.5 rad/s | grasp 타이밍 |
+| 🟡 q_bias 중력보상 | 명령에 적분 보상 추가(녹화 action 에 baked) | integrator 없음(녹화 action 운반) | obs 어긋나면 재유도 불가 |
+
+**다음 레버**: ① 제어타이밍 직격(vla node `create_timer` 의 `use_sim_time` 준수 확인 → bridge lock-step 또는
+sim-time-aware 소비) ② bridge Python slew(학습 envelope 재현) ③ deploy 이미지 h264 round-trip ④ recovery 궤적·VLA-RFT.
+**cleaner BC data·짧은 horizon·시작자세정합 만으론 closed-loop drift 불충분 입증**(plan gate-5 위험 적중).
+
+### 16.4 신설/수정 코드
+- `pick_cube_curobo_batch.py`: `--mix_sizes`(크기 DR + uniform 재샘플 + per-env park).
+- `run_cube_desk_ros_bridge.py`: `--cube_name`·비활성 park·`home_q` 학습 frame-0 정합·`--dump_obs`.
+- 산출물: `outputs/eval_1cube_posefix/`·`outputs/compare_1cube/`(open-loop overlay PNG)·HF repo 2종.
