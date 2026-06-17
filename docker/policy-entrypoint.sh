@@ -75,6 +75,14 @@ GROOT_ZMQ_HOST="${GROOT_ZMQ_HOST:-127.0.0.1}"
 GROOT_ZMQ_PORT="${GROOT_ZMQ_PORT:-5555}"
 GROOT_ZMQ_TIMEOUT_MS="${GROOT_ZMQ_TIMEOUT_MS:-60000}"
 
+# ── policy-server-attn 환경 변수 (SmolVLA 전용) ──────────────────────────────
+# scripts/policy_server_attention_bridge.py (AttentionBridgeServer) 기동 시 사용.
+# 위 policy-server 변수(HOST/PORT/FPS/...)를 공유하고 cross-attention 히트맵 PUB 주소만 추가.
+# 브리지(run_cube_desk_ros_bridge.py --attention_overlay)가 이 포트로 SUB. gRPC 8080·
+# GR00T 5555 와 구분. SmolVLA 가 아니면 캡처를 스킵하므로 타 모델 무영향.
+ATTN_ZMQ_HOST="${ATTN_ZMQ_HOST:-0.0.0.0}"
+ATTN_ZMQ_PORT="${ATTN_ZMQ_PORT:-5556}"
+
 # ── train 환경 변수 ──────────────────────────────────────────────────────────
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
@@ -371,6 +379,45 @@ case "$CMD" in
       --groot_zmq_host=${GROOT_ZMQ_HOST} \
       --groot_zmq_port=${GROOT_ZMQ_PORT} \
       --groot_zmq_timeout_ms=${GROOT_ZMQ_TIMEOUT_MS} \
+      ${POLICY_SERVER_EXTRA_ARGS} \
+      "$@"
+    ;;
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # policy-server-attn — SmolVLA cross-attention 시각화 브리지 (SmolVLA 전용)
+  #
+  # scripts/policy_server_attention_bridge.py (AttentionBridgeServer) 를 기동한다.
+  # 표준 policy-server 와 동일한 gRPC 추론(vla_policy_node 무수정)을 하면서, 매 추론마다
+  # SmolVLA expert cross-attention 을 캡처해 카메라별 히트맵을 ZMQ PUB(:5556) 한다.
+  # Isaac Sim 브리지(run_cube_desk_ros_bridge.py --attention_overlay)가 SUB 해 오버레이.
+  #   vla_policy_node ─gRPC:8080─▶ [이 서버] ─ZMQ:5556(히트맵)─▶ Isaac Sim bridge
+  #
+  # ⚠ SmolVLA 전용: 정책이 SmolVLA 가 아니면 캡처를 스킵하고 표준 추론으로 동작(타 모델 무영향).
+  #
+  # [env var → CLI arg 매핑]
+  #   POLICY_SERVER_HOST/PORT/FPS/INFERENCE_LATENCY/OBS_QUEUE_TIMEOUT (policy-server 공유)
+  #   ATTN_ZMQ_HOST → --attn_zmq_host (기본 0.0.0.0)
+  #   ATTN_ZMQ_PORT → --attn_zmq_port (기본 5556)
+  #
+  # 예시:
+  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  #     -e POLICY_PROFILE=smolvla policy-server policy-server-attn
+  # ────────────────────────────────────────────────────────────────────────────
+  policy-server-attn)
+    info "── Policy Server (SmolVLA + Attention Bridge) 시작 (gRPC + ZMQ) ──"
+    info "  gRPC Bind     → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
+    info "  FPS           → ${POLICY_FPS}"
+    info "  Attention ZMQ → tcp://${ATTN_ZMQ_HOST}:${ATTN_ZMQ_PORT} (히트맵 PUB)"
+    info "  ※ 모델·디바이스는 클라이언트 SendPolicyInstructions 로 주입. SmolVLA 만 캡처."
+    shift || true
+    exec python /workspace/scripts/policy_server_attention_bridge.py \
+      --host=${POLICY_SERVER_HOST} \
+      --port=${POLICY_SERVER_PORT} \
+      --fps=${POLICY_FPS} \
+      --inference_latency=${INFERENCE_LATENCY} \
+      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
+      --attn_zmq_host=${ATTN_ZMQ_HOST} \
+      --attn_zmq_port=${ATTN_ZMQ_PORT} \
       ${POLICY_SERVER_EXTRA_ARGS} \
       "$@"
     ;;

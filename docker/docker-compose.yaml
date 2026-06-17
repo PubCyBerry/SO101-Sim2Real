@@ -227,8 +227,11 @@ services:
     network_mode: host
 
     # ── 기본 명령 ────────────────────────────────────────────────────────
-    # policy-server     : 표준 Async Inference gRPC 서버 (RTC 없음) — **기본**
-    # policy-server-rtc : RTC 통합 서버 (scripts/policy_server_rtc.py 경유) — opt-in
+    # policy-server      : 표준 Async Inference gRPC 서버 (RTC 없음) — **기본**
+    # policy-server-rtc  : RTC 통합 서버 (scripts/policy_server_rtc.py 경유) — opt-in
+    # policy-server-attn : SmolVLA cross-attention 시각화 브리지 (히트맵 ZMQ PUB :5556) — opt-in
+    #   (scripts/policy_server_attention_bridge.py 경유, SmolVLA 전용 — 타 정책은 캡처 스킵)
+    #   예: run --rm -e POLICY_PROFILE=smolvla policy-server policy-server-attn
     #
     # 기본이 non-RTC 인 이유 (2026-06-15 정량 검증, sim VLA closed-loop):
     #   서버측 RTC(policy_server_rtc.py)는 prev_chunk_left_over 를 wall-clock 으로 추정하는데,

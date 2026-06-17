@@ -13,6 +13,50 @@
 
 ---
 
+## 작업 인계 (2026-06-17 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / 🔵 무중단 실행중)
+
+- **목표(사용자)**: 이전 4-cube/1-cube 256 비교의 교란변수 제거. **현재 DR 그대로 4-cube 1024 ep 생성 → HF push → ACT·SmolVLA·GR00T-N1.7 를 등량(batch×steps=640k samples)으로 학습**, 전과정 무중단. 동기: ①4-cube>1-cube 확인 ②4-cube가 extent 경계 약함(분포 혼선 의심) ③SmolVLA>GR00T이나 GR00T가 4× 적게 학습(640k vs 160k)돼 불공정.
+- **등량 결정(사용자 확정)**: ACT b32×20k · SmolVLA b32×20k · **GR00T b8×80k**(b16 OOM 회피, 640k 동일·smoke 검증 fit). 데이터셋+3모델 전부 HF push.
+- **오케스트레이션**: `scripts/run_4cube_1024_pipeline.sh`(신규, 미커밋) — 5스테이지 직렬, `outputs/p5_logs/4cube1024_*.log`. 학습 스테이지는 `wait_for_vram`(ACT 16G/SmolVLA 22G/GR00T 42G)로 사용자 라이브 eval 과 coexist→GR00T는 eval 정지 후 자동. **PID 1833865(setsid detached)**, 12:56 KST 시작.
+  - Stage1 gen: planner(:5599)+`pick_cube_curobo_batch.py --num_envs 16 --active_objects 4 --record_episodes 1024`(~78round/~9-10h). 🟢 ROUND1 정상(grasp 16/16). DR 무변경.
+  - Stage2: `upload_to_huggingface.py`→`taehunkim/so101_sim_pick_cube_4cube_1024`(v3.0 태그 자동).
+  - Stage3/4: `policy-server train`(profile act/smolvla)+`--policy.push_to_hub=true`→`so101_{act,smolvla}_sim_pick_cube_4cube_1024`.
+  - Stage5: `gr00t convert`+`gr00t finetune`(b8×80k, SAVE_STEPS=20000=4ckpt)→`huggingface-cli upload` 수동→`so101_groot_n17_sim_pick_cube_4cube_1024`.
+- **디스크 조치**: NVMe `/` 57G free(87%)→GR00T convert(datasets/, NVMe)·24G/ckpt 위험. **`datasets/`→`/DISK1/so101-sim2real/datasets` 심볼릭 이전**(outputs 패턴 동일, 비파괴 mv). NVMe 88G free 회복. outputs는 기존 `/DISK1` 심링크.
+- **실행 위치 = 메인 리포**(`/home/konan147/Workspaces/SO101-Sim2Real`). worktree(`train_4cube_vla`)엔 .venv/.env 없음 → 플랜·스크립트 저작만. GPU 1장 공유(coexist 사용자 승인).
+- **다음/검증**: gen 완주(`successes_rec>=1024`)→push 태그 해결→3모델 step 도달·loss·ckpt→3 HF repo. closed-loop eval=사용자 직접(범위 밖, 이전 1-cube 1024는 closed-loop 0% drift벽). 모니터=`tail outputs/p5_logs/4cube1024_pipeline.log`.
+
+---
+
+## 작업 인계 (2026-06-17 — SmolVLA cross-attention 오버레이 시각화 / 🟢 라이브 검증 완료·커밋)
+
+**목표(사용자)**: StanleyChueh/lerobot `record_attention_plot_cross_stanley.py` 방식을 폐루프 추론에 이식 → Isaac Sim 브리지 GUI에서 SmolVLA expert cross-attention 히트맵을 top/wrist/front 3캠에 라이브 오버레이 + 토글 버튼. **SmolVLA 전용**(groot_n17/act 무영향, 사용자 명시 [[feature-scope-smolvla-only]]).
+
+**확정 결정(사용자)**: ① 표시=Isaac Sim omni.ui 창 3개 ② 토글=표시만(서버는 attn 모드면 항상 PUB) ③ 어텐션=마지막 cross 레이어(15)·head·action-step 평균.
+
+**아키텍처**: 모델=policy-server 전용(vla-ros는 gRPC shim) → 어텐션 캡처는 서버, ZMQ 사이드채널(:5556)로 브리지 전송(GR00T 브리지 선례). lerobot 0.5.2 SmolVLA는 `attention_mode="cross_attn"` 기본·`eager_attention_forward` 항상 사용(probs materialize), 추출 훅만 없음 → instance-level monkey-patch.
+
+**변경 파일**(전부 additive opt-in, 기존 모드 byte-identical):
+- **NEW** `scripts/policy_server_attention_bridge.py` — `AttentionBridgeServer(PolicyServer)`. patch 3곳(`eager_attention_forward` probs 캡처[k_len==prefix_len·q_len≤chunk]·`embed_prefix` cam span[`_assemble_spans`]·`embed_image` 토큰수). `_get_action_chunk` override→head·step 평균→cam slice→sqrt grid→0~98 percentile→`send_pyobj`. SmolVLA 가드(아니면 표준 동작).
+- `docker/policy-entrypoint.sh` — `policy-server-attn` 모드 + `ATTN_ZMQ_*` env.
+- `scripts/sim/run_cube_desk_ros_bridge.py` — `--attention_overlay/--attn_zmq_host/--attn_zmq_port`, ZMQ SUB(CONFLATE), rgb annotator 3캠 상시, omni.ui `ByteImageProvider` 창+토글 CheckBox, `_attention_tick()` 메인·eval 루프 훅.
+- `env/smolvla.env`(ATTN 블록만) · `docker/docker-compose.yaml`(주석) · `AGENTS.md`(모드 등재).
+- cam 매핑 고정: camera1=top/2=wrist/3=front(RENAME_MAP 입력순서).
+
+**검증 완료**: py_compile(2 파일)·bash -n(entrypoint)·lerobot 속성(vlm_with_expert·embed_image shape[1]=num_img_embs·num_attention_heads·model=VLAFlowMatching·chunk_size=50)·`_assemble_spans` 오프셋 수학 standalone OK.
+
+**라이브 검증 완료(livestream)**: 서버 `[ATTN] PUB #1 | prefix_len=241 | probs=(1,15,50,241) | grids={top:(8,8),wrist:(8,8),front:(8,8)}` → 3 오버레이 창에 JET 히트맵 정상. 토글("Attention Overlay" 체크박스) 동작. 실행: `policy-server-attn` 모드는 entrypoint 재빌드 필요(이미지 baked)라 당장은 **우회**(`--entrypoint python policy-server /workspace/scripts/policy_server_attention_bridge.py ...`, 스크립트는 bind-mount). 브리지는 `--livestream 1 --attention_overlay`.
+
+**해결한 버그(중요·TROUBLESHOOTING 기록)**: 서버(numpy 2.x)↔브리지(numpy 1.26 Isaac핀) **ZMQ pickle 비호환** `No module named 'numpy._core'` → 브리지가 조용히 삼켜 raw 카메라만 보임. **fix=히트맵을 `grid.tolist()`(plain list)로 PUB**(numpy 버전 무관) + 브리지 recv 에러 1회 보고.
+
+**해석(시각화)**: 마지막 cross 레이어·15head·50step 평균. ⚠ 함정=8×8 coarse·percentile[0,98] 프레임내 상대(빨강=절대고집중 아님)·512패딩 위치 오차·50step 평균. 이 프레임=attention이 task 객체(큐브·그릇) 아닌 **배경(Unity 매트 로고)·그리퍼로 분산** → 시각 grounding 약함 = drift 0% 벽([[onecube-eval-drift-wall]])과 정합 + 배경 over-fit → 3DGS 실배경 트랙 근거.
+
+**GR00T-N1.7 확장 가능성(논의)**: 가능하나 더 까다로움. ① GR00T=**flash_attention 기본**(`use_flash_attention=True`·qwen3_backbone) → probs 미materialize, eager 강제/softmax hook 필요. ② action head DiT가 backbone VL features에 cross-attn(`gr00t_n1d7.py:52/59 cross_attention_dim`) = 캡처 지점. ③ 계측은 **gr00t 컨테이너**(모델 거기, bridge는 relay) + 2nd PUB(:5557). ④ 브리지 overlay/toggle/numpy-list 직렬화 100% 재사용(포트만 분기). 다음=GR00T 내부 정찰(DiT cross-attn 모듈·eager 강제법·카메라 토큰 타일링).
+
+**리스크/한계**: token span 오정렬(자가검증 로그)·grid 비정사각(factorize)·live 640×480 vs 정책 512패딩 약간 공간 오프셋. 영구 모드는 policy-server 이미지 재빌드 시 baked(현재 build 캐시 prune됨→torch 재설치 느림, 한가할 때).
+
+---
+
 ## 작업 인계 (2026-06-16 — cube_desk 실사 배경 3DGS(NuRec) 합성 PoC / 🔵 docker 빌드 중)
 
 **목표(사용자)**: sim-real visual gap 축소 → 실제 작업공간 배경을 3D Gaussian Splatting 으로 재구성 → USDZ 로 cube_desk 씬에 정적 배경 레이어 합성. Isaac Sim 5.1 NuRec USDZ 렌더 지원·Blackwell sm_120 호환 검증. 

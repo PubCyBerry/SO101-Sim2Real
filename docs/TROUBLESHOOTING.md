@@ -6,6 +6,7 @@
 - [uv-compile Too many open files panic (다코어 호스트, 모든 uv RUN)](#uv-compile-too-many-open-files-panic-다코어-호스트-모든-uv-run)
 - [`uv pip install torch` 단계에서 nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
 - [torchcodec `c10::MessageLogger::stream` 심볼 누락으로 학습 DataLoader 크래시](#torchcodec-c10messageloggerstream-심볼-누락으로-학습-dataloader-크래시)
+- [policy-server(numpy 2.x) ↔ Isaac 브리지(numpy 1.26) ZMQ pickle 비호환 — `No module named 'numpy._core'`](#policy-servernumpy-2x--isaac-브리지numpy-126-zmq-pickle-비호환--no-module-named-numpy_core)
 - [`torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`](#torchcompile-활성화-시-invalidcxxcompiler-no-working-c-compiler-found)
 - [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
 - [LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패](#lerobot-051-gr00t-n15-학습-smoke가-단계별로-실패)
@@ -336,6 +337,49 @@ docker compose -f docker/docker-compose.yaml run --rm policy-server python \
 ```
 
 `torchcodec OK` 가 출력되면 정상. 학습 재실행 시 DataLoader worker 크래시 없이 Training 진행 확인.
+
+---
+
+## policy-server(numpy 2.x) ↔ Isaac 브리지(numpy 1.26) ZMQ pickle 비호환 — `No module named 'numpy._core'`
+
+**현상**
+
+`policy-server-attn`(SmolVLA attention 오버레이) 에서 서버가 ZMQ 로 히트맵을 PUB 하고 Isaac Sim 브리지(`run_cube_desk_ros_bridge.py --attention_overlay`)가 SUB 하는데, 브리지 오버레이 창에 **히트맵이 안 뜨고 raw 카메라 영상만** 나온다. 서버 콘솔엔 `[ATTN] PUB #N` 이 정상 출력되지만 브리지는 아무 것도 못 받는다(브리지의 `except` 가 에러를 조용히 삼켜 증상이 안 드러남).
+
+**오류 메시지** (호스트에서 SUB 를 직접 떠 `recv_pyobj` 하면 표면화)
+
+```
+ModuleNotFoundError: No module named 'numpy._core'
+  File ".../zmq/sugar/socket.py", in recv_pyobj
+    return self._deserialize(msg, pickle.loads)
+```
+
+**원인**
+
+`socket.send_pyobj()` 는 객체를 **pickle** 로 직렬화한다. numpy `ndarray` 를 pickle 하면 그 numpy 버전의 내부 모듈 경로가 박힌다. policy-server 컨테이너는 **numpy 2.x**(내부 모듈 `numpy._core`)로 ndarray 를 직렬화하는데, Isaac 브리지 호스트는 Isaac Sim ABI 핀 때문에 **numpy 1.26.0**(이 버전엔 `numpy._core` 가 없고 `numpy.core` 임)이라 역직렬화가 실패한다. 즉 numpy 1.x↔2.x 간 ndarray pickle 은 **cross-process 비호환**. (cross-UID DDS·pyarrow ABI 와 같은 계열의 버전·ABI 불일치 함정.)
+
+**해결 방법**
+
+ndarray 를 pickle 로 직접 보내지 말고 **numpy 버전 무관한 형태**로 직렬화한다. 히트맵은 8×8 로 작아 `grid.tolist()`(중첩 Python list)로 보내면 충분하다 — pickle 에 numpy 참조가 안 박혀 양쪽 numpy 버전 무관. 수신측은 `np.asarray(heat, dtype=np.float32)` 로 복원.
+
+```python
+# scripts/policy_server_attention_bridge.py — _publish_attention
+heatmaps[cam] = grid.tolist()   # ndarray 직접 send_pyobj 금지(numpy 1.x↔2.x pickle 깨짐)
+```
+
+큰 배열이면 `np.save`(.npy 포맷은 버전 안정) → bytes 로 보내거나(`policy_server_groot_bridge.py` 의 msgpack `_encode` 패턴), `frombuffer`+shape+dtype 수동 직렬화를 쓴다. 더불어 수신측 `except` 로 에러를 **조용히 삼키지 말 것**(첫 1회는 반드시 로깅) — 이 증상이 30분 묻혔던 원인.
+
+**확인 방법**
+
+서버 기동 상태에서 호스트에서 SUB probe:
+
+```bash
+uv run python -c "import zmq; s=zmq.Context.instance().socket(zmq.SUB); \
+  s.setsockopt_string(zmq.SUBSCRIBE,''); s.setsockopt(zmq.RCVTIMEO,3000); \
+  s.connect('tcp://127.0.0.1:5556'); m=s.recv_pyobj(); print('OK', list(m['heatmaps']))"
+```
+
+`OK ['top', 'wrist', 'front']` 출력 + 브리지 오버레이 창에 JET 히트맵이 보이면 정상.
 
 ---
 

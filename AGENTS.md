@@ -76,9 +76,10 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 - `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 구동. `async` 그룹(grpcio + protobuf)이 teleop 이미지에도 설치됨. 실제로는 `policy-client-shim.py` 경유 (아래 참조).
 
 **`policy-entrypoint.sh`** (policy-server 서비스, CMD 기본값 `policy-server`):
-`prepare-model` · `policy-server` · `policy-server-rtc` · `policy-server-groot` · `train` · `eval` · `info` · `bash` · `python`
+`prepare-model` · `policy-server` · `policy-server-rtc` · `policy-server-groot` · `policy-server-attn` · `train` · `eval` · `info` · `bash` · `python`
 
 - `policy-server-rtc` 는 `policy_server_rtc.py` 로 서버 측 Real-Time Chunking(RTC) 가이던스를 주입한 async 서버 (gRPC 프로토콜·클라이언트 변경 없음, `RTC_*` env 튜닝).
+- `policy-server-attn` 은 `policy_server_attention_bridge.py` (`AttentionBridgeServer`, PolicyServer 서브클래스)로 **SmolVLA 전용** cross-attention 시각화 브리지. gRPC 추론은 표준과 동일(`vla_policy_node` 무수정)하면서 매 추론마다 SmolVLA expert cross-attention(마지막 cross 레이어, head·action-step 평균)을 instance-level monkey-patch(`eager_attention_forward`·`embed_prefix`·`embed_image`)로 캡처해 카메라별 히트맵을 ZMQ PUB(`ATTN_ZMQ_*`, 기본 :5556). Isaac Sim 브리지(`run_cube_desk_ros_bridge.py --attention_overlay`)가 SUB 해 top/wrist/front omni.ui 창에 오버레이(토글=표시만). SmolVLA 가 아니면 캡처 스킵 → groot/act 무영향. cam 매핑=입력순서(camera1=top/2=wrist/3=front).
 - `policy-server-groot` 는 `policy_server_groot_bridge.py` (`GrootBridgeServer`, PolicyServer 서브클래스)로 gRPC 컨트랙트를 유지한 채 추론만 `gr00t` 컨테이너의 ZMQ 서버(Gr00tPolicy N1.7)에 위임한다. `GROOT_ZMQ_*` env, `vla_policy_node` 무수정.
 - **train/eval 은 이쪽 서비스**: SmolVLA 학습이 쓰는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지엔 미설치. (GR00T-N1.7 학습은 lerobot-train 이 아니라 `gr00t` 서비스 `finetune` 모드.)
 
@@ -138,7 +139,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
 | `environments/pick_cube_state_machine.py` | SO-101 해석적(closed-form) IK + joint position action 만으로 PickCube pick-and-place (Lula/DiffIK 미사용). side-approach grasp(닫힘축 비킴 하강→수평 SLIDE), 장애물(그릇·큐브) 회피 roll 후보, 동적 집기 순서, DRAG(inner-reach 끌기), 수평 jaw release, `--calibrate` 진단 모드. **seed 0 DR full 4env 16/16 (100%), 고정 spawn 4/4 ~20초**. 함정·해결책은 `docs/TROUBLESHOOTING.md` §SO-101 해석적 FK·§하강 grasp·§release 퍼올림·§base 발치 spawn 참조 |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
-| `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽 |
+| `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽. **`--attention_overlay`** = `policy-server-attn`(SmolVLA) PUB 히트맵을 ZMQ SUB(`--attn_zmq_port`)해 top/wrist/front omni.ui 창에 JET 오버레이 + 토글(GUI/livestream 전용). |
 | `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |
 | `planning/curobo_planner_server.py` · `sim/pick_cube_curobo_{demo,batch}.py` | **cuRobo 트랙** — ZMQ planner 사이드카 + single-env 데모 / multi-env lock-step 배치. `--record_dir` 지정 시 **LeRobot v3 기록 모드**(demo=single-env, batch=success-only render-batch N-env 카메라). 상세 `docs/PICKCUBE_CUROBO_PROJECT.md` |
 | `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
