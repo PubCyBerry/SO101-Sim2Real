@@ -3894,3 +3894,146 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm vla-ros
 # (override 시) docker compose ... run --rm -e GRIPPER_CMD_OFFSET=0 vla-ros   # 실기기 모델
 # eval ever-in-bowl: 0% → 5%(이 fix) → 12.5%(+non-RTC). all-4 잔여 0% 는 BC covariate shift.
 ```
+
+---
+
+## cuRobo 5-DOF position-only 가 안 됨 (오진단) — `orientation_tolerance` ≠ `track_position`
+
+### 현상
+
+SO-101(5축)에 cuRobo `plan_pose`/`solve_pose` 로 pose-goal 을 주면 임의 orientation 에서 거의 항상
+실패. "5-DOF 라 cuRobo pose-goal 비가능, joint-goal(`plan_cspace`)만 + 해석적 IK 로 자세 공급"으로
+결론냈었다(`PICKCUBE_CUROBO_PROJECT.md` 옛 D2/C4/D9). **이 결론은 틀렸다 — position-only API 를
+잘못 짚은 오진단이었다.**
+
+### 오류 메시지
+
+없음(IK_FAIL / `success=False`). 옛 probe(`validate_so101_curobo.py[4b]`, `_probe_so101_reach.py`)는
+position-only 를 `InverseKinematicsCfg(orientation_tolerance=6.3)` 로 시도 → "position-only ==
+6-DOF, 차이 없음"으로 관측.
+
+### 원인
+
+`orientation_tolerance`(`solver_ik_cfg.py`)는 **success 판정 수렴 게이트일 뿐**, optimizer 의
+orientation cost·gradient 를 끄지 못한다. 게이트를 π 로 풀어도 cost 가 살아 있어 5축이 position 과
+orientation 을 동시에 못 맞춰 실패. 즉 게이트 완화 ≠ 자세 cost 비활성. 진짜 자세 cost 를 끄는 API 를
+안 쓴 게 원인.
+
+### 해결 방법
+
+**`ToolPoseCriteria.track_position()`** (`curobo.types` 공개 shim) → weight factor
+`[1,1,1,0,0,0]`(회전 3축 0). 커널 `_src/cost/wp_tool_pose.py::compute_rotation_error_axis_angle`:
+회전축 weight 0 → `q_xyz=0` → `angle=0` → `angular_distance=0` **항상** + rotation gradient 0. 따라서
+(a) orientation 수렴 게이트(`angular_distance < orientation_tolerance`) **무조건 통과** (b) optimizer
+가 자세를 **안 건드림** = 진짜 position-only.
+
+```python
+from curobo.types import ToolPoseCriteria
+planner.warmup(enable_graph=True, num_warmup_iterations=5)
+# warmup 후 런타임 주입 안전(plan_grasp 도 phase 마다 같은 패턴). ik_solver + trajopt_solver 동시 갱신.
+planner.update_tool_pose_criteria({planner.tool_frames[0]: ToolPoseCriteria.track_position()})
+res = planner.plan_pose(goal_tool_poses, current_state)   # gizmo orientation 무시, position 만 도달
+```
+
+- grasp 처럼 **자세 제어가 필요**하면 `GoalToolPose(num_goalset=N)` 후보 자세(top-down + tilt/roll)로
+  `plan_pose`/`plan_grasp` → cuRobo 가 도달가능한 것 자동 선택. partial-pose 면 weight factor 의 원하는
+  회전축만 1 로.
+- 해석적 IK + FK 15mm 발산(옛 D9) 우회는 더 이상 불필요. cuRobo IK 가 EE position 을 5mm tol 내 정확 매칭.
+
+### 확인 방법
+
+```bash
+# 정량 probe: 동일 reachable 타깃에 IK 성공률 비교 (orientation_tolerance=0.05 고정, N=200)
+uv run --no-sync --group isaac python scripts/sim/_probe_posonly.py
+#   (A) full-pose + 도달가능 자세 : 89.5%  (sanity)
+#   (B) full-pose + 임의 자세     :  0.0%  (옛 D2 벽)
+#   (C) track_position + 임의 자세: 97.5%  (수정)  → (C)≫(B), Δ=+97.5pp
+#   + MotionPlanner.plan_pose(position-only) 9/10 궤적 생성
+# 인터랙티브: scripts/sim/motion_plan_so101_viser.py — gizmo 자세 임의 회전해도 도달(옛 벽 재현 안 됨)
+uv run --no-sync --group isaac python scripts/sim/motion_plan_so101_viser.py --port 8088
+```
+
+---
+
+## cuRobo IKSolver 를 두 배치 크기로 호출 시 CUDA context 깨짐 (illegal memory access)
+
+### 현상
+
+cuRobo `IKSolver.solve_pose` 를 한 번은 batch=N(예: 후보 360개), 다음엔 batch=1(예: hover 1개)로
+호출하면, 두 번째 호출에서 죽고 **이후 모든 CUDA 연산이 illegal memory access** 로 cascade(viser
+가 "아무 반응 없음"). GUI 에선 첫 grasp 클릭 후 전부 먹통.
+
+### 오류 메시지
+
+```
+ValueError: CUDA graph reset is not available.
+  (solver_core.py reset_cuda_graph)
+…그 다음…
+RuntimeError: CUDA error: an illegal memory access was encountered
+```
+
+### 원인
+
+`use_cuda_graph=True`(기본)면 첫 solve 때 그 batch 크기로 CUDA graph 를 캡처한다. 다른 batch
+크기로 다시 호출하면 graph 를 재캡처해야 하는데 cuRobo 가 `reset_cuda_graph` 를 막아(`"CUDA graph
+reset is not available"`) 예외 → 깨진 graph 상태로 다음 커널 실행 → illegal memory access. 한번
+나면 프로세스 CUDA context 가 오염돼 회복 불가(재시작 필요).
+
+### 해결 방법
+
+가변 batch 로 쓸 solver 는 **`InverseKinematicsCfg.create(..., use_cuda_graph=False)`**. graph
+캡처 안 하므로 매 호출 batch 크기 자유(후보 360 → hover 1 → 360 반복 OK). 일회성·소량 호출(클릭당
+1회)이라 graph 미사용 속도 저하 무시 가능. 적용: `motion_plan_so101_viser.py` 의 `grasp_ik`
+(후보 배치 IK + hover 단일 IK 두 크기 사용).
+
+### 확인 방법
+
+```bash
+# batch 360 → 1 → 360 반복 크래시 없음 확인(use_cuda_graph=False)
+uv run --no-sync --group isaac python scripts/sim/motion_plan_so101_viser.py --port 8088
+# → Grasp 여러 번 클릭해도 "illegal memory access" 안 남
+```
+
+---
+
+## viser 가 "Viser not installed" 로 안 뜸 — isaacsim websockets==12.0 핀이 viser 깸
+
+### 현상
+
+cuRobo viser 스크립트(`motion_plan_so101_viser.py`·공식 `motion_planning.py --visualize`·
+`build_so101_xrdf.py --visualize` 등) 부팅 시 viser import 실패로 종료. 과거(같은 머신)엔 잘 됐는데
+어느 순간 안 됨.
+
+### 오류 메시지
+
+```
+ModuleNotFoundError: No module named 'websockets.asyncio'
+…(curobo/viewer.py)…
+ImportError: Viser not installed. Install with: pip install viser
+```
+
+### 원인
+
+`viser 1.0.30` 은 `websockets.asyncio`(websockets ≥13.0)를 요구하는데, **`isaacsim-kernel` 이
+`websockets==12.0` 하드핀**. `--group isaac` venv 에서 두 요구가 충돌 → `uv sync`(또는 isaac 재설치)가
+lock 의 12.0 을 복원하면 viser 가 깨진다. viser 는 lock 미등재(cuRobo `[cu12]` 가 끌어온 것)라 sync
+때 12.0 으로 덮임. **ABI 핀(numpy/torch/pyarrow)과 무관** — viewer 전용 의존.
+
+### 해결 방법
+
+`.venv` 에 websockets ≥13.1 재설치(cuRobo 처럼 post-sync 수동 보강):
+
+```bash
+uv pip install 'websockets>=13.1,<14'
+```
+
+원복(isaac 쪽 영향 우려 시) = `uv pip install websockets==12.0` 또는 `uv sync`. websockets 13 은
+viser 전용이라 sim 스크립트(teleop/env)의 isaac livestream 이 ws12 API 를 쓰면 영향 가능하나 viser
+스크립트엔 무관.
+
+### 확인 방법
+
+```bash
+uv run --no-sync --group isaac python -c "import viser; print(viser.__version__)"  # 1.0.30
+uv run --no-sync --group isaac python -c "import websockets.asyncio; print('ok')"   # ok (≥13)
+```
