@@ -14,7 +14,8 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
 | `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
 | `docs/PATH_GROOT_N17.md` | GR00T-N1.7 네이티브 정책 (별도 gr00t 이미지 finetune + ZMQ 서버 + gRPC↔ZMQ bridge → 기존 sim 폐루프) |
-| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🔴 gripper offset=sim데이터규약·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic) |
+| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🟢 gripper offset=Option A 절대기록 해소·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic·🟠 gripper scale 캘리브) |
+| `docs/PICKCUBE_RL_REF_COMPARISON.md` | 성공 레퍼런스(`ref_repos/pick_and_place`, IsaacLab Lift-Cube-Place) 대비 분석 + reward/arch/gamma 정합(`--skill ref`) — 성공 8할=강한 그리퍼+평면 place, 우리 블로커=grasp 물리 재확인 |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
@@ -123,9 +124,10 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 ### USD 에셋 (`assets/`)
 
 - `scenes/pen_desk/scene.usd` + `objects/<Pen*,PenCup>/<Name>.usd` — kitchen_with_orange 패턴 (객체별 self-contained USD + `prepend payload` 참조)
-- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = 2.5cm 회색 폼(grasp 안정 물리: mass 0.035kg, contactOffset 0.004, maxDepenetrationVelocity 1.0, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
+- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = **Cube1/2 40mm·Cube3/4 50mm**(2026-06-18 30/40→40/50 확대) 회색 펠트(라운드 visual + grasp 물리 mass 35/55g, contactOffset 0.004, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
 - `robots/` — SO-101 follower USD + 편집용 URDF
-- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 펜·큐브 collider 는 `PhysicsCollisionAPI` 직접 부여 (별도 proxy 미사용)
+- **충돌 근사(2026-06-18)**: sim2real grasp 표면 현실화 위해 grasp 관여 mesh 를 **SDF Mesh**(`approximation="sdf"`, PhysxSDFMeshCollisionAPI, res 256)로. 큐브 collider = invisible 라운드 mesh(옛 analytic Box 대체, visual 정합), jaw/gripper collider = `/so101_new_calib/{jaw,gripper}/collisions`(convexDecomposition→sdf, `set_gripper_jaw_sdf_collision.py`). **근거: triangle/meshSimplification 은 동적 rigid body 서 convexHull 로 fallback → SDF 만 오목 형상 정확**(convexHull/Decomp 은 손가락 사이 메워 collision 부풀림). 팔 링크는 convexDecomposition 유지(grasp 무관·저비용)
+- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 큐브 collider 는 self-contained USD 에 `PhysicsCollisionAPI`+SDF 직접 부여 (별도 proxy 미사용)
 - **영역 분리**: 조작 대상(펜/큐브) = 그린 타원 (`y ∈ [0.22, 0.26]`), 컨테이너(펜컵/그릇) = 주황 호 (`y ∈ [0.34, 0.40]`). y 마진 ≥ 0.08 m 라 조작 대상이 컨테이너 안에 spawn 불가.
 
 ### 진입 스크립트 (`scripts/`)
@@ -134,6 +136,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 |---|---|
 | `environments/list_envs.py` | leisaac 등록 환경 일람 |
 | `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. **펜**=pxr.Sdf 문자열 조립(isaac 불필요). **큐브**=공식 pxr/PhysxSchema 스키마 API. PhysxSchema 가 isaacsim 번들 플러그인이라 `isaaclab.app.AppLauncher` headless 부팅이 필요 → `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/author_pick_cube_scene.py`. 큐브 조명은 scene.usd 가 직접 author(`/Scene/DomeLight`+`/Scene/KeyLight`), 그릇 충돌은 watertight mesh + SDF(`approximation="sdf"`, PhysxSDFMeshCollisionAPI) |
+| `assets/set_gripper_jaw_sdf_collision.py` · `assets/viz_collision_overlay.py` | (1) `so101_follower.usd` jaw/gripper collision 을 convexDecomposition→**SDF**(usd-core raw 스키마, isaac 불요, `.preSDF.bak` 백업) (2) visual vs collision(SDF source) vs convexHull 오버레이 PNG(`outputs/collision_overlay/`, matplotlib+trimesh). 둘 다 GPU 불요 |
 | `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(top/wrist/front 3단 수직 분할 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
@@ -144,7 +147,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `planning/curobo_planner_server.py` · `sim/pick_cube_curobo_{demo,batch}.py` | **cuRobo 트랙** — ZMQ planner 사이드카 + single-env 데모 / multi-env lock-step 배치. `--record_dir` 지정 시 **LeRobot v3 기록 모드**(demo=single-env, batch=success-only render-batch N-env 카메라). 상세 `docs/PICKCUBE_CUROBO_PROJECT.md` |
 | `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
 | `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
-| `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼 |
+| `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼. **그리퍼 기록 규약 = 절대 joint target**(2026-06-18 Option A, post-offset/real native; 옛 pre-offset −0.20 폐기 → sim·real 추론 둘 다 `GRIPPER_CMD_OFFSET=0`, 발산 0). curobo demo/batch·rollout 동일 적용. 상세 `docs/SIM_REAL_INFERENCE_PARITY.md §5.1` |
 | `sim/compare_train_vs_rtc.py` · `sim/compare_train_vs_async_groot.py` · `sim/replay_infer_overlay.py` | VLA 추론 진단 — recorded ep 를 학습방식 vs 배포(async/RTC·gRPC bridge) 통과시켜 정책출력 오버레이+입력 timestamp 마커+per-joint MAE. `_rtc`=SmolVLA(RTC), `_groot`=GR00T-N1.7(ZMQ teacher-forced vs gRPC bridge). policy-server 컨테이너서 실행, 서버 기동 필요 |
 
 > **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.

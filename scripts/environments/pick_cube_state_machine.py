@@ -1,7 +1,7 @@
 """SO-101 pick-and-place 컨트롤러 (cube_desk 씬) — 해석적 IK + Cartesian waypoint follower.
 
 Lula/DiffIK 등 수치 솔버 없이 닫힌 해(closed-form) IK + joint position action 만으로
-`SimToReal-SO101-PickCube-v0` 에서 큐브 4개(30/40mm)를 그릇에 담는다. VLA Expert 데이터
+`SimToReal-SO101-PickCube-v0` 에서 큐브 4개(40/50mm)를 그릇에 담는다. VLA Expert 데이터
 생성용이라 2048-env 병렬에서 최종 placement 100% + 재시도 발동 ~0% 가 목표.
 
 설계 — 두 조각
@@ -215,10 +215,10 @@ parser.add_argument("--nudge_r_far", type=float, default=0.32,
 parser.add_argument("--cube_clear", type=float, default=0.05,
                     help="grasp 닫힘축 연장선과 다른 큐브 사이 최소 거리 (m)")
 # 그리퍼 명령 (joint target, rad)
-parser.add_argument("--gripper_open", type=float, default=0.65,
-                    help="30mm 큐브용 열림 joint target (rad)")
-parser.add_argument("--gripper_open_large", type=float, default=0.85,
-                    help="40mm 큐브용 열림 joint target (rad)")
+parser.add_argument("--gripper_open", type=float, default=0.85,
+                    help="40mm 큐브용 열림 joint target (rad). 큐브 30→40mm 확대에 맞춰 0.65→0.85 (+0.20/10mm slope 유지)")
+parser.add_argument("--gripper_open_large", type=float, default=1.05,
+                    help="50mm 큐브용 열림 joint target (rad). 0.85→1.05 (+0.20/10mm slope 유지)")
 parser.add_argument("--gripper_close", type=float, default=-0.05)
 # 속도 (m/s, Cartesian)
 parser.add_argument("--travel_height", type=float, default=0.15,
@@ -329,8 +329,8 @@ from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 # cube_desk 책상 윗면 world z (placed 판정 기준).
 DESK_TOP_Z = 0.705
 
-# 큐브 한 변 길이 (author 스크립트 CUBE_SCALES): Cube1/2=30mm, Cube3/4=40mm.
-CUBE_SIZES = {"Cube1": 0.030, "Cube2": 0.030, "Cube3": 0.040, "Cube4": 0.040}
+# 큐브 한 변 길이 (author 스크립트 CUBE_SCALES): Cube1/2=40mm, Cube3/4=50mm.
+CUBE_SIZES = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
 
 # gripper action 의 default offset (PickCubeEnvCfg init joint_pos["gripper"]).
 # SlewLimitedJointPositionAction: desired = raw*scale(1.0) + offset → raw = target - offset.
@@ -792,10 +792,10 @@ class SO101PickPlace:
 
     @staticmethod
     def _open_cmd(cube: str) -> float:
-        """큐브 크기 → 그리퍼 열림 target (rad). 30/40mm 두 검증점 선형 보간·외삽 →
+        """큐브 크기 → 그리퍼 열림 target (rad). 40/50mm 두 검증점 선형 보간·외삽 →
         임의 크기 일반화 (큐브가 손가락 사이로 들어올 만큼 벌림)."""
-        size = CUBE_SIZES.get(cube, 0.030)
-        frac = (size - 0.030) / (0.040 - 0.030)
+        size = CUBE_SIZES.get(cube, 0.040)
+        frac = (size - 0.040) / (0.050 - 0.040)
         cmd = args.gripper_open + frac * (args.gripper_open_large - args.gripper_open)
         return max(0.2, min(1.74, cmd))
 
@@ -803,7 +803,7 @@ class SO101PickPlace:
     def _side_offset(cube: str) -> float:
         """큐브 크기 → side-approach 비킴 거리 (m). 큐브 반폭 + 여유 → 임의 크기 일반화.
         충분히 비켜야 비킨 수직 하강 중 열린 jaw 가 큐브 윗면을 안 침(descend clip 방지)."""
-        size = CUBE_SIZES.get(cube, 0.030)
+        size = CUBE_SIZES.get(cube, 0.040)
         return max(args.side_offset, size * 0.5 + 0.018)
 
     # ---- planner --------------------------------------------------------

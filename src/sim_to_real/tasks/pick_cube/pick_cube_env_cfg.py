@@ -58,12 +58,12 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
 # 매트 윗면 world z=0.709. z중심 = 0.709 + 반높이 + slack(0.001).
-#   작은(Cube1/2, 30mm): 0.709+0.015+0.001=0.725, 큰(Cube3/4, 40mm): 0.709+0.020+0.001=0.730.
+#   작은(Cube1/2, 40mm): 0.709+0.020+0.001=0.730, 큰(Cube3/4, 50mm): 0.709+0.025+0.001=0.735.
 _CUBE_INIT_STATES = {
-    "Cube1": ((-0.14, 0.135, 0.725), _yaw_quat(20.0)),
-    "Cube2": ((0.14, 0.115, 0.725), _yaw_quat(-35.0)),
-    "Cube3": ((-0.10, 0.225, 0.730), _yaw_quat(50.0)),
-    "Cube4": ((0.09, 0.195, 0.730), _yaw_quat(-20.0)),
+    "Cube1": ((-0.14, 0.135, 0.730), _yaw_quat(20.0)),
+    "Cube2": ((0.14, 0.115, 0.730), _yaw_quat(-35.0)),
+    "Cube3": ((-0.10, 0.225, 0.735), _yaw_quat(50.0)),
+    "Cube4": ((0.09, 0.195, 0.735), _yaw_quat(-20.0)),
 }
 # BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(0.36, 0.045, 0.705) = (-0.22, 0.305, 0.715), +y 0.01 → 0.315.
 _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
@@ -86,8 +86,8 @@ _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
 _MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)
 _CUBE_SCATTER_X_RANGE: tuple[float, float] = (_MAT_BL_ENV[0] + 0.16, _MAT_BL_ENV[0] + 0.56)  # (-0.18, 0.22)
 _CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1] + 0.11, _MAT_BL_ENV[1] + 0.25)  # (0.155, 0.295)
-# 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(40mm) face 대각 절반 ((s/2)·√2).
-_CUBE_VOLUME_INSET: float = 0.040 * 0.5 * (2 ** 0.5)  # ≈ 0.0283
+# 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(50mm) face 대각 절반 ((s/2)·√2).
+_CUBE_VOLUME_INSET: float = 0.050 * 0.5 * (2 ** 0.5)  # ≈ 0.0354
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
@@ -918,6 +918,54 @@ class PickCubeRewardsCfg:
         },
     )
 
+    # -----------------------------------------------------------------------
+    # 레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 보상항.
+    # 기본 weight 0 (full/acquire/place/full_bc 비활성). apply_skill_ref 가 켠다.
+    # target_region → 그릇(BOWL) 매핑, 높이는 DESK_TOP_Z 기준. 단일 객체 레시피라
+    # active 큐브 합산(active_objects=1 이면 레퍼런스와 동일).
+    # -----------------------------------------------------------------------
+    ref_reaching = RewTerm(
+        func=task_mdp.reaching_object_ref,
+        weight=0.0,
+        params={
+            "std": 0.1,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
+        },
+    )
+    ref_lifting = RewTerm(
+        func=task_mdp.lifting_object_dist_limit_ref,
+        weight=0.0,
+        params={
+            "minimal_height": 0.04,
+            "minimal_dist": 0.05,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+        },
+    )
+    ref_tracking = RewTerm(
+        func=task_mdp.object_target_region_distance_ref,
+        weight=0.0,
+        params={
+            "std": 0.3,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+        },
+    )
+    ref_lowering = RewTerm(
+        func=task_mdp.object_lowering_ref,
+        weight=0.0,
+        params={
+            "std": 0.1,
+            "minimal_dist": 0.05,
+            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
+            "container_center_xy": BOWL_CENTER_XY,
+            "container_cfg": SceneEntityCfg(BOWL_NAME),
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Terminations
@@ -1371,6 +1419,56 @@ def apply_skill_full_bc(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 
         _term = getattr(env_cfg.rewards, _name, None)
         if _term is not None and "object_cfgs" in _term.params:
             _term.params["object_cfgs"] = active_cfgs
+    env_cfg.episode_length_s = float(episode_length_s)
+
+
+def apply_skill_ref(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 5.0) -> None:
+    """레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 프리셋.
+
+    성공이 확인된 레퍼런스의 보상·종료 구조를 SO-101+그릇 환경에 그대로 재현한다.
+    우리 dense shaping(grasp_align/close·task_progress·PBRS·bootstrap·RND·terminal) 전부 끄고
+    레퍼런스 6항만 사용:
+      ref_reaching 1.0 · ref_lifting 30 · ref_tracking 16 · ref_lowering 7
+      + action_rate −1e-4 · joint_vel −1e-4 (레퍼런스와 동일 함수·weight).
+    종료도 레퍼런스와 동일: **success 종료 없음**(time_out + cube_lost(≈object_dropping)만).
+    success 로 조기 종료하면 tracking/lowering 보상이 잘려 레퍼런스 MDP 와 달라지므로 끈다.
+    그리퍼 init 은 우리 OPEN(0.70)로 둔다(레퍼런스 hand joint 0.0=open 과 의도 동일,
+    SO-101 부호 규약이 달라 0.0 은 near-closed 라 grasp 불가). episode 5s.
+    **apply_curriculum 이후** 호출. arch/gamma 는 run_expert_policy.sh ref 스테이지가 맞춘다
+    (MLP[128,64,32]+obs_normalization, γ0.98, init_noise_std 1.0, entropy 0.006, lr 8e-5).
+    """
+    active_cfgs = _active_cfgs_from(env_cfg)
+    try:
+        env_cfg.scene.robot.init_state.joint_pos["gripper"] = 0.70
+    except Exception:
+        pass
+    _set_reward_weights(env_cfg, {
+        # 레퍼런스 6항 (target_region→그릇 매핑)
+        "ref_reaching": 1.0,
+        "ref_lifting": 30.0,
+        "ref_tracking": 16.0,
+        "ref_lowering": 7.0,
+        "action_rate": -1e-4,
+        "joint_vel": -1e-4,
+        # 우리 dense/shaping/PBRS/terminal/penalty 전부 off
+        "reach_cube": 0.0, "grasp_align_cube": 0.0, "grasp_close_cube": 0.0,
+        "grasp_contact_cube": 0.0, "pregrasp_cube": 0.0, "guided_lift_cube": 0.0,
+        "grasp_cube": 0.0, "carry_cube": 0.0, "lift_cube": 0.0, "transport_cube": 0.0,
+        "place_height_cube": 0.0, "insert_cube": 0.0, "place_pbrs_cube": 0.0,
+        "task_progress_pbrs_cube": 0.0, "release_cube": 0.0, "over_bowl_drop_cube": 0.0,
+        "over_bowl_grasped_bonus": 0.0, "task_success": 0.0, "early_finish_bonus": 0.0,
+        "bowl_disturb": 0.0, "cube_predisturb": 0.0, "time_penalty": 0.0,
+    })
+    # active subset 만 보상 계산(apply_curriculum 이후)
+    for _name in ("ref_reaching", "ref_lifting", "ref_tracking", "ref_lowering"):
+        _term = getattr(env_cfg.rewards, _name, None)
+        if _term is not None and "object_cfgs" in _term.params:
+            _term.params["object_cfgs"] = active_cfgs
+    # 레퍼런스: success 종료 없음 — 5s 풀 에피소드(tracking/lowering 누적). cube_lost(추락) 유지.
+    try:
+        env_cfg.terminations.success = None
+    except Exception:
+        pass
     env_cfg.episode_length_s = float(episode_length_s)
 
 

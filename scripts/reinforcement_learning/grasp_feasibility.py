@@ -31,7 +31,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="SO-101 grasp 물리 가능성 진단")
 parser.add_argument("--task", default="SimToReal-SO101-PickCube-v0")
 parser.add_argument("--num_envs", type=int, default=32)
-parser.add_argument("--cube", default="Cube1", help="테스트할 큐브 prim 이름 (Cube1=30mm, Cube3=40mm)")
+parser.add_argument("--cube", default="Cube1", help="테스트할 큐브 prim 이름 (Cube1=40mm, Cube3=50mm)")
 parser.add_argument("--settle_steps", type=int, default=10)
 parser.add_argument("--pin_steps", type=int, default=8, help="닫는 동안 큐브를 고정할 step 수(초기 접촉 형성)")
 parser.add_argument("--no_dynamic_effort", action="store_true", default=False,

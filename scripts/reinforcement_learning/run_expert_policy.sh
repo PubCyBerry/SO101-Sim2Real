@@ -14,7 +14,8 @@
 set -euo pipefail
 
 ROOT=/home/konan147/Workspaces/SO101-Sim2Real
-cd "$ROOT/.claude/worktrees/lstm-ppo-pickcube"
+# 이 스크립트가 위치한 worktree 루트로 이동(과거 lstm-ppo-pickcube 하드코딩 → 이전됨).
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 export OMNI_KIT_ACCEPT_EULA=YES
 export PYTHONPATH="$(pwd)/src"
@@ -71,11 +72,35 @@ stage_train() {
     --run_name $RUN
 }
 
+# Stage ref — 레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 학습.
+#   성공 확인된 레퍼런스의 보상/arch/gamma 를 SO-101+그릇 환경에 그대로 맞춘다.
+#   - 보상: --skill ref (apply_skill_ref) = reaching 1·lifting 30·tracking 16·lowering 7
+#     + action_rate/joint_vel −1e-4. success 종료 없음(5s 풀 에피소드). 그 외 우리 shaping/PBRS/
+#     bootstrap/RND 전부 off.
+#   - arch: feedforward MLP [128,64,32] + obs_normalization (NO --recurrent). init_noise_std 1.0.
+#   - PPO: gamma 0.98, lam 0.95, entropy 0.006, lr 8e-5 adaptive, epochs 5, minibatch 4,
+#     num_steps_per_env 24, max_grad_norm 0.4 (= 레퍼런스 LiftCubePlacePPORunnerCfg).
+#   - bootstrap/RND 미사용(레퍼런스는 순수 dense scratch). active_objects 1.
+stage_ref() {
+  echo "[expert] STAGE ref: 레퍼런스 정합 (MLP[128,64,32]+obs_norm, dense 6항, γ0.98, NO bootstrap/RND)"
+  $PY scripts/reinforcement_learning/train.py --task SimToReal-SO101-PickCube-v0 \
+    --skill ref \
+    --num_envs 4096 --num_steps_per_env 24 --num_learning_epochs 5 --num_mini_batches 4 \
+    --policy_hidden_dims 128 64 32 --obs_normalization --init_noise_std 1.0 \
+    --schedule adaptive --learning_rate 8e-5 --entropy_coef 0.006 \
+    --gamma 0.98 --lam 0.95 --max_grad_norm 0.4 \
+    --device cuda:0 --headless --seed 42 --save_interval 50 \
+    --experiment_name ref_lift_place --log_root_path "$LOGROOT" \
+    --max_iterations 4000 --active_objects 1 \
+    --run_name ref
+}
+
 case "${1:-train}" in
   demos) stage_demos ;;         # (이력) SM demo 수집 — 현 전략 미사용
   bc)    stage_bc ;;            # (이력) BC warmstart — 현 전략 미사용(사용자 지시)
   train) stage_train ;;         # 순수 PPO scratch (현 전략)
+  ref)   stage_ref ;;           # 레퍼런스(Lift-Cube-Place) 정합
   all)   stage_train ;;
-  *) echo "usage: $0 [train]  (순수 PPO; demos/bc 는 이력)"; exit 1 ;;
+  *) echo "usage: $0 [train|ref]  (train=순수 PPO; ref=레퍼런스 정합; demos/bc 는 이력)"; exit 1 ;;
 esac
 echo "[expert] done: ${1:-all}"
