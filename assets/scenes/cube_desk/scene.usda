@@ -269,10 +269,10 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 20
-        double3 xformOp:translate = (-0.14, 0.125, 0.725)
+        double3 xformOp:translate = (-0.14, 0.125, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
-        over "Box" (
+        over "Collision" (
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {
@@ -287,10 +287,10 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -35
-        double3 xformOp:translate = (0.13999999999999999, 0.105, 0.725)
+        double3 xformOp:translate = (0.13999999999999999, 0.105, 0.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
-        over "Box" (
+        over "Collision" (
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {
@@ -305,10 +305,10 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 50
-        double3 xformOp:translate = (-0.10000000000000003, 0.21500000000000002, 0.73)
+        double3 xformOp:translate = (-0.10000000000000003, 0.21500000000000002, 0.735)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
-        over "Box" (
+        over "Collision" (
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {
@@ -323,10 +323,10 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = -20
-        double3 xformOp:translate = (0.08999999999999997, 0.185, 0.73)
+        double3 xformOp:translate = (0.08999999999999997, 0.185, 0.735)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
-        over "Box" (
+        over "Collision" (
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {

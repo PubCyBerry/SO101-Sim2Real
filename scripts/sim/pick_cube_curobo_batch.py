@@ -56,7 +56,7 @@ parser.add_argument("--grasp_dz", type=float, default=0.0)
 parser.add_argument("--side_offset", type=float, default=0.035)
 parser.add_argument("--active_objects", type=int, default=4)
 parser.add_argument("--mix_sizes", action="store_true",
-                    help="크기 DR: env별 1큐브 무작위 배정(Cube1/2=30mm·Cube3/4=40mm, 4중 균등→크기 ~50/50)."
+                    help="크기 DR: env별 1큐브 무작위 배정(Cube1/2=40mm·Cube3/4=50mm, 4중 균등→크기 ~50/50)."
                          " 나머지는 z=-1 park(카메라 밖). active_objects 무시(1-per-env).")
 parser.add_argument("--cube_clear", type=float, default=0.022)
 parser.add_argument("--bowl_clear", type=float, default=0.055)
@@ -257,9 +257,12 @@ def main() -> int:
     rec_capture = [False]
     rec_freeze = [False] * N           # per-env 터미널(all-placed/진행불가) → 이후 idle frame 미기록(tail trim)
     successes_rec = [0]
-    # env action term offset(=init_state.joint_pos). slew-limited processed_actions 는 post-offset →
-    # raw-equiv 환원 위해 빼준다(arm 0·gripper 0.20). 기록 규약(pre-offset)·deploy 정합 보존.
-    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, GRIPPER_ACTION_OFFSET], np.float32)
+    # 기록 규약 = **절대 joint target**(post-offset, real 하드웨어가 그대로 먹는 단위). slew-limited
+    # processed_actions 가 이미 post-offset(env term 이 +0.20 적용한 실제 target)이라 그대로 기록한다.
+    # (옛 규약은 −0.20 으로 pre-offset 기록 → sim ROS 노드만 +0.20 복원하고 real 은 안 해 그리퍼가
+    #  6.35/[0,100] 덜 열리는 sim↔real 발산. Option A: 기록을 절대값으로 → 양쪽 동일 소비, 발산 0.)
+    # 제어 입력 경로(act() 의 grip − GRIPPER_ACTION_OFFSET)는 env term 정합 위해 그대로 둔다.
+    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
 
     def _resolve_arm_term():
         """단일 'arm' action term(6축 전부 커버) 핸들. IsaacLab 버전별 접근 차이 흡수."""

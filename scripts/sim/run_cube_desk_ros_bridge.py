@@ -58,7 +58,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="cube_desk Isaac Sim ROS 2 bridge")
 parser.add_argument("--num_cubes", type=int, default=4, choices=[1, 2, 3, 4])
 parser.add_argument("--cube_name", default="",
-                    help="단일 활성 큐브 직접 지정(크기별 eval: Cube1/2=30mm·Cube3/4=40mm). "
+                    help="단일 활성 큐브 직접 지정(크기별 eval: Cube1/2=40mm·Cube3/4=50mm). "
                          "빈값=CUBE_NAMES[:num_cubes]. 비활성 큐브는 z=-1 park(카메라 밖).")
 parser.add_argument("--dr", action="store_true", help="큐브 위치를 scatter 범위로 무작위화")
 parser.add_argument("--seed", type=int, default=0)

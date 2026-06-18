@@ -188,8 +188,16 @@ def _read_joint_state(raw_env) -> np.ndarray:
     return _to_lerobot_units(robot.data.joint_pos[0].detach().cpu().numpy())
 
 
+# 그리퍼 action term offset(=PickCubeEnvCfg init_state.joint_pos["gripper"]). RL 정책 출력은
+# raw(pre-offset)이고 env term 이 +offset 해 실제 target 을 만든다. 기록은 **절대 target**(real
+# 하드웨어 native)으로 한다(Option A): raw 에 offset 을 더해 절대값으로 변환 후 기록 → sim·real
+# 추론 양쪽이 동일 절대 단위 소비, gripper offset 발산 0. (arm 은 offset 0 이라 무영향.)
+_GRIPPER_ACTION_OFFSET = 0.20
+
+
 def _action_to_record(action_tensor: torch.Tensor) -> np.ndarray:
-    action = action_tensor[0].detach().cpu().numpy()
+    action = action_tensor[0].detach().cpu().numpy().copy()
+    action[5] = action[5] + _GRIPPER_ACTION_OFFSET  # raw(pre-offset) → 절대 joint target
     return _to_lerobot_units(action)
 
 

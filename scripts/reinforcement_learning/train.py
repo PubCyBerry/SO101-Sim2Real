@@ -76,16 +76,18 @@ parser.add_argument("--container_radius_scale", "--cup_radius_scale", dest="cont
                     help="그릇/컵 안 판정 반경 배율. --cup_radius_scale은 호환 alias.")
 parser.add_argument("--episode_length_s", type=float, default=None,
                     help="에피소드 길이(초) override (기본값: env 설정값 30.0)")
-parser.add_argument("--skill", default="full", choices=["full", "acquire", "place", "full_bc"],
+parser.add_argument("--skill", default="full", choices=["full", "acquire", "place", "full_bc", "ref"],
                     help="skill chaining 프리셋(PickCube): acquire(=skill1, '그릇 위 grasp' "
                          "도달 즉시 종료·grasp 점화 dense) / place(=skill2, lower+open·단기 "
                          "horizon 5s·grasp_close 제거) / full(기존 전체 task) / full_bc(BC "
-                         "warmstart 의 단일 end-to-end finetune·camp-free·require_open). full_bc 는 "
+                         "warmstart 의 단일 end-to-end finetune·camp-free·require_open) / "
+                         "ref(레퍼런스 ref_repos/pick_and_place 정합: reaching 1·lifting 30·tracking 16·"
+                         "lowering 7 dense + success 종료 없음·5s). full_bc 는 "
                          "--resume_checkpoint <bc> --demo_reset_prob <r> --demo_dataset_dir <SM demos> 와 쓴다.")
 parser.add_argument("--grasp_bootstrap_prob", type=float, default=0.0,
                     help="초기상태 grasp 부트스트랩 비율(0~1). reset 시 이 비율의 env 를 큐브-인-그리퍼로 시작.")
 parser.add_argument("--grasp_bootstrap_close", type=float, default=-0.15,
-                    help="부트스트랩 시 gripper 닫힘 각(rad). -0.15 가 30mm 큐브 held 0.94.")
+                    help="부트스트랩 시 gripper 닫힘 각(rad). -0.15 는 30mm 기준값. 큐브 40/50mm 확대 후 재검증 필요(큰 큐브는 덜 닫힘).")
 parser.add_argument("--grasp_bootstrap_prob_final", type=float, default=0.0,
                     help="부트스트랩 prob 를 이 값으로 선형 감쇠(annealing). 정상-env grasp 학습 압력↑.")
 parser.add_argument("--grasp_bootstrap_anneal_iters", type=int, default=0,
@@ -153,6 +155,11 @@ parser.add_argument("--rnn_num_layers", type=int, default=1,
                     help="RNN 층 수 (--recurrent 일 때만)")
 parser.add_argument("--obs_normalization", action="store_true", default=False,
                     help="actor/critic 관측 정규화(empirical running stats) 사용. 43-dim rl_state 권장.")
+parser.add_argument("--policy_hidden_dims", type=int, nargs="+", default=[256, 128],
+                    help="feedforward ActorCritic MLP hidden dims(actor/critic 공통). "
+                         "레퍼런스(Lift-Cube-Place) 정합 시 128 64 32. --recurrent 면 RNN 뒤 MLP head.")
+parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                    help="PPO gradient clipping max norm. 레퍼런스 place 러너는 0.4.")
 parser.add_argument("--schedule", default="fixed", choices=["fixed", "adaptive"],
                     help="PPO learning rate schedule")
 # --device / --headless 는 AppLauncher 가 등록
@@ -184,6 +191,7 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     apply_skill_acquire,
     apply_skill_full_bc,
     apply_skill_place,
+    apply_skill_ref,
 )
 from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import apply_curriculum as apply_pen_curriculum  # noqa: E402
 
@@ -215,9 +223,9 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
     policy_cfg = {
         "class_name": "ActorCritic",
         "init_noise_std": args.init_noise_std,
-        # MLP/LSTM 공통 [256,128] — near-MDP 87dim obs 에 충분 용량(MLP 도 LSTM 과 동등 비교).
-        "actor_hidden_dims": [256, 128],
-        "critic_hidden_dims": [256, 128],
+        # MLP hidden dims (--policy_hidden_dims, 기본 [256,128]). 레퍼런스 정합 시 [128,64,32].
+        "actor_hidden_dims": list(args.policy_hidden_dims),
+        "critic_hidden_dims": list(args.policy_hidden_dims),
         "activation": "elu",
         "actor_obs_normalization": args.obs_normalization,
         "critic_obs_normalization": args.obs_normalization,
@@ -240,7 +248,7 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "lam": args.lam,
         "entropy_coef": args.entropy_coef,
         "desired_kl": 0.01,
-        "max_grad_norm": 1.0,
+        "max_grad_norm": args.max_grad_norm,
         "value_loss_coef": 1.0,
         "use_clipped_value_loss": True,
         "clip_param": 0.2,
@@ -345,6 +353,8 @@ def main() -> None:
                 apply_skill_place(env_cfg)
             elif args.skill == "full_bc":
                 apply_skill_full_bc(env_cfg)
+            elif args.skill == "ref":
+                apply_skill_ref(env_cfg)
         # --episode_length_s 는 skill 프리셋(place=5s)보다 우선(명시 CLI override)
         if args.episode_length_s is not None:
             env_cfg.episode_length_s = args.episode_length_s

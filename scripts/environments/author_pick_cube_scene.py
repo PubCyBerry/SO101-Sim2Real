@@ -16,7 +16,7 @@ isaacsim 을 headless 부팅한 뒤에만 import 된다. 따라서 ``main()`` �
   assets/scenes/cube_desk/
   ├── scene.usd + .usda                 # 책상/조명 + 객체 5개 payload 참조
   └── objects/
-      ├── Cube1..4/Cube{N}.usd + .usda  # 시각 bevel mesh + invisible 충돌 Box
+      ├── Cube1..4/Cube{N}.usd + .usda  # 시각 라운드 mesh + invisible SDF 충돌 mesh
       └── Bowl/Bowl.usd + .usda         # 시각 회전체 Mesh + watertight SDF 충돌 Mesh
 
 좌표는 SO-101 follower init_state 와 맞춘 SCENE_OFFSET 으로 시프트한다.
@@ -53,37 +53,45 @@ MATERIALS = {
 
 # 큐브 4개 scene-local 배치 (이름, translate, yaw°). 매트 앞쪽에 흩뿌림.
 # z = 매트 윗면(scene-local 0.004) + 큐브 반높이 + slack(0.001).
-#   30mm: 0.004 + 0.015 + 0.001 = 0.020,  40mm: 0.004 + 0.020 + 0.001 = 0.025
+#   40mm: 0.004 + 0.020 + 0.001 = 0.025,  50mm: 0.004 + 0.025 + 0.001 = 0.030
 CUBES = (
-    ("Cube1", (-0.50, 0.08, 0.020), 20.0),   # 작은 큐브 30mm
-    ("Cube2", (-0.22, 0.06, 0.020), -35.0),  # 작은 큐브 30mm
-    ("Cube3", (-0.46, 0.17, 0.025), 50.0),   # 큰  큐브 40mm
-    ("Cube4", (-0.27, 0.14, 0.025), -20.0),  # 큰  큐브 40mm
+    ("Cube1", (-0.50, 0.08, 0.025), 20.0),   # 작은 큐브 40mm
+    ("Cube2", (-0.22, 0.06, 0.025), -35.0),  # 작은 큐브 40mm
+    ("Cube3", (-0.46, 0.17, 0.030), 50.0),   # 큰  큐브 50mm
+    ("Cube4", (-0.27, 0.14, 0.030), -20.0),  # 큰  큐브 50mm
 )
 
 # 그릇 scene-local (바닥 중심).
 BOWL_LOCAL: tuple[float, float, float] = (-0.58, 0.26, 0.010)
 
 CUBE_SCALES: dict[str, tuple[float, float, float]] = {
-    "Cube1": (0.03, 0.03, 0.03),
-    "Cube2": (0.03, 0.03, 0.03),
-    "Cube3": (0.04, 0.04, 0.04),
-    "Cube4": (0.04, 0.04, 0.04),
+    "Cube1": (0.04, 0.04, 0.04),
+    "Cube2": (0.04, 0.04, 0.04),
+    "Cube3": (0.05, 0.05, 0.05),
+    "Cube4": (0.05, 0.05, 0.05),
 }
 
 # ── 물리 상수 (docs/GRASP_PHYSICS.md 근거 — 임의 변경 금지) ──────────────────
 # 큐브 질량 — 크기별 차등. 의자다리 커버 폼은 속이 약간 비어 부피 완전비례보다
-#   가볍게, 쉘(표면적 ∝ 변²)비례로 잡는다. 30mm(Cube1/2): 20 g, 40mm(Cube3/4): 35 g.
+#   가볍게, 쉘(표면적 ∝ 변²)비례로 잡는다. 40mm(Cube1/2): 35 g, 50mm(Cube3/4): 55 g
+#   (35×(50/40)²≈54.7 → 55g).
 CUBE_MASSES: dict[str, float] = {
-    "Cube1": 0.020, "Cube2": 0.020,
-    "Cube3": 0.035, "Cube4": 0.035,
+    "Cube1": 0.035, "Cube2": 0.035,
+    "Cube3": 0.055, "Cube4": 0.055,
 }
 CONTACT_OFFSET_DEFAULT = 0.004      # 정적·두꺼운 면(책상/매트/그릇)
 CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용
 # 큐브 시각 형태 — 실물은 회색 펠트로 감싼 쿠션형(코너 반경 큼). 라운드 박스로 author.
 #   collision 은 별도 invisible Box(정육면체) 그대로라 grasp 물리·좌표 불변(시각 전용).
-CUBE_ROUND_RADIUS_FRAC: float = 0.22  # 변 대비 코너 반경 비율(0.030→6.6mm, 0.040→8.8mm)
+CUBE_ROUND_RADIUS_FRAC: float = 0.22  # 변 대비 코너 반경 비율(0.040→8.8mm, 0.050→11mm)
 CUBE_ROUND_SEGS: int = 10             # 면당 격자 분할(라운딩 매끈도)
+# 큐브 충돌 = SDF Mesh(signed distance field). 기존 analytic Box → 시각(라운드 펠트)과
+#   동일 형상의 invisible mesh 에 SDF 부여. SDF 는 동적 rigid body 에서 오목/라운드 형상을
+#   정확히 표현하는 유일한 근사(triangle/meshSimplification 은 동적서 convexHull 로 fallback).
+#   collision=visual 정합 → sim2real grasp 표면 현실화. ⚠ grasp 면이 라운드로 바뀌므로
+#   grasp 물리 재검증 필요(기존 sharp box 대비 코너 접촉 변화).
+CUBE_COLLISION_SEGS: int = 6          # 충돌 mesh 면당 분할(SDF source — 시각보다 거칠어도 무방)
+CUBE_SDF_RESOLUTION: int = 256        # SDF 격자 해상도(긴 축 기준). 256=비용/정밀 균형. 큐브는 작아 충분
 CUBE_FELT_ROUGHNESS: float = 0.95     # 펠트 천 — 거의 완전 확산
 # 흰 시접 무늬는 geometry 가 아니라 albedo 텍스처에 그린다(평면 무늬). UV 는 큐브
 # 전개도(net): 앞(+X)·윗(+Z)·뒤(-X)·밑(-Z) 4면을 세로(v)로 연속 적층(밴드 컬럼 u<0.5),
@@ -364,6 +372,24 @@ def _apply_collision(
     physx.CreateMinTorsionalPatchRadiusAttr().Set(0.001)
 
 
+def _apply_sdf_mesh_collision(
+    prim: "Usd.Prim",
+    *,
+    resolution: int,
+    contact_offset: float = CONTACT_OFFSET_DEFAULT,
+    rest_offset: float = 0.0,
+) -> None:
+    """Mesh prim 에 SDF(signed distance field) 충돌 부여 — 동적 rigid body 오목/라운드 정확.
+
+    UsdPhysics.MeshCollisionAPI.approximation="sdf" + PhysxSDFMeshCollisionAPI(sdfResolution).
+    convexHull/Decomposition 과 달리 source mesh 표면을 그대로 따라가 collision=visual 정합.
+    """
+    _apply_collision(prim, contact_tuning=True, contact_offset=contact_offset, rest_offset=rest_offset)
+    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set("sdf")
+    sdf = PhysxSchema.PhysxSDFMeshCollisionAPI.Apply(prim)
+    sdf.CreateSdfResolutionAttr().Set(int(resolution))
+
+
 def _set_mesh(
     mesh: "UsdGeom.Mesh",
     points: list[tuple[float, float, float]],
@@ -579,7 +605,7 @@ def _bowl_collision_geometry(
 # ---------------------------------------------------------------------------
 
 def author_cube(name: str) -> "Usd.Stage":
-    """큐브 1개 stage author — 시각 bevel mesh + invisible 충돌 Box."""
+    """큐브 1개 stage author — 시각 라운드 mesh + invisible SDF 충돌 mesh."""
     stage = _new_stage(name, OBJECTS_DIR / name / f"{name}.usda")
     root_prim = stage.GetPrimAtPath(f"/{name}")
 
@@ -623,13 +649,16 @@ def author_cube(name: str) -> "Usd.Stage":
     _bind_visual(visual.GetPrim(), felt)
     # 흰 시접 무늬는 GrayFelt albedo(전개도 net UV)에 그려져 있어 별도 mesh 불필요.
 
-    # 충돌 전용 Box: invisible 해석적 Cube(size=1) + scale. 완전 평면 grasp 면.
-    box = UsdGeom.Cube.Define(stage, f"/{name}/Box")
-    box.CreateSizeAttr(1.0)
-    box.CreateExtentAttr([Gf.Vec3f(-0.5, -0.5, -0.5), Gf.Vec3f(0.5, 0.5, 0.5)])
-    box.MakeInvisible()
-    _set_xform(box, scale=CUBE_SCALES[name])
-    _apply_collision(box.GetPrim(), contact_tuning=True, contact_offset=CUBE_CONTACT_OFFSET)
+    # 충돌 전용 SDF Mesh: 시각(라운드 펠트)과 동일 형상의 invisible mesh + SDF 근사.
+    #   기존 analytic Box(sharp) → SDF rounded mesh 로 교체: collision=visual 정합(sim2real).
+    #   source mesh 는 시각보다 거친 분할(CUBE_COLLISION_SEGS)이면 충분(SDF 가 해상도 담당).
+    col_pts, col_faces, _cuv, _cn = _rounded_box_geometry(sx, sy, sz, radius, CUBE_COLLISION_SEGS)
+    col = UsdGeom.Mesh.Define(stage, f"/{name}/Collision")
+    _set_mesh(col, col_pts, col_faces, double_sided=False)
+    col.MakeInvisible()
+    _apply_sdf_mesh_collision(
+        col.GetPrim(), resolution=CUBE_SDF_RESOLUTION, contact_offset=CUBE_CONTACT_OFFSET
+    )
     # friction 머티리얼 바인딩은 scene.usd 가 공유 /Scene/Looks/CubeFriction 으로 over-bind.
 
     return stage
@@ -852,8 +881,8 @@ def author_scene() -> "Usd.Stage":
             stage, name, f"./objects/{name}/{name}.usd",
             translate=_shift(pos), rotate_z=yaw,
         )
-        # 공유 CubeFriction 을 큐브 collider(payload 의 /Box)에 over-bind.
-        box_over = stage.OverridePrim(f"/Scene/{name}/Box")
+        # 공유 CubeFriction 을 큐브 collider(payload 의 /Collision)에 over-bind.
+        box_over = stage.OverridePrim(f"/Scene/{name}/Collision")
         _bind_physics(box_over, shared_cube_friction)
 
     return stage

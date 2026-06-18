@@ -203,3 +203,29 @@ contactOffset·충돌 형상 보강을 별도 검토한다.
   rest pose·궤적에서 self-collision 막힘이 없는지 GUI 확인.
 - solver iteration 8/1 → 4/4 변경은 leisaac 정합이지만, 다객체 PPO(2048+ env)
   에서 안정성은 별도 smoke 로 확인.
+
+## 8. 충돌 근사 = SDF Mesh (grasp 표면 sim2real, 2026-06-18)
+
+**관찰**: sim 메쉬 시각화에서 그리퍼·큐브가 실제보다 크게 잡힘. 원인 = grasp 관여 mesh 의
+충돌 근사가 **convexDecomposition/convexHull** 이라 손가락 사이 오목면을 메워 collision 부피가
+visual 보다 부풀려짐 → 가짜 grip(실제 얇은 jaw 보다 큰 영역으로 잡음).
+
+**PhysX 사실(결정적)**: 동적 rigid body 에서 **triangle mesh·meshSimplification 은 지원 안 됨 →
+convexHull 로 fallback**. 동적 body 에서 오목/실제 형상을 정확히 표현하는 유일한 근사 = **SDF
+(signed distance field)**. 즉 grasp 표면 충실 옵션은 SDF 하나뿐(나머지는 부풀림).
+
+| 요소 | 충돌 근사 | author |
+|---|---|---|
+| 큐브 collider | **SDF**(라운드 mesh, res 256) — 옛 analytic Box 대체, visual 정합 | `author_pick_cube_scene.py` `_apply_sdf_mesh_collision` |
+| jaw/gripper collider | convexDecomposition → **SDF**(res 256) | `scripts/assets/set_gripper_jaw_sdf_collision.py`(usd-core raw 스키마, `.preSDF.bak`) |
+| 팔 링크(base~wrist) | convexDecomposition 유지 | (grasp 무관·저비용) |
+| 그릇 collider | convexDecomposition 유지 | num_envs>1 SDF cooking crash 회피(§기존) |
+
+- **비용**: SDF cooking + `sdfResolution`(메모리 ∝ res³). 256=비용/정밀 균형. 로봇 mesh 는 env 간
+  공유/인스턴싱이라 1회 cooking(Factory/Forge 가 수천 env SDF 기어 사용 선례). ⚠ 4096-env SDF
+  안정성은 smoke 검증 권장(그릇 SDF 는 과거 multi-env crash).
+- **큐브 크기**: Cube1/2 30→**40mm**, Cube3/4 40→**50mm**(질량 35/55g). `_CUBE_INIT_STATES` z·
+  `_CUBE_VOLUME_INSET`·SM `CUBE_SIZES`/`gripper_open`(40/50 앵커) 동기 갱신.
+- ⚠ **재검증**: 큐브 collider sharp box→라운드 SDF + 크기 확대로 grasp 접촉면 변화 → SM/RL grasp
+  성공률 재측정 필요. 진단 = `scripts/assets/viz_collision_overlay.py`(visual vs SDF source vs convexHull
+  오버레이, `outputs/collision_overlay/`).

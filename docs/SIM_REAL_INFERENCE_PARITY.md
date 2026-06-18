@@ -72,7 +72,7 @@ flowchart LR
 | # | 단계 | 입력 | 연산 | 출력 | 파일:line |
 |---|---|---|---|---|---|
 | 1 | 수신·역변환 | action chunk (deg, [0,100]) | `from_lerobot_units` | rad | `:304,306` |
-| 2 | **그리퍼 오프셋** | `raw_rad[gripper]` | **`+= GRIPPER_CMD_OFFSET (0.20)`** | rad | `:307-308` |
+| 2 | **그리퍼 오프셋** | `raw_rad[gripper]` | **`+= GRIPPER_CMD_OFFSET (0, Option A 절대 데이터)`** | rad | `:307-308` |
 | 3 | clamp | rad | `clamp_joint_rad` (arm ±π, gripper [-0.175,1.745]) | rad | `:309` |
 | 4 | publish | rad | JointState | `/isaac_joint_commands`, 30 Hz | `:310-315` |
 | 5 | chunk blending | timestep queue | weighted_average, refill `ceil(apc×0.5)` | — | `:240,289-300` |
@@ -130,7 +130,7 @@ flowchart LR
 
 | # | 인자 | SIM | REAL | 결과 | 심각도 |
 |---|---|---|---|---|---|
-| **1** | **GRIPPER_CMD_OFFSET** | `+0.20 rad` 재적용 | `0` (미적용) | **§5.1 참조 — sim 학습 모델엔 함정** | 🔴 |
+| **1** | **GRIPPER_CMD_OFFSET** | `0` (절대 데이터) | `0` | **§5.1 — Option A(절대 기록)로 해소·발산 0** | 🟢 |
 | **2** | `single_arm` **RELATIVE** action | 관측 state 정확 → delta 정확 | 센서 오차·지연 → delta 기준점 흔들림 → **누적 drift** | 같은 모델이 real 에서 더 부정확 | 🟠 |
 | **3** | **min-max 정규화 범위**(sim stats) | 학습 분포 안 | real joint/gripper 가 sim min/max 벗어나면 `clip` → 입력 왜곡 | 정규화 mismatch | 🟠 |
 | **4** | **카메라 intrinsic/FOV** | focal **18mm** + DR 16–20mm, 렌더 정합 | 실측 미상(렌즈·왜곡·색감 다름) | 시각 도메인 갭 (BC 시각 입력 분포 shift) | 🟠 |
@@ -139,23 +139,38 @@ flowchart LR
 | **7** | **카메라 키(RENAME_MAP)** | GR00T=bare(정합), SmolVLA=camera1/2/3 | 동일 규칙 | GR00T 는 sim=real 동일, 분기 아님 | 🟢(GR00T) |
 | **8** | 단위(rad↔deg)·joint 순서·해상도·RGB | 변환 자동 일치 | 동일 | 분기 아님(검증됨) | 🟢 |
 
-### 5.1 🔴 GRIPPER_CMD_OFFSET — sim 학습 모델 real 배포 함정
+### 5.1 ✅ GRIPPER_CMD_OFFSET — Option A(절대 기록 규약)로 해소 (2026-06-18)
 
-오프셋의 출처는 **하드웨어가 아니라 sim 데이터 규약**이다:
+오프셋의 출처는 **하드웨어가 아니라 sim 데이터 규약**이었다(옛 규약):
 
 ```
 Isaac PickCube env: gripper action term use_default_offset=True, init=0.20 rad
   → 실제 관절 target = action×1.0 + 0.20
-recorder 기록 action = grip_target − 0.20   (pre-offset)
-  → 모델은 "(grip_target − 0.20)" 분포를 학습
+[옛] recorder 기록 action = grip_target − 0.20   (pre-offset)  ← sim 전용 프레임
+  → 모델이 (grip_target − 0.20) 학습 → sim 노드만 +0.20 복원, real 미복원
+  → real 그리퍼가 0.20 rad(=[0,100]에서 6.35·≈11.5°) 덜 열림 = sim↔real 발산
 ```
 
-| 배포 | 필요한 처리 | 현재 코드 | 결과 |
-|---|---|---|---|
-| **SIM** (bridge 직결, env action term 우회) | `+0.20` 재적용해 true target 복원 | `vla_policy_node` 가 `+0.20` ✓ | 정상 |
-| **REAL** (sim 학습 모델 배포) | 모델 출력이 sim 규약(pre-offset)이므로 **동일하게 보정 필요** | robot_client `0` ✗ | **그리퍼가 ~0.20 rad(≈[0,100]에서 6.35·≈11.5°) 덜 열림 → grasp 실패 위험** |
+**Option A 적용**: recorder 가 그리퍼를 **절대 joint target**(post-offset, real 하드웨어 native)으로
+기록하도록 변경. 데이터가 offset-free → sim·real 추론 양쪽이 동일 단위 소비 → **발산 0(구조적 제거)**.
 
-> `env/*.env` 주석의 "실기기=0" 은 **실기기 데이터로 학습한(절대각) 모델** 전제다. **이번처럼 sim cuRobo 데이터로 학습한 GR00T 를 real 에 올리면 0 이 아니라 보정이 필요**할 수 있다(real gripper "0" 캘리브 정의와 대조 검증 필요). **현재 real 배포 미진행이라 잠재 함정으로 기록.**
+```
+[신] recorder 기록 action = grip_target   (절대, post-offset)
+  · curobo demo/batch: ACTION_OFFSET_NP gripper 0.20→0 (processed_actions 그대로)
+  · rollout_to_lerobot: raw 정책출력 + 0.20 (절대 환원)
+  · 제어 입력 경로(act() 의 grip − 0.20)는 env term 정합 위해 불변
+sim 추론(vla_policy_node): GRIPPER_CMD_OFFSET = 0  (env/*.env)
+real 추론(robot_client):   0  (변경 없음)
+```
+
+| 배포 | 처리 | 결과 |
+|---|---|---|
+| **SIM** (bridge 직결) | `+0` (절대 데이터라 재적용 불요) | 정상 |
+| **REAL** (sim 학습 모델 배포) | `+0` (데이터가 이미 real native) | **정상 — 발산 0** |
+
+> ⚠ **절대 규약으로 재생성·재학습한 모델 전용.** 옛 pre-offset 데이터로 학습한 구 모델을 sim 추론하면
+> 여전히 `GRIPPER_CMD_OFFSET=0.2` 필요(구 모델은 큐브 크기/SDF 변경으로 폐기·재학습 예정).
+> 남은 그리퍼 sim2real 항목 = **scale/0점 캘리브**(`GRIPPER_LEROBOT_SCALE=31.75` vs real [0,100]→물리 개도, §6 Option D).
 
 ---
 
@@ -163,7 +178,8 @@ recorder 기록 action = grip_target − 0.20   (pre-offset)
 
 | 항목 | 내용 | 조치 |
 |---|---|---|
-| 🔴 gripper offset 의미 | sim 학습 모델 → real 시 offset=0 가정이 깨질 수 있음(§5.1) | real 배포 전 gripper 캘리브 0점 vs sim pre-offset 대조 |
+| 🟢 gripper offset | **해소(Option A, 2026-06-18)**: recorder 절대 기록 → sim·real 둘 다 offset 0, 발산 0(§5.1) | 절대 규약 재생성·재학습 후 적용. 구 모델은 0.2 유지 |
+| 🟠 gripper scale/0점 (Option D) | `GRIPPER_LEROBOT_SCALE=31.75` 는 sim 가정값 — real [0,100]→물리 개도 미측정 | real bring-up 시 개도(mm) 측정해 scale·0점 정합 |
 | 🟠 RELATIVE single_arm | 기존 문서 "절대 action" 표기와 내부 RELATIVE 표현의 괴리(반환은 절대 맞음) | 본 문서로 정정. real 에서 state 추정 정확도·지연 관리 필요 |
 | 🟠 min-max 범위 sim 전용 | real proprioception 이 sim min/max 벗어나면 clip 왜곡 | real 데이터로 stats 재산출 또는 범위 확인 |
 | 🟠 카메라 intrinsic 미측정 | sim focal 18mm/DR 16–20 vs real 미상 | real 카메라 intrinsic 측정 후 정합(또는 시각 DR↑·real fine-tune) |
@@ -175,7 +191,7 @@ recorder 기록 action = grip_target − 0.20   (pre-offset)
 ## 7. Sim → Real 배포 체크리스트
 
 ```
-□ GRIPPER_CMD_OFFSET — sim 학습 모델이면 real 에도 보정 필요성 검증(§5.1). 기본 "0" 맹신 금지
+□ GRIPPER_CMD_OFFSET=0 (Option A 절대 기록 데이터 전용). 구 pre-offset 모델이면 sim 0.2 유지(§5.1)
 □ RENAME_MAP — GR00T=빈값(bare top/wrist/front), SmolVLA=camera1/2/3
 □ ACTIONS_PER_CHUNK — GR00T 16 / SmolVLA 24, 서버·클라 일치
 □ 카메라 해상도 640×480, 순서 top/wrist/front = 학습 순서
@@ -191,5 +207,5 @@ recorder 기록 action = grip_target − 0.20   (pre-offset)
 ## 8. 결론
 
 - **단위·순서·해상도·RGB·정규화 stats** 는 sim/real **자동 일치**(변환 함수·baked stats 공유). 여기서 분기 없음.
-- **분기는 클라이언트 양 끝 + 도메인 갭**에서 발생: ① 🔴 그리퍼 오프셋(sim 데이터 규약), ② 🟠 RELATIVE action 의 state 의존성, ③ 🟠 sim-stats min-max clip, ④ 🟠 카메라 intrinsic 갭, ⑤🟡 지연·동역학.
-- **현재(sim eval) 관점**: sim 은 state 정확·offset 정상·물리 parity 라 위 인자 대부분 무해. **real 전이 시점에 #1·#4 가 1순위 리스크**.
+- **분기는 클라이언트 양 끝 + 도메인 갭**에서 발생: ① 🟢 그리퍼 오프셋 — **Option A(절대 기록)로 해소(2026-06-18)**, ② 🟠 RELATIVE action 의 state 의존성, ③ 🟠 sim-stats min-max clip, ④ 🟠 카메라 intrinsic 갭, ⑤🟡 지연·동역학, ⑥ 🟠 그리퍼 scale/0점 캘리브(Option D, real bring-up).
+- **현재(sim eval) 관점**: sim 은 state 정확·offset 0·물리 parity 라 위 인자 대부분 무해. **real 전이 시점에 #4(카메라)·#6(그리퍼 scale) 가 1순위 리스크**(offset 은 해소됨).

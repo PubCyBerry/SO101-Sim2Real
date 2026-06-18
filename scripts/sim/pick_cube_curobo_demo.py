@@ -326,9 +326,11 @@ def main() -> int:
     CONTROL_DT = 1.0 / 30.0  # decimation 4 × sim.dt(1/120)
     nstep = [0]
 
-    # env action term offset(=init_state.joint_pos, arm 0·gripper 0.20). slew-limited processed_actions
-    # 는 post-offset → raw-equiv 환원(−offset). 기록 규약(pre-offset)·deploy 정합 보존.
-    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, GRIPPER_ACTION_OFFSET], np.float32)
+    # 기록 규약 = **절대 joint target**(post-offset, real 하드웨어 native). processed_actions 가
+    # 이미 post-offset(env term +0.20 적용 실제 target)이라 그대로 기록(−offset 안 함). Option A:
+    # 옛 pre-offset 기록은 sim 노드만 +0.20 복원·real 미복원 → 그리퍼 6.35/[0,100] 발산. 절대 기록으로 해소.
+    # 제어 입력(act() 의 grip_target − GRIPPER_ACTION_OFFSET)은 env term 정합 위해 불변.
+    ACTION_OFFSET_NP = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
 
     def _resolve_arm_term():
         """단일 'arm' action term 핸들. IsaacLab 버전별 접근 차이 흡수."""
