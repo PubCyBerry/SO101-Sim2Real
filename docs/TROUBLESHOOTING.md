@@ -4081,3 +4081,85 @@ viser 전용이라 sim 스크립트(teleop/env)의 isaac livestream 이 ws12 API
 uv run --no-sync --group isaac python -c "import viser; print(viser.__version__)"  # 1.0.30
 uv run --no-sync --group isaac python -c "import websockets.asyncio; print('ok')"   # ok (≥13)
 ```
+
+## `-e POLICY_PROFILE=X` 가 무시되고 엉뚱한 모델 프로필이 로드됨 (docker compose 보간)
+
+### 현상
+`docker compose run -e POLICY_PROFILE=act ... policy-server train` 했는데 ACT 가 아니라 SmolVLA 로 학습/추론됨(`--policy.path=lerobot/smolvla_base`, camera rename map 적용). 4cube 1024 학습 중 ACT 가 smolvla 로 오학습된 사고.
+
+### 원인
+compose 의 `env_file: ../env/${POLICY_PROFILE:-groot_n17}.env` 보간은 **parse-time** 에 `.env`(혹은 셸 환경)의 `POLICY_PROFILE` 로 치환된다. `.env` 에 `POLICY_PROFILE=smolvla` 가 있으면 `-e POLICY_PROFILE=act`(컨테이너 런타임 var)는 보간에 영향을 못 줘 전 서비스가 `env/smolvla.env` 를 로드한다. docker-compose.yaml 주석(서비스 env_file 위)도 "셸 환경 동명 변수가 보간에 쓰인다" 라고 명시.
+
+### 해결 방법
+`POLICY_PROFILE` 을 **셸 환경 변수 프리픽스**로 준다 (셸 env 가 `.env` 보다 보간 우선):
+```bash
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e POLICY_PROFILE=act  policy-server train --policy.push_to_hub=true
+```
+`-e POLICY_PROFILE` 도 함께 주는 이유는 컨테이너 런타임 코드(예: `vla_policy_node`)가 `os.getenv("POLICY_PROFILE")` 로 다시 읽기 때문(아래 항목).
+
+### 확인 방법
+`POLICY_PROFILE=act docker compose ... run --rm --entrypoint bash policy-server -c 'echo $TRAIN_POLICY_TYPE $POLICY_BASE_MODEL_PATH'` → `act` / 빈값(SmolVLA 면 `lerobot/smolvla_base`).
+
+## vla_policy_node 가 `-e POLICY_REPO_ID`/`-e POLICY_PROFILE` 을 덮어쓰고 옛 모델로 추론
+
+### 현상
+eval/데모에서 `-e POLICY_REPO_ID=<신규 체크포인트>` 를 줘도 vla 노드 로그가 `[vla] sent instructions (type=smolvla, model=...so101_smolvla_sim_pick_cube_smooth...)` 처럼 **옛 프로필 모델**을 보냄.
+
+### 오류 메시지
+```
+[vla_policy_node-1] [vla] sent instructions (type=smolvla, model=/workspace/outputs/train/so101_smolvla_sim_pick_cube_smooth/checkpoints/last/pretrained_model, ...)
+```
+
+### 원인
+`vla_policy_node._load_env` 가 `load_dotenv(.env)` 후 `profile=os.getenv("POLICY_PROFILE")` 로 프로필을 정하고 `load_dotenv(env/<profile>.env, override=True)` 로 **파일 값이 os.environ(=`-e` 주입값) 을 덮는다**. `.env` 의 `POLICY_PROFILE` 이 smolvla 면 smolvla.env 가 다시 적용돼 `POLICY_REPO_ID`·`POLICY_TYPE` 가 원복된다(override=True 라 `-e` 패배).
+
+### 해결 방법
+① 컨테이너에 `-e POLICY_PROFILE=<원하는 프로필>` 을 줘 `os.getenv` 가 맞게 잡히게 하고, ② 모델 경로는 **프로필 파일 안에** 둔다(override=True 라 파일이 이김). 커밋된 프로필을 안 건드리려면 **임시 프로필 복사** 패턴:
+```bash
+cp env/act.env env/act_4ceval.env
+sed -i 's#^POLICY_REPO_ID=.*#POLICY_REPO_ID=/workspace/outputs/train/so101_act_sim_pick_cube_4cube_1024/checkpoints/last/pretrained_model#' env/act_4ceval.env
+POLICY_PROFILE=act_4ceval docker compose ... run -d -e POLICY_PROFILE=act_4ceval vla-ros
+```
+GR00T 는 모델이 `GROOT_CHECKPOINT`(gr00t 컨테이너, bash 엔트리포인트라 `-e` 그대로 먹음)이고 vla 노드는 type/chunk 만 필요. `scripts/{run_4cube_1024_eval,demo_vla}.sh` 가 이 패턴 내장.
+
+### 확인 방법
+`docker logs <vla container> | grep "sent instructions"` → `type=` 와 `model=` 가 의도한 모델인지. (bridge eval JSON 의 `model` 필드는 stale 라벨이라 신뢰 금지 — vla 노드 로그가 진실.)
+
+## gen 데이터 생성 완료 후 프로세스가 안 끝남 (Isaac Sim teardown 좀비)
+
+### 현상
+`pick_cube_curobo_batch.py --record_dir ...` 가 목표 에피소드 도달·`🎬 데이터셋 완료` 로그·`meta/info.json`(total_episodes) 기록까지 끝냈는데 python 프로세스가 종료 안 됨(state `Sl`·0% CPU). `uv run` 이 안 돌아와 오케스트레이션 스크립트가 멈춤(GPU idle).
+
+### 원인
+headless Isaac Sim 의 `simulation_app.close()`/teardown 이 finalize 후 행(hang). 데이터는 이미 완전하게 디스크에 기록됨.
+
+### 해결 방법
+데이터셋 완전성 확인(`grep total_episodes meta/info.json`) 후 **numeric PID 직접 kill**. 오케스트레이션은 **Stage1 skip-if-complete 가드**(info.json total_episodes≥목표면 gen 생략)로 재실행 시 push 부터 잇는다(`run_4cube_1024_pipeline.sh`). ⚠ `pkill -f pick_cube_curobo_batch` 광범위 매칭은 다른 동명 프로세스 동반 종료 주의 — PID 우선.
+
+### 확인 방법
+`ps -o stat,%cpu -p <pid>` = `Sl`·0.0 이고 dataset 의 `meta/{info.json,stats.json,tasks.parquet}` 존재 + `du -sh` 안정 → kill 안전.
+
+## 호스트 `huggingface-cli upload` 401 Unauthorized (모델 push 실패)
+
+### 현상
+GR00T 등 native 체크포인트를 호스트에서 `huggingface-cli upload` 로 올릴 때 401. lerobot-train 의 `--policy.push_to_hub`(컨테이너)는 성공하는데 호스트 CLI 만 실패.
+
+### 오류 메시지
+```
+huggingface_hub.errors.HfHubHTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/api/repos/create
+Invalid username or password.
+```
+
+### 원인
+호스트 `huggingface-cli` 는 `.env` 를 자동으로 안 읽는다(컨테이너만 env_file 로 토큰 주입받음). `huggingface-cli login` 캐시도 없으면 미인증.
+
+### 해결 방법
+`.env` 의 `HF_TOKEN` 을 추출해 `--token`(+`HF_TOKEN` env) 으로 명시:
+```bash
+HF_TOKEN_VAL=$(grep '^HF_TOKEN=' .env | cut -d= -f2- | tr -d '"'\'' ')
+HF_TOKEN="$HF_TOKEN_VAL" uv run --no-sync huggingface-cli upload <repo> <local_ckpt> . --repo-type model --token "$HF_TOKEN_VAL"
+```
+
+### 확인 방법
+업로드 로그 끝 `https://huggingface.co/<repo>/tree/main/.` + HF 웹에서 파일 확인.

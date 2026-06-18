@@ -145,6 +145,9 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
 | `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
 | `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼 |
+| `run_4cube_1024_pipeline.sh` | **무중단 학습 파이프라인**(메인 리포 실행) — 4-cube 1024 gen → HF push → ACT/SmolVLA/GR00T-N1.7 **등량 640k samples** 학습(b32×20k / b32×20k / b8×80k) → 모델 push. 직렬·VRAM 게이트·Stage1 skip-if-complete·`POLICY_PROFILE` 셸 프리픽스·hf `--token`. 로그 `outputs/p5_logs/4cube1024_*.log` |
+| `run_4cube_1024_eval.sh` | 3모델 **closed-loop sim eval**(bridge `--eval` + policy-server + vla-ros) 직렬 자동 — 동일 N·num_cubes 공정 비교, per-모델 `outputs/vla_eval_*_4cube_1024.json`. 임시 `env/*_4ceval.env` 프로필(모델 repoint)로 vla node `_load_env` override 회피 |
+| `demo_vla.sh` | **VLA 라이브 데모 런처**(eval 아님, 연속 추론) — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. ACT·SmolVLA(policy-server) / GR00T(zmq+bridge) 자동 배선, 임시 `env/*_demo.env` 생성·정리, livestream(WebRTC :49100) 관전 |
 | `sim/compare_train_vs_rtc.py` · `sim/compare_train_vs_async_groot.py` · `sim/replay_infer_overlay.py` | VLA 추론 진단 — recorded ep 를 학습방식 vs 배포(async/RTC·gRPC bridge) 통과시켜 정책출력 오버레이+입력 timestamp 마커+per-joint MAE. `_rtc`=SmolVLA(RTC), `_groot`=GR00T-N1.7(ZMQ teacher-forced vs gRPC bridge). policy-server 컨테이너서 실행, 서버 기동 필요 |
 
 > **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.

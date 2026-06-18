@@ -13,7 +13,15 @@
 
 ---
 
-## 작업 인계 (2026-06-17 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / 🔵 무중단 실행중)
+## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)
+
+- **✅ 완료(2026-06-18 13:24)**: 데이터 1024ep(504515 frame) + **3모델 전부 학습·HF push 완료**. ACT(b32×20k rc=0)·SmolVLA(b32×20k rc=0)·GR00T-N1.7(b8×80k rc=0, loss 0.13→0.055), 전부 640k samples 등량. HF: `taehunkim/so101_sim_pick_cube_4cube_1024`(데이터) + `so101_{act,smolvla,groot_n17}_sim_pick_cube_4cube_1024`(모델). 로컬 ckpt `outputs/train/...`(GR00T=checkpoint-80000 24GB). closed-loop eval=사용자 직접(범위 밖).
+- **실행 중 처치 4건**(상세 memory [[4cube-1024-equal-compute-pipeline]]): ①gen 1024 finalize 후 Isaac teardown 좀비→kill+Stage1 skip가드 ②`-e POLICY_PROFILE` 보간 안 됨→셸-env 프리픽스(ACT가 smolvla로 오학습된 것 정정·재실행) ③datasets/→/DISK1 심볼릭(NVMe 디스크압) ④호스트 huggingface-cli upload 401→`--token` 주입. 스크립트 `scripts/run_4cube_1024_pipeline.sh`(미커밋) 전부 반영.
+- **✅ closed-loop sim eval(2026-06-18, N=10·4-cube·seed0)**: 셋 다 **all-4 완주 0%**(drift 벽 지속). per-cube GR00T **2.5%**(1개 안착)>ACT/SmolVLA 0%, ever-in-bowl **SmolVLA 20%>GR00T 12.5%>ACT 5%**. 즉 SmolVLA 관여 최고·GR00T 유일 완성. open-loop 정상이나 closed-loop drift 벽 4cube-1024+등량학습으로도 안 깨짐. 결과 `outputs/vla_eval_{act,smolvla,groot_n17}_4cube_1024.json`, 스크립트 `scripts/run_4cube_1024_eval.sh`(미커밋), 임시 프로필 `env/*_4ceval.env`. eval 플러밍 함정(vla node `_load_env` override·JSON model 라벨 stale)=memory. 다음=recovery 궤적·VLA-RFT.
+
+---
+
+## (진행 기록) 작업 인계 (2026-06-17 — 4-cube 1024 파이프라인 시작 시점)
 
 - **목표(사용자)**: 이전 4-cube/1-cube 256 비교의 교란변수 제거. **현재 DR 그대로 4-cube 1024 ep 생성 → HF push → ACT·SmolVLA·GR00T-N1.7 를 등량(batch×steps=640k samples)으로 학습**, 전과정 무중단. 동기: ①4-cube>1-cube 확인 ②4-cube가 extent 경계 약함(분포 혼선 의심) ③SmolVLA>GR00T이나 GR00T가 4× 적게 학습(640k vs 160k)돼 불공정.
 - **등량 결정(사용자 확정)**: ACT b32×20k · SmolVLA b32×20k · **GR00T b8×80k**(b16 OOM 회피, 640k 동일·smoke 검증 fit). 데이터셋+3모델 전부 HF push.
