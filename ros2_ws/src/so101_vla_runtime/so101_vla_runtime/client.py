@@ -49,6 +49,8 @@ class CanonicalVlaClient:
         request = GetRuntimeInfo.Request()
         request.client_id = self.client_id
         request.acquire_motion_lease = True
+        request.release_motion_lease = False
+        request.lease_token = ""
         response = self._call(self.runtime_client, request, timeout_sec)
         if not response.ok:
             raise RuntimeError(response.error)
@@ -62,6 +64,19 @@ class CanonicalVlaClient:
         self.model_frame = response.model_frame
         self.fps = response.fps
         self.chunk_size = response.chunk_size
+
+    def release(self, timeout_sec: float = 2.0) -> None:
+        if not self.lease_token:
+            return
+        request = GetRuntimeInfo.Request()
+        request.client_id = self.client_id
+        request.acquire_motion_lease = False
+        request.release_motion_lease = True
+        request.lease_token = self.lease_token
+        response = self._call(self.runtime_client, request, timeout_sec)
+        if not response.ok:
+            raise RuntimeError(response.error)
+        self.lease_token = ""
 
     def infer(
         self,

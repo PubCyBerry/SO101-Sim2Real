@@ -65,3 +65,19 @@ class MotionLease:
         current_ns = time.monotonic_ns() if now_ns is None else int(now_ns)
         with self._lock:
             return self._active(current_ns)
+
+    def release(
+        self,
+        client_id: str,
+        token: str,
+        *,
+        now_ns: int | None = None,
+    ) -> None:
+        current_ns = time.monotonic_ns() if now_ns is None else int(now_ns)
+        with self._lock:
+            active = self._active(current_ns)
+            if active is None:
+                return
+            if active.client_id != client_id or not secrets.compare_digest(active.token, token):
+                raise LeaseError("motion lease release client/token 불일치")
+            self._lease = None

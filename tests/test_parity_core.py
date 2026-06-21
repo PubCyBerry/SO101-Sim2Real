@@ -287,6 +287,13 @@ class LeaseTest(unittest.TestCase):
         self.assertGreater(renewed.expires_at_ns, first.expires_at_ns)
         with self.assertRaises(LeaseError):
             lease.acquire("real", now_ns=1_060_000_000)
+        with self.assertRaises(LeaseError):
+            lease.release("sim", "wrong-token", now_ns=1_060_000_000)
+        lease.release("sim", renewed.token, now_ns=1_060_000_000)
+        self.assertIsNone(lease.snapshot(now_ns=1_060_000_001))
+        real = lease.acquire("real", now_ns=1_070_000_000)
+        self.assertEqual(real.client_id, "real")
+        lease.release("real", real.token, now_ns=1_080_000_000)
         real = lease.acquire("real", now_ns=1_200_000_000)
         self.assertEqual(real.client_id, "real")
 

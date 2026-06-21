@@ -118,6 +118,7 @@ def main() -> int:
     cameras = {}
     adapter = None
     node = None
+    client = None
     trace = None
     try:
         contract = PolicyIOContract.load(args.contract)
@@ -314,6 +315,11 @@ def main() -> int:
     finally:
         if trace is not None:
             trace.close()
+        if client is not None:
+            try:
+                client.release()
+            except Exception:
+                pass
         if node is not None:
             node.destroy_node()
             import rclpy

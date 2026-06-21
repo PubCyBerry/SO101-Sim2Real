@@ -13,6 +13,18 @@
 
 ---
 
+## 작업 인계 (2026-06-22 — 양쪽 검증·문서 정비·Git sync / ✅ software 완료)
+
+- **양쪽 정상 검증**: Windows와 konan147에서 lock/stack/ROS overlay/core 17/dataset 1/checkpoint/compatibility/3-camera 통과. 양쪽 Isaac6 sim client 32-step에서 underrun/timeout/stale 0, real dry-run은 `hardware_accessed=false`, `motion_allowed=false`.
+- **transport 최신값**: gradient raw RGB 3장(2,764,800 bytes) 100회 Windows→server p50=17.63ms/p99=18.89ms, server local p50=8.97ms/p99=10.55ms. chunk bitwise 동일, second lease·contract mismatch 거부.
+- **운영 오류 수정**: Compose Zenoh shared memory를 끄고 unicast compression을 고정해 POSIX SHM `OS error 12`와 p99 회귀를 해소. probe/sim/real client가 정상 종료 시 motion lease를 즉시 release하도록 interface/runtime 갱신.
+- **환경 재현**: Windows `scripts/parity/bootstrap_windows.ps1`, server `scripts/parity/bootstrap_server.sh`. Windows repo `.pixi`는 `D:\SO101\isaac6_ros\.pixi` Junction. server runtime `/DISK1/so101-sim2real/runtime/isaac6_ros`도 Git repo로 전환.
+- **문서 정비**: `README.md`에서 Canonical 경로를 기본으로 승격하고 `docs/PATH_F_CANONICAL_PARITY.md`에 설치·service·검증·manifest·calibration·dataset·dynamics·안전·rollback 절차를 통합. A/B/C/D/E 및 migration review/masterplan/sync handoff에는 Legacy/현재 상태를 명시.
+- **Git sync**: Windows, konan147 Legacy repo, konan147 runtime repo를 `origin/main`으로 fast-forward. 서버 기존 미커밋 학습 작업은 `stash@{0}: pre-canonical-sync-20260622`에 보존.
+- **남은 gate**: real paired pose 10~20점, caliper 7~9점, torque-off EEPROM readback, no-load/payload dynamics, physical trajectory parity. 비상 전원 차단 확인과 `--enable-motion` 전에는 torque 금지.
+
+---
+
 ## 작업 인계 (2026-06-21 — SO-101 Canonical Parity + Isaac Sim 6 / ROS 2 Jazzy / 🟠 software 완료·실측 gate 대기)
 
 - **목표/계약**: 학습 없이 `so101-canonical-v1`(arm=절대 URDF rad, gripper=jaw aperture mm, absolute target, 30Hz, top/wrist/front RGB uint8 480×640)을 sim/real 공통 executor로 실행. ROS 2 Jazzy + `rmw_zenoh_cpp`, single-flight deterministic chunk. 기존 Isaac 5.1은 rollback 유지.

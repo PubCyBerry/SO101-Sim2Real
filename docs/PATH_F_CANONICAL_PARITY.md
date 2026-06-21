@@ -175,6 +175,11 @@ docker compose --env-file .env -f docker/docker-compose.yaml up -d \
   zenoh-router vla-ros-server
 ```
 
+두 container는 `transport/shared_memory/enabled=false`와
+`transport/unicast/compression/enabled=true`로 실행한다. non-root Docker node에서
+POSIX SHM provider가 `OS error 12`로 초기화 실패하는 것을 피하면서 raw RGB transport의
+p99 gate를 유지하기 위한 고정 설정이다.
+
 상태 확인:
 
 ```bash
@@ -226,6 +231,7 @@ python scripts/parity/launch.py mock-probe --samples 100
 - 두 번째 motion lease 거부
 - contract mismatch 거부
 - 반환 chunk bitwise 동일
+- probe 종료 시 lease 즉시 반납
 
 ### Isaac Sim client
 

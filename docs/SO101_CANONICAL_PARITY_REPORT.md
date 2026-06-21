@@ -153,8 +153,8 @@ Fitter는 다음 지표를 계산한다.
 
 양쪽 migration 재검증은 Windows `bootstrap_windows.ps1 -CheckOnly -Smoke`와
 서버 `bootstrap_server.sh --check-only --smoke --probe`로 통과했다.
-2026-06-22 기준 Windows→server gradient RGB 3장 transport는 p99 `18.80 ms`,
-서버 local은 p99 `10.93 ms`였으며
+2026-06-22 기준 Windows→server gradient RGB 3장 transport는 p99 `18.89 ms`,
+서버 local은 p99 `10.55 ms`였으며
 second lease와 contract mismatch가 모두 거부되고 반환 chunk가 bitwise 동일했다.
 
 ## 7. 안전한 실행

@@ -286,7 +286,9 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
       ZENOH_ROUTER_CHECK_ATTEMPTS: "10"
-      ZENOH_CONFIG_OVERRIDE: 'connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=true'
+      # rmw_zenoh_cpp POSIX SHM provider는 non-root container에서 OS error 12로
+      # 초기화 실패할 수 있다. host network TCP + compression 경로를 고정한다.
+      ZENOH_CONFIG_OVERRIDE: 'connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false;transport/unicast/compression/enabled=true'
       VLA_RUNTIME_MANIFEST: /workspace/project/configs/parity/runtime_manifest.mock.json
       VLA_CONTRACT_PATH: /workspace/project/configs/parity/policy_io.json
       VLA_CALIBRATION_PATH: /workspace/project/calibration/so101_canonical.json
@@ -309,7 +311,7 @@ services:
       - ..:/workspace/project:ro
     environment:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
-      ZENOH_CONFIG_OVERRIDE: 'listen/endpoints=["tcp/0.0.0.0:7447"];transport/shared_memory/enabled=true'
+      ZENOH_CONFIG_OVERRIDE: 'listen/endpoints=["tcp/0.0.0.0:7447"];transport/shared_memory/enabled=false;transport/unicast/compression/enabled=true'
     network_mode: host
     ipc: host
     command: ["zenoh-router"]

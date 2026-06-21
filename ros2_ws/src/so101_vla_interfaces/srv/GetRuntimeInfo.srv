@@ -1,5 +1,7 @@
 string client_id
 bool acquire_motion_lease
+bool release_motion_lease
+string lease_token
 ---
 bool ok
 string error

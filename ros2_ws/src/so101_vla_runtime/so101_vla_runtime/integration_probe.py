@@ -30,6 +30,7 @@ def main() -> None:
     rclpy.init(args=ros_args)
     node = Node("so101_vla_integration_probe")
     report: dict = {}
+    primary = None
     try:
         primary = CanonicalVlaClient(node, "probe-primary")
         primary.connect()
@@ -127,6 +128,11 @@ def main() -> None:
         if not report["ok"]:
             raise SystemExit(1)
     finally:
+        if primary is not None:
+            try:
+                primary.release()
+            except Exception:
+                pass
         node.destroy_node()
         rclpy.shutdown()
 

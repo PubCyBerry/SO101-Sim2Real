@@ -81,6 +81,10 @@ class VlaServer(Node):
         try:
             lease_token = ""
             expires_at = 0
+            if request.acquire_motion_lease and request.release_motion_lease:
+                raise ValueError("lease acquire와 release를 동시에 요청할 수 없다")
+            if request.release_motion_lease:
+                self.lease.release(request.client_id, request.lease_token)
             if request.acquire_motion_lease:
                 snapshot = self.lease.acquire(request.client_id)
                 lease_token = snapshot.token

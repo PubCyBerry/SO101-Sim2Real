@@ -1187,8 +1187,8 @@ container의 memory/SHM 조건에서 POSIX segment provider 생성이 실패하�
 
 ### 해결 방법
 
-서버 VLA node용 Zenoh session config에서 shared memory를 끄고, cross-machine raw image
-전송에는 unicast compression을 켠다. router는 별도 service로 유지한다.
+Compose의 VLA server와 router 모두에서 shared memory를 끄고, cross-machine raw image
+전송에는 unicast compression을 켠다.
 
 ```json5
 {
@@ -1201,15 +1201,22 @@ container의 memory/SHM 조건에서 POSIX segment provider 생성이 실패하�
 }
 ```
 
-container에는 이 파일을 read-only mount하고
-`ZENOH_SESSION_CONFIG_URI=/workspace/project/configs/zenoh/server-client.json5`를
-지정한다.
+현재 Compose는 동일 설정을 `ZENOH_CONFIG_OVERRIDE`로 강제한다.
+
+```yaml
+ZENOH_CONFIG_OVERRIDE: >-
+  connect/endpoints=["tcp/127.0.0.1:7447"];
+  transport/shared_memory/enabled=false;
+  transport/unicast/compression/enabled=true
+```
 
 ### 확인 방법
 
 ```bash
-docker restart so101-vla-replay
-docker logs --since 10s so101-vla-replay
+docker compose --env-file .env -f docker/docker-compose.yaml up -d \
+  --force-recreate zenoh-router vla-ros-server
+docker compose --env-file .env -f docker/docker-compose.yaml logs \
+  --tail 30 vla-ros-server
 ```
 
 `VLA server ready backend=...`가 출력되고 container가 `Up` 상태를 유지하면 정상이다.
@@ -4745,3 +4752,41 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass \
 ```
 
 마지막에 `status=passed`, 고정 Pixi/lock/IsaacLab commit이 출력되어야 한다.
+
+---
+
+## Integration probe 종료 후 motion lease가 30초 동안 남음
+
+### 현상
+
+transport probe가 정상 종료된 직후 sim 또는 real client를 시작하면 single-client lease 거부가
+발생한다. 30초 뒤에는 같은 명령이 성공한다.
+
+### 오류 메시지
+
+```text
+motion lease는 이미 'probe-primary'가 보유 중이다
+```
+
+### 원인
+
+기존 `GetRuntimeInfo` interface는 lease acquire만 제공하고 release operation이 없었다.
+Client process가 정상 종료돼도 server는 manifest의 `lease_duration_ms=30000`이 만료될 때까지
+기존 lease를 유지했다.
+
+### 해결 방법
+
+`GetRuntimeInfo` request에 `release_motion_lease`와 `lease_token`을 추가하고,
+`CanonicalVlaClient.release()`가 token을 검증해 lease를 즉시 반납하도록 한다.
+Integration probe, sim client, real client는 cleanup 경로에서 release를 호출한다.
+
+### 확인 방법
+
+다음 두 명령을 대기 없이 순서대로 실행한다.
+
+```bash
+python scripts/parity/launch.py mock-probe --samples 20
+python scripts/parity/launch.py sim --steps 4
+```
+
+두 번째 명령이 lease timeout 대기 없이 시작되고 core lease test가 통과해야 한다.

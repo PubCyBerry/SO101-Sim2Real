@@ -45,6 +45,8 @@ def main() -> int:
     args = _parser().parse_args()
     pixi = _pixi()
     environment = os.environ.copy()
+    environment.setdefault("PYTHONUTF8", "1")
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
     if "ZENOH_SESSION_CONFIG_URI" not in environment:
         config = (
             Path("configs/zenoh/windows-client.json5")

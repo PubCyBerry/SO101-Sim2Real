@@ -51,6 +51,7 @@ def _report(payload: dict) -> None:
 def main() -> int:
     env = None
     node = None
+    client = None
     trace = None
     adapter = None
     try:
@@ -199,6 +200,11 @@ def main() -> int:
     finally:
         if trace is not None:
             trace.close()
+        if client is not None:
+            try:
+                client.release()
+            except Exception:
+                pass
         if node is not None:
             node.destroy_node()
             import rclpy

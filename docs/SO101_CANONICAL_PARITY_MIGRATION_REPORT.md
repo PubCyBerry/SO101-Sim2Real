@@ -147,8 +147,8 @@ raw RGB 3장 service 왕복:
 
 | payload | samples | p50 | p99 | gate |
 |---|---:|---:|---:|---|
-| gradient RGB, Windows→server 2026-06-22 | 100 | 17.54 ms | 18.80 ms | 통과 |
-| gradient RGB, 서버 local 2026-06-22 | 100 | 9.28 ms | 10.93 ms | 통과 |
+| gradient RGB, Windows→server 2026-06-22 | 100 | 17.63 ms | 18.89 ms | 통과 |
+| gradient RGB, 서버 local 2026-06-22 | 100 | 8.97 ms | 10.55 ms | 통과 |
 | incompressible random RGB | 100 | 31.34 ms | 42.53 ms | 실패 |
 
 실제 camera frame은 random worst case가 아니므로 최종 network gate는 실기기 camera frame으로 다시
