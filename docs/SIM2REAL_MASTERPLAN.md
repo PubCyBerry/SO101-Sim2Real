@@ -2,6 +2,10 @@
 
 > 이 문서는 Codex `/goal`의 입력 스펙이다. 변하지 않는 목표·아키텍처·계약을 담는다.
 > 운영 현황은 [`../TASKS.md`](../TASKS.md), 서사형 인계는 [`../CONTEXT.md`](../CONTEXT.md) 참조.
+>
+> **2026-06-22 실행 계층 갱신:** 학습 roadmap은 아래 역사적 phase를 유지하지만 sim↔real
+> 배포 runtime은 [`PATH_F_CANONICAL_PARITY.md`](PATH_F_CANONICAL_PARITY.md)의
+> Isaac Sim 6 / Isaac Lab 3 / ROS Jazzy canonical 경로가 현재 기준이다. Isaac 5.1 경로는 rollback이다.
 
 ## Context
 
@@ -15,10 +19,10 @@
 | 항목 | 결정 |
 |---|---|
 | 오케스트레이션 토폴로지 | **Codex(상위 플래너) → Claude Code CLI(구현 워커)** 디스패치 |
-| Isaac 설치·머신 역할 | **서버 konan147(48GB Blackwell)에 Isaac Sim 5.1 headless 설치** — RL·롤아웃·GR00T fine-tune 전담. Windows는 실기기 클라이언트+경량 검증 |
+| Isaac 설치·머신 역할 | Windows와 konan147에 Isaac Sim 6 canonical runtime. 서버는 GPU 중량 작업 전담, Windows는 실기기 client와 parity 검증. Isaac 5.1은 rollback |
 | 자율 범위 | **시뮬 전구간 A~E 무인 자율**. 실기기(F~G)는 사용자 개입 게이트 |
 | 상태 관리 | **CONTEXT.md(서사 핸드오프) + TASKS.md(구조화 체크리스트)**, git tracked |
-| 시뮬 스택 | **leisaac 전면 제거 → 순수 Isaac Sim 5.1.0 + Isaac Lab 2.3.2 재구현**. 기존에서 기술 참고만 차용 |
+| 시뮬 스택 | 기본 실행=`Isaac Sim 6.0.0.1 + Isaac Lab 3 beta2 + PhysX`; 기존 `5.1.0 + Lab 2.3.2`는 학습/rollback 경로 |
 
 Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만 다시 읽으면 방향과 현황을 복구한다.
 
@@ -48,7 +52,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | codebase_version | `v3.0` |
 | robot_type | `so_follower` |
 | action / observation.state | 각 **6-dim joint position** (순서: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) |
-| 카메라 | `observation.images.{top, wrist}` · 480×640×3 · h264 · **fps 30** |
+| 카메라 | `observation.images.{top, wrist, front}` · 480×640×3 · h264 · **fps 30** |
 | task 문자열 | `"pick up the cube and place it in the bowl"` |
 
 이 계약을 **기계가 강제**하도록 `scripts/validate_lerobot_schema.py`(§7)를 가장 먼저 만든다. 모든 데이터 생성 단계는 이 validator를 통과해야 done 처리된다.
@@ -120,7 +124,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | | Windows 워크스테이션 (A4000 16GB) | 서버 konan147 (Blackwell 48GB) |
 |---|---|---|
 | 주 역할 | 실기기 클라이언트·경량 검증·코드 편집·**오케스트레이터 호스트(Codex)** | **모든 GPU 중량 작업** |
-| Isaac Sim | 설치 안 함(또는 디버그용 소수 env) | **설치(headless EGL)** — RL 학습·롤아웃 |
+| Isaac Sim | **6.0 canonical client 설치**(A4000) | **6.0 canonical + 5.1 rollback 설치**(Blackwell) |
 | GR00T fine-tune | 불가(16GB<25GB) | **전담** |
 | 추론 | RobotClient(실기기) | PolicyServer(GR00T, ~6GB) |
 | 데이터 저장 | 작업 캐시만 | `/DISK1/so101-sim2real` (롤아웃·체크포인트·HDF5) |

@@ -1,5 +1,9 @@
 # PATH D — WSL2 + ROS 2 Jazzy + SO-101 (RViz + MoveIt 2)
 
+> 이 문서는 Legacy MoveIt 실험 경로다. Canonical parity real client는 Windows native Pixi에서
+> 실행하며 WSL2/usbipd를 사용하지 않는다. 현재 기본 경로는
+> [`PATH_F_CANONICAL_PARITY.md`](PATH_F_CANONICAL_PARITY.md)다.
+
 Windows 11 워크스테이션의 **WSL2(Ubuntu 24.04)** 위에서 ROS 2 Jazzy 로 SO-101 **follower** 팔을
 RViz 시각화 + MoveIt 2 모션 플래닝/제어하는 경로.
 

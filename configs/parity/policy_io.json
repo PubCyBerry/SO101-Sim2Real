@@ -1,0 +1,32 @@
+{
+  "schema": "so101-canonical-v1",
+  "joint_order": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "feature_names": [
+    "shoulder_pan.pos",
+    "shoulder_lift.pos",
+    "elbow_flex.pos",
+    "wrist_flex.pos",
+    "wrist_roll.pos",
+    "gripper.pos"
+  ],
+  "units": {
+    "arm": "urdf_radian",
+    "gripper": "jaw_aperture_mm"
+  },
+  "action_mode": "absolute_position_target",
+  "fps": 30,
+  "cameras": {
+    "order": ["top", "wrist", "front"],
+    "shape": [480, 640, 3],
+    "dtype": "uint8",
+    "encoding": "rgb8"
+  },
+  "contract_hash": "8391f48d2ad25f24c5e2b14a28d5e28fd5551dc85361468988a294b077cd2414"
+}

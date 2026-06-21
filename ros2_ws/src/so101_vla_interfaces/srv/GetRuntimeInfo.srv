@@ -1,0 +1,16 @@
+string client_id
+bool acquire_motion_lease
+---
+bool ok
+string error
+string contract_hash
+string runtime_manifest_hash
+string checkpoint_hash
+string calibration_hash
+string motor_profile_hash
+string backend
+string model_frame
+uint32 fps
+uint32 chunk_size
+string lease_token
+uint64 lease_expires_at_ns

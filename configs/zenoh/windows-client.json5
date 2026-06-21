@@ -1,0 +1,20 @@
+{
+  mode: "client",
+  connect: {
+    // Windows hosts에서 konan147은 Tailscale(100.79.237.116)로 해석되므로
+    // parity latency gate는 동일 LAN의 server endpoint를 직접 사용한다.
+    endpoints: ["tcp/10.10.16.147:7447"],
+  },
+  scouting: {
+    multicast: {
+      enabled: false,
+    },
+  },
+  transport: {
+    unicast: {
+      compression: {
+        enabled: true,
+      },
+    },
+  },
+}

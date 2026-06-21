@@ -1,0 +1,11 @@
+{
+  "schema": "so101-paired-arm-poses-v1",
+  "joint_order": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "poses": []
+}

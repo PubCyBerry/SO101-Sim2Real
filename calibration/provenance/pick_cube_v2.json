@@ -1,0 +1,15 @@
+{
+  "schema": "so101-dataset-provenance-v1",
+  "dataset": "datasets/pick_cube_v2",
+  "source_frame": "real_lerobot_range_v1",
+  "canonical_calibration_hash": null,
+  "collected_after": "2026-06-17",
+  "recorder": "LeRobot v3 SOFollower teleoperation",
+  "source_calibration_snapshot": "calibration/source/so101_robot.lerobot.json",
+  "verified": false,
+  "blocked_on": [
+    "paired arm pose fit",
+    "real gripper caliper aperture curve",
+    "source calibration snapshot identity confirmation"
+  ]
+}

@@ -1,186 +1,178 @@
 # SO-ARM101 VLA Control System
 
-SO-ARM101 6축 로봇 팔용 **LeRobot 파이프라인 + Isaac Lab Sim-to-Real 시뮬레이션** 통합 저장소.
+SO-ARM101 6축 로봇 팔의 실기기 LeRobot 파이프라인과 Isaac Lab Sim-to-Real 환경을 함께 관리한다.
 
-실기기 텔레오퍼레이션·데이터 수집·정책 학습·추론과 Isaac Sim 시뮬을 세 가지 실행 경로로 제공한다. 호스트 uv 경로(실기기 teleop·Isaac 시뮬)는 `pyproject.toml` 의존성 그룹(`teleop` / `isaac` / `dev`)으로 묶고, `policy-server` Docker 이미지는 LeRobot 0.5.1 을 `pyproject.toml` 과 **독립적으로** 핀한다(Dockerfile.policy 가 `uv pip install` 로 직접 명세 — Isaac override 와 numpy 충돌 회피). `pyproject.toml` 의 `policy` / `async` 그룹은 호스트 참조용. 실기기는 SmolVLA(기본) / GR00T 등 LeRobot 호환 정책을 모두 학습·추론할 수 있다.
+현재 기본 실행 경로는 학습을 수행하지 않는
+[`so101-canonical-v1`](docs/PATH_F_CANONICAL_PARITY.md) parity runtime이다.
+Windows 실기기 client와 Isaac Sim client가 같은 ROS 2 Jazzy protocol, scheduler, limiter,
+trace 형식을 사용하고 konan147의 VLA server에 `rmw_zenoh_cpp`로 연결된다.
 
-## 목차 <!-- omit in toc -->
+```text
+                    ROS 2 Jazzy VLA Server
+                 deterministic chunk inference
+                              │
+                 ROS 2 Jazzy + rmw_zenoh_cpp
+                  ┌───────────┴───────────┐
+          Isaac Sim Client          Real SO-101 Client
+          same executor             same executor
+          Sim adapter               Real adapter
+```
 
-- [실행 경로](#실행-경로)
-- [환경 요구사항](#환경-요구사항)
-- [사전 설치 확인](#사전-설치-확인)
-- [공통 준비](#공통-준비)
-- [경로별 가이드](#경로별-가이드)
-- [관련 문서](#관련-문서)
-- [Reference](#reference)
-
----
+기존 Isaac Sim 5.1 / Isaac Lab 2.3.2와 LeRobot 학습·수집 경로는 rollback 및 별도 작업용으로
+유지한다. Canonical parity 경로에서는 WSL2와 usbipd를 사용하지 않는다.
 
 ## 실행 경로
 
-| 경로 | 진입점 | 용도 | 가이드 |
+| 경로 | 상태 | 용도 | 가이드 |
 |---|---|---|---|
-| **A. Windows native + uv** (실기기) | `uv run lerobot-*` CLI | 로컬 venv 에서 SO-101 직접 제어, 빠른 반복·디버깅 | [PATH_A_NATIVE](docs/PATH_A_NATIVE.md) |
-| **B. Docker 컨테이너** (실기기) | `docker compose ... run lerobot <mode>` | 격리 환경, Linux 학습 서버 배포, async inference policy server | [PATH_B_DOCKER](docs/PATH_B_DOCKER.md) |
-| **C. Host uv** (Isaac Lab 시뮬) | `uv run scripts/...` | Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0` 시뮬 teleop·오라클 정책·데이터 수집 | [PATH_C_ISAAC_SIM](docs/PATH_C_ISAAC_SIM.md) |
+| **F. Canonical parity** | **기본** | Isaac Sim 6와 실기기 SO-101의 동일 action 실행, ROS Jazzy VLA server | [PATH_F_CANONICAL_PARITY](docs/PATH_F_CANONICAL_PARITY.md) |
+| A. Windows native + uv | Legacy | LeRobot teleop·record·replay·학습 | [PATH_A_NATIVE](docs/PATH_A_NATIVE.md) |
+| B. Docker | Legacy | 기존 LeRobot container와 async gRPC policy server | [PATH_B_DOCKER](docs/PATH_B_DOCKER.md) |
+| C. Host uv | Rollback | Isaac Sim 5.1 환경, 기존 task·dataset 생성 | [PATH_C_ISAAC_SIM](docs/PATH_C_ISAAC_SIM.md) |
+| D/E | 별도 실험 | MoveIt2·cuMotion 기반 제어 | `docs/PATH_D_*`, `docs/PATH_E_*` |
 
-### 어떤 경로를 선택할까?
+### 선택 기준
 
 ```mermaid
 flowchart TD
-    Q1{"실행 환경"}
-    Q1 -->|시뮬레이션| C["경로 C<br/>Isaac Lab 시뮬레이션"]
-    Q1 -->|실기기| Q2{"Docker 사용 여부"}
-    Q2 -->|"아니오 (빠른 디버깅)"| A["경로 A<br/>Windows native + uv"]
-    Q2 -->|"예 (재현성)"| B["경로 B<br/>Docker 컨테이너"]
-
-    classDef path fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
-    class A,B,C path
+    Q{"목적"}
+    Q -->|"sim↔real 동일 실행·검증"| F["경로 F<br/>Canonical parity"]
+    Q -->|"teleop·record·학습"| A["경로 A/B<br/>Legacy LeRobot"]
+    Q -->|"기존 Isaac 5.1 재현"| C["경로 C<br/>Rollback"]
+    Q -->|"MoveIt/cuMotion 실험"| DE["경로 D/E"]
 ```
 
-| 상황 | 권장 경로 |
+## Canonical 고정 stack
+
+| 항목 | 버전 |
 |---|---|
-| SO-101 처음 세팅, CLI 동작 빠르게 확인 | **A** |
-| Linux 학습 서버에서 fine-tune / async 추론 서버 운영 | **B** |
-| 실기기 없이 데이터 수집·정책 검증 (RT 코어 GPU 보유) | **C** |
-| 원격(서버↔로컬) 텔레옵 수집 | [REMOTE_TELEOP_RECORD](docs/REMOTE_TELEOP_RECORD.md) |
+| Isaac Sim | `6.0.0.1` |
+| Isaac Lab | `v3.0.0-beta2`, commit `28a37cecdd433c22d9eabd6a5954add9f13a8951` |
+| ROS 2 / RMW | Jazzy / `rmw_zenoh_cpp` |
+| Pixi | `0.70.2` |
+| Python | `3.12` |
+| PyTorch | `2.10.0+cu128` |
+| Physics | PhysX |
 
----
+고정 설치 위치:
 
-## 환경 요구사항
+- Windows runtime: `D:\SO101\isaac6_ros`
+- Windows Git repo: 임의 위치 가능. repo `.pixi` Junction이 위 runtime을 가리킨다.
+- konan147 repo/runtime: `/DISK1/so101-sim2real/runtime/isaac6_ros`
 
-### 소프트웨어
+`pixi.toml`과 `pixi.lock`은 두 머신이 동일 파일을 사용한다. 현재 lock SHA256은
+`9736a03f7b8b2b1d94d40285d0dc3508886cb38d2f04d9c885099ae50a31fcc5`다.
 
-| 항목 | 버전 | 비고 |
-|------|------|------|
-| Windows | 11 Pro | 본 가이드는 Windows 11 기준 |
-| NVIDIA Driver | 580 이상 | CUDA 12.8 컨테이너 / Isaac Sim 5.1 호환 |
-| CUDA Toolkit | 12.8 이상 | torch 2.7.0+cu128 매칭 |
-| uv | 최신 | Astral 공식 installer |
-| Docker Desktop | 최신 | (경로 B) WSL2 backend + GPU 가속 활성 |
-| usbipd-win | 5.0 이상 | (경로 B) USB → WSL2 포워딩 |
-| Isaac Sim | 5.1.0 | (경로 C) `isaac` 그룹이 자동 설치 |
-| Hugging Face 계정 | - | 데이터셋·모델 업로드/다운로드 |
-| W&B 계정 | - | 학습 로깅 (선택) |
+## 빠른 시작
 
-### 하드웨어
+### Windows
 
-| 장치 | 수량 | 비고 |
-|------|------|------|
-| NVIDIA GPU (RT 코어 + 16 GB+) | 1 | 시뮬·학습·추론 공통. RTX A4000 / A5000 / A6000 / L40(S) / RTX 6000 Ada / RTX PRO 5000·6000 Blackwell / GeForce RTX 40·50 시리즈 등. **H100 / A100 은 RT 코어 부재로 Isaac Sim 미지원** |
-| SO-101 Leader Arm | 1 | Feetech STS3215 서보 × 6 |
-| SO-101 Follower Arm | 1 | Feetech STS3215 서보 × 6 |
-| USB-Serial 어댑터 | 2 | CH343 칩 (COM 포트) |
-| 카메라 | 1~3 | front (전면), wrist (손목), top (탑뷰). `ENABLED_CAMERAS` 로 부분집합 선택 가능 |
-
-### 핵심 의존성
-
-버전은 `pyproject.toml` 에 고정. ABI 호환성 핀이라 임의 `uv lock --upgrade` 금지.
-
-| 패키지 | 버전 | 그룹 |
-|---|---|---|
-| Python | 3.11 | (필수) |
-| torch | 2.7.0+cu128 | (공용) |
-| lerobot | 0.4.4 | 실기기 `lerobot` 이미지 (`[feetech]`) |
-| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
-| grpcio | 1.73.1 | `async` |
-| isaacsim | 5.1.0 `[all,extscache]` | `isaac` |
-| isaaclab | 2.3.0 | `isaac` (leisaac extras) |
-| leisaac | 0.4.0 | `isaac` (git tag v0.4.0) |
-| usd-core | ≥26.5 | (공용) |
-
-ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `packaging<26` / `setuptools<82`. 자세한 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.
-
----
-
-## 사전 설치 확인
-
-본 가이드는 **NVIDIA Driver · CUDA Toolkit · uv · Docker Desktop · usbipd-win 이 이미 설치되어 있다**고 가정한다. Git Bash 또는 PowerShell 에서 다음으로 빠르게 확인한다.
+Git Bash에서:
 
 ```bash
-nvidia-smi              # Driver 580+ / CUDA 12.8+
-uv --version            # 최신
-docker --version        # (경로 B)
-usbipd --version        # (경로 B)
+powershell.exe -NoProfile -ExecutionPolicy Bypass \
+  -File scripts/parity/bootstrap_windows.ps1
 ```
 
-설치되지 않은 항목이 있으면 각 공식 가이드 참고:
+설치 확인:
 
-- NVIDIA Driver / CUDA: [developer.nvidia.com](https://developer.nvidia.com/cuda-downloads)
-- uv: [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Docker Desktop: [docs.docker.com/desktop/windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend + Settings → Resources → GPU 활성)
-- usbipd-win: `winget install usbipd` (관리자 PowerShell)
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass \
+  -File scripts/parity/bootstrap_windows.ps1 -CheckOnly -Smoke
+python scripts/parity/launch.py validate
+python scripts/parity/launch.py real-dry-run
+```
 
----
+### konan147
+
+```bash
+ssh konan147
+cd /DISK1/so101-sim2real/runtime/isaac6_ros
+bash scripts/parity/bootstrap_server.sh
+bash scripts/parity/bootstrap_server.sh --check-only --smoke
+```
+
+Zenoh router와 deterministic replay server:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml build vla-ros-server
+docker compose --env-file .env -f docker/docker-compose.yaml up -d \
+  zenoh-router vla-ros-server
+```
+
+Windows에서 server transport와 sim client를 검증한다. 두 명령은 single-client lease 때문에
+동시에 실행하지 않는다.
+
+```bash
+python scripts/parity/launch.py mock-probe --samples 100
+python scripts/parity/launch.py sim --steps 32
+```
+
+전체 설치·운영·안전 절차는
+[`docs/PATH_F_CANONICAL_PARITY.md`](docs/PATH_F_CANONICAL_PARITY.md)를 따른다.
+
+## 실기기 안전
+
+현재 calibration bundle은 실측 전이므로 motion이 차단되어 있다.
+
+```text
+calibration.validated=false
+motor_profile.readback_validated=false
+```
+
+실기기 torque는 다음 조건이 모두 충족될 때만 허용한다.
+
+1. paired arm pose와 caliper gripper calibration 검증
+2. torque-off EEPROM readback 검증
+3. 사용자가 비상 전원 차단 준비를 확인
+4. `--enable-motion`과 `--confirm-emergency-cutoff-ready` 명시
+
+`SOFollower.configure()`를 자동 호출해 EEPROM을 덮어쓰지 않는다.
 
 ## 공통 준비
 
-세 경로 모두에서 공통으로 거치는 단계.
-
-### Hub / W&B 인증
+Legacy 학습·dataset 작업에서 Hub/W&B가 필요하면 Git Bash에서 인증한다.
 
 ```bash
-uv run hf auth login         # 또는 토큰 직접 입력
-uv run wandb login           # 선택
-```
-
-또는 세션 환경변수로 주입:
-
-```bash
-export HF_TOKEN="hf_xxx"
-export WANDB_API_KEY="xxx"
-```
-
-### `.env` 작성 (경로 B 필수, 경로 A·C 는 참고용)
-
-```bash
+uv run hf auth login
+uv run wandb login
 cp .env.example .env
 ```
 
-| 이름 | 설명 |
-|-----|------|
-| HF_TOKEN | Hugging Face 토큰 ([설정](https://huggingface.co/settings/tokens)) |
-| HF_USER | HF 계정 이름 |
-| WANDB_API_KEY | W&B API 키 ([설정](https://wandb.ai/settings)) |
-| TELEOP_PORT / ROBOT_PORT | 리더/팔로워 직렬 포트 (Docker 는 `/dev/ttyACM*`, uv 는 `COMx`) |
-| `*_CAM_PORT` | 카메라 포트 (Docker 는 `/dev/video*`, uv 는 OpenCV index) |
-| `CAM_*` | 해상도/FPS/fourcc |
-| SINGLE_TASK / HF_DATASET_REPO_ID / NUM_EPISODES 등 | 데이터 수집·학습 파라미터 |
+Canonical replay validation에는 HF/W&B token이 필요 없다. `.env`의 secret은 Git에 commit하지 않는다.
 
-`.env` 는 Docker compose 가 `--env-file` 로 컨테이너에 주입한다. uv 경로는 자동 로드되지 않으므로 [경로 A §복사해서 바꿔 쓰는 Bash 변수](docs/PATH_A_NATIVE.md#복사해서-바꿔-쓰는-bash-변수) 블록을 권장.
+## Legacy 환경
 
----
+Legacy uv/Docker 경로는 별도 dependency graph를 사용한다.
 
-## 경로별 가이드
+| 구성 | 버전 |
+|---|---|
+| Isaac rollback | Isaac Sim 5.1 / Isaac Lab 2.3.2 / torch 2.7 |
+| LeRobot teleop image | LeRobot 0.4.4 / Python 3.11 |
+| 기존 policy server | LeRobot 0.5.1 / Python 3.12 |
 
-각 경로의 아키텍처·준비·실행 명령은 전용 문서에 정리되어 있다.
+Legacy ABI pin은 `pyproject.toml`, `uv.lock`, `AGENTS.md`에 기록되어 있다.
+`uv lock --upgrade`로 임의 갱신하지 않는다.
 
-- **[경로 A — Windows native + uv (실기기)](docs/PATH_A_NATIVE.md)** — 호스트 uv venv 에서 `lerobot-*` CLI 직접 호출. 빠른 반복·디버깅.
-- **[경로 B — Docker 컨테이너 (실기기)](docs/PATH_B_DOCKER.md)** — usbipd → WSL2 → Docker 격리 환경. Linux 서버 배포, async inference policy server.
-- **[경로 C — Host uv (Isaac Lab 시뮬)](docs/PATH_C_ISAAC_SIM.md)** — Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0` 시뮬 teleop·데이터 수집.
-
----
-
-## 관련 문서
+## 주요 문서
 
 | 문서 | 내용 |
 |---|---|
-| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 등 에러 사례 |
-| [`docs/REMOTE_TELEOP_RECORD.md`](docs/REMOTE_TELEOP_RECORD.md) | 원격(서버 ↔ 로컬 PC) 텔레옵 데이터 수집 파이프라인 |
-| [`docs/OpenUSD_Guide.md`](docs/OpenUSD_Guide.md) | USD 포맷 / 씬 author 참고 |
+| [`PATH_F_CANONICAL_PARITY.md`](docs/PATH_F_CANONICAL_PARITY.md) | Canonical runtime 설치·사용·검증·안전·rollback |
+| [`SO101_CANONICAL_PARITY_MIGRATION_REPORT.md`](docs/SO101_CANONICAL_PARITY_MIGRATION_REPORT.md) | Isaac 6 / Lab 3 / ROS Jazzy migration 결과 |
+| [`SO101_CANONICAL_PARITY_REPORT.md`](docs/SO101_CANONICAL_PARITY_REPORT.md) | 현재 parity gate와 실측 대기 항목 |
+| [`SIM_REAL_INFERENCE_PARITY.md`](docs/SIM_REAL_INFERENCE_PARITY.md) | 기존 model frame과 canonical 변환 감사 |
+| [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | 설치·ABI·ROS·Isaac·실기기 오류 해결 |
+| [`PATH_A_NATIVE.md`](docs/PATH_A_NATIVE.md) | Legacy Windows LeRobot |
+| [`PATH_B_DOCKER.md`](docs/PATH_B_DOCKER.md) | Legacy Docker/WSL2 |
+| [`PATH_C_ISAAC_SIM.md`](docs/PATH_C_ISAAC_SIM.md) | Isaac 5.1 rollback |
 
----
+## 공식 참고 자료
 
-## Reference
-
-- [Isaac Sim 5.1 + Isaac Lab 2.3 + LeIsaac on Windows](https://hackmd.io/@asierarranz/rkg1tvT93gx)
-- [Installation | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/teleoperation)
-- [Teleoperation | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/teleoperation)
-- [Policy Training & Inference | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/policy_support)
-- [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning)
-- [Train an SO-101 Robot From Sim-to-Real With NVIDIA Isaac](https://docs.nvidia.com/learning/physical-ai/sim-to-real-so-101/latest/index.html)
-- [isaac-sim/Sim-to-Real-SO-101-Workshop](https://github.com/isaac-sim/Sim-to-Real-SO-101-Workshop)
-- [LeRobot Installation](https://huggingface.co/docs/lerobot/main/installation)
-- [LeRobot Cameras](https://huggingface.co/docs/lerobot/main/en/cameras)
-- [uv Installation](https://docs.astral.sh/uv/getting-started/installation/)
-- [uv Python management](https://docs.astral.sh/uv/guides/install-python/)
+- [Isaac Sim 6.0 ROS 설치](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/installation/install_ros.html)
+- [Windows/Linux Jazzy Pixi 설치](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/installation/install_ros_other_platforms.html)
+- [Isaac Sim 6.0 요구사항](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/installation/requirements.html)
+- [Isaac Sim 6.0 Release Notes](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/overview/release_notes.html)
+- [Isaac Lab v3.0.0-beta2](https://github.com/isaac-sim/IsaacLab/releases/tag/v3.0.0-beta2)
+- [Isaac Lab 3.0 Migration Guide](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/migration/migrating_to_isaaclab_3-0.html)
+- [ROS 2 Jazzy Zenoh](https://docs.ros.org/en/jazzy/Installation/RMW-Implementations/Non-DDS-Implementations/Working-with-Zenoh.html)

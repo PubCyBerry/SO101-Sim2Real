@@ -1,0 +1,154 @@
+[workspace]
+name = "so101-isaac6-ros"
+channels = ["https://prefix.dev/robostack-jazzy", "https://prefix.dev/conda-forge"]
+platforms = ["win-64", "linux-64"]
+
+# 환경은 의존성 충돌을 피하기 위해 의도적으로 분리한다.
+[environments]
+sim = ["ros", "sim"]
+real = ["ros", "real"]
+ros-tools = ["ros", "ros-tools"]
+
+[feature.ros.dependencies]
+python = "3.12.*"
+pip = "*"
+setuptools = "<81"
+cmake = ">=3.28,<5"
+ninja = ">=1.11,<2"
+pkg-config = ">=0.29,<1"
+compilers = ">=1.11,<2"
+git = ">=2.45,<3"
+colcon-common-extensions = ">=0.3,<0.4"
+ros-jazzy-ros-base = ">=0.11,<0.12"
+ros-jazzy-ros2cli = ">=0.32,<0.33"
+ros-jazzy-rclpy = ">=7.1,<8"
+ros-jazzy-rmw-zenoh-cpp = "*"
+ros-jazzy-sensor-msgs = ">=5.3,<6"
+ros-jazzy-std-msgs = ">=5.3,<6"
+ros-jazzy-builtin-interfaces = ">=2.0,<3"
+ros-jazzy-rosidl-default-generators = ">=1.6,<2"
+ros-jazzy-rosidl-default-runtime = ">=1.6,<2"
+ros-jazzy-ament-cmake = ">=2.5,<3"
+
+[feature.ros.target.win.dependencies]
+pywin32 = "==306"
+
+[feature.ros.target.win.activation.env]
+SO101_RUNTIME_ROOT = "D:\\SO101\\isaac6_ros"
+PATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\bin;%CONDA_PREFIX%\\Library\\bin;%CONDA_PREFIX%;%CONDA_PREFIX%\\Scripts;%SystemRoot%\\System32;%SystemRoot%"
+
+[feature.ros.target.unix.activation.env]
+SO101_RUNTIME_ROOT = "/DISK1/so101-sim2real/runtime/isaac6_ros"
+LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib:$CONDA_PREFIX/lib"
+
+[feature.ros-tools.target.win.activation.env]
+PYTHONPATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\lib\\site-packages;%PIXI_PROJECT_ROOT%\\src"
+
+[feature.ros-tools.target.unix.activation.env]
+PYTHONPATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib/python3.12/site-packages:$PIXI_PROJECT_ROOT/src"
+
+[feature.real.target.win.activation.env]
+PYTHONPATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\lib\\site-packages;%PIXI_PROJECT_ROOT%\\src"
+
+[feature.real.target.unix.activation.env]
+PYTHONPATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib/python3.12/site-packages:$PIXI_PROJECT_ROOT/src"
+
+[feature.real.target.unix.dependencies]
+# LeRobot의 PyPI evdev 1.9.3 sdist는 Ubuntu 24.04 host kernel headers에 없는
+# 신규 key code를 생성해 빌드가 실패한다. conda-forge CPython 3.12 wheel을 사용한다.
+evdev = "==1.9.0"
+
+[feature.ros.activation.env]
+RMW_IMPLEMENTATION = "rmw_zenoh_cpp"
+ROS_DISTRO = "jazzy"
+ROS_DOMAIN_ID = "0"
+WARN_ON_TORCH_QUATF_ACCESS = "1"
+
+[feature.ros-tools.dependencies]
+pytest = ">=9,<10"
+pyyaml = ">=6,<7"
+
+[feature.ros-tools.pypi-dependencies]
+numpy = ">=2,<3"
+
+[feature.real.dependencies]
+pyyaml = ">=6,<7"
+
+[feature.real.pypi-dependencies]
+numpy = ">=2,<3"
+lerobot = { version = "==0.5.1", extras = ["feetech"] }
+opencv-python = ">=4.10,<5"
+torch = { version = "==2.10.0+cu128", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "==0.25.0+cu128", index = "https://download.pytorch.org/whl/cu128" }
+
+[feature.sim.dependencies]
+pyyaml = ">=6,<7"
+coverage = "==7.6.1"
+# Isaac Lab의 PyPI tinyobjloader 0.1은 Windows wheel이 없어 sdist 빌드가 실패한다.
+# conda-forge prebuilt binding으로 동일 import를 제공한다.
+tinyobjloader = "==2.0.0rc13"
+
+[feature.sim.activation.env]
+OMNI_KIT_ACCEPT_EULA = "YES"
+PYTHONUTF8 = "1"
+PYTHONIOENCODING = "utf-8"
+
+[feature.sim.target.win.activation.env]
+ISAACLAB_SOURCE_ROOT = "D:\\SO101\\isaac6_ros\\IsaacLab"
+PYTHONPATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\lib\\site-packages;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_assets;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_physx;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_tasks;%PIXI_PROJECT_ROOT%\\src"
+
+[feature.sim.target.unix.activation.env]
+ISAACLAB_SOURCE_ROOT = "/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab"
+PYTHONPATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib/python3.12/site-packages:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_assets:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_physx:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_tasks:$PIXI_PROJECT_ROOT/src"
+
+[feature.sim.pypi-dependencies]
+numpy = ">=2,<3"
+hydra-core = "==1.3.2"
+isaacsim = { version = "==6.0.0.1", extras = ["all", "extscache", "ros2"] }
+torch = { version = "==2.10.0+cu128", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "==0.25.0+cu128", index = "https://download.pytorch.org/whl/cu128" }
+torchaudio = { version = "==2.10.0+cu128", index = "https://download.pytorch.org/whl/cu128" }
+isaaclab = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab" }
+isaaclab-assets = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_assets" }
+isaaclab-physx = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_physx" }
+isaaclab-tasks = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_tasks" }
+
+[system-requirements]
+cuda = "12.8"
+libc = "2.35"
+
+[pypi-options]
+# dependency override에도 CUDA wheel source가 적용되도록 workspace extra index에 둔다.
+extra-index-urls = [
+  "https://download.pytorch.org/whl/cu128",
+  "https://pypi.nvidia.com",
+]
+index-strategy = "unsafe-best-match"
+
+[pypi-options.dependency-overrides]
+numpy = ">=2,<3"
+opencv-python-headless = "*"
+typing-extensions = "*"
+cryptography = "*"
+packaging = "*"
+pillow = "==12.1.1"
+filelock = "*"
+fsspec = "*"
+mpmath = "*"
+coverage = "==7.6.1"
+psutil = "*"
+jinja2 = "*"
+torch = "==2.10.0+cu128"
+torchvision = "==0.25.0+cu128"
+torchaudio = "==2.10.0+cu128"
+
+[tasks]
+core-test = { cmd = "python tests/test_parity_core.py", default-environment = "ros-tools" }
+dataset-test = { cmd = "python tests/test_dataset_converter.py", default-environment = "real" }
+ros-build = { cmd = "python scripts/parity/build_ros_overlay.py", default-environment = "ros-tools" }
+zenoh-router = { cmd = "ros2 run rmw_zenoh_cpp rmw_zenohd", default-environment = "ros-tools" }
+sim-compatibility-check = { cmd = "isaacsim isaacsim.exp.compatibility_check", default-environment = "sim" }
+sim-compatibility-check-headless = { cmd = "python scripts/parity/run_isaac_compatibility_check.py", default-environment = "sim" }
+stack-check-sim = { cmd = "python scripts/parity/check_stack.py --environment sim", default-environment = "sim" }
+stack-check-real = { cmd = "python scripts/parity/check_stack.py --environment real", default-environment = "real" }
+stack-check-ros = { cmd = "python scripts/parity/check_stack.py --environment ros-tools", default-environment = "ros-tools" }

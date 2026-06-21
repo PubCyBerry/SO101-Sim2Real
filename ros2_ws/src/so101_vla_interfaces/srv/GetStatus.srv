@@ -1,0 +1,10 @@
+string client_id
+---
+bool ok
+string error
+string active_client_id
+uint64 lease_expires_at_ns
+bool inference_in_flight
+uint64 request_count
+uint64 failure_count
+string runtime_manifest_hash

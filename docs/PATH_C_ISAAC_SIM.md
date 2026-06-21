@@ -1,8 +1,11 @@
-# 경로 C — Host uv (Isaac Lab 시뮬)
+# 경로 C — Host uv (Isaac Sim 5.1 Rollback)
 
-> [← README](../README.md) · 관련: [경로 A (Windows native)](PATH_A_NATIVE.md) · [경로 B (Docker)](PATH_B_DOCKER.md) · [OpenUSD 가이드](OpenUSD_Guide.md) · [트러블슈팅](TROUBLESHOOTING.md)
+> [← README](../README.md) · [기본 Canonical 경로](PATH_F_CANONICAL_PARITY.md) · 관련: [경로 A (Windows native)](PATH_A_NATIVE.md) · [경로 B (Docker)](PATH_B_DOCKER.md) · [OpenUSD 가이드](OpenUSD_Guide.md) · [트러블슈팅](TROUBLESHOOTING.md)
 
 Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0`(펜→펜컵) · `SimToReal-SO101-PickCube-v0`(큐브→그릇) Gym 환경에서 시뮬 teleop · 오라클 정책 · 데이터 수집을 수행한다. 두 task 는 4객체+1컨테이너 구조가 동일해 씬·env cfg·MDP·카메라 리그를 공유 패턴으로 재사용한다(`pick_cube` 는 `pick_pen.mdp` 를 그대로 import). Docker 미연결 — RT 코어 GPU 가 있는 Windows 워크스테이션 또는 Linux 서버의 호스트 uv 환경에서 직접 실행한다.
+
+> 이 경로는 parity gate 통과 전까지 유지하는 rollback 기준선이다. 새 실행 계층은 Isaac Sim
+> `6.0.0.1` / Isaac Lab 3 / Pixi 기반 [경로 F](PATH_F_CANONICAL_PARITY.md)를 사용한다.
 
 > 사전 준비(인증)는 [README §공통 준비](../README.md#공통-준비) 참고.
 

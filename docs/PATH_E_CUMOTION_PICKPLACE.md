@@ -1,5 +1,8 @@
 # PATH E — Isaac Sim cube_desk + MoveIt2/cuMotion Pick & Place
 
+> 이 문서는 2026-06-09 Legacy WSL2/Isaac 5.1 실험 기록이다. 현재 canonical runtime은
+> [`PATH_F_CANONICAL_PARITY.md`](PATH_F_CANONICAL_PARITY.md)를 따른다.
+
 cube_desk 장면(Isaac Sim, Windows)에서 SO-101 이 큐브 4개를 그릇에 담는 pick & place 를
 **MoveIt2 path planning(cuMotion 우선, OMPL/Pilz 폴백)** 으로 구동한다. PATH C(Isaac Sim)와
 PATH D(WSL2 ROS2 MoveIt)를 `topic_based_ros2_control` 브릿지로 잇는다.

@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+# policy-server:0.5.1 위에 ROS 2 Jazzy + rmw_zenoh_cpp와 typed VLA runtime만 추가한다.
+FROM policy-server:0.5.1
+
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg2 lsb-release \
+    && curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+       -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo ${UBUNTU_CODENAME}) main" \
+       > /etc/apt/sources.list.d/ros2.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential \
+       ninja-build \
+       ros-jazzy-ros-base \
+       ros-jazzy-rmw-zenoh-cpp \
+       python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+# Root pyproject는 Isaac 5/LeRobot 0.4 의존성을 포함하므로 설치하지 않는다.
+# Isaac/ROS/LeRobot 독립 core만 기존 policy venv에 직접 배치한다.
+COPY src/so101_parity /opt/venv/lib/python3.12/site-packages/so101_parity
+
+WORKDIR /opt/so101_ros
+COPY ros2_ws/src/so101_vla_interfaces src/so101_vla_interfaces
+COPY ros2_ws/src/so101_vla_runtime src/so101_vla_runtime
+
+RUN source /opt/ros/jazzy/setup.bash \
+    && export PYTHONPATH="/opt/ros/jazzy/lib/python3.12/site-packages:/usr/lib/python3/dist-packages:${PYTHONPATH:-}" \
+    && colcon build \
+       --merge-install \
+       --cmake-args \
+         -DBUILD_TESTING=OFF \
+         -DPython3_EXECUTABLE=/opt/venv/bin/python
+
+COPY docker/policy-ros-entrypoint.sh /usr/local/bin/policy-ros-entrypoint.sh
+RUN chmod +x /usr/local/bin/policy-ros-entrypoint.sh
+
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp \
+    ROS_DISTRO=jazzy \
+    ROS_DOMAIN_ID=0 \
+    PYTHONPATH="/opt/so101_ros/install/lib/python3.12/site-packages:/opt/ros/jazzy/lib/python3.12/site-packages:/usr/lib/python3/dist-packages:/opt/venv/lib/python3.12/site-packages" \
+    LD_LIBRARY_PATH="/opt/so101_ros/install/lib:/opt/ros/jazzy/lib:${LD_LIBRARY_PATH}"
+
+ENTRYPOINT ["/usr/local/bin/policy-ros-entrypoint.sh"]
+CMD ["vla-server"]

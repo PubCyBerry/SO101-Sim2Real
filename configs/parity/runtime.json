@@ -1,0 +1,23 @@
+{
+  "schema": "so101-parity-runtime-v1",
+  "policy_io": "configs/parity/policy_io.json",
+  "calibration": "calibration/so101_canonical.json",
+  "fps": 30,
+  "executor": {
+    "mode": "single_flight_non_overlapping",
+    "prefetch_lead_formula": "max(8, ceil(p99_latency_seconds * 30) + 2)",
+    "prefetch_lead_actions_min": 8,
+    "timeout_ms": 2000,
+    "underrun_behavior": "hold_last_target",
+    "underrun_advances_policy_step": false,
+    "overlap_aggregation": "disabled",
+    "rtc": "disabled"
+  },
+  "initial_home_target": [0.0, -1.3, 1.2, -0.3490658504, -1.5707963268, 40.0],
+  "motion_limits": {
+    "velocity_per_s": [2.0, 2.0, 2.0, 2.5, 3.0, 80.0],
+    "acceleration_per_s2": [4.0, 4.0, 4.0, 5.0, 6.0, 160.0],
+    "jerk_per_s3": [20.0, 20.0, 20.0, 25.0, 30.0, 800.0]
+  },
+  "trace_schema": "so101-parity-trace-v1"
+}

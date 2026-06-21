@@ -134,6 +134,14 @@ ipython_config.py
 .pixi/*
 !.pixi/config.toml
 
+# Canonical parity runtime-local installations. The server runtime repository keeps
+# these large mutable artifacts beside tracked source without committing them.
+/IsaacLab/
+/bin/
+/ros2_ws/build/
+/ros2_ws/install/
+/ros2_ws/log/
+
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
 

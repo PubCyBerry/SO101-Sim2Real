@@ -257,6 +257,63 @@ services:
     stdin_open: true
     tty: true
 
+  # ── Canonical VLA ROS 2 Jazzy server ───────────────────────────────────
+  # 기존 policy-server:0.5.1 이미지에 ROS 2 Jazzy/rmw_zenoh_cpp와 typed
+  # so101_vla_interfaces/runtime만 추가한다. checkpoint는 client instruction으로
+  # 받지 않고 VLA_RUNTIME_MANIFEST에서 startup 시 고정한다.
+  vla-ros-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.policy_ros
+    image: so101-vla-ros-server:jazzy
+    container_name: so101_vla_ros_server
+    restart: "no"
+    user: "${UID:-1000}:${GID:-1000}"
+    depends_on:
+      - zenoh-router
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ..:/workspace/project:ro
+      - ../logs:/workspace/logs
+      - ../outputs:/workspace/outputs
+      - hf_cache:/workspace/.cache/huggingface
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_ROUTER_CHECK_ATTEMPTS: "10"
+      ZENOH_CONFIG_OVERRIDE: 'connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=true'
+      VLA_RUNTIME_MANIFEST: /workspace/project/configs/parity/runtime_manifest.mock.json
+      VLA_CONTRACT_PATH: /workspace/project/configs/parity/policy_io.json
+      VLA_CALIBRATION_PATH: /workspace/project/calibration/so101_canonical.json
+      VLA_RUNTIME_CONFIG_PATH: /workspace/project/configs/parity/runtime.json
+      VLA_PIXI_LOCK_PATH: /workspace/project/pixi.lock
+      HF_HOME: /workspace/.cache/huggingface
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    network_mode: host
+    ipc: host
+    command: ["vla-server"]
+
+  # konan147:7447 단일 router. Windows 노드는 client mode로 이 endpoint에 직접 연결한다.
+  zenoh-router:
+    image: so101-vla-ros-server:jazzy
+    container_name: so101_zenoh_router
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ..:/workspace/project:ro
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_CONFIG_OVERRIDE: 'listen/endpoints=["tcp/0.0.0.0:7447"];transport/shared_memory/enabled=true'
+    network_mode: host
+    ipc: host
+    command: ["zenoh-router"]
+
   # ── VLA 추론 ROS 노드 (sim) ───────────────────────────────────────────
   # 상주 Isaac Sim bridge(호스트: scripts/sim/run_cube_desk_ros_bridge.sh)가 publish 하는
   # /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 policy-server(gRPC)로

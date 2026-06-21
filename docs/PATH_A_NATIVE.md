@@ -1,8 +1,12 @@
-# 경로 A — Windows native + uv (실기기)
+# 경로 A — Windows native + uv (Legacy 실기기)
 
-> [← README](../README.md) · 관련: [경로 B (Docker)](PATH_B_DOCKER.md) · [경로 C (Isaac Lab 시뮬)](PATH_C_ISAAC_SIM.md) · [트러블슈팅](TROUBLESHOOTING.md)
+> [← README](../README.md) · [기본 Canonical 경로](PATH_F_CANONICAL_PARITY.md) · 관련: [경로 B (Docker)](PATH_B_DOCKER.md) · [경로 C (Isaac Lab 시뮬)](PATH_C_ISAAC_SIM.md) · [트러블슈팅](TROUBLESHOOTING.md)
 
 WSL2 / Docker / usbipd 를 거치지 않고 호스트 Windows 의 uv venv 에서 직접 `lerobot-*` CLI 를 호출한다. 직렬 포트는 `COMx`, 카메라는 OpenCV index. **빠른 반복·디버깅**에 유리한 경로.
+
+> 이 문서는 teleop·record·학습용 Legacy LeRobot 경로다. Isaac Sim 6과 실기기의 동일 canonical
+> executor 실행은 [경로 F](PATH_F_CANONICAL_PARITY.md)를 사용한다. 두 환경의 dependency와
+> calibration을 섞지 않는다.
 
 > 사전 준비(인증, GPU/CUDA 설치 확인)는 [README §공통 준비](../README.md#공통-준비) 참고.
 
@@ -408,6 +412,13 @@ LeRobot 0.4.4 의 async `robot_client` 는 built-in SO follower config 등록 �
 > - GR00T N1.5 fine-tune 체크포인트는 `top/wrist/front` 키를 그대로 기대한다. `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 과 함께 `--robot.cameras` 키도 `top/wrist/front` 로 둔다.
 >
 > 🖥️ **rerun viewer**: 명령 앞에 `DISPLAY_DATA=true` 를 붙이면 shim 이 control loop 의 관측(카메라·state)·액션을 rerun 에 로깅해 로컬 뷰어를 띄운다. 원격 송출은 `DISPLAY_IP`/`DISPLAY_PORT` 추가.
+>
+> 🤏 **gripper scale 보정(Option B, sim 학습 모델 → 실기기 추론에서만)**: sim 데이터는 gripper 를 `rad×31.75` 로 기록하나 실기기 `SOFollower` 는 `RANGE_0_100`(캘리브 full-travel %)이라, 보정 없이는 그리퍼가 **sim 의도(37°)의 절반(~20°)만 열린다**(`docs/SIM_REAL_INFERENCE_PARITY.md §5.2`). 명령 앞에 `GRIPPER_AFFINE=1` 만 붙이면 shim 이 **양방향**(closed-loop) affine 을 건다 — `send_action` sim→real, `get_observation` real→sim, gripper 만(arm 불변). 기본 앵커=물리(sim[-1.59,27=48.7°]↔real[1,51], real teleop grasp-open 기준):
+> ```bash
+> GRIPPER_AFFINE=1 \
+>   uv run python ./docker/policy-client-shim.py ...   # real open/close 실측 시 GRIPPER_REAL_OPEN/CLOSE 로 정밀화
+> ```
+> ⚠ **sim 학습 모델일 때만** 켠다. real 학습 모델(예: pick_cube_v2 teleop 데이터)은 [0,100] 네이티브 출력이라 affine 켜면 이중보정→오작동 → 끄고 기존대로 실행. 모델별 앵커는 `scripts/sim/inspect_dataset_distribution.py` 로 재산출.
 
 ```bash
 uv run python ./docker/policy-client-shim.py \

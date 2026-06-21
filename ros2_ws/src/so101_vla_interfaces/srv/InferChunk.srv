@@ -1,0 +1,24 @@
+string client_id
+string lease_token
+uint64 request_id
+uint64 observation_step
+uint64 start_step
+string contract_hash
+string runtime_manifest_hash
+string expected_checkpoint_hash
+string task
+float32[6] canonical_state
+sensor_msgs/Image top_image
+sensor_msgs/Image wrist_image
+sensor_msgs/Image front_image
+---
+bool ok
+string error
+uint64 request_id
+uint64 start_step
+uint32 action_count
+float32[] canonical_actions
+float64 inference_latency_ms
+string contract_hash
+string runtime_manifest_hash
+string checkpoint_hash

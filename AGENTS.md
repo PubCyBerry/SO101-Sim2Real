@@ -10,18 +10,34 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `docs/PATH_A_NATIVE.md` | Windows 네이티브 실행 |
 | `docs/PATH_B_DOCKER.md` | Docker 실기기 경로 |
 | `docs/PATH_C_ISAAC_SIM.md` | Isaac Sim 시뮬 경로 |
+| `docs/PATH_F_CANONICAL_PARITY.md` | 기본 canonical parity 설치·운영·검증·안전 절차 |
 | `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
 | `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
 | `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
 | `docs/PATH_GROOT_N17.md` | GR00T-N1.7 네이티브 정책 (별도 gr00t 이미지 finetune + ZMQ 서버 + gRPC↔ZMQ bridge → 기존 sim 폐루프) |
-| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🟢 gripper offset=Option A 절대기록 해소·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic·🟠 gripper scale 캘리브) |
+| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🟢 gripper offset=Option A 절대기록 해소·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic·🔴 gripper scale·🟠 arm 영점/부호 per-joint affine §5.2·§5.3) |
+| `docs/SIM_REAL_SYNC_HANDOFF.md` | sim↔real 동등 추론 **동기화 설계 논의 인계**(2026-06-19) — 현 per-joint affine=임시, 정석안 A(real-native 데이터 baked)/B(real 학습)/C(delta action)+`so101_frame` 코덱+parity 검증 하네스. 다음 세션 결정 리스트 |
+| `docs/SO101_CANONICAL_PARITY_MIGRATION_REPORT.md` | Isaac Sim 6 / Isaac Lab 3 / ROS 2 Jazzy migration 구현·stack·rollback 검증 |
+| `docs/SO101_CANONICAL_PARITY_REPORT.md` | canonical executor/calibration/dataset/dynamics parity gate 현황과 실측 절차 |
 | `docs/PICKCUBE_RL_REF_COMPARISON.md` | 성공 레퍼런스(`ref_repos/pick_and_place`, IsaacLab Lift-Cube-Place) 대비 분석 + reward/arch/gamma 정합(`--skill ref`) — 성공 8할=강한 그리퍼+평면 place, 우리 블로커=grasp 물리 재확인 |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
 | `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
 | `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
 | `docs/PICKCUBE_CUROBO_PROJECT.md` | cuRobo PickCube 마스터(P0~P6) — 배치 충돌 플래닝 + **sim→train→sim VLA 전체 루프**(render-batch 데이터 → SmolVLA 학습 → ROS2 추론). §13=재현·함정 |
 
-## 두 실행 경로
+## 실행 경로
+
+Canonical parity가 현재 기본 실행 경로다.
+
+| 항목 | Windows / Isaac client | konan147 server |
+|---|---|---|
+| 실행 | native Pixi `sim`/`real`/`ros-tools` | 동일 tracked Pixi environments |
+| stack | Isaac Sim 6.0.0.1, Lab 3 beta2, ROS Jazzy | 동일 |
+| protocol | `rmw_zenoh_cpp` client mode | router `:7447` + VLA server |
+| 설치 | `D:\SO101\isaac6_ros` (`.pixi` Junction) | `/DISK1/so101-sim2real/runtime/isaac6_ros` |
+| 진입점 | `scripts/parity/launch.py` | `scripts/parity/bootstrap_server.sh`, Docker Compose |
+
+아래 표는 rollback/학습용 Legacy 경로다.
 
 | | 실기기 경로 | 시뮬 경로 |
 |---|---|---|
@@ -44,7 +60,9 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | **Storage** | NVMe SSD 512 GB + SATA HDD 1 TB | NVMe SSD 477 GB (ext4 `/`) + SATA HDD 3.6 TB (`/DISK1`) |
 | **GPU** | RTX A4000 16 GB (driver 596.36, CUDA 13.2, cc 8.6 Ampere) | RTX PRO 5000 Blackwell 48 GB GDDR7 (driver 580.95.05-open, cc 12.0 Blackwell) |
 
-테스트 스위트·lint config 없음 (`tests/`, `ruff.toml`, `pre-commit-config.yaml` 등 미정의). 변경 검증 = 컨테이너 빌드 + 실기기 실행 + `uv run` 시뮬 1회 실행.
+Canonical test는 `tests/test_parity_core.py` 17개와
+`tests/test_dataset_converter.py` 1개가 있다. Legacy 경로에는 별도 통합 test suite가 없어
+컨테이너 build와 해당 smoke 실행으로 검증한다.
 
 ## Docker 컨테이너 구조 (실기기 경로)
 
@@ -54,6 +72,8 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 |---|---|---|---|
 | `lerobot` | `lerobot-so101:0.4.4` / `Dockerfile.lerobot` | Python 3.11 + LeRobot 0.4.4 (teleop deps) | teleop / record / replay / train / eval / dataset-viz |
 | `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async deps) | async inference gRPC 서버 (+ `policy-server-groot` bridge) |
+| `vla-ros-server` | `so101-vla-ros-server:jazzy` / `Dockerfile.policy_ros` | policy-server 0.5.1 + ROS Jazzy + `rmw_zenoh_cpp` | canonical typed VLA server(replay/ACT/SmolVLA/GR00T-ZMQ) |
+| `zenoh-router` | `so101-vla-ros-server:jazzy` | ROS Jazzy + `rmw_zenoh_cpp` | `konan147:7447` canonical router |
 | `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 |
 | `gr00t` | `gr00t-n17:ea` / `ref_repos/Isaac-GR00T/docker/Dockerfile`(무수정) | Python 3.10 + transformers 4.57 + gr00t | GR00T-N1.7 convert / finetune / ZMQ 추론(:5555) |
 
@@ -94,7 +114,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | 파일 | 용도 |
 |---|---|
 | `docker/groot_compat_patch.py` | `Dockerfile.policy` 빌드 시 `lerobot[smolvla,async]==0.5.1` 설치 직후 1회 실행. transformers 5.3 + torch 2.10 에서 LeRobot 0.5.1 GR00T wrapper 가 깨지는 4지점을 site-packages 에서 멱등 패치. 형태가 다르면 `RuntimeError` 로 빌드 중단(버전 트립와이어) — lerobot/transformers 업그레이드 시 이 패치부터 점검. |
-| `docker/policy-client-shim.py` | `policy-client` 모드 실제 진입점. lerobot 0.4.4 `robot_client.py` 가 built-in robot config 모듈을 import 안 해 `--robot.type` 이 거부되는 회귀(huggingface/lerobot#3078)를 선행 import 로 보강. rerun viewer(`DISPLAY_DATA=true`) monkey patch 유효를 위해 `async_client()` 직접 호출(runpy 미사용). |
+| `docker/policy-client-shim.py` | `policy-client` 모드 실제 진입점. lerobot 0.4.4 `robot_client.py` 가 built-in robot config 모듈을 import 안 해 `--robot.type` 이 거부되는 회귀(huggingface/lerobot#3078)를 선행 import 로 보강. rerun viewer(`DISPLAY_DATA=true`) monkey patch 유효를 위해 `async_client()` 직접 호출(runpy 미사용). **+ per-joint affine(Option B, sim-모델→real 전용)**: `GRIPPER_AFFINE=1` 일 때 `SOFollower` **양방향 6축** monkey-patch — `get_observation` real→model `A·x+B`, `send_action` model→real `(x−B)/A`(closed-loop OOD 방지, gripper [0,100] clamp). arm=`AFFINE_<JOINT>_SIGN/OFFSET`(기본 identity 1,0 → 측정 전 무변경), gripper=anchor env(기본 sim[-1.59,27]↔real[1,51]). real 학습 모델은 끔(이중보정). 측정=`scripts/test/measure_joint_affine.py`(paired-pose 피팅)·`read_position.py`. SmolVLA 정규화는 pre/post 동일 stats 공유라 프레임 보존(추가 스케일 없음). 상세 `docs/SIM_REAL_INFERENCE_PARITY.md §5.2·§5.3` |
 | `docker/lerobot_keyboard_stdin.py` + `.pth` | WSLg X 서버가 Windows Terminal 키 입력을 못 보는 환경에서 pynput 리스너 대신 `/dev/tty` + termios cbreak 리더로 `init_keyboard_listener` 대체. `.pth` 가 Python 시작 시 hook 설치 (lerobot 이미지 site-packages 에 COPY). |
 
 ### `.env` / 모델 프로필
@@ -148,6 +168,9 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
 | `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
 | `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼. **그리퍼 기록 규약 = 절대 joint target**(2026-06-18 Option A, post-offset/real native; 옛 pre-offset −0.20 폐기 → sim·real 추론 둘 다 `GRIPPER_CMD_OFFSET=0`, 발산 0). curobo demo/batch·rollout 동일 적용. 상세 `docs/SIM_REAL_INFERENCE_PARITY.md §5.1` |
+| `sim/inspect_dataset_distribution.py` | **sim↔real parity 진단**(Isaac 무의존) — LeRobot v3 데이터셋(`--root`/`--repo_id`) 6축 분포(min/q01/q50/q99/max/mean/std) + arm degree 판정(\|값\|>100°) + **gripper scale mismatch 정량**(sim `×31.75` vs real `RANGE_0_100`) + Option B affine 권장 env 출력. pyarrow 직접 읽기. 상세 `docs/SIM_REAL_INFERENCE_PARITY.md §5.2` |
+| `sim/read_sim_pose.py` | **per-joint affine 측정(sim 쪽)** — PickCube 로봇을 지정 joint config(기본 P1 zero/P2 READY/P3 distinct)로 순환 구동하며 achieved joint 를 **데이터셋 프레임**(arm deg·gripper rad×31.75, recorder 와 동일 `to_lerobot_units`)으로 출력. GUI 로 포즈 보고 실기기서 같은 포즈 재현. 짝 = `scripts/test/{read_position,measure_joint_affine}.py`. 상세 `§5.3` |
+| `parity/bootstrap_server.sh` · `parity/launch.py` | **Isaac 6 / ROS Jazzy canonical runtime** — konan147 고정 Pixi/IsaacLab 설치·검증과 공통 validate/mock-probe/sim/real launcher. 서버 설치는 `/DISK1/so101-sim2real/runtime/isaac6_ros`에서 `bootstrap_server.sh`; 실기기 motion은 validated calibration + `--enable-motion` + 비상 차단 확인 없이는 fail-closed. |
 | `run_4cube_1024_pipeline.sh` | **무중단 학습 파이프라인**(메인 리포 실행) — 4-cube 1024 gen → HF push → ACT/SmolVLA/GR00T-N1.7 **등량 640k samples** 학습(b32×20k / b32×20k / b8×80k) → 모델 push. 직렬·VRAM 게이트·Stage1 skip-if-complete·`POLICY_PROFILE` 셸 프리픽스·hf `--token`. 로그 `outputs/p5_logs/4cube1024_*.log` |
 | `run_4cube_1024_eval.sh` | 3모델 **closed-loop sim eval**(bridge `--eval` + policy-server + vla-ros) 직렬 자동 — 동일 N·num_cubes 공정 비교, per-모델 `outputs/vla_eval_*_4cube_1024.json`. 임시 `env/*_4ceval.env` 프로필(모델 repoint)로 vla node `_load_env` override 회피 |
 | `demo_vla.sh` | **VLA 라이브 데모 런처**(eval 아님, 연속 추론) — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. ACT·SmolVLA(policy-server) / GR00T(zmq+bridge) 자동 배선, 임시 `env/*_demo.env` 생성·정리, livestream(WebRTC :49100) 관전 |

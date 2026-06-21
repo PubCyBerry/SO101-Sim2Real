@@ -2,6 +2,14 @@
 
 > 조사 기준일: 2026-06-15
 >
+> **구현 상태 갱신(2026-06-22):** 이 문서는 migration 착수 전 조사 기록이다. 권고한 병행
+> 경로가 구현되어 Isaac Sim `6.0.0.1`, Isaac Lab commit
+> `28a37cecdd433c22d9eabd6a5954add9f13a8951`, ROS 2 Jazzy,
+> `rmw_zenoh_cpp`, Pixi 기반 software gate를 Windows와 konan147에서 통과했다.
+> 현재 설치·실행은 [`PATH_F_CANONICAL_PARITY.md`](PATH_F_CANONICAL_PARITY.md), 결과는
+> [`SO101_CANONICAL_PARITY_MIGRATION_REPORT.md`](SO101_CANONICAL_PARITY_MIGRATION_REPORT.md)를
+> 기준으로 한다. 아래의 “현재 프로젝트” 표현은 2026-06-15 당시 상태다.
+>
 > 현재 프로젝트: Isaac Sim 5.1.0 + Isaac Lab 2.3.2 + Python 3.11 + PyTorch 2.7 + NumPy 1.26
 >
 > 검토 대상: Isaac Sim 6.0.x + Isaac Lab 3.0 beta 계열

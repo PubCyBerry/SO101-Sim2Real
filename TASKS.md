@@ -1,7 +1,7 @@
 # TASKS — SO-101 Sim2Real 자율 개발
 
 > **단일 진실 공급원.** Codex가 갱신. 매 사이클 SELECT 전 재로드.
-> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist} 480×640@30 · PickCube task 문자열).
+> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist,front} 480×640@30 · PickCube task 문자열).
 > 자율 계약: 마스터플랜 §0 — A~E 무인, F~G만 사용자 게이트.
 > RELOAD: 매 사이클 시작에 마스터플랜 §0·§1·§7 + 본 파일 + `CONTEXT.md` 최근 인계 1~2개.
 > 복구불가 블로커: 동일 task 3회 실패 시 `blocked` 기록 후 의존 없는 task로 우회.
@@ -9,6 +9,16 @@
 >
 > 필드: `id | 설명 | machine | dep | verify(명령/기준) | status`
 > 상태: `todo | in_progress | blocked | done | gated`. verify 통과 전 done 금지. blocked는 사유 1줄.
+
+---
+
+## Canonical parity runtime (2026-06-22)
+
+- [x] **CP.1** Isaac Sim 6.0.0.1 / Isaac Lab 3 beta2 / ROS Jazzy / Pixi 고정 stack을 Windows와 konan147에 설치 | status:done
+- [x] **CP.2** `so101-canonical-v1` codec, calibration, deterministic executor, trace 구현 | status:done
+- [x] **CP.3** typed ROS VLA server + Isaac/real clients + replay backend + Zenoh router 구현 | status:done
+- [x] **CP.4** 양쪽 compatibility, 3-camera, 32-step client, transport, rollback software gate 통과 | status:done
+- [ ] **CP.5** paired pose·caliper·EEPROM readback·real dynamics·physical parity | status:gated — 사용자 현장 보조와 비상 전원 차단 준비 필요
 
 ---
 

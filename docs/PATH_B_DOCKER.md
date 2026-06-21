@@ -1,8 +1,11 @@
-# 경로 B — Docker 컨테이너 (실기기)
+# 경로 B — Docker 컨테이너 (Legacy 실기기)
 
-> [← README](../README.md) · 관련: [경로 A (Windows native)](PATH_A_NATIVE.md) · [경로 C (Isaac Lab 시뮬)](PATH_C_ISAAC_SIM.md) · [원격 텔레옵·수집](REMOTE_TELEOP_RECORD.md) · [트러블슈팅](TROUBLESHOOTING.md)
+> [← README](../README.md) · [기본 Canonical 경로](PATH_F_CANONICAL_PARITY.md) · 관련: [경로 A (Windows native)](PATH_A_NATIVE.md) · [경로 C (Isaac Lab 시뮬)](PATH_C_ISAAC_SIM.md) · [트러블슈팅](TROUBLESHOOTING.md)
 
 격리된 Docker 환경에서 실기기 워크플로를 실행한다. Linux 학습 서버 배포와 async inference policy server 분리에 적합한 경로. Windows host → usbipd-win → WSL2 → Docker Desktop 경유로 USB 장치를 전달한다.
+
+> 이 문서의 WSL2/usbipd 구조는 기존 LeRobot workflow 전용이다. Canonical ROS Jazzy real client는
+> Windows native Pixi에서 실행하며 WSL2와 usbipd를 사용하지 않는다.
 
 > 사전 준비(인증, `.env` 작성, Docker/usbipd 설치 확인)는 [README §공통 준비](../README.md#공통-준비) 참고. native 명령과의 대응은 [경로 A 부록](PATH_A_NATIVE.md#부록-docker-mode-대응표).
 

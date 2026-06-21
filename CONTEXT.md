@@ -13,11 +13,58 @@
 
 ---
 
+## 작업 인계 (2026-06-21 — SO-101 Canonical Parity + Isaac Sim 6 / ROS 2 Jazzy / 🟠 software 완료·실측 gate 대기)
+
+- **목표/계약**: 학습 없이 `so101-canonical-v1`(arm=절대 URDF rad, gripper=jaw aperture mm, absolute target, 30Hz, top/wrist/front RGB uint8 480×640)을 sim/real 공통 executor로 실행. ROS 2 Jazzy + `rmw_zenoh_cpp`, single-flight deterministic chunk. 기존 Isaac 5.1은 rollback 유지.
+- **고정 stack 완료**: Windows `D:\SO101\isaac6_ros`, 서버 `/DISK1/so101-sim2real/runtime/isaac6_ros`에 동일 `pixi.toml`/`pixi.lock`; Isaac Sim `6.0.0.1`, Isaac Lab source `28a37cecdd433c22d9eabd6a5954add9f13a8951`, Pixi `0.70.2`, Python `3.12.13`, torch `2.10.0+cu128`, ROS Jazzy, PhysX. lock SHA256=`9736a03f...fcc5`. 두 머신 `sim`/`real`/`ros-tools` 설치, stack check·공식 Checker 기반 compatibility 통과. 서버 재현 명령=`bash scripts/parity/bootstrap_server.sh`; `--check-only --smoke --probe` 전체 통과.
+- **Isaac 6 경로 완료**: `SimToReal-SO101-PickCube-Isaac6Parity-v0`, XYZW·`ProxyArray.torch`·`CameraCfg`·`isaaclab_physx.PhysxCfg`·`env.step()` 30Hz. 공식 quaternion finder review 0, removed write API/legacy Core API 0. Windows/서버 3-camera `[1,480,640,3] uint8` smoke 통과.
+- **공통 runtime 완료**: 독립 `src/so101_parity/`(contract/calibration/PCHIP/model codec/manifest/lease/executor/limiter/trace/dynamics), `src/sim_to_real/parity/` compatibility wrapper. underrun hold 시 logical step 정지, exact chunk boundary, one in-flight, timeout safe stop, prefetch formula, 공통 JSONL trace. core **17/17**, dataset converter **1/1** 통과.
+- **ROS 완료**: typed `/get_runtime_info`, `/infer_chunk`, `/status`; replay/direct ACT·SmolVLA/GR00T-ZMQ backend, single motion lease, mismatch fail-closed. 서버 `so101-zenoh-router` + `so101-vla-replay` 실행 중. Windows/서버 ROS overlay 2 package build 통과. Windows·서버 Isaac6 sim client 각 32/32, underrun/timeout/stale 0.
+- **transport**: Windows→LAN `tcp/10.10.16.147:7447`, compression. gradient raw RGB 2,764,800 bytes 100회 p50=17.59ms/p99=18.83ms 통과. 서버 local 재검증 p50=8.62ms/p99=9.72ms. incompressible random은 Windows→server p99=42.53ms 미통과 → 실제 camera frame 재측정 필요. lease reject·contract mismatch reject·chunk bitwise 동일.
+- **hash 최신값**: contract=`8391f48d...2414`, calibration=`6112d10a...1c21c`, motor profile=`d73d0b9e...61aa`, runtime manifest=`9cb11de2...ffd9`, replay checkpoint=`5efd76d1...9024`.
+- **Calibration 상태**: sim gripper 9점 자동 측정(2.264~109.356mm, PCHIP round-trip `4.27e-14mm`) 완료. real paired arm 10~20점, caliper 7~9점, EEPROM torque-off readback 미실행. 따라서 `validated=false`, `readback_validated=false`, real curve 없음이며 real motion fail-closed.
+- **Real client 안전**: Windows native direct Feetech bus, `SOFollower.configure()` 호출 없음, preflight torque-off readback 후에만 torque. motion write는 `Goal_Position` 단일 `sync_write`. dry-run hardware 미접근 통과. `launch.py real-motion`은 validated bundle + `--enable-motion` + `--confirm-emergency-cutoff-ready` 모두 없으면 거부.
+- **Dataset**: 원본 불변. `pick_cube_v2` 48,873f/100ep와 3cam video frame count 일치하나 provenance/calibration 미검증으로 변환 차단. `pick_cube` 18,526f, `pick_pen` 53,985f는 source calibration 복구 불가로 quarantine. converter는 synthetic tiny v3 dataset에서 Parquet/stats/video 검증까지 통과.
+- **Dynamics**: no-load/cube payload 각 5,190 step·173s plan(hold/step/ramp/triangle/multisine/compound/gripper sweep), sim runner 10-step smoke 통과. ARX delay/gain/damping/limit/deadband/backlash/droop fitter 구현. real trace 전이므로 fit report는 blocked.
+- **Rollback**: 서버 legacy checkout `4b909db`, Isaac Sim 5.1 `SimToReal-SO101-PickCube-v0` env smoke 10 step/action·obs 6축/reset0 통과.
+- **문서**: `docs/SO101_CANONICAL_PARITY_MIGRATION_REPORT.md`, `docs/SO101_CANONICAL_PARITY_REPORT.md`, `docs/TROUBLESHOOTING.md` 갱신.
+- **다음 사용자 gate**: ① 비상 전원 차단 준비 확인 후 torque-off `real-readback`(torque는 켜지 않음) ② paired pose·caliper 입력 ③ manifest 재생성/server restart ④ canonical dataset 변환 ⑤ no-load real dynamics ⑥ 사용자 payload 장착 확인 후 payload dynamics ⑦ 최종 physical parity. **`--enable-motion` 전까지 torque 금지.**
+
+---
+
+## 작업 인계 (2026-06-19 — sim↔real gripper scale mismatch 확정·진단도구·Option B affine / ✅ 완료)
+
+- **문제**: SmolVLA `so101_smolvla_sim_pick_cube_4cube_1024` 실기기 추론 시 그리퍼가 Isaac 보다 덜 열림(사용자 보고). 원인 추적.
+- **✅ 근본원인 확정·정량(서버 없이, Isaac 불요)**: **gripper scale mismatch**. sim 데이터 gripper=`rad×31.75`(`lerobot_units.py`), 실기기 `SOFollower` gripper=항상 `MotorNormMode.RANGE_0_100`(`so_follower.py:60`, use_degrees 무관)=캘리브 full-travel %. 두 척도 캘리브 안 됨 → 같은 모델 출력의 물리 의미가 sim≠real. 모델 HF 캐시 baked stats(`policy_preprocessor_step_5_normalizer_processor.safetensors`) 추출: 모델 grasp-open=20.64(=0.65rad=37°), 무보정 real 은 ~20° → **약 절반만 열림**. **arm 은 정합**: `wrist_roll` max 156°(>100)→DEGREE 확정, real `use_degrees` 설치본 기본값 True(`config_so_follower.py:43`).
+- **real teleop 교차검증**: `datasets/pick_cube_v2`(실기기 teleop 100ep) gripper q99=50.9/max 73.3/min 0.4. **사용자 정정: teleop 은 grasp 에 ~45-60° 만, 완전개방 안 함** → grasp-open 기준 = q99≈51. sim grasp-open 0.85rad=48.7° 과 같은 동작이라 **sim 27 ↔ real 51** 페어링. arm 분포 real·sim 거의 겹침(영점·부호도 정합).
+- **신규 도구 2개(미커밋)**: ① `scripts/sim/inspect_dataset_distribution.py` — 6축 분포+degree판정+affine env 출력(pyarrow, 스모크 OK). ② `docker/policy-client-shim.py` Option B **양방향** affine(`GRIPPER_AFFINE=1`, sim-모델→real 전용): `send_action` sim→real `A·g+B`(clamp) + `get_observation` real→sim `(g−B)/A`(closed-loop OOD 방지). gripper.pos 만, arm 불변. 기본 물리 앵커 sim[-1.59,27]↔real[1,51](A=1.749,B=3.78). 검증 PASS(model 20.64→real 39.9≈38°=sim 의도, state real[1,51]→model[-1.6,27] 분포 정합).
+- **문서 갱신**: `docs/SIM_REAL_INFERENCE_PARITY.md`(§5 표 #9·§5.2·§6·§7·§8), `AGENTS.md`(스크립트표+shim행), `docs/PATH_A_NATIVE.md`. memory [[project-gripper-scale-sim-real-mismatch]].
+- **남은 일**: real 닫힘/grasp-열림 [0,100] **실측**으로 앵커 확정(현재 1/51 은 teleop 분포 추정). affine 은 단위만 고침 — 모델 자체 under-command(37°)는 못 고침, 더 벌리려면 REAL_OPEN↑ 또는 Option A(real 데이터 재학습). real 학습 모델 추론 시 GRIPPER_AFFINE 끔(이중보정).
+- **후속(2026-06-19 말)**: arm 도 per-joint affine 으로 shim 확장(6축 양방향, `AFFINE_<J>_SIGN/OFFSET`+`GRIPPER_A/B`), 측정도구 `scripts/sim/read_sim_pose.py`(sim, GUI 크래시=enable_cameras 수정)+`scripts/test/measure_joint_affine.py`(real paired-pose 피팅) 신설. 서버=이 PC sim **byte-identical 검증**(md5). 사용자 측정·임시 적용 완료. **정석 동기화 구조는 미결정** → 인계 문서 [`docs/SIM_REAL_SYNC_HANDOFF.md`](docs/SIM_REAL_SYNC_HANDOFF.md)(옵션 A/B/C·`so101_frame` 코덱·parity 하네스·결정 리스트). 다음 세션 본격 논의. ⚠ 사용자 측정 affine 값·`measure_joint_affine.py` 수정분 미기록 → 다음 세션 시작 시 확보.
+
+---
+
 ## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)
 
 - **✅ 완료(2026-06-18 13:24)**: 데이터 1024ep(504515 frame) + **3모델 전부 학습·HF push 완료**. ACT(b32×20k rc=0)·SmolVLA(b32×20k rc=0)·GR00T-N1.7(b8×80k rc=0, loss 0.13→0.055), 전부 640k samples 등량. HF: `taehunkim/so101_sim_pick_cube_4cube_1024`(데이터) + `so101_{act,smolvla,groot_n17}_sim_pick_cube_4cube_1024`(모델). 로컬 ckpt `outputs/train/...`(GR00T=checkpoint-80000 24GB). closed-loop eval=사용자 직접(범위 밖).
 - **실행 중 처치 4건**(상세 memory [[4cube-1024-equal-compute-pipeline]]): ①gen 1024 finalize 후 Isaac teardown 좀비→kill+Stage1 skip가드 ②`-e POLICY_PROFILE` 보간 안 됨→셸-env 프리픽스(ACT가 smolvla로 오학습된 것 정정·재실행) ③datasets/→/DISK1 심볼릭(NVMe 디스크압) ④호스트 huggingface-cli upload 401→`--token` 주입. 스크립트 `scripts/run_4cube_1024_pipeline.sh`(미커밋) 전부 반영.
 - **✅ closed-loop sim eval(2026-06-18, N=10·4-cube·seed0)**: 셋 다 **all-4 완주 0%**(drift 벽 지속). per-cube GR00T **2.5%**(1개 안착)>ACT/SmolVLA 0%, ever-in-bowl **SmolVLA 20%>GR00T 12.5%>ACT 5%**. 즉 SmolVLA 관여 최고·GR00T 유일 완성. open-loop 정상이나 closed-loop drift 벽 4cube-1024+등량학습으로도 안 깨짐. 결과 `outputs/vla_eval_{act,smolvla,groot_n17}_4cube_1024.json`, 스크립트 `scripts/run_4cube_1024_eval.sh`(미커밋), 임시 프로필 `env/*_4ceval.env`. eval 플러밍 함정(vla node `_load_env` override·JSON model 라벨 stale)=memory. 다음=recovery 궤적·VLA-RFT.
+
+---
+
+## 작업 인계 (2026-06-17 야간 — 실기기 무인 자율 pick-place 수집 파이프라인 / 🟠 조명 블로커로 grasp 미실행)
+
+- **목표(사용자)**: 사람 0 으로 실기기 SO-101 이 회색 큐브→파란 그릇 담기 자율 수집(LeRobot v3). 컨트롤러=고전비전(HSV)+해석적 IK (학습 VLA 전부 0% → 배제). reset=실그릇 추출(사용자 선택). Windows 네이티브 `SOFollower`(COM8).
+- **신규(미커밋) `scripts/real/`**: `so101_kinematics.py`(`SO101Kinematics` 추출, Isaac 무의존) · `vision.py`(HSV 큐브/그릇/그리퍼-tip + 픽셀→baseXY 호모그래피) · `autonomous_collect.py`(스테이지 check/fold/calibrate/test/collect; 30Hz waypoint executor; pick→bowl + bowl-extract reset SM; `LeRobotV3DatasetWriter` 기록).
+- **검증 완료**: COM8 연결(connect 재시도 3회로 feetech "no status packet" 대응) · 카메라 매핑 idx2=top/idx1=wrist/idx0=front(RGB) · **hand-eye 캘리브 median 잔차 4.6mm**(`datasets/pick_cube_real/calibration.json`) · 큐브3/그릇 픽셀→baseXY reachable · 단위(로봇 네이티브 lerobot=arm deg/grip[0,100], 기록 변환 불필요) · 안전(`max_relative_target=5`·workspace bound·stuck/timeout·fold observe pose).
+- **조명**: 야간 암흑(Vmean25)이었으나 06-18 새벽 다시 밝음(Vmean121). `jointcheck` 로 5관절 ±30° 추종 OK(err 1-3°).
+- **🔴 핵심 블로커=reach/torque + 레이아웃**: 진단 스테이지(`reachbowl`/`jointreach`/`pick`) 추가해 측정:
+  - **파란 그릇 = reach 밖** (base r≈0.46 > 기구학 max 0.44; ik_reach r=0.42서 None; 뻗으면 그리퍼가 책상에 z<0 으로 박혀 stall).
+  - **먼 +y 큐브(r>0.30) stall**: jointreach 진단 = lift −17°/elbow −42°/wrist_flex 한계(95°)에 핀 → 확장자세서 servo 추종 실패(P_Coefficient=16 soft + 중력 droop).
+  - **근접 큐브(r≈0.20) = pick 시퀀스 stall 없이 완주**하나 **실제 파지는 실패**(사용자 육안 확인 "안 잡혔어"; table-count 2→1 은 검출노이즈 오탐). calib_offset(tip≠TCP) 미튜닝.
+  - 객체가 신뢰 워크스페이스(r≈0.15~0.28) 밖으로 퍼짐. 검출도 2/3 큐브만 간헐.
+- **move_to/set_gripper 버그 수정**: waypoint 당 IK 1회만 풀어 고정 target(매tick 재해→pitch분기 진동→false stuck 제거). 단위/조명 인코딩(UTF-8)·clamp 로그 필터·connect 3회 재시도 추가.
+- **남은 일**: ① 레이아웃 압축(그릇+큐브 r≤0.28, 팔 근처·중앙, 폼폼 제거) ② calibrate 재실행(근접 그리드) ③ grasp offset 튜닝(`--calib-offset-x/y --grasp-z --grip-open/close`, `--stage pick` 의 grasp_*.png 로 측정) ④ `--stage test`→`collect --target N --upload`. 데이터 0건. **현재 팔 torque-off limp(disconnect 시 자동), 사용자 요청으로 대기 중.** 진단 스테이지: check/jointcheck/reachbowl/jointreach/fold/calibrate/pick/test/collect.
 
 ---
 

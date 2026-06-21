@@ -1,64 +1,65 @@
 joints:
   shoulder_pan:
     id: 1
-    homing_offset: 530
-    range_min: 866
-    range_max: 3231
-    p_coefficient: 16 # may be original 16 is too much, set 12
+    drive_mode: 0
+    homing_offset: -1579
+    range_min: 827
+    range_max: 3394
+    p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32
     return_delay_time: 0
     acceleration: 254
-
   shoulder_lift:
     id: 2
-    homing_offset: -369
-    range_min: 896
-    range_max: 3211
+    drive_mode: 0
+    homing_offset: -1618
+    range_min: 906
+    range_max: 3218
     p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32
     return_delay_time: 0
     acceleration: 254
-
   elbow_flex:
     id: 3
-    homing_offset: -98
-    range_min: 866
-    range_max: 3066
+    drive_mode: 0
+    homing_offset: 1717
+    range_min: 838
+    range_max: 3249
     p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32
     return_delay_time: 0
     acceleration: 254
-
   wrist_flex:
     id: 4
-    homing_offset: 725
-    range_min: 1039
-    range_max: 3121
+    drive_mode: 0
+    homing_offset: 1503
+    range_min: 683
+    range_max: 3166
     p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32
     return_delay_time: 0
     acceleration: 254
-
   wrist_roll:
     id: 5
-    homing_offset: 1704
-    range_min: 123
-    range_max: 3955
+    drive_mode: 0
+    homing_offset: -778
+    range_min: 0
+    range_max: 4095
     p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32
     return_delay_time: 0
     acceleration: 254
-
   gripper:
     id: 6
-    homing_offset: 1573
-    range_min: 2027
-    range_max: 3483
+    drive_mode: 0
+    homing_offset: -1706
+    range_min: 1423
+    range_max: 3037
     p_coefficient: 16
     i_coefficient: 0
     d_coefficient: 32

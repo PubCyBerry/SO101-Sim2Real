@@ -1,0 +1,124 @@
+{
+  "schema": "so101-canonical-calibration-v1",
+  "policy_io_schema": "so101-canonical-v1",
+  "calibration_id": "so101-follower-pending-measurement",
+  "validated": false,
+  "joint_order": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "arm": {
+    "shoulder_pan": {"sign": 1.0, "offset_rad": 0.0, "real_deg_range": [-180.0, 180.0], "fit_rmse_rad": null},
+    "shoulder_lift": {"sign": 1.0, "offset_rad": 0.0, "real_deg_range": [-180.0, 180.0], "fit_rmse_rad": null},
+    "elbow_flex": {"sign": 1.0, "offset_rad": 0.0, "real_deg_range": [-180.0, 180.0], "fit_rmse_rad": null},
+    "wrist_flex": {"sign": 1.0, "offset_rad": 0.0, "real_deg_range": [-180.0, 180.0], "fit_rmse_rad": null},
+    "wrist_roll": {"sign": 1.0, "offset_rad": 0.0, "real_deg_range": [-180.0, 180.0], "fit_rmse_rad": null}
+  },
+  "gripper": {
+    "real": {
+      "native_unit": "lerobot_range_0_100",
+      "native": [],
+      "aperture_mm": [],
+      "max_interpolation_error_mm": null
+    },
+    "sim": {
+      "native_unit": "isaac_joint_radian",
+      "native": [
+        -0.17453299462795258,
+        0.06525089591741562,
+        0.3052355647087097,
+        0.545231282711029,
+        0.7852389216423035,
+        1.0252524614334106,
+        1.2652760744094849,
+        1.5053043365478516,
+        1.7453299760818481
+      ],
+      "aperture_mm": [
+        2.2640670649707317,
+        20.531050860881805,
+        37.957388907670975,
+        52.9959499835968,
+        67.37883388996124,
+        80.298513174057,
+        91.7663499712944,
+        101.28805786371231,
+        109.35647040605545
+      ],
+      "max_interpolation_error_mm": 4.263256414560601e-14,
+      "source_report": "outputs/parity/sim_gripper_aperture.json"
+    }
+  },
+  "source_snapshots": {
+    "lerobot": "calibration/source/so101_robot.lerobot.json",
+    "ros_yaml": "ros2_ws/src/so101_bringup/config/hardware/follower_joints.yaml"
+  },
+  "motor_profile": {
+    "expected": {
+      "operating_mode": 3,
+      "required_preflight_torque_enable": 0,
+      "torque_enable_after_validation": 1,
+      "p_coefficient": 16,
+      "i_coefficient": 0,
+      "d_coefficient": 32,
+      "return_delay_time": 0,
+      "acceleration": 254,
+      "gripper": {
+        "max_torque_limit": 500,
+        "protection_current": 250,
+        "overload_torque": 25
+      },
+      "joints": {
+        "shoulder_pan": {
+          "id": 1,
+          "drive_mode": 0,
+          "homing_offset": -1579,
+          "range_min": 827,
+          "range_max": 3394
+        },
+        "shoulder_lift": {
+          "id": 2,
+          "drive_mode": 0,
+          "homing_offset": -1618,
+          "range_min": 906,
+          "range_max": 3218
+        },
+        "elbow_flex": {
+          "id": 3,
+          "drive_mode": 0,
+          "homing_offset": 1717,
+          "range_min": 838,
+          "range_max": 3249
+        },
+        "wrist_flex": {
+          "id": 4,
+          "drive_mode": 0,
+          "homing_offset": 1503,
+          "range_min": 683,
+          "range_max": 3166
+        },
+        "wrist_roll": {
+          "id": 5,
+          "drive_mode": 0,
+          "homing_offset": -778,
+          "range_min": 0,
+          "range_max": 4095
+        },
+        "gripper": {
+          "id": 6,
+          "drive_mode": 0,
+          "homing_offset": -1706,
+          "range_min": 1423,
+          "range_max": 3037
+        }
+      }
+    },
+    "readback_validated": false,
+    "profile_hash": "d73d0b9e1117d042fccfb6e230ba83ad6121c4f298f9452de8d493c2b6b161aa"
+  },
+  "calibration_hash": "6112d10a0a7f2aa3c68788aaf286d30a59218bb53d24593c1b3efe12aaa1c21c"
+}

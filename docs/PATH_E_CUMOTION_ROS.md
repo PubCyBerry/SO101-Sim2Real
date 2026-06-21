@@ -1,5 +1,8 @@
 # PATH E — cuMotion + ROS 2 로 SO-101 cube_desk pick-and-place
 
+> 이 문서는 별도 cuMotion/MoveIt 실험 경로이며 기존 Isaac Sim 5.1 bridge를 유지한다.
+> Canonical parity 실행은 [`PATH_F_CANONICAL_PARITY.md`](PATH_F_CANONICAL_PARITY.md)를 따른다.
+
 Isaac Sim 이 `cube_desk` 씬을 시뮬하고, **NVIDIA cuMotion**(GPU collision-free 모션 플래너)을
 **MoveIt 2** 에 붙여 ROS 2 로 SO-101 5DOF 팔을 제어해 4개 큐브를 그릇에 담는 경로.
 

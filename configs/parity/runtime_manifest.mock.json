@@ -1,0 +1,28 @@
+{
+  "schema": "so101-runtime-manifest-v1",
+  "backend": "replay",
+  "checkpoint_ref": "replay_checkpoint.json",
+  "model_frame": "canonical",
+  "task": "pick up the cube and place it in the bowl",
+  "chunk_size": 16,
+  "lease_duration_ms": 30000,
+  "contract_hash": "8391f48d2ad25f24c5e2b14a28d5e28fd5551dc85361468988a294b077cd2414",
+  "calibration_hash": "6112d10a0a7f2aa3c68788aaf286d30a59218bb53d24593c1b3efe12aaa1c21c",
+  "motor_profile_hash": "d73d0b9e1117d042fccfb6e230ba83ad6121c4f298f9452de8d493c2b6b161aa",
+  "checkpoint_hash": "5efd76d1d1eada26d27e122ae6078d0d89c19a563494c5f73788bc05b5be9024",
+  "pixi_lock_hash": "9736a03f7b8b2b1d94d40285d0dc3508886cb38d2f04d9c885099ae50a31fcc5",
+  "runtime_config_hash": "07f52a5cb26d8cd79be2f4bc656538f0b4f9a95b0e6e9997659d13c82d932162",
+  "stack": {
+    "python": "3.12.13",
+    "isaacsim": null,
+    "isaaclab": null,
+    "isaaclab_commit": "28a37cecdd433c22d9eabd6a5954add9f13a8951",
+    "ros": "jazzy",
+    "rmw": "rmw_zenoh_cpp",
+    "pixi": "0.70.2",
+    "torch": null,
+    "lerobot": null,
+    "physics": "physx"
+  },
+  "manifest_hash": "9cb11de2a4c92aa1ad3bc9a0730742caa5e82771aabe84186fdfbea35648ffd9"
+}

@@ -16,6 +16,8 @@
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
 - [Windows 네이티브 bare `isaacsim` Full App 이 app ready 직후 종료](#windows-네이티브-bare-isaacsim-full-app-이-app-ready-직후-종료)
 - [Isaac Lab pip 전환 후 `import sim_to_real` 실패](#isaac-lab-pip-전환-후-import-sim_to_real-실패)
+- [policy-server 기반 ROS Jazzy image의 colcon 빌드 도구·Python 모듈 누락](#policy-server-기반-ros-jazzy-image의-colcon-빌드-도구python-모듈-누락)
+- [`rmw_zenoh_cpp` Docker node가 POSIX SHM provider 초기화 실패](#rmw_zenoh_cpp-docker-node가-posix-shm-provider-초기화-실패)
 - [Isaac Lab SO-101 hold smoke에서 관절 속도 잔류](#isaac-lab-so-101-hold-smoke에서-관절-속도-잔류)
 - [Isaac Lab 대규모 PPO에서 `totalAggregatePairsCapacity` 부족](#isaac-lab-대규모-ppo에서-totalaggregatepairscapacity-부족)
 - [Isaac Lab `RigidObject` reset sampling이 원점 기준으로 밀림](#isaac-lab-rigidobject-reset-sampling이-원점-기준으로-밀림)
@@ -1056,6 +1058,161 @@ ok
 ```
 
 `SimulationApp` 기반 headless import도 exit code 0이면 통과다. 대량의 GLFW/display warning은 headless 서버에서 흔하며, `sim_to_real-ok` 출력과 정상 종료 여부를 기준으로 판단한다.
+
+---
+
+## Windows Pixi ROS 2 Jazzy에서 `rclpy` DLL procedure mismatch
+
+**현상**: Pixi `ros-tools` 환경의 패키지 설치와 lock solve는 성공하지만 `import rclpy` 또는 `ros2 pkg ...`가 즉시 실패한다.
+
+**오류 메시지**:
+
+```text
+ImportError: DLL load failed while importing _rclpy_pybind11:
+지정된 프로시저를 찾을 수 없습니다.
+The C extension '...\.pixi\envs\ros-tools\Lib\site-packages\rclpy\
+_rclpy_pybind11.cp312-win_amd64.pyd' failed to be imported while being present
+```
+
+### 원인
+
+RoboStack의 `rpyutils.import_c_library()`는 Windows에서 현재 `PATH`의 모든 디렉터리를 `os.add_dll_directory()`로 다시 등록한다. Pixi가 앞에 붙인 환경 DLL 경로 뒤에 Miniconda, MSYS2, Poppler 등 호스트 경로가 길게 남아 있으면 등록 순서 때문에 외부의 동명 OpenSSL/런타임 DLL이 선택될 수 있다. 이 경우 `_rclpy_pybind11` 파일과 직접 의존 DLL은 존재해도 ABI가 다른 procedure를 찾게 된다.
+
+직접 `LoadLibrary`하거나 Pixi 환경 DLL만 남긴 최소 `PATH`에서는 같은 `.pyd`가 정상 로드된다는 점으로 확인했다.
+
+### 해결 방법
+
+`pixi.toml`의 Windows ROS feature activation에서 `PATH`를 Pixi 환경과 Windows system directory만 포함하도록 제한한다.
+
+```toml
+[feature.ros.target.win.activation.env]
+PYTHONPATH = "%PIXI_PROJECT_ROOT%\\src"
+PATH = "%CONDA_PREFIX%\\Library\\bin;%CONDA_PREFIX%;%CONDA_PREFIX%\\Scripts;%SystemRoot%\\System32;%SystemRoot%"
+```
+
+호스트 전역 `PATH`는 수정하지 않는다. 정리 범위는 `pixi run`/`pixi shell`로 활성화된 프로젝트 환경 내부뿐이다.
+
+### 확인 방법
+
+```bash
+pixi run -e ros-tools python -c "import rclpy; print('rclpy ok')"
+pixi run -e ros-tools python scripts/parity/check_stack.py --environment ros-tools
+```
+
+두 번째 명령의 JSON에서 `checks.rmw_zenoh_cpp.ok=true`, 최상위 `ok=true`이면 통과다.
+
+---
+
+## policy-server 기반 ROS Jazzy image의 colcon 빌드 도구·Python 모듈 누락
+
+### 현상
+
+`policy-server:0.5.1` 위에 ROS 2 Jazzy를 설치한 `Dockerfile.policy_ros`에서 typed interface를
+`colcon build`하면 CMake 단계 또는 `rosidl_adapter` 단계에서 빌드가 중단된다.
+
+### 오류 메시지
+
+```text
+CMake was unable to find a build program corresponding to "Unix Makefiles".
+CMAKE_MAKE_PROGRAM is not set.
+CMAKE_C_COMPILER not set
+CMAKE_CXX_COMPILER not set
+```
+
+빌드 도구를 추가한 뒤에는 다음 오류가 이어질 수 있다.
+
+```text
+ModuleNotFoundError: No module named 'em'
+```
+
+### 원인
+
+기존 policy image는 추론용 slim runtime이므로 compiler와 `make`가 없다. 또한 ROS apt
+패키지의 `python3-empy` 같은 보조 모듈은 `/usr/lib/python3/dist-packages`에 설치되지만,
+LeRobot policy가 사용하는 `/opt/venv` Python은 system dist-packages를 자동으로 검색하지
+않는다.
+
+### 해결 방법
+
+image에 `build-essential`과 `ninja-build`를 설치하고, build/runtime `PYTHONPATH`에 ROS
+site-packages와 system dist-packages를 모두 명시한다.
+
+```dockerfile
+RUN apt-get install -y --no-install-recommends \
+    build-essential ninja-build \
+    ros-jazzy-ros-base ros-jazzy-rmw-zenoh-cpp \
+    python3-colcon-common-extensions
+
+ENV PYTHONPATH="/opt/so101_ros/install/lib/python3.12/site-packages:\
+/opt/ros/jazzy/lib/python3.12/site-packages:\
+/usr/lib/python3/dist-packages:\
+/opt/venv/lib/python3.12/site-packages"
+```
+
+`colcon build`에서도 동일한 ROS/system Python 경로를 export하고
+`-DPython3_EXECUTABLE=/opt/venv/bin/python`을 유지한다.
+
+### 확인 방법
+
+```bash
+docker build --progress=plain \
+  -f docker/Dockerfile.policy_ros \
+  -t so101-vla-ros:jazzy .
+```
+
+`Summary: 2 packages finished`와 image export가 출력되면 정상이다.
+
+---
+
+## `rmw_zenoh_cpp` Docker node가 POSIX SHM provider 초기화 실패
+
+### 현상
+
+ROS Jazzy + `rmw_zenoh_cpp` node를 Docker host network/IPC로 시작하면 router는 뜨지만
+VLA server가 `rclpy.init()`에서 종료되며 restart loop에 들어간다.
+
+### 오류 메시지
+
+```text
+Unable to create POSIX shm segment: OS error 12
+rclpy._rclpy_pybind11.RCLError: failed to initialize rcl:
+Failed to create POSIX SHM provider
+```
+
+### 원인
+
+해당 `rmw_zenoh_cpp` build는 Zenoh shared-memory transport를 기본 초기화한다. policy server
+container의 memory/SHM 조건에서 POSIX segment provider 생성이 실패하면 TCP router만
+사용할 계획이어도 RMW context 전체 초기화가 실패한다.
+
+### 해결 방법
+
+서버 VLA node용 Zenoh session config에서 shared memory를 끄고, cross-machine raw image
+전송에는 unicast compression을 켠다. router는 별도 service로 유지한다.
+
+```json5
+{
+  mode: "client",
+  connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+  transport: {
+    shared_memory: { enabled: false },
+    unicast: { compression: { enabled: true } },
+  },
+}
+```
+
+container에는 이 파일을 read-only mount하고
+`ZENOH_SESSION_CONFIG_URI=/workspace/project/configs/zenoh/server-client.json5`를
+지정한다.
+
+### 확인 방법
+
+```bash
+docker restart so101-vla-replay
+docker logs --since 10s so101-vla-replay
+```
+
+`VLA server ready backend=...`가 출력되고 container가 `Up` 상태를 유지하면 정상이다.
 
 ---
 
@@ -4163,3 +4320,428 @@ HF_TOKEN="$HF_TOKEN_VAL" uv run --no-sync huggingface-cli upload <repo> <local_c
 
 ### 확인 방법
 업로드 로그 끝 `https://huggingface.co/<repo>/tree/main/.` + HF 웹에서 파일 확인.
+
+---
+
+## policy-client shim에서 `NameError: name '_gsc' is not defined`
+
+### 현상
+
+paired-pose 측정값인 `GRIPPER_A/B`를 지정해 `policy-client-shim.py`를 실행하면 로봇 연결 전에
+종료한다.
+
+### 오류 메시지
+
+```text
+NameError: name '_gsc' is not defined
+```
+
+### 원인
+
+`GRIPPER_A/B` 직접 지정 분기에서는 anchor 변수 `_gsc/_gso/_grc/_gro`를 만들지 않는데, 시작
+로그가 이를 무조건 참조했다. 같은 블록 아래에 이전 gripper-only 구현의 monkey-patch 코드도
+중복으로 남아 있었다.
+
+### 해결 방법
+
+직접 지정과 anchor 계산 경로에 각각 독립적인 로그 설명을 만들고, 이전 구현의 중복 블록을
+제거했다. `GRIPPER_A`와 `GRIPPER_B` 중 하나만 지정한 경우에는 조용히 기본 anchor로 돌아가지
+않고 명시적인 `ValueError`를 낸다.
+
+### 확인 방법
+
+```bash
+GRIPPER_AFFINE=1 GRIPPER_A=1.0467 GRIPPER_B=-14.174 \
+  uv run python -c "import runpy; runpy.run_path('docker/policy-client-shim.py', run_name='shim_test')"
+```
+
+`직접 지정(GRIPPER_A/B)` 로그가 나오고 `NameError` 없이 종료하면 정상이다.
+
+---
+
+## Isaac Lab 3 Windows 설치에서 `tinyobjloader` wheel 부재
+
+### 현상
+
+Isaac Sim 6 / Isaac Lab 3용 Pixi `sim` 환경을 Windows에서 설치할 때 PyPI dependency build가
+중단된다.
+
+### 오류 메시지
+
+```text
+Failed to build `tinyobjloader==0.1`
+Microsoft Visual C++ build tools are required
+```
+
+### 원인
+
+Isaac Lab의 PyPI dependency가 가리키는 `tinyobjloader 0.1`에는 현재 Windows CPython 3.12
+wheel이 없어 sdist build로 전환된다. 호스트 compiler를 추가하는 것은 프로젝트 격리 원칙에도
+맞지 않는다.
+
+### 해결 방법
+
+`pixi.toml`의 `sim` feature에 conda-forge prebuilt binding을 고정한다.
+
+```toml
+[feature.sim.dependencies]
+tinyobjloader = "==2.0.0rc13"
+```
+
+### 확인 방법
+
+```bash
+pixi install -e sim --locked
+pixi run stack-check-sim
+```
+
+환경 설치와 stack check가 모두 exit code 0이면 정상이다.
+
+---
+
+## Isaac Lab git wheel에 config와 하위 package가 누락됨
+
+### 현상
+
+고정 commit의 Isaac Lab package가 설치됐지만 extension config, task config 또는 하위 module을
+찾지 못한다.
+
+### 오류 메시지
+
+```text
+Extensions config 'extension.toml' doesn't exist
+ModuleNotFoundError: No module named 'isaaclab_tasks...'
+```
+
+### 원인
+
+동일 git commit에서 build한 wheel만으로는 source tree의 extension config와 일부 package
+layout이 완전히 보존되지 않는다. 따라서 package version만 맞아도 실제 beta2 source layout과
+다른 실행이 될 수 있다.
+
+### 해결 방법
+
+Isaac Lab을 runtime root에 exact detached commit으로 checkout하고, Pixi activation의
+`PYTHONPATH`를 네 source package root에 직접 연결한다.
+
+```bash
+gh repo clone isaac-sim/IsaacLab "$SO101_RUNTIME_ROOT/IsaacLab" -- --filter=blob:none
+git -C "$SO101_RUNTIME_ROOT/IsaacLab" checkout --detach \
+  28a37cecdd433c22d9eabd6a5954add9f13a8951
+```
+
+### 확인 방법
+
+```bash
+git -C "$SO101_RUNTIME_ROOT/IsaacLab" rev-parse HEAD
+pixi run stack-check-sim
+```
+
+첫 출력이 고정 commit과 같고 stack check가 통과해야 한다.
+
+---
+
+## ROS overlay mirror가 cross-drive 또는 동일 경로에서 실패
+
+### 현상
+
+Windows에서는 `colcon`의 Python package build가 `C:` project와 `D:` runtime 사이 상대경로
+계산에서 실패한다. 같은 wrapper를 서버에서 실행하면 source와 mirror destination이 같아
+`SameFileError`가 발생한다.
+
+### 오류 메시지
+
+```text
+ValueError: path is on mount 'D:', start on mount 'C:'
+shutil.Error: '<DirEntry ...>' and '.../ros2_ws/src/...' are the same file
+```
+
+### 원인
+
+`ament_python`은 cross-drive relative path를 처리하지 못한다. 반대로 Linux 배치에서는 project
+root가 runtime root와 같아 copy source와 destination이 동일하다.
+
+### 해결 방법
+
+`scripts/parity/build_ros_overlay.py`가 Windows에서는 package source를 runtime drive로 mirror한
+뒤 그 위치에서 build하고, `source.resolve() == destination.resolve()`인 서버에서는 copy를
+생략하도록 한다.
+
+### 확인 방법
+
+```bash
+pixi run ros-build
+```
+
+Windows와 서버 모두 `Summary: 2 packages finished`가 출력되어야 한다.
+
+---
+
+## Linux Isaac client가 ROS interface type support `.so`를 찾지 못함
+
+### 현상
+
+ROS overlay build와 Python import는 성공하지만 Isaac 6 sim client가 첫 service client 생성에서
+실패한다.
+
+### 오류 메시지
+
+```text
+ImportError: libso101_vla_interfaces__rosidl_generator_py.so:
+cannot open shared object file
+UnsupportedTypeSupport: Could not import 'rosidl_typesupport_c'
+```
+
+### 원인
+
+generated Python package 경로만 `PYTHONPATH`에 있었고, overlay native library가 있는
+`.pixi/ros2/install/lib`가 Linux `LD_LIBRARY_PATH`에 없었다.
+
+### 해결 방법
+
+Unix ROS activation에 overlay library와 Pixi library를 명시한다.
+
+```toml
+[feature.ros.target.unix.activation.env]
+LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib:$CONDA_PREFIX/lib"
+```
+
+### 확인 방법
+
+```bash
+ZENOH_SESSION_CONFIG_URI="$PWD/configs/zenoh/server-client.json5" \
+  pixi run -e sim python scripts/parity/run_sim_client.py \
+  --steps 32 --visualizer none
+```
+
+report가 `status=passed`, `underruns=0`, `timeouts=0`이면 정상이다.
+
+---
+
+## Canonical MotionLimiter가 target 근처에서 limit cycle 발생
+
+### 현상
+
+sim client가 READY pose 근처까지 이동한 뒤 오차가 줄지 않고 왕복하여 home timeout이 난다.
+
+### 오류 메시지
+
+```text
+20초 안에 canonical READY pose에 도달하지 못했다
+```
+
+### 원인
+
+매 step의 desired velocity를 `position_error / dt`로 계산하면 작은 위치 오차에도 큰 속도 반전이
+요구된다. jerk/acceleration limiter와 결합되면 target을 반복해서 overshoot하는 limit cycle이
+생긴다.
+
+### 해결 방법
+
+desired velocity를 `position_error * position_gain_per_s`로 계산하고 velocity limit만 clamp한다.
+기본 gain은 `1.0 s^-1`이며 limiter 상태와 target은 모두 canonical frame이다.
+
+### 확인 방법
+
+```bash
+pixi run core-test
+```
+
+`test_motion_limiter_converges_without_limit_cycle`가 통과하고 Isaac 6 sim client가 READY pose 이후
+32 step을 완료해야 한다.
+
+---
+
+## Isaac process에서 USD mesh와 SciPy 거리 계산을 함께 수행할 때 OpenMP 충돌
+
+### 현상
+
+sim gripper aperture 측정 스크립트가 USD mesh를 읽고 SciPy 거리 계산까지 한 process에서
+수행하면 import 또는 계산 중 비정상 종료한다.
+
+### 오류 메시지
+
+```text
+OMP: Error #15: Initializing libiomp5md.dll, but found libomp.dll already initialized
+# 또는 Python traceback 없이 process 종료
+```
+
+### 원인
+
+Isaac/pxr runtime과 SciPy stack이 서로 다른 OpenMP runtime을 같은 process에 로드한다.
+
+### 해결 방법
+
+`extract_gripper_tip_points.py`에서 USD tip mesh point cloud를 Isaac 외부 process로 먼저
+추출한다. Isaac process의 `measure_sim_gripper_aperture.py`는 그 결과를 읽고 torch distance만
+계산한다.
+
+### 확인 방법
+
+```bash
+pixi run -e sim python scripts/parity/measure_sim_gripper_aperture.py
+```
+
+`outputs/parity/sim_gripper_aperture.json`이 9개 anchor, `monotonic=true`,
+`status=passed`를 기록하면 정상이다.
+
+---
+
+## Windows Isaac compatibility checker가 storage 검사에서 무기한 정지
+
+### 현상
+
+공식 compatibility checker GUI 또는 headless wrapper가 결과를 출력하지 않고 계속 실행된다.
+
+### 오류 메시지
+
+```text
+faulthandler:
+... compatibility_checker.py, line 547 in check_storage
+```
+
+### 원인
+
+공식 `Checker.check_storage()`는 Windows의 존재하는 모든 drive letter에 대해
+`shutil.disk_usage()`를 호출한다. 연결이 끊겼거나 응답이 느린 network/removable drive가 있으면
+검사가 장시간 block된다.
+
+### 해결 방법
+
+`run_isaac_compatibility_check.py`는 공식 `Checker`와 extension spec을 그대로 사용하되 Windows
+storage 항목만 설치 대상 runtime drive(`D:`)로 제한한다. GPU/driver/RTX/VRAM/CPU/RAM/OS
+판정 로직은 공식 구현을 사용한다.
+
+### 확인 방법
+
+```bash
+pixi run sim-compatibility-check-headless \
+  --report outputs/parity/isaac_compatibility_windows.json
+```
+
+JSON의 `status=passed`, `gpu_rtx[0].status=true`, `gpu_vram[0].status=true`를 확인한다.
+
+---
+
+## Ubuntu 24.04에서 LeRobot `evdev 1.9.3` native build 실패
+
+### 현상
+
+konan147에 Pixi `real` environment를 설치할 때 LeRobot의 Linux dependency인 PyPI
+`evdev 1.9.3` sdist compilation이 실패한다.
+
+### 오류 메시지
+
+```text
+error: 'KEY_LINK_PHONE' undeclared here (not in a function)
+error: 'KEY_ACCESSIBILITY' undeclared here (not in a function)
+error: 'KEY_DO_NOT_DISTURB' undeclared here (not in a function)
+```
+
+### 원인
+
+PyPI `evdev 1.9.3` build가 package의 최신 Linux input key-code table을 Ubuntu 24.04 host의
+kernel UAPI header와 함께 compile한다. 서버 header에는 해당 신규 key code가 없어 generated
+C extension을 만들 수 없다.
+
+### 해결 방법
+
+Linux `real` feature에 conda-forge의 CPython 3.12 prebuilt `evdev 1.9.0`을 platform-specific
+dependency로 고정한다. 호스트 compiler/header를 사용하는 sdist build를 제거한다.
+
+```toml
+[feature.real.target.unix.dependencies]
+evdev = "==1.9.0"
+```
+
+그 뒤 lock을 갱신하고 Windows와 서버가 같은 `pixi.lock`을 사용하도록 한다.
+
+### 확인 방법
+
+```bash
+pixi install -e real --locked
+pixi run stack-check-real
+```
+
+`lerobot=0.5.1`, `torch=2.10.0+cu128`, ROS Jazzy와 `rmw_zenoh_cpp`가 모두 확인되고
+`ok=true`이면 정상이다.
+
+---
+
+## Pixi 환경 안에서 parity launcher validation 시 `cv2` import 실패
+
+### 현상
+
+`launch.py validate`를 `pixi run -e ros-tools` 안에서 실행하면 core test는 통과하지만
+dataset converter test가 OpenCV import에서 실패한다. `pixi run dataset-test`를 직접 실행하면
+정상 통과한다.
+
+### 오류 메시지
+
+```text
+ModuleNotFoundError: No module named 'cv2'
+```
+
+### 원인
+
+launcher가 nested `pixi run dataset-test`를 실행할 때 이미 활성화된 `ros-tools` environment가
+유지되어 task의 `default-environment=real`이 적용되지 않았다. OpenCV는 의도적으로 `real`
+environment에만 설치되어 있다.
+
+### 해결 방법
+
+launcher의 validation command가 각 environment를 명시하도록 한다.
+
+```text
+pixi run -e ros-tools core-test
+pixi run -e real dataset-test
+```
+
+### 확인 방법
+
+Windows Git Bash 또는 Linux Bash에서 다음을 실행한다.
+
+```bash
+python scripts/parity/launch.py validate
+```
+
+core 17개, dataset 1개와 checkpoint validator가 모두 통과해야 한다.
+
+---
+
+## Windows PowerShell 5.1이 bootstrap script의 UTF-8 한국어를 parser error로 처리
+
+### 현상
+
+Git Bash에서 `powershell.exe -File scripts/parity/bootstrap_windows.ps1`을 실행하면 정상적인
+따옴표와 block이 깨진 것처럼 parser error가 연속 발생한다.
+
+### 오류 메시지
+
+```text
+Unexpected token 'Pixi' in expression or statement.
+The string is missing the terminator: ".
+Missing closing '}' in statement block or type definition.
+```
+
+### 원인
+
+Windows PowerShell 5.1은 BOM 없는 `.ps1`을 UTF-8로 자동 판별하지 않는다. 한국어 주석과 문자열이
+system ANSI code page로 잘못 decode되면서 일부 byte가 quote/parser token으로 해석되었다.
+
+### 해결 방법
+
+`bootstrap_windows.ps1`의 실행 파일 내부 주석과 오류 문자열을 ASCII로 제한한다. 사용자 대상
+설명은 UTF-8 Markdown 문서에 유지한다. 이 방식은 PowerShell 5.1과 PowerShell 7에서 동일하게
+실행된다.
+
+### 확인 방법
+
+Git Bash에서 다음을 실행한다.
+
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass \
+  -File scripts/parity/bootstrap_windows.ps1 -CheckOnly
+```
+
+마지막에 `status=passed`, 고정 Pixi/lock/IsaacLab commit이 출력되어야 한다.

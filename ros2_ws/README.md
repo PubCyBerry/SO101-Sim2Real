@@ -1,8 +1,22 @@
-# ros2_ws — SO-101 ROS 2 Jazzy 워크스페이스 (follower MoveIt2)
+# ros2_ws — SO-101 ROS 2 Jazzy 워크스페이스
 
-WSL2 Ubuntu 24.04 + ROS 2 Jazzy 에서 SO-101 **follower** 팔을 RViz 시각화 + MoveIt 2 모션 플래닝/제어하기 위한 워크스페이스.
+이 workspace에는 두 경로가 공존한다.
 
-전체 셋업·실행 절차는 [`../docs/PATH_D_ROS2_WSL_MOVEIT.md`](../docs/PATH_D_ROS2_WSL_MOVEIT.md) 참조.
+| 경로 | 패키지 | 실행 환경 | 문서 |
+|---|---|---|---|
+| Canonical parity | `so101_vla_interfaces`, `so101_vla_runtime` | Windows/Linux native Pixi + ROS Jazzy + `rmw_zenoh_cpp` | [`PATH_F_CANONICAL_PARITY`](../docs/PATH_F_CANONICAL_PARITY.md) |
+| Legacy MoveIt | `so101_description`, `so101_moveit_config`, `so101_bringup`, `feetech_ros2_driver` | WSL2 Ubuntu 24.04 + ROS Jazzy | [`PATH_D_ROS2_WSL_MOVEIT`](../docs/PATH_D_ROS2_WSL_MOVEIT.md) |
+
+Canonical package만 빌드:
+
+```bash
+pixi run ros-build
+```
+
+산출물은 repo `.pixi/ros2` 아래에 생성된다. Windows에서는 `.pixi` Junction을 통해
+`D:\SO101\isaac6_ros\.pixi\ros2`에 저장된다.
+
+아래 내용은 Legacy follower MoveIt2 경로다.
 
 ## 출처 (내재화)
 
