@@ -143,6 +143,7 @@ from pxr import Gf, UsdGeom  # noqa: E402
 
 from isaaclab.utils.math import convert_camera_frame_orientation_convention  # noqa: E402
 
+import isaaclab.sim as sim_utils  # noqa: E402 (광원 spawn — curobo demo PickCubeSceneCfg 와 동일 cfg)
 import isaaclab.sim.schemas as schemas  # noqa: E402 (순수 USD authoring — 시뮬 파이프라인 무관)
 from isaaclab.sim.schemas import ArticulationRootPropertiesCfg  # noqa: E402
 from isaacsim.core.api import World  # noqa: E402
@@ -640,6 +641,17 @@ def main() -> None:
 
     # cube_desk scene.usd: SCENE_OFFSET 가 baked 돼 큐브/그릇이 이미 world 좌표에 author 됨.
     add_reference_to_stage(CUBE_DESK_USD_PATH, SCENE_PRIM)
+
+    # 조명 parity: scene.usd 는 광원 prim 이 없어(PickCubeSceneCfg 가 /World 계층서 따로 author)
+    # bridge 만 디폴트 헤드라이트로 렌더돼 curobo demo 와 노출/색이 달랐다. curobo demo(=VLA 학습
+    # env)의 PickCubeSceneCfg 와 **동일 cfg**(DomeLight 2000 + KeyLight distant 1800)를 같은
+    # prim 경로(/World/Light·/World/KeyLight)에 spawn 해 조명을 정확히 맞춘다.
+    _dome = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9))
+    _dome.func("/World/Light", _dome)
+    _key = sim_utils.DistantLightCfg(intensity=1800.0, color=(1.0, 0.98, 0.95), angle=1.0)
+    # RotateXYZ(-50,0,-35)° 등가 quat(wxyz) — PickCubeSceneCfg.key_light init_state 와 동일.
+    _key.func("/World/KeyLight", _key, orientation=(0.8644, -0.4031, -0.1271, -0.2725))
+    print("[bridge] 조명 parity: DomeLight 2000 + KeyLight distant 1800 (curobo demo 동일)", flush=True)
 
     # SO-101 follower: defaultPrim(/so101_new_calib) 이 ROBOT_PRIM 으로 composes-in.
     robot_prim = add_reference_to_stage(ROBOT_USD_PATH, ROBOT_PRIM)
