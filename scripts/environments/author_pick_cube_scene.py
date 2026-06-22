@@ -80,18 +80,17 @@ CUBE_MASSES: dict[str, float] = {
     "Cube3": 0.055, "Cube4": 0.055,
 }
 CONTACT_OFFSET_DEFAULT = 0.004      # 정적·두꺼운 면(책상/매트/그릇)
-CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용
+CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용(convexHull 접촉이 안정적이라 좁은 margin OK)
 # 큐브 시각 형태 — 실물은 회색 펠트로 감싼 쿠션형(코너 반경 큼). 라운드 박스로 author.
-#   collision 은 별도 invisible Box(정육면체) 그대로라 grasp 물리·좌표 불변(시각 전용).
 CUBE_ROUND_RADIUS_FRAC: float = 0.22  # 변 대비 코너 반경 비율(0.040→8.8mm, 0.050→11mm)
 CUBE_ROUND_SEGS: int = 10             # 면당 격자 분할(라운딩 매끈도)
-# 큐브 충돌 = SDF Mesh(signed distance field). 기존 analytic Box → 시각(라운드 펠트)과
-#   동일 형상의 invisible mesh 에 SDF 부여. SDF 는 동적 rigid body 에서 오목/라운드 형상을
-#   정확히 표현하는 유일한 근사(triangle/meshSimplification 은 동적서 convexHull 로 fallback).
-#   collision=visual 정합 → sim2real grasp 표면 현실화. ⚠ grasp 면이 라운드로 바뀌므로
-#   grasp 물리 재검증 필요(기존 sharp box 대비 코너 접촉 변화).
-CUBE_COLLISION_SEGS: int = 6          # 충돌 mesh 면당 분할(SDF source — 시각보다 거칠어도 무방)
-CUBE_SDF_RESOLUTION: int = 256        # SDF 격자 해상도(긴 축 기준). 256=비용/정밀 균형. 큐브는 작아 충분
+# 큐브 충돌 = convexHull Mesh. 시각(라운드 펠트)과 동일 형상의 invisible mesh.
+#   ⚠ 2026-06-22: SDF → convexHull 교체. 큐브는 **볼록**이라 convexHull 이 라운드 표면을
+#   정확히 표현(오목 형상만 SDF 필요 — bowl/jaw 전용). SDF 는 평평한 책상 접촉서 normal 이
+#   매 step 뒤집혀 큐브 제자리 회전 버즈(~2.9 rad/s, "덜그럭")를 냈고, 그 불안정이 grasp 도
+#   망가뜨렸다(고정 spawn SM 3/16). convexHull 로 jitter 해소(0.056 rad/s 정지, 50배↓) +
+#   grasp 복원(13/16, 81%). 측정: scripts/test/measure_cube_jitter.py.
+CUBE_COLLISION_SEGS: int = 6          # 충돌 mesh 면당 분할(convexHull source — 시각보다 거칠어도 무방)
 CUBE_FELT_ROUGHNESS: float = 0.95     # 펠트 천 — 거의 완전 확산
 # 흰 시접 무늬는 geometry 가 아니라 albedo 텍스처에 그린다(평면 무늬). UV 는 큐브
 # 전개도(net): 앞(+X)·윗(+Z)·뒤(-X)·밑(-Z) 4면을 세로(v)로 연속 적층(밴드 컬럼 u<0.5),
@@ -372,24 +371,6 @@ def _apply_collision(
     physx.CreateMinTorsionalPatchRadiusAttr().Set(0.001)
 
 
-def _apply_sdf_mesh_collision(
-    prim: "Usd.Prim",
-    *,
-    resolution: int,
-    contact_offset: float = CONTACT_OFFSET_DEFAULT,
-    rest_offset: float = 0.0,
-) -> None:
-    """Mesh prim 에 SDF(signed distance field) 충돌 부여 — 동적 rigid body 오목/라운드 정확.
-
-    UsdPhysics.MeshCollisionAPI.approximation="sdf" + PhysxSDFMeshCollisionAPI(sdfResolution).
-    convexHull/Decomposition 과 달리 source mesh 표면을 그대로 따라가 collision=visual 정합.
-    """
-    _apply_collision(prim, contact_tuning=True, contact_offset=contact_offset, rest_offset=rest_offset)
-    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set("sdf")
-    sdf = PhysxSchema.PhysxSDFMeshCollisionAPI.Apply(prim)
-    sdf.CreateSdfResolutionAttr().Set(int(resolution))
-
-
 def _set_mesh(
     mesh: "UsdGeom.Mesh",
     points: list[tuple[float, float, float]],
@@ -612,11 +593,12 @@ def author_cube(name: str) -> "Usd.Stage":
     _apply_rigid_body(
         root_prim,
         mass=CUBE_MASSES[name],
-        angular_damping=1.5,
-        linear_damping=1.5,
+        angular_damping=3.0,                   # resting jitter 해소(2026-06-22): 1.5→3.0, 미세 회전 진동 흡수
+        linear_damping=2.5,                    # resting jitter 해소(2026-06-22): 1.5→2.5, 미세 병진 진동 흡수
         solver_position_iterations=32,
         solver_velocity_iterations=8,          # 원복(16 시도→grasp 회귀 격리, maxDepen 이 주범)
         max_depenetration_velocity=1.0,        # 원복(0.5 가 grasp grip 약화 92.8→77% 회귀)
+        stabilization_threshold=0.002,         # resting jitter 해소(2026-06-22): 0.0005→0.002, 정지 근처 솔버 안정화 강화(sleep_threshold 는 default 0.0005 유지)
     )
 
     looks = f"/{name}/Looks"
@@ -649,16 +631,19 @@ def author_cube(name: str) -> "Usd.Stage":
     _bind_visual(visual.GetPrim(), felt)
     # 흰 시접 무늬는 GrayFelt albedo(전개도 net UV)에 그려져 있어 별도 mesh 불필요.
 
-    # 충돌 전용 SDF Mesh: 시각(라운드 펠트)과 동일 형상의 invisible mesh + SDF 근사.
-    #   기존 analytic Box(sharp) → SDF rounded mesh 로 교체: collision=visual 정합(sim2real).
-    #   source mesh 는 시각보다 거친 분할(CUBE_COLLISION_SEGS)이면 충분(SDF 가 해상도 담당).
+    # 충돌 전용 convexHull Mesh: 시각(라운드 펠트)과 동일 형상의 invisible mesh.
+    #   ⚠ 2026-06-22: 기존 SDF → convexHull 로 교체(jitter 해소). 큐브는 **볼록(convex)**
+    #   형상이라 convexHull 이 라운드 표면을 정확히 표현한다(오목면이 없어 SDF 불필요 —
+    #   SDF 는 bowl/jaw 같은 오목 형상 전용). SDF 는 평평한 책상 접촉에서 normal 이 매 step
+    #   뒤집혀 큐브가 제자리 회전 버즈(측정 각속도 ~2.9 rad/s 격렬 진동, "덜그럭")를 냈다.
+    #   convexHull 은 동일 grasp 표면 + 안정 접촉(~0.056 rad/s 정지, 50배↓) + 저비용.
+    #   측정·재현: scripts/test/measure_cube_jitter.py. grasp 회귀 없음(고정 spawn SM 동일).
     col_pts, col_faces, _cuv, _cn = _rounded_box_geometry(sx, sy, sz, radius, CUBE_COLLISION_SEGS)
     col = UsdGeom.Mesh.Define(stage, f"/{name}/Collision")
     _set_mesh(col, col_pts, col_faces, double_sided=False)
     col.MakeInvisible()
-    _apply_sdf_mesh_collision(
-        col.GetPrim(), resolution=CUBE_SDF_RESOLUTION, contact_offset=CUBE_CONTACT_OFFSET
-    )
+    _apply_collision(col.GetPrim(), contact_tuning=True, contact_offset=CUBE_CONTACT_OFFSET)
+    UsdPhysics.MeshCollisionAPI.Apply(col.GetPrim()).CreateApproximationAttr().Set("convexHull")
     # friction 머티리얼 바인딩은 scene.usd 가 공유 /Scene/Looks/CubeFriction 으로 over-bind.
 
     return stage

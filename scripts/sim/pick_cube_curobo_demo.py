@@ -289,7 +289,8 @@ def main() -> int:
     robot = scene["robot"]
     g_idx = list(robot.data.body_names).index("gripper")
     cubes = list(CUBE_NAMES[: args.active_objects])
-    CUBE_SIZES = {"Cube1": 0.030, "Cube2": 0.030, "Cube3": 0.040, "Cube4": 0.040}
+    # 큐브 한 변(author CUBE_SCALES, 2026-06-18 30/40→40/50 확대): Cube1/2=40mm, Cube3/4=50mm.
+    CUBE_SIZES = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
     q_bias = torch.zeros((1, 5), device=device)
 
     # ── LeRobot v3 기록 상태 (record 모드 전용) ──

@@ -1335,6 +1335,48 @@ TA.2 smoke에서 `physics_stability.pass=true`이고 다음 수준의 여유가 
 
 ---
 
+## cube_desk 큐브가 책상 위에서 계속 덜그럭거림 (SDF collider 접촉 불안정) — grasp 도 동반 회귀
+
+### 현상
+
+cube_desk scene을 열면 큐브가 정지한 듯 보이다가 제자리에서 계속 미세하게 덜그럭(회전 버즈)거린다. 책상 위에 가만히 놓여도 sleep으로 들어가지 못한다. 더 큰 문제로, 같은 불안정이 grasp까지 망가뜨려 결정적 state machine의 고정 spawn 성공률이 비정상적으로 낮다(과거 ~100% → 19%).
+
+`scripts/test/measure_cube_jitter.py`로 정지 구간(settle) 큐브 root 속도를 재면 진동이 가라앉지 않는다.
+
+```
+[JITTER] step  40  max_lin=  6.133 mm/s  max_ang= 0.4702 rad/s
+[JITTER] step  60  max_lin= 38.030 mm/s  max_ang= 3.7995 rad/s   ← 가라앉다가 다시 급등(오실레이션)
+[JITTER] step 160  max_lin= 33.072 mm/s  max_ang= 1.7023 rad/s
+[RESULT] settle 구간 max_ang= 2.8939 rad/s   판정: 여전히 진동
+[SM] TOTAL: 3/16 cubes in bowl (18.8%)   ← grasp 동반 회귀
+```
+
+### 원인
+
+큐브 collider를 **SDF Mesh**(`approximation="sdf"`)로 둔 것이 원인. SDF는 **오목 형상**(bowl 내부, gripper jaw 사이)을 정확히 표현하기 위한 근사인데, **큐브는 볼록(convex)**이라 SDF가 불필요했다. 볼록 SDF mesh가 평평한 책상(analytic Box collider)에 닿으면 접촉 normal/접촉점이 매 step 미세하게 뒤집혀 교번 토크 impulse가 발생 → 큐브가 제자리에서 회전 버즈. damping/sleepThreshold/stabilizationThreshold/contactOffset/restOffset 어느 것을 올려도 접촉 churn 자체를 못 막아 해소되지 않는다(damping 3.0·stab 0.002·contactOffset 0.004 조합으로도 settle max_ang 2.9 rad/s 그대로). 이 불안정이 grasp 중에도 큐브를 흔들어 빈 grasp·큐브 밀림을 유발했다.
+
+### 해결 방법
+
+큐브 collider를 **convexHull**로 교체한다(`author_pick_cube_scene.py`의 `author_cube`). 큐브가 볼록이라 convexHull이 같은 라운드 표면을 정확히 표현하면서 책상 접촉이 안정적이다.
+
+```python
+_apply_collision(col.GetPrim(), contact_tuning=True, contact_offset=CUBE_CONTACT_OFFSET)
+UsdPhysics.MeshCollisionAPI.Apply(col.GetPrim()).CreateApproximationAttr().Set("convexHull")
+```
+
+`.usda`의 `physics:approximation`을 `"convexHull"`로 바꾸고 `PhysxSDFMeshCollisionAPI`/`physxSDFMeshCollision:sdfResolution`을 제거한 뒤 `.usd`를 다시 export한다. damping/offset/threshold는 pristine 그대로 두면 된다(convexHull 단독으로 충분). **SDF는 큐브에 쓰지 말 것 — 오목 형상(bowl/jaw)에만 사용.**
+
+### 확인 방법
+
+`measure_cube_jitter.py`에서 settle 구간 각속도가 **0.056 rad/s**(상수, 비진동)로 떨어지고 선속도 ~1.1 mm/s, drift가 freeze되면 정지(50배↓). grasp는 고정 spawn 4-env SM에서 **13/16(81%)**로 복원된다.
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/test/measure_cube_jitter.py --headless
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/environments/pick_cube_state_machine.py --num_envs 4 --object_radius_scale 0 --seed 0 --headless
+```
+
+---
+
 ## `lerobot record` 키보드 컨트롤이 동작하지 않음 (WSLg + Windows Terminal)
 
 **현상**: `docker compose ... run --rm lerobot record` 실행 후 우측/좌측 화살표·Esc 를 눌러도 에피소드 시작/정지·재녹화·종료가 트리거되지 않는다. 증상은 두 단계로 나타난다.

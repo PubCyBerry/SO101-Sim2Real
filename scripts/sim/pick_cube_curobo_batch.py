@@ -139,7 +139,8 @@ BASE_Z_OFFSET = 0.0325
 BASE_YAW_OFFSET = math.pi / 2
 BIAS_KI = 0.06
 BIAS_MAX = 0.35
-CUBE_SIZES = {"Cube1": 0.030, "Cube2": 0.030, "Cube3": 0.040, "Cube4": 0.040}
+# 큐브 한 변(author CUBE_SCALES, 2026-06-18 30/40→40/50 확대): Cube1/2=40mm, Cube3/4=50mm.
+CUBE_SIZES = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
 # mix 단일-큐브 uniform 재샘플의 bowl/base 최소 이격(DR randomize_cubes 값과 일치).
 MIX_BOWL_SEP = 0.14
 MIX_BASE_SEP = 0.135
