@@ -61,7 +61,7 @@ flowchart TD
 - konan147 repo/runtime: `/DISK1/so101-sim2real/runtime/isaac6_ros`
 
 `pixi.toml`과 `pixi.lock`은 두 머신이 동일 파일을 사용한다. 현재 lock SHA256은
-`9736a03f7b8b2b1d94d40285d0dc3508886cb38d2f04d9c885099ae50a31fcc5`다.
+`234ba771eafb1b870a97f5ffe35887d89fe12188f093963ea3fc0ebc9f14854b`다.
 
 ## 빠른 시작
 

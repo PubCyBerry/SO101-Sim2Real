@@ -2409,6 +2409,7 @@ environments:
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_assets&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_physx&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_tasks&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
+      - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_visualizers&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: https://download-r2.pytorch.org/whl/cu128/torch-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://download-r2.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://download-r2.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -3028,6 +3029,7 @@ environments:
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_assets&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_physx&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_tasks&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
+      - pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_visualizers&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
       - pypi: https://download-r2.pytorch.org/whl/cu128/torch-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl
       - pypi: https://download-r2.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl
       - pypi: https://download-r2.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-win_amd64.whl
@@ -19043,6 +19045,35 @@ packages:
   - torchvision>=0.25.0
   - protobuf>=4.25.8,!=5.26.0
   - tensorboard
+  requires_python: '>=3.12'
+- pypi: git+https://github.com/isaac-sim/IsaacLab.git?subdirectory=source%2Fisaaclab_visualizers&rev=28a37cecdd433c22d9eabd6a5954add9f13a8951#28a37cecdd433c22d9eabd6a5954add9f13a8951
+  name: isaaclab-visualizers
+  version: 0.1.0
+  requires_dist:
+  - isaaclab
+  - numpy
+  - warp-lang ; extra == 'newton'
+  - newton[sim]==1.2.1 ; extra == 'newton'
+  - pyopengl-accelerate ; extra == 'newton'
+  - pyglet>=2.1.6,<3 ; extra == 'newton'
+  - imgui-bundle>=1.92.601 ; extra == 'newton'
+  - typing-extensions==4.12.2 ; extra == 'newton'
+  - pydantic>=2.7,<2.12 ; extra == 'newton'
+  - newton[sim]==1.2.1 ; extra == 'rerun'
+  - rerun-sdk>=0.29.0 ; extra == 'rerun'
+  - pyarrow==22.0.0 ; extra == 'rerun'
+  - newton[sim]==1.2.1 ; extra == 'viser'
+  - viser>=1.0.16 ; extra == 'viser'
+  - pyopengl-accelerate ; extra == 'all'
+  - imgui-bundle>=1.92.601 ; extra == 'all'
+  - newton[sim]==1.2.1 ; extra == 'all'
+  - pyarrow==22.0.0 ; extra == 'all'
+  - pydantic>=2.7,<2.12 ; extra == 'all'
+  - pyglet>=2.1.6,<3 ; extra == 'all'
+  - rerun-sdk>=0.29.0 ; extra == 'all'
+  - typing-extensions==4.12.2 ; extra == 'all'
+  - viser>=1.0.16 ; extra == 'all'
+  - warp-lang ; extra == 'all'
   requires_python: '>=3.12'
 - pypi: https://download-r2.pytorch.org/whl/cu128/torch-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
   name: torch

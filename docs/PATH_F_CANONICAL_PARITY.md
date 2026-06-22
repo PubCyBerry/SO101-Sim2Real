@@ -49,7 +49,7 @@ flowchart TB
 | Python | `3.12.13` |
 | torch | `2.10.0+cu128` |
 | Physics | PhysX |
-| `pixi.lock` SHA256 | `9736a03f7b8b2b1d94d40285d0dc3508886cb38d2f04d9c885099ae50a31fcc5` |
+| `pixi.lock` SHA256 | `234ba771eafb1b870a97f5ffe35887d89fe12188f093963ea3fc0ebc9f14854b` |
 
 ```text
 Windows runtime  D:\SO101\isaac6_ros
@@ -213,7 +213,7 @@ python scripts/parity/launch.py validate
 통과 조건:
 
 - `pixi lock --check`
-- core 17/17
+- core 19/19
 - dataset converter 1/1
 - replay checkpoint hash 일치
 
@@ -240,6 +240,50 @@ python scripts/parity/launch.py sim --steps 32
 ```
 
 `mock-probe`와 `sim`은 single active lease를 공유하므로 동시에 실행하지 않는다.
+
+### konan147 WebRTC livestream
+
+Isaac Sim 6 canonical client 자체가 ROS VLA server를 호출하므로 기존
+`run_cube_desk_ros_bridge.py`와 `vla-ros` client는 실행하지 않는다. konan147에서
+sim client를 Kit/WebRTC mode로 실행한다.
+
+SmolVLA 4-cube checkpoint server:
+
+```bash
+cd /DISK1/so101-sim2real/runtime/isaac6_ros
+
+POLICY_PROFILE=smolvla \
+PARITY_MODEL_OUTPUTS_DIR=/DISK1/so101-sim2real/lerobot_outputs \
+VLA_RUNTIME_MANIFEST=/workspace/project/configs/parity/runtime_manifest.smolvla_4cube_1024.json \
+docker compose --env-file .env -f docker/docker-compose.yaml up -d \
+  zenoh-router vla-ros-server
+```
+
+Isaac Sim 6 canonical client:
+
+```bash
+python3 scripts/parity/launch.py sim \
+  --manifest configs/parity/runtime_manifest.smolvla_4cube_1024.json \
+  --sim-device cuda:0 \
+  --continuous \
+  --livestream 1 \
+  --public-ip 10.10.16.147 \
+  --camera-viewports
+```
+
+- 이 명령 하나가 기존 `isaac sim bridge`와 `vla-ros policy client` 역할을 함께 담당한다.
+- 기존 `policy-server`와 `vla-ros` service는 canonical 경로에서 실행하지 않는다.
+- 정책 RGB sensor는 inference chunk 경계에서만 렌더하고, Kit WebRTC viewport는 매 control
+  step 갱신한다. 3-camera sensor를 매 step 중복 렌더하지 않아 canonical 실행률을 유지한다.
+- 같은 LAN에서는 `10.10.16.147`, Tailscale에서는 `100.79.237.116`처럼 실제 client가
+  접근할 server interface 주소를 사용한다.
+- Windows Isaac Sim WebRTC Streaming Client는 해당 IP에 연결한다.
+- 포트는 signaling `49100/TCP`, media `47998/UDP`다.
+- livestream endpoint에는 인증·암호화가 없으므로 공인 인터넷에 직접 노출하지 않는다.
+- 원격 `File > Exit` 또는 server terminal의 `Ctrl+C`로 종료한다.
+
+Isaac Lab 3의 mode 의미는 `1=public/LAN IP 명시`, `2=private network 자동 설정`이다.
+`PUBLIC_IP`를 지정하는 원격 관전에는 mode 1을 사용한다.
 
 ### Real client dry-run
 

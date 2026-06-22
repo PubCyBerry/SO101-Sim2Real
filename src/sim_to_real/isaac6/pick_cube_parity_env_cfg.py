@@ -80,7 +80,10 @@ def _camera(
         width=640,
         height=480,
         update_period=1.0 / 30.0,
-        update_latest_camera_pose=True,
+        # The parity contract consumes pixels only. Updating pose output uses
+        # FrameView and adds work on every camera fetch without changing render
+        # transforms for cameras attached to moving robot links.
+        update_latest_camera_pose=False,
     )
 
 
@@ -267,10 +270,18 @@ class PickCubeIsaac6ParityEnvCfg(ManagerBasedRLEnvCfg):
             enable_external_forces_every_iteration=True,
             bounce_threshold_velocity=0.01,
             friction_correlation_distance=0.00625,
-            gpu_found_lost_aggregate_pairs_capacity=4 * 1024 * 1024,
-            gpu_total_aggregate_pairs_capacity=1024 * 1024,
-            gpu_max_rigid_patch_count=16 * 2**16,
-            gpu_collision_stack_size=2**29,
+            # Single-environment parity does not need the legacy 2048-env
+            # training capacities. These retain ample headroom for the robot,
+            # desk, five rigid props and grasp contacts while avoiding several
+            # GiB of unnecessary GPU/pinned-memory reservation.
+            gpu_max_rigid_contact_count=2**20,
+            gpu_max_rigid_patch_count=5 * 2**14,
+            gpu_found_lost_pairs_capacity=2**19,
+            gpu_found_lost_aggregate_pairs_capacity=2**20,
+            gpu_total_aggregate_pairs_capacity=2**19,
+            gpu_collision_stack_size=2**25,
+            gpu_heap_capacity=2**25,
+            gpu_temp_buffer_capacity=2**23,
         )
         self.viewer.eye = (0.06, 1.515, 0.98)
         self.viewer.lookat = (0.01, 0.245, 0.76)

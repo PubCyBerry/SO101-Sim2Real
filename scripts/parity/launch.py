@@ -27,6 +27,22 @@ def _pixi() -> str:
     raise RuntimeError("Pixi 0.70.2 launcher를 찾을 수 없다")
 
 
+def _pixi_command(subcommand: str, *arguments: str) -> list[str]:
+    command = [_pixi(), subcommand]
+    if sys.platform == "win32":
+        project_root = Path(__file__).resolve().parents[2]
+        manifest = project_root / "pixi.toml"
+        lock = project_root / "pixi.lock"
+        if not manifest.is_file() or not lock.is_file():
+            raise RuntimeError(
+                f"tracked Pixi manifest/lock을 찾을 수 없다: {project_root}"
+            )
+        command += ["--manifest-path", str(manifest)]
+    if subcommand == "run":
+        command.append("--frozen")
+    return [*command, *arguments]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -36,14 +52,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--port", default="COM8")
     parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument(
+        "--sim-device",
+        default="cpu" if sys.platform == "win32" else "cuda:0",
+        choices=("cpu", "cuda:0"),
+        help="단일-env parity 권장값: Windows=cpu, Linux=cuda:0",
+    )
     parser.add_argument("--enable-motion", action="store_true")
     parser.add_argument("--confirm-emergency-cutoff-ready", action="store_true")
+    parser.add_argument(
+        "--manifest",
+        default="configs/parity/runtime_manifest.mock.json",
+        help="sim client가 검증할 runtime manifest",
+    )
+    parser.add_argument("--continuous", action="store_true")
+    parser.add_argument("--livestream", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--public-ip", default="")
+    parser.add_argument("--camera-viewports", action="store_true")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
-    pixi = _pixi()
     environment = os.environ.copy()
     environment.setdefault("PYTHONUTF8", "1")
     environment.setdefault("PYTHONIOENCODING", "utf-8")
@@ -57,11 +87,10 @@ def main() -> int:
 
     if args.mode == "validate":
         commands = [
-            [pixi, "lock", "--check"],
-            [pixi, "run", "-e", "ros-tools", "core-test"],
-            [pixi, "run", "-e", "real", "dataset-test"],
-            [
-                pixi,
+            _pixi_command("lock", "--check"),
+            _pixi_command("run", "-e", "ros-tools", "core-test"),
+            _pixi_command("run", "-e", "real", "dataset-test"),
+            _pixi_command(
                 "run",
                 "-e",
                 "ros-tools",
@@ -71,12 +100,11 @@ def main() -> int:
                 "configs/parity/runtime_manifest.mock.json",
                 "--checkpoint",
                 "configs/parity/replay_checkpoint.json",
-            ],
+            ),
         ]
     elif args.mode == "mock-probe":
         commands = [
-            [
-                pixi,
+            _pixi_command(
                 "run",
                 "-e",
                 "ros-tools",
@@ -89,27 +117,36 @@ def main() -> int:
                 "5",
                 "--image-pattern",
                 "gradient",
-            ]
+            )
         ]
     elif args.mode == "sim":
-        commands = [
-            [
-                pixi,
-                "run",
-                "-e",
-                "sim",
-                "python",
-                "scripts/parity/run_sim_client.py",
-                "--steps",
-                str(args.steps),
-                "--visualizer",
-                "none",
-            ]
+        sim_arguments = [
+            "run",
+            "-e",
+            "sim",
+            "python",
+            "scripts/parity/run_sim_client.py",
+            "--steps",
+            str(args.steps),
+            "--device",
+            args.sim_device,
+            "--manifest",
+            args.manifest,
+            "--visualizer",
+            "kit" if args.livestream else "none",
+            "--livestream",
+            str(args.livestream),
         ]
+        if args.continuous:
+            sim_arguments.append("--continuous")
+        if args.public_ip:
+            sim_arguments += ["--public-ip", args.public_ip]
+        if args.camera_viewports:
+            sim_arguments.append("--camera-viewports")
+        commands = [_pixi_command(*sim_arguments)]
     elif args.mode == "real-dry-run":
         commands = [
-            [
-                pixi,
+            _pixi_command(
                 "run",
                 "-e",
                 "real",
@@ -117,12 +154,11 @@ def main() -> int:
                 "scripts/parity/run_real_client.py",
                 "--port",
                 args.port,
-            ]
+            )
         ]
     elif args.mode == "real-readback":
         commands = [
-            [
-                pixi,
+            _pixi_command(
                 "run",
                 "-e",
                 "real",
@@ -131,7 +167,7 @@ def main() -> int:
                 "--port",
                 args.port,
                 "--inspect-readback",
-            ]
+            )
         ]
     else:
         if not args.enable_motion or not args.confirm_emergency_cutoff_ready:
@@ -140,8 +176,7 @@ def main() -> int:
                 "--confirm-emergency-cutoff-ready를 모두 요구한다"
             )
         commands = [
-            [
-                pixi,
+            _pixi_command(
                 "run",
                 "-e",
                 "real",
@@ -153,7 +188,7 @@ def main() -> int:
                 str(args.steps),
                 "--enable-motion",
                 "--confirm-emergency-cutoff-ready",
-            ]
+            )
         ]
 
     for command in commands:

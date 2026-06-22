@@ -36,12 +36,27 @@ def main() -> int:
     )
     parser.add_argument("--task", default="pick up the cube and place it in the bowl")
     parser.add_argument("--chunk-size", type=int, required=True)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--rename-map",
+        default="{}",
+        help="ACT/SmolVLA observation rename map JSON",
+    )
     parser.add_argument(
         "--checkpoint-ref",
         help="manifest 기준 checkpoint 위치. 생략하면 --checkpoint 문자열을 사용한다.",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    try:
+        rename_map = json.loads(args.rename_map)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--rename-map JSON 오류: {exc}") from exc
+    if not isinstance(rename_map, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in rename_map.items()
+    ):
+        raise ValueError("--rename-map은 string→string JSON object여야 한다")
 
     contract = PolicyIOContract.load(args.contract)
     calibration = CalibrationBundle.load(args.calibration)
@@ -77,6 +92,9 @@ def main() -> int:
             "physics": "physx",
         },
     }
+    if args.backend in ("act", "smolvla"):
+        raw["device"] = args.device
+        raw["rename_map"] = rename_map
     manifest = RuntimeManifest.with_hash(raw)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

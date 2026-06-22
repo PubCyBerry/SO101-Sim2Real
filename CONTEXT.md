@@ -13,6 +13,21 @@
 
 ---
 
+## 작업 인계 (2026-06-22 — Isaac 6 canonical SmolVLA WebRTC / ✅ 실행 중)
+
+- **구조 확정**: Legacy의 `policy-server + run_cube_desk_ros_bridge + vla-ros` 3-process 경로를 canonical에서는 `zenoh-router + vla-ros-server`와 Isaac6 sim client 2단계로 축소. Isaac6 client가 bridge와 ROS policy client 역할을 함께 수행한다.
+- **모델**: `/DISK1/so101-sim2real/lerobot_outputs/train/so101_smolvla_sim_pick_cube_4cube_1024/checkpoints/last/pretrained_model`, backend=`smolvla`, model frame=`sim_legacy_rad_scale_v1`, chunk=40. Manifest=`configs/parity/runtime_manifest.smolvla_4cube_1024.json`, hash=`b86da238...65d25`.
+- **WebRTC**: `scripts/parity/launch.py sim`에 `--continuous`, `--livestream`, `--public-ip`, `--camera-viewports`, custom manifest 지원 추가. Perspective + top/wrist/front layout 복원. server `49100/TCP` listen 및 Windows `Test-NetConnection` 통과.
+- **Isaac Lab 3 보완**: pinned `isaaclab_visualizers[kit]` 추가, source subpackage packaging 보완을 위해 Windows/Linux `PYTHONPATH`에 `source/isaaclab_visualizers` 추가. 새 lock SHA256=`234ba771...854b`.
+- **SmolVLA 수정**: policy gripper output이 sim PCHIP 최소 joint를 소폭 벗어나는 경우 legacy model codec에서 native calibration range clamp. `vla-ros-server` image rebuild 필요. 160-step real checkpoint smoke 통과: underrun/timeout/stale=0, 34.04 policy step/s.
+- **렌더 분리**: 정책 RGB sensor는 inference chunk 경계에서만 render하고 Lab3 `KitVisualizer.step()`이 WebRTC viewport를 매 control step 갱신. 매-step sensor render는 14.87 step/s였으나 분리 후 livestream 64-step=32.45 step/s, underrun/timeout/stale=0.
+- **현재 실행 중**: konan147 PID=`2006413`, PID file=`outputs/parity/smolvla_livestream.pid`, log=`outputs/parity/smolvla_livestream.log`; 재기동 후 trace 728 step 이상 연속 증가, latest hold/underrun/timeout=false. Windows Streaming Client는 `10.10.16.147` 접속.
+- **중지**: `cd /DISK1/so101-sim2real/runtime/isaac6_ros && kill -- -$(cat outputs/parity/smolvla_livestream.pid)`.
+- **검증**: Windows core 19/19 + dataset 1/1 + checkpoint 통과, server core 19/19, SmolVLA 160-step 통과, `49100/TCP` Windows 접근 통과.
+- **문서**: `docs/PATH_F_CANONICAL_PARITY.md`, `docs/TROUBLESHOOTING.md`에 실행법과 Lab3 visualizer/PCHIP clamp 오류 기록.
+
+---
+
 ## 작업 인계 (2026-06-22 — 양쪽 검증·문서 정비·Git sync / ✅ software 완료)
 
 - **양쪽 정상 검증**: Windows와 konan147에서 lock/stack/ROS overlay/core 17/dataset 1/checkpoint/compatibility/3-camera 통과. 양쪽 Isaac6 sim client 32-step에서 underrun/timeout/stale 0, real dry-run은 `hardware_accessed=false`, `motion_allowed=false`.

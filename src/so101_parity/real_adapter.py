@@ -30,14 +30,20 @@ class RealSO101Adapter:
         self.period_s = 1.0 / fps
         self._next_deadline = time.perf_counter()
 
-    def capture(self) -> CanonicalObservation:
+    def read_state(self) -> np.ndarray:
         positions = self.bus.sync_read("Present_Position")
         native = np.asarray([positions[name] for name in JOINT_ORDER], dtype=np.float32)
-        state = self.calibration.real_to_canonical(native, clamp=False)
+        return self.calibration.real_to_canonical(native, clamp=False)
+
+    def capture(self, state: np.ndarray | None = None) -> CanonicalObservation:
+        if state is None:
+            state = self.read_state()
         images = {}
         for name in ("top", "wrist", "front"):
             image = np.asarray(self.cameras[name].read_latest())
-            images[name] = np.ascontiguousarray(image, dtype=np.uint8)
+            # Camera backends commonly recycle their latest-frame buffer. Own
+            # the request snapshot before the background inference thread uses it.
+            images[name] = np.array(image, dtype=np.uint8, order="C", copy=True)
         return CanonicalObservation(state=state, images=images)
 
     def canonical_to_native(self, target: np.ndarray) -> np.ndarray:

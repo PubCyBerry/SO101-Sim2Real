@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import sys
+import time
 import traceback
 
 from isaaclab.app import AppLauncher
@@ -27,18 +29,52 @@ parser.add_argument("--pixi-lock", type=Path, default=Path("pixi.lock"))
 parser.add_argument("--p99-latency-ms", type=float, default=250.0)
 parser.add_argument("--trace", type=Path, default=Path("outputs/parity/sim_trace.jsonl"))
 parser.add_argument("--report", type=Path, default=Path("outputs/parity/sim_client_report.json"))
+parser.add_argument(
+    "--continuous",
+    action="store_true",
+    help="WebRTC/GUI에서 종료할 때까지 canonical executor를 계속 실행",
+)
+parser.add_argument(
+    "--public-ip",
+    default="",
+    help="WebRTC가 광고할 LAN/Tailscale IP. 지정 시 livestream mode 1을 사용",
+)
+parser.add_argument(
+    "--camera-viewports",
+    action="store_true",
+    help="Perspective와 top/wrist/front 카메라를 4분할 Kit UI로 표시",
+)
+parser.add_argument(
+    "--layout",
+    type=Path,
+    default=Path("assets/layouts/pick_cube_3cam.json"),
+    help="camera viewport docking layout JSON",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
+if args.public_ip:
+    os.environ["PUBLIC_IP"] = args.public_ip
+    if args.livestream in (-1, 0):
+        args.livestream = 1
+
+livestream_mode = 0 if args.livestream == -1 else args.livestream
 launcher = AppLauncher(
     {
-        "visualizer": args.visualizer or "none",
+        "visualizer": args.visualizer or ("kit" if livestream_mode else "none"),
         "device": args.device,
         "enable_cameras": True,
-        "livestream": 0,
+        "livestream": livestream_mode,
     }
 )
 simulation_app = launcher.app
+
+
+_CAMERA_PRIMS = (
+    ("Top Camera", "/World/envs/env_0/TopCamera"),
+    ("Wrist Camera", "/World/envs/env_0/Robot/gripper/WristCamera"),
+    ("Front Camera", "/World/envs/env_0/Robot/shoulder/FrontCamera"),
+)
 
 
 def _report(payload: dict) -> None:
@@ -46,6 +82,57 @@ def _report(payload: dict) -> None:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(text + "\n", encoding="utf-8")
     print(text, file=sys.__stdout__, flush=True)
+
+
+def _dock_camera_viewports() -> None:
+    """WebRTC가 Perspective와 정책 입력 3개를 함께 캡처하도록 Kit UI를 구성한다."""
+    try:
+        import omni.kit.app
+        import omni.ui as ui
+        from omni.kit.viewport.utility import create_viewport_window
+        from pxr import Sdf
+
+        extension_manager = omni.kit.app.get_app().get_extension_manager()
+        for extension in ("omni.kit.viewport.window", "omni.kit.viewport.utility"):
+            if not extension_manager.is_extension_enabled(extension):
+                extension_manager.set_extension_enabled_immediate(extension, True)
+
+        created = {}
+        for title, prim_path in _CAMERA_PRIMS:
+            created[title] = create_viewport_window(
+                name=f"SO101 {title}",
+                camera_path=Sdf.Path(prim_path),
+            )
+
+        app = omni.kit.app.get_app()
+        for _ in range(3):
+            app.update()
+
+        layout_path = args.layout.resolve()
+        if layout_path.is_file():
+            ui.Workspace.restore_workspace(
+                json.loads(layout_path.read_text(encoding="utf-8"))
+            )
+            for _ in range(3):
+                app.update()
+            print(f"[parity] viewport layout 복원: {layout_path}", flush=True)
+            return
+
+        main_viewport = ui.Workspace.get_window("Viewport")
+        top = created.get("Top Camera")
+        wrist = created.get("Wrist Camera")
+        front = created.get("Front Camera")
+        if main_viewport is not None and top is not None:
+            top.dock_in(main_viewport, ui.DockPosition.RIGHT, 0.5)
+        if top is not None and wrist is not None:
+            wrist.dock_in(top, ui.DockPosition.BOTTOM, 0.5)
+        if wrist is not None and front is not None:
+            front.dock_in(wrist, ui.DockPosition.BOTTOM, 0.5)
+        for _ in range(3):
+            app.update()
+        print("[parity] viewport docked: Perspective + top/wrist/front", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[parity] camera viewport 구성 실패, Perspective만 사용: {exc}", flush=True)
 
 
 def main() -> int:
@@ -88,9 +175,21 @@ def main() -> int:
 
         task_id = "SimToReal-SO101-PickCube-Isaac6Parity-v0"
         env_cfg = parse_env_cfg(task_id, device=args.device, num_envs=1)
+        env_started = time.perf_counter()
         env = gym.make(task_id, cfg=env_cfg)
         env.reset()
-        adapter = Isaac6ParityAdapter(env, calibration)
+        env_ready_s = time.perf_counter() - env_started
+        if args.camera_viewports:
+            _dock_camera_viewports()
+        # 정책용 RGB sensor는 inference observation이 필요한 chunk 경계에서만
+        # 갱신한다. Lab 3 KitVisualizer는 별도로 매 simulation step app.update()를
+        # 호출하므로 WebRTC viewport는 연속 갱신되면서 sensor render 비용은 줄어든다.
+        render_on_capture = True
+        adapter = Isaac6ParityAdapter(
+            env,
+            calibration,
+            render_on_capture=render_on_capture,
+        )
 
         rclpy.init()
         node = Node("so101_isaac6_parity_client")
@@ -161,20 +260,45 @@ def main() -> int:
             request_timeout_ms=int(runtime_cfg["executor"]["timeout_ms"]),
         )
         home = np.asarray(runtime_cfg["initial_home_target"], dtype=np.float32)
+        home_started = time.perf_counter()
         observation = runtime.move_home(home)
+        home_s = time.perf_counter() - home_started
+        prime_started = time.perf_counter()
         runtime.prime(observation)
-        runtime.run(args.steps)
+        prime_s = time.perf_counter() - prime_started
+        run_started = time.perf_counter()
+        start_policy_step = runtime.executor.step
+        runtime.run(
+            None if args.continuous else args.steps,
+            should_continue=simulation_app.is_running,
+        )
+        run_s = time.perf_counter() - run_started
+        executed_steps = runtime.executor.step - start_policy_step
         _report(
             {
                 "status": "passed",
                 "task": task_id,
-                "steps": args.steps,
+                "requested_steps": None if args.continuous else args.steps,
+                "executed_steps": executed_steps,
+                "continuous": args.continuous,
+                "livestream": livestream_mode,
+                "public_ip": args.public_ip or None,
+                "policy_sensor_render": "inference_boundary",
+                "webrtc_viewport_update": "control_step" if livestream_mode else None,
                 "policy_steps": runtime.executor.step,
                 "loop_ticks": runtime.executor.loop_tick,
                 "underruns": runtime.executor.underruns,
                 "timeouts": runtime.executor.timeouts,
                 "stale_responses": runtime.executor.stale_responses,
                 "prefetch_lead": runtime.executor.prefetch_lead,
+                "observation_captures": runtime.observation_captures,
+                "timing_s": {
+                    "environment_create_reset": env_ready_s,
+                    "move_home": home_s,
+                    "prime": prime_s,
+                    "run": run_s,
+                },
+                "effective_policy_steps_per_s": executed_steps / run_s if run_s else 0.0,
                 "trace": str(args.trace),
                 "contract_hash": contract.contract_hash,
                 "runtime_manifest_hash": manifest.manifest_hash,

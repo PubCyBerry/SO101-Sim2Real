@@ -60,7 +60,7 @@ Canonical parity가 현재 기본 실행 경로다.
 | **Storage** | NVMe SSD 512 GB + SATA HDD 1 TB | NVMe SSD 477 GB (ext4 `/`) + SATA HDD 3.6 TB (`/DISK1`) |
 | **GPU** | RTX A4000 16 GB (driver 596.36, CUDA 13.2, cc 8.6 Ampere) | RTX PRO 5000 Blackwell 48 GB GDDR7 (driver 580.95.05-open, cc 12.0 Blackwell) |
 
-Canonical test는 `tests/test_parity_core.py` 17개와
+Canonical test는 `tests/test_parity_core.py` 19개와
 `tests/test_dataset_converter.py` 1개가 있다. Legacy 경로에는 별도 통합 test suite가 없어
 컨테이너 build와 해당 smoke 실행으로 검증한다.
 

@@ -12,17 +12,39 @@ from so101_parity.runtime import CanonicalObservation
 class Isaac6ParityAdapter:
     domain = "sim"
 
-    def __init__(self, env, calibration: CalibrationBundle) -> None:
+    def __init__(
+        self,
+        env,
+        calibration: CalibrationBundle,
+        *,
+        render_on_capture: bool = False,
+    ) -> None:
         self.env = env
         self.calibration = calibration
         self.scene = env.unwrapped.scene
         self.robot = self.scene["robot"]
+        self.sim = env.unwrapped.sim
         self.device = env.unwrapped.device
+        self.render_on_capture = bool(render_on_capture)
+        if self.render_on_capture:
+            # Camera construction marks RTX sensors globally active, causing
+            # ManagerBasedRLEnv.step() to enter the render path every 30 Hz
+            # tick. Chunk inference only consumes an RGB snapshot at request
+            # boundaries, so render explicitly in capture() and keep physics
+            # ticks free of Kit/RTX work in between.
+            env.unwrapped.render_enabled = False
+            self.sim.set_setting("/isaaclab/render/rtx_sensors", False)
         self._last_native = self.robot.data.joint_pos.torch[0].detach().clone()
 
-    def capture(self) -> CanonicalObservation:
+    def read_state(self) -> np.ndarray:
         native = self.robot.data.joint_pos.torch[0].detach().cpu().numpy()
-        state = self.calibration.sim_to_canonical(native, clamp=True)
+        return self.calibration.sim_to_canonical(native, clamp=True)
+
+    def capture(self, state: np.ndarray | None = None) -> CanonicalObservation:
+        if state is None:
+            state = self.read_state()
+        if self.render_on_capture:
+            self.sim.render()
         images = {}
         for contract_name, scene_name in (
             ("top", "top_camera"),

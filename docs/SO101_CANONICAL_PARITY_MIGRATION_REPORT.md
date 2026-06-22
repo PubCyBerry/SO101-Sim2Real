@@ -15,7 +15,7 @@
 | Python | `3.12.13` | 통과 | 통과 |
 | PyTorch | `2.10.0+cu128` | 통과 | 통과 |
 | Physics | PhysX | 통과 | 통과 |
-| lock SHA256 | `9736a03f7b8b2b1d94d40285d0dc3508886cb38d2f04d9c885099ae50a31fcc5` | 동일 | 동일 |
+| lock SHA256 | `234ba771eafb1b870a97f5ffe35887d89fe12188f093963ea3fc0ebc9f14854b` | 동일 | 동일 |
 
 Isaac Lab package metadata는 source checkout 내부 package version을 `6.1.11` 등으로 표시하지만,
 실행 package path와 Git `HEAD`는 두 머신 모두 위 고정 commit이다. 재현성 판단은 package metadata가
@@ -131,7 +131,7 @@ Windows는 LAN endpoint `tcp/10.10.16.147:7447`에 client mode로 직접 연결�
 
 | 항목 | 결과 |
 |---|---|
-| Windows core tests | 17/17 통과 |
+| Windows core tests | 19/19 통과 |
 | canonical dataset converter smoke | 1/1 통과 |
 | Windows ROS overlay | 2 packages 통과 |
 | 서버 ROS overlay | 2 packages 통과 |

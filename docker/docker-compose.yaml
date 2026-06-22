@@ -281,7 +281,9 @@ services:
     volumes:
       - ..:/workspace/project:ro
       - ../logs:/workspace/logs
-      - ../outputs:/workspace/outputs
+      # 서버 학습 산출물은 PARITY_MODEL_OUTPUTS_DIR로 별도 지정할 수 있다.
+      # 기본값은 repo outputs이며 policy checkpoint는 server에서 read-only로 사용한다.
+      - ${PARITY_MODEL_OUTPUTS_DIR:-../outputs}:/workspace/outputs:ro
       - hf_cache:/workspace/.cache/huggingface
     environment:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
@@ -289,7 +291,7 @@ services:
       # rmw_zenoh_cpp POSIX SHM provider는 non-root container에서 OS error 12로
       # 초기화 실패할 수 있다. host network TCP + compression 경로를 고정한다.
       ZENOH_CONFIG_OVERRIDE: 'connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false;transport/unicast/compression/enabled=true'
-      VLA_RUNTIME_MANIFEST: /workspace/project/configs/parity/runtime_manifest.mock.json
+      VLA_RUNTIME_MANIFEST: ${VLA_RUNTIME_MANIFEST:-/workspace/project/configs/parity/runtime_manifest.mock.json}
       VLA_CONTRACT_PATH: /workspace/project/configs/parity/policy_io.json
       VLA_CALIBRATION_PATH: /workspace/project/calibration/so101_canonical.json
       VLA_RUNTIME_CONFIG_PATH: /workspace/project/configs/parity/runtime.json

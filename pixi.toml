@@ -95,11 +95,11 @@ PYTHONIOENCODING = "utf-8"
 
 [feature.sim.target.win.activation.env]
 ISAACLAB_SOURCE_ROOT = "D:\\SO101\\isaac6_ros\\IsaacLab"
-PYTHONPATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\lib\\site-packages;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_assets;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_physx;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_tasks;%PIXI_PROJECT_ROOT%\\src"
+PYTHONPATH = "%PIXI_PROJECT_ROOT%\\.pixi\\ros2\\install\\lib\\site-packages;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_assets;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_physx;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_tasks;D:\\SO101\\isaac6_ros\\IsaacLab\\source\\isaaclab_visualizers;%PIXI_PROJECT_ROOT%\\src"
 
 [feature.sim.target.unix.activation.env]
 ISAACLAB_SOURCE_ROOT = "/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab"
-PYTHONPATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib/python3.12/site-packages:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_assets:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_physx:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_tasks:$PIXI_PROJECT_ROOT/src"
+PYTHONPATH = "$PIXI_PROJECT_ROOT/.pixi/ros2/install/lib/python3.12/site-packages:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_assets:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_physx:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_tasks:/DISK1/so101-sim2real/runtime/isaac6_ros/IsaacLab/source/isaaclab_visualizers:$PIXI_PROJECT_ROOT/src"
 
 [feature.sim.pypi-dependencies]
 numpy = ">=2,<3"
@@ -112,6 +112,7 @@ isaaclab = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecd
 isaaclab-assets = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_assets" }
 isaaclab-physx = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_physx" }
 isaaclab-tasks = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_tasks" }
+isaaclab-visualizers = { git = "https://github.com/isaac-sim/IsaacLab.git", rev = "28a37cecdd433c22d9eabd6a5954add9f13a8951", subdirectory = "source/isaaclab_visualizers", extras = ["kit"] }
 
 [system-requirements]
 cuda = "12.8"

@@ -126,6 +126,18 @@ class CalibrationTest(unittest.TestCase):
             restored = codec.model_to_canonical(codec.canonical_to_model(canonical))
             self.assertLess(float(np.max(np.abs(canonical - restored))), 1e-5)
 
+    def test_legacy_model_output_is_clamped_to_calibration_range(self) -> None:
+        bundle = self._bundle()
+        sim_codec = ModelCodec("sim_legacy_rad_scale_v1", bundle)
+        sim_model = np.array([0.0, 0.0, 0.0, 0.0, 0.0, -100.0], dtype=np.float32)
+        sim_canonical = sim_codec.model_to_canonical(sim_model)
+        self.assertAlmostEqual(float(sim_canonical[5]), 4.0, places=6)
+
+        real_codec = ModelCodec("real_lerobot_range_v1", bundle)
+        real_model = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 150.0], dtype=np.float32)
+        real_canonical = real_codec.model_to_canonical(real_model)
+        self.assertAlmostEqual(float(real_canonical[5]), 46.0, places=6)
+
     def test_calibration_bundle_fitter_cli(self) -> None:
         base_path = Path("calibration/so101_canonical.json")
         base = json.loads(base_path.read_text(encoding="utf-8"))
@@ -304,11 +316,18 @@ class RuntimeTest(unittest.TestCase):
             self.domain = domain
             self.state = np.zeros(6, dtype=np.float32)
             self.commands: list[np.ndarray] = []
+            self.state_reads = 0
+            self.image_captures = 0
 
-        def capture(self) -> CanonicalObservation:
+        def read_state(self) -> np.ndarray:
+            self.state_reads += 1
+            return self.state.copy()
+
+        def capture(self, state: np.ndarray | None = None) -> CanonicalObservation:
+            self.image_captures += 1
             image = np.zeros((480, 640, 3), dtype=np.uint8)
             return CanonicalObservation(
-                self.state.copy(),
+                self.state.copy() if state is None else state,
                 {"top": image, "wrist": image, "front": image},
             )
 
@@ -364,6 +383,42 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(len(traces[1]), 6)
             for left, right in zip(adapters[0].commands, adapters[1].commands, strict=True):
                 self.assertEqual(left.tobytes(), right.tobytes())
+            # Initial prime captures one RGB observation. Per-tick state/trace
+            # reads must not copy three discarded camera frames.
+            self.assertEqual([adapter.image_captures for adapter in adapters], [1, 1])
+            self.assertEqual([adapter.state_reads for adapter in adapters], [6, 6])
+
+    def test_continuous_run_stops_on_external_app_signal(self) -> None:
+        def infer(ticket, _observation):
+            return Chunk(
+                ticket.request_id,
+                ticket.requested_start_step,
+                np.zeros((16, 6), dtype=np.float32),
+            )
+
+        adapter = self._Adapter("sim")
+        hashes = RuntimeHashes("contract", "runtime", "checkpoint", "calibration", "motor")
+        checks = iter([True, True, True, True, False])
+        with tempfile.TemporaryDirectory() as directory:
+            with JsonlTraceWriter(Path(directory) / "continuous.jsonl") as trace:
+                runtime = CanonicalRuntime(
+                    adapter=adapter,
+                    infer=infer,
+                    limiter=MotionLimiter(
+                        fps=30,
+                        max_velocity=np.ones(6) * 10,
+                        max_acceleration=np.ones(6) * 100,
+                        max_jerk=np.ones(6) * 1000,
+                    ),
+                    hashes=hashes,
+                    trace=trace,
+                    prefetch_lead=8,
+                    request_timeout_ms=1000,
+                )
+                runtime.limiter.reset(np.zeros(6, dtype=np.float32))
+                runtime.run(None, should_continue=lambda: next(checks))
+        self.assertEqual(len(adapter.commands), 4)
+        self.assertEqual(runtime.executor.step, 4)
 
 
 class MotorProfileTest(unittest.TestCase):

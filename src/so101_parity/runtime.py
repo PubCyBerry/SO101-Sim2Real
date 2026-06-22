@@ -44,7 +44,9 @@ class CanonicalObservation:
 class RuntimeAdapter(Protocol):
     domain: str
 
-    def capture(self) -> CanonicalObservation: ...
+    def read_state(self) -> np.ndarray: ...
+
+    def capture(self, state: np.ndarray | None = None) -> CanonicalObservation: ...
 
     def canonical_to_native(self, target: np.ndarray) -> np.ndarray: ...
 
@@ -90,6 +92,14 @@ class CanonicalRuntime:
         )
         self.worker = SingleFlightInferenceWorker(infer)
         self._last_inference_latency_ms: float | None = None
+        self.observation_captures = 0
+
+    def _capture_observation(
+        self,
+        state: np.ndarray | None = None,
+    ) -> CanonicalObservation:
+        self.observation_captures += 1
+        return self.adapter.capture(state=state)
 
     def move_home(
         self,
@@ -101,8 +111,8 @@ class CanonicalRuntime:
         home = np.asarray(target, dtype=np.float32)
         if home.shape != (6,):
             raise ValueError("home target shape은 (6,)이어야 한다")
-        observation = self.adapter.capture()
-        self.limiter.reset(observation.state)
+        state = self.adapter.read_state()
+        self.limiter.reset(state)
         tolerance_value = (
             np.asarray(tolerance, dtype=np.float32)
             if tolerance is not None
@@ -112,18 +122,26 @@ class CanonicalRuntime:
             limited = self.limiter.apply(home)
             native = self.adapter.canonical_to_native(limited)
             self.adapter.advance(native)
-            observation = self.adapter.capture()
-            if np.all(np.abs(observation.state - home) <= tolerance_value):
-                return observation
-        error = observation.state - home
+            state = self.adapter.read_state()
+            if np.all(np.abs(state - home) <= tolerance_value):
+                # Dynamics/backend speed can change which control tick first
+                # satisfies the home tolerance. Re-anchor limiter state to the
+                # exact canonical home so subsequent policy targets remain
+                # bitwise identical across sim/real and CPU/GPU PhysX.
+                self.limiter.reset(home)
+                # Prime inference needs one synchronized RGB observation. During
+                # homing, images are otherwise unused and are intentionally not
+                # copied every 30 Hz control tick.
+                return self._capture_observation(state=state)
+        error = state - home
         raise TimeoutError(
             "canonical home target 도달 timeout: "
-            f"state={observation.state.tolist()}, error={error.tolist()}"
+            f"state={state.tolist()}, error={error.tolist()}"
         )
 
     def prime(self, observation: CanonicalObservation | None = None) -> None:
         if observation is None:
-            observation = self.adapter.capture()
+            observation = self._capture_observation()
         ticket = self.executor.begin_request()
         try:
             chunk = self.infer(ticket, observation)
@@ -133,14 +151,27 @@ class CanonicalRuntime:
         self.executor.accept(chunk)
         self._last_inference_latency_ms = chunk.inference_latency_ms
 
-    def run(self, steps: int) -> None:
-        if steps < 1:
-            raise ValueError("steps는 1 이상이어야 한다")
+    def run(
+        self,
+        steps: int | None,
+        *,
+        should_continue: Callable[[], bool] | None = None,
+    ) -> None:
+        """정해진 step 수 또는 외부 app이 종료될 때까지 실행한다.
+
+        ``steps=None``은 livestream처럼 사용자가 원격 GUI에서 종료할 때까지
+        같은 executor/worker를 유지해야 하는 경로에 사용한다.
+        """
+        if steps is not None and steps < 1:
+            raise ValueError("steps는 1 이상이거나 None이어야 한다")
         if not self.executor.ready:
             self.prime()
         self.worker.start()
+        completed = 0
         try:
-            for _ in range(steps):
+            while steps is None or completed < steps:
+                if should_continue is not None and not should_continue():
+                    break
                 self._poll_inference()
                 if self.executor.request_timed_out():
                     ticket = self.executor.in_flight_ticket
@@ -150,9 +181,10 @@ class CanonicalRuntime:
                     self._trace_timeout(ticket.request_id)
                     raise TimeoutError(f"inference request {ticket.request_id} timeout")
 
-                observation = self.adapter.capture()
+                state = self.adapter.read_state()
                 if self.executor.should_request():
                     ticket = self.executor.begin_request()
+                    observation = self._capture_observation(state=state)
                     self.worker.submit(ticket, observation)
 
                 tick = self.executor.tick()
@@ -170,7 +202,7 @@ class CanonicalRuntime:
                     raw_model_output=tick.target.tolist(),
                     limited_canonical_target=limited.tolist(),
                     native_command=np.asarray(native, dtype=np.float32).tolist(),
-                    measured_canonical_state=observation.state.tolist(),
+                    measured_canonical_state=state.tolist(),
                     inference_latency_ms=self._last_inference_latency_ms,
                     hold=not tick.consumed,
                     underrun=tick.underrun,
@@ -182,6 +214,7 @@ class CanonicalRuntime:
                     motor_profile_hash=self.hashes.motor_profile_hash,
                     domain=self.adapter.domain,
                 )
+                completed += 1
         finally:
             self.worker.close()
 

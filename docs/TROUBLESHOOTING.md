@@ -4790,3 +4790,89 @@ python scripts/parity/launch.py sim --steps 4
 ```
 
 두 번째 명령이 lease timeout 대기 없이 시작되고 core lease test가 통과해야 한다.
+
+---
+
+## Isaac Lab 3 WebRTC에서 Kit visualizer를 찾지 못함
+
+### 현상
+
+Isaac Sim 6 canonical client를 `--livestream 1 --visualizer kit`으로 실행하면 Kit은 부팅되지만
+environment reset 단계에서 종료된다.
+
+### 오류 메시지
+
+```text
+Visualizer 'kit' skipped: isaaclab_visualizers is not installed.
+Explicitly requested visualizer(s) ['kit'] could not be configured.
+```
+
+### 원인
+
+Isaac Lab 3.0 beta2는 visualizer backend를 `isaaclab_visualizers` source package로 분리했다.
+또한 해당 beta의 `setup.py`는 top-level package만 설치하므로 `kit` subpackage를 사용하려면
+같은 pinned checkout의 `source/isaaclab_visualizers`가 `PYTHONPATH`에 있어야 한다.
+
+### 해결 방법
+
+`pixi.toml`의 `sim` feature에 같은 Isaac Lab commit의
+`isaaclab-visualizers[kit]`을 추가하고, Windows/Linux `PYTHONPATH`에도
+`IsaacLab/source/isaaclab_visualizers`를 추가한다. 변경된 lock을 양쪽 머신에 동일하게
+설치한다.
+
+### 확인 방법
+
+```bash
+pixi run -e sim python -c \
+  "from isaaclab_visualizers.kit import KitVisualizerCfg; print('kit-ok')"
+```
+
+그 뒤 livestream 로그에 다음이 출력되고 `49100/TCP`가 listen해야 한다.
+
+```text
+Registered backend 'kit' for factory Visualizer.
+```
+
+---
+
+## Legacy sim SmolVLA 출력이 gripper calibration anchor를 소폭 벗어남
+
+### 현상
+
+SmolVLA direct backend로 여러 chunk를 실행하면 초기 chunk는 정상이나 이후 inference가
+gripper PCHIP 범위 오류로 중단된다.
+
+### 오류 메시지
+
+```text
+interpolation 범위 이탈: [-0.219..., -0.219...] not in [-0.1745..., 1.7453...]
+```
+
+### 원인
+
+정규화 해제된 policy action은 학습 분포 끝에서 native gripper joint limit를 소폭 넘을 수 있다.
+기존 `ModelCodec`은 이를 actuator 범위로 clamp하지 않고 PCHIP에 전달해 fail-closed했다.
+
+### 해결 방법
+
+`sim_legacy_rad_scale_v1`과 `real_lerobot_range_v1`의 model action을 canonical로 변환할 때
+calibration native range로 먼저 clamp한다. State와 calibration 자체의 strict validator는
+그대로 유지한다. `vla-ros-server`는 canonical core를 image에 복사하므로 수정 후 이미지를
+다시 빌드한다.
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml build vla-ros-server
+```
+
+### 확인 방법
+
+SmolVLA checkpoint로 160-step canonical sim을 실행한다.
+
+```bash
+python3 scripts/parity/launch.py sim \
+  --manifest configs/parity/runtime_manifest.smolvla_4cube_1024.json \
+  --sim-device cuda:0 \
+  --steps 160
+```
+
+`underruns=0`, `timeouts=0`, `stale_responses=0`으로 완료되어야 한다.

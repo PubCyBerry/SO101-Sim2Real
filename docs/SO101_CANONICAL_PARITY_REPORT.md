@@ -39,7 +39,7 @@ camera: top/wrist/front, RGB uint8 480×640
 - raw output, limited target, native command, measured state를 JSONL에 기록
 
 동일 초기 상태 mock sim/real test에서 limited canonical target은 모든 step byte-identical이다.
-MotionLimiter convergence와 timeout/underrun/chunk boundary test를 포함해 core 17 tests가 통과했다.
+MotionLimiter convergence와 timeout/underrun/chunk boundary test를 포함해 core 19 tests가 통과했다.
 
 ## 3. Calibration
 

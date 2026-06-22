@@ -1,15 +1,15 @@
 {
   "schema": "so101-runtime-manifest-v1",
-  "backend": "replay",
-  "checkpoint_ref": "replay_checkpoint.json",
-  "model_frame": "canonical",
+  "backend": "smolvla",
+  "checkpoint_ref": "/workspace/outputs/train/so101_smolvla_sim_pick_cube_4cube_1024/checkpoints/last/pretrained_model",
+  "model_frame": "sim_legacy_rad_scale_v1",
   "task": "pick up the cube and place it in the bowl",
-  "chunk_size": 16,
+  "chunk_size": 40,
   "lease_duration_ms": 30000,
   "contract_hash": "8391f48d2ad25f24c5e2b14a28d5e28fd5551dc85361468988a294b077cd2414",
   "calibration_hash": "6112d10a0a7f2aa3c68788aaf286d30a59218bb53d24593c1b3efe12aaa1c21c",
   "motor_profile_hash": "d73d0b9e1117d042fccfb6e230ba83ad6121c4f298f9452de8d493c2b6b161aa",
-  "checkpoint_hash": "5efd76d1d1eada26d27e122ae6078d0d89c19a563494c5f73788bc05b5be9024",
+  "checkpoint_hash": "492ae71451c86ee6ae87de5fdd6ab1f4508899e40c3fc52a52eaa21131f9d6b9",
   "pixi_lock_hash": "234ba771eafb1b870a97f5ffe35887d89fe12188f093963ea3fc0ebc9f14854b",
   "runtime_config_hash": "07f52a5cb26d8cd79be2f4bc656538f0b4f9a95b0e6e9997659d13c82d932162",
   "stack": {
@@ -24,5 +24,11 @@
     "lerobot": null,
     "physics": "physx"
   },
-  "manifest_hash": "1a533eccc5cf99dd64b78de4358484a49875d92de1c459c2dcf7683b5b54b36c"
+  "device": "cuda",
+  "rename_map": {
+    "observation.images.top": "observation.images.camera1",
+    "observation.images.wrist": "observation.images.camera2",
+    "observation.images.front": "observation.images.camera3"
+  },
+  "manifest_hash": "b86da238ba935f28672be3b7ed173a0b046688f0c88df9b5052f8e500c465d25"
 }

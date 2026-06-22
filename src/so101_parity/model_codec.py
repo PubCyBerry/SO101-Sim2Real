@@ -52,9 +52,12 @@ class ModelCodec:
             sim_native = model.copy()
             sim_native[:5] *= math.pi / 180.0
             sim_native[5] /= self.legacy_gripper_scale
-            return self.calibration.sim_to_canonical(sim_native)
+            # 정책 출력은 정규화 해제 뒤 calibration anchor를 소폭 벗어날 수 있다.
+            # Native actuator가 물리적으로 수행할 수 있는 범위로 clamp한 뒤 canonical로
+            # 변환해야 sim/real adapter가 동일한 실행 target을 받는다.
+            return self.calibration.sim_to_canonical(sim_native, clamp=True)
         if self.frame == "real_lerobot_range_v1":
-            return self.calibration.real_to_canonical(model)
+            return self.calibration.real_to_canonical(model, clamp=True)
         raise ModelCodecError(f"지원하지 않는 model frame: {self.frame!r}")
 
     def canonical_chunk_to_model(self, chunk: np.ndarray) -> np.ndarray:
