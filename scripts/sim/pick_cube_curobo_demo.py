@@ -59,6 +59,12 @@ parser.add_argument("--public_ip", default="", help="원격 WebRTC livestream �
 parser.add_argument("--cameras", action="store_true", help="top/wrist/front 카메라 리그 주입 + 3-패널 docking viewport")
 parser.add_argument("--layout", default="assets/layouts/pick_cube_3cam.json",
                     help="viewport docking layout JSON(ui.Workspace dump). ROOT 상대경로. 없으면 수동 dock fallback")
+# ── GUI 3-Cam layout 합성 동영상 (headless 서버용) ──
+parser.add_argument("--gui_video", default=None,
+                    help="지정 시 GUI dock(Perspective 좌 + Top/Wrist/Front 우 스택) 합성 mp4 녹화 모드. "
+                         "첫 all-4 성공 라운드만 저장. headless 서버에서 GUI 창 없이 동일 레이아웃 재현.")
+parser.add_argument("--gui_video_rounds", type=int, default=12,
+                    help="gui_video: 성공 라운드 찾을 최대 시도 횟수")
 # ── LeRobot v3 데이터 기록 (P5: sim→real expert 데이터) ──
 parser.add_argument("--record_dir", default=None,
                     help="지정 시 LeRobot v3 데이터셋 기록 모드. 카메라 강제 ON, all-4 성공 라운드만 기록")
@@ -74,6 +80,9 @@ args = parser.parse_args()
 
 # record 모드: 카메라 강제 ON(이미지 obs 필요). headless 권장(viewport docking 생략).
 if args.record_dir:
+    args.cameras = True
+# gui_video 모드: 센서 카메라 강제 ON(top/wrist/front 합성). headless 가능(GUI dock 불요).
+if args.gui_video:
     args.cameras = True
 
 # 원격 WebRTC livestream — PUBLIC_IP env + mode 1 (mode 2 는 PUBLIC_IP 무시 → LAN IP 검은화면).
@@ -124,6 +133,7 @@ from lerobot_recorder import LeRobotV3DatasetWriter  # noqa: E402
 from lerobot_units import (  # noqa: E402
     CAMERA_KEYS,
     CAMERA_SCENE_NAMES,
+    FPS,
     read_camera_rgb_u8,
     to_lerobot_units as _to_lerobot_units,
 )
@@ -275,6 +285,11 @@ def main() -> int:
             step_trigger=lambda step: step == 0, video_length=args.video_length,
             disable_logger=True)
         base = env.unwrapped
+    elif args.gui_video:
+        # 합성 동영상 모드: env.render()(perspective) + 카메라 센서를 직접 합성하므로
+        # RecordVideo wrapper 없이 rgb_array 만 활성화한다.
+        env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array").unwrapped
+        base = env
     else:
         env = gym.make(args.task, cfg=env_cfg).unwrapped
         base = env
@@ -304,6 +319,41 @@ def main() -> int:
             args.record_dir, overwrite=args.record_overwrite, enable_videos=True)
         log(f"[demo] 🎥 RECORD 모드 → {args.record_dir} "
             f"(목표 {args.record_episodes} all-4 에피소드, {len(cubes)}큐브)")
+
+    # ── GUI 4-뷰 합성 동영상 상태 (gui_video 모드 전용) ──
+    gui_mode = bool(args.gui_video)
+    gui_buffer: list = []      # 현재 라운드 합성 프레임(uint8 HxWx3)
+    gui_capture = [False]      # act() 캡처 게이트
+    GUI_TILE_H, GUI_TILE_W = 480, 640     # 4분할 각 타일(카메라 native, 모두 동일 비율)
+
+    def _gui_resize(img, h, w):
+        from PIL import Image  # noqa: PLC0415
+        return np.asarray(Image.fromarray(img).resize((w, h), Image.BILINEAR), dtype=np.uint8)
+
+    def _gui_label(img, text):
+        """타일 좌상단에 패널명 오버레이(가독성용 검은 띠 + 흰 글자)."""
+        from PIL import Image, ImageDraw  # noqa: PLC0415
+        im = Image.fromarray(img)
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 8 + 7 * len(text), 16], fill=(0, 0, 0))
+        d.text((3, 2), text, fill=(255, 255, 255))
+        return np.asarray(im, dtype=np.uint8)
+
+    def _gui_compose():
+        """4-뷰 2×2 동일비율 그리드: TL=Perspective TR=Top / BL=Wrist BR=Front (각 480×640)."""
+        def cam_tile(k, name):
+            rgb = read_camera_rgb_u8(base, CAMERA_SCENE_NAMES[k])      # (480,640,3)
+            return _gui_label(_gui_resize(rgb, GUI_TILE_H, GUI_TILE_W), name)
+        try:
+            persp = env.render()                                      # (H,W,3) viewer 카메라
+            persp = np.asarray(persp)[..., :3].astype(np.uint8)
+            persp = _gui_label(_gui_resize(persp, GUI_TILE_H, GUI_TILE_W), "Perspective")
+        except Exception:
+            persp = _gui_label(np.zeros((GUI_TILE_H, GUI_TILE_W, 3), np.uint8), "Perspective")
+        top_row = np.concatenate([persp, cam_tile("top", "Top")], axis=1)        # (480,1280,3)
+        bot_row = np.concatenate([cam_tile("wrist", "Wrist"),
+                                  cam_tile("front", "Front")], axis=1)            # (480,1280,3)
+        return np.concatenate([top_row, bot_row], axis=0)                         # (960,1280,3)
 
     pl = Planner(args.planner_host, args.planner_port)
     ping = pl.call({"cmd": "ping"})
@@ -379,6 +429,8 @@ def main() -> int:
         if pend is not None:
             action_rec = _to_lerobot_units(_processed_action_np())
             rec_buffer.append((action_rec, pend[0], pend[1]))
+        if gui_mode and gui_capture[0]:
+            gui_buffer.append(_gui_compose())
 
     def to_base(p_w, sn):
         return _world_to_base_np(np.asarray(p_w, float), sn["rp"], sn["ryaw"])
@@ -607,6 +659,55 @@ def main() -> int:
             if not simulation_app.is_running():
                 break
             act(READY, args.grip_open)
+
+    if gui_mode:
+        out_path = args.gui_video if os.path.isabs(args.gui_video) else os.path.join(ROOT, args.gui_video)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        # 렌더 워밍업: headless 오프스크린 RTX 가 로봇 MDL 머티리얼을 컴파일하기 전엔 magenta 로
+        # 보이므로(데스크/큐브는 UsdPreviewSurface 라 즉시 로드) 캡처 전 render 프레임을 소진한다.
+        log("[demo] gui_video: 렌더 워밍업(머티리얼 컴파일)…")
+        for _ in range(90):
+            if not simulation_app.is_running():
+                break
+            act(READY, args.grip_open)
+            try:
+                env.render()
+            except Exception:
+                pass
+        saved = False
+        for i in range(args.gui_video_rounds):
+            if not simulation_app.is_running():
+                break
+            if i > 0:
+                env.reset()
+                q_bias = torch.zeros((1, 5), device=device)
+            log(f"[demo] ===== GUI-VIDEO ROUND {i+1}/{args.gui_video_rounds} =====")
+            gui_buffer.clear()
+            gui_capture[0] = True
+            run_round()
+            gui_capture[0] = False
+            if len(placed) == len(cubes) and gui_buffer:
+                import imageio.v2 as imageio  # noqa: PLC0415  (ABI: AppLauncher 부팅 후)
+                wr = imageio.get_writer(out_path, fps=FPS, codec="libx264", quality=8,
+                                        macro_block_size=1, ffmpeg_params=["-pix_fmt", "yuv420p"])
+                for fr in gui_buffer:
+                    wr.append_data(fr)
+                wr.close()
+                h, w = gui_buffer[0].shape[:2]
+                log(f"[demo] 🎬 GUI 3-Cam 동영상 저장: {out_path} "
+                    f"({len(gui_buffer)} frames, {w}×{h}, {len(gui_buffer)/FPS:.1f}s)")
+                saved = True
+                break
+            log(f"[demo] ✗ 라운드 {len(placed)}/{len(cubes)} — all-4 실패, 폐기 후 재시도")
+            gui_buffer.clear()
+            for _ in range(40):   # 라운드 간 대기(미캡처)
+                if not simulation_app.is_running():
+                    break
+                act(READY, args.grip_open)
+        if not saved:
+            log(f"[demo] ⚠ {args.gui_video_rounds} 라운드 내 all-4 성공 없음 — 동영상 미저장")
+        env.close()
+        return 0
 
     if record_mode:
         rec_max = args.record_max_attempts if args.record_max_attempts > 0 else max(args.record_episodes * 5, 30)
