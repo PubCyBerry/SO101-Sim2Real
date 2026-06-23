@@ -1133,6 +1133,16 @@ def main() -> None:
             n_ever = sum(ever.values())
             all_ok = success_step is not None or (n_final == n_active)
             bowl_final = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
+            recovery_layout = {"cubes": {}, "bowl": None}
+            for name, handle in cube_handles.items():
+                position, orientation = handle.get_world_pose()
+                recovery_layout["cubes"][name] = [
+                    float(value) for value in (*position[:3], *orientation[:4])
+                ]
+            bowl_position, bowl_orientation = bowl_handle.get_world_pose()
+            recovery_layout["bowl"] = [
+                float(value) for value in (*bowl_position[:3], *bowl_orientation[:4])
+            ]
             episodes.append({
                 "episode": ep,
                 "n_final": n_final, "n_ever": n_ever, "all_ok": all_ok,
@@ -1149,6 +1159,7 @@ def main() -> None:
                     ),
                     "final_z_mm": round(float(bowl_final[2] - bowl_start[2]) * 1000, 1),
                 },
+                "recovery_layout": recovery_layout,
                 "cubes": {n: {"in_bowl": bool(final[n][0]),
                               "xy_mm": round(final[n][1] * 1000, 1),
                               "z": round(final[n][2], 4),
