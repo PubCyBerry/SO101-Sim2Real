@@ -39,6 +39,10 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--gripper_speed", type=float, default=5.0)
 parser.add_argument("--grip_open", type=float, default=0.85)
 parser.add_argument("--grip_close", type=float, default=-0.05)
+parser.add_argument("--max_cmd_vel", type=float, default=2.3,
+                    help="명령 arm 속도 상한(rad/s). seq_exec·run_traj 가 step 당 |Δq| 를 이 값/30Hz "
+                         "이하로 sub-interpolate → 생성 데이터 ≤2.5 rad/s(실기기 정합). <2.5 는 q_bias "
+                         "가산 여유. env arm max_velocity(5.0)는 불변.")
 parser.add_argument("--loop", type=int, default=1, help="라운드 반복 횟수")
 parser.add_argument("--ik_seeds", type=int, default=48, help="배치 IK seed 수(낮추면 빠름·성공↓)")
 parser.add_argument("--plan_attempts", type=int, default=4)
@@ -391,6 +395,11 @@ def main() -> int:
     log(f"[batch] init_batch OK n_envs={r.get('n_envs')} chunk={r.get('chunk')}")
 
     CONTROL_DT = 1.0 / 30.0
+    # 실행 rate 감속: 명령 step 당 |Δq| ≤ MAX_STEP → 명령 속도 ≤ MAX_VEL rad/s. 실기기 데이터
+    # within-task ≤2.5 rad/s 정합용. env arm max_velocity(5.0) 하드캡 대신 motion 에 step 을 더 줘
+    # ≤2.5 면서 완주(하드캡은 lock-step lag 로 grasp 파손). MAX_VEL<2.5 는 q_bias 가산 여유.
+    MAX_VEL = float(args.max_cmd_vel)
+    MAX_STEP = MAX_VEL * CONTROL_DT
     nstep = [0]
 
     # ── 배치 stepping ──
@@ -454,25 +463,38 @@ def main() -> int:
         return True
 
     def seq_exec(goal, active, grip, steps):
-        """미세동작 직접 보간(N,5). inactive env 는 hold(goal=start)."""
+        """미세동작 직접 보간(N,5). inactive env 는 hold(goal=start). step 당 |Δq|≤MAX_STEP
+        보장(eff=max(steps, ⌈maxΔ/MAX_STEP⌉)) → 명령 속도 ≤MAX_VEL rad/s, 완주는 유지."""
         start = cur_arm()
         g = np.array(goal, np.float32).copy()
         g[~active] = start[~active]
-        for i in range(1, steps + 1):
+        maxd = float(np.abs(g - start).max()) if active.any() else 0.0
+        eff = max(int(steps), int(math.ceil(maxd / MAX_STEP)) if MAX_STEP > 0 else int(steps))
+        for i in range(1, eff + 1):
             if not simulation_app.is_running():
                 return False
-            a = i / steps
+            a = i / eff
             act(start * (1 - a) + g * a, grip)
         return True
 
     def run_traj(trajs, grip, stride):
-        """plan 배치 궤적 실행. trajs (N,H,6). inactive env 는 서버서 flat(goal=start)."""
+        """plan 배치 궤적 실행. trajs (N,H,6). inactive env 는 서버서 flat(goal=start).
+        waypoint 간 |Δq|>MAX_STEP 이면 sub-interpolate → 명령 속도 ≤MAX_VEL rad/s 보장."""
         H = trajs.shape[1]
-        for i in range(0, H, stride):
-            if not simulation_app.is_running():
-                return False
-            act(trajs[:, i, :5], grip)
-        act(trajs[:, -1, :5], grip)
+        prev = cur_arm()                                  # (N,5)
+        idxs = list(range(0, H, stride))
+        if idxs[-1] != H - 1:
+            idxs.append(H - 1)                            # 항상 마지막 도달
+        for i in idxs:
+            wp = trajs[:, i, :5]                          # (N,5)
+            maxd = float(np.abs(wp - prev).max())
+            sub = max(1, int(math.ceil(maxd / MAX_STEP)) if MAX_STEP > 0 else 1)
+            for k in range(1, sub + 1):
+                if not simulation_app.is_running():
+                    return False
+                a = k / sub
+                act(prev * (1 - a) + wp * a, grip)
+            prev = wp
         return True
 
     # ── 상태 스냅 (배치 → per-env 스칼라 dict 리스트, 데모 헬퍼 재사용) ──

@@ -40,6 +40,10 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--gripper_speed", type=float, default=5.0)
 parser.add_argument("--grip_open", type=float, default=0.85, help="그리퍼 열림 target(rad)")
 parser.add_argument("--grip_close", type=float, default=-0.05)
+parser.add_argument("--max_cmd_vel", type=float, default=2.3,
+                    help="명령 arm 속도 상한(rad/s). seq_exec·run_traj 가 step 당 |Δq| 를 이 값/30Hz "
+                         "이하로 sub-interpolate → 생성 데이터 ≤2.5 rad/s(실기기 정합). <2.5 는 q_bias "
+                         "가산 여유. env arm max_velocity(5.0)는 불변.")
 parser.add_argument("--loop", type=int, default=0, help="시퀀스 반복 횟수(0=auto: livestream 무한·그외 1회)")
 parser.add_argument("--ready_steps", type=int, default=70)
 parser.add_argument("--settle_steps", type=int, default=10)
@@ -375,6 +379,11 @@ def main() -> int:
         return s
 
     CONTROL_DT = 1.0 / 30.0  # decimation 4 × sim.dt(1/120)
+    # 실행 rate 감속: 명령 step 당 |Δq| ≤ MAX_STEP → 명령 속도 ≤ MAX_VEL rad/s. 실기기 데이터
+    # within-task ≤2.5 rad/s 정합용. env arm max_velocity(5.0) 하드캡 대신 motion 에 step 을
+    # 더 줘 ≤2.5 면서 완주(하드캡은 lock-step lag 로 grasp 파손). MAX_VEL<2.5 는 q_bias 가산 여유.
+    MAX_VEL = float(args.max_cmd_vel)
+    MAX_STEP = MAX_VEL * CONTROL_DT
     nstep = [0]
 
     # 기록 규약 = **절대 joint target**(post-offset, real 하드웨어 native). processed_actions 가
@@ -442,15 +451,25 @@ def main() -> int:
         return robot.data.joint_pos[0, :5].detach().cpu().tolist()
 
     def run_traj(traj, grip_target, hold=0, stride=1):
-        """plan 궤적 실행. stride>1 = 매 stride 번째 waypoint 만(PD 가 보간) → crisp·빠름."""
+        """plan 궤적 실행. stride 번째 waypoint 를 따라가되, waypoint 간 |Δq|>MAX_STEP 이면
+        sub-interpolate 해 명령 속도 ≤MAX_VEL rad/s 보장(실기기 정합·완주 유지)."""
         n = len(traj)
-        for i in range(0, n, stride):
-            if not simulation_app.is_running():
-                return False
-            act(traj[i][:5], grip_target)
-        act(traj[-1][:5], grip_target)   # 항상 마지막 도달
+        prev = cur_arm()
+        idxs = list(range(0, n, stride))
+        if idxs[-1] != n - 1:
+            idxs.append(n - 1)   # 항상 마지막 도달
+        for i in idxs:
+            wp = list(traj[i][:5])
+            maxd = max(abs(wp[j] - prev[j]) for j in range(5))
+            sub = max(1, math.ceil(maxd / MAX_STEP))
+            for k in range(1, sub + 1):
+                if not simulation_app.is_running():
+                    return False
+                a = k / sub
+                act([prev[j] * (1 - a) + wp[j] * a for j in range(5)], grip_target)
+            prev = wp
         for _ in range(hold):
-            act(traj[-1][:5], grip_target)
+            act(prev, grip_target)
         return True
 
     def settle(q_arm, grip_target, n):
@@ -477,14 +496,16 @@ def main() -> int:
         plan_cspace 의 이웃 과다기각 회피). clearance roll-선택이 이미 face 확보."""
         start = cur_arm()
         g = goal_q6[:5]
-        for i in range(1, steps + 1):
+        maxd = max(abs(g[j] - start[j]) for j in range(5))
+        eff = max(steps, math.ceil(maxd / MAX_STEP))   # ≤MAX_VEL rad/s 보장(steps 는 최소 floor)
+        for i in range(1, eff + 1):
             if not simulation_app.is_running():
                 return False
-            a = i / steps
+            a = i / eff
             act([start[j] * (1 - a) + g[j] * a for j in range(5)], grip)
         for _ in range(hold):
             act(g, grip)
-        log(f"[demo] {tag} (direct {steps}step)")
+        log(f"[demo] {tag} (direct {eff}step)")
         return True
 
     def ik_q(p_w, yaw_b, pmax, sn, roll=0.0, name=""):

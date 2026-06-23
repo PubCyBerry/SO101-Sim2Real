@@ -757,4 +757,8 @@ sim-time-aware 소비) ② bridge Python slew(학습 envelope 재현) ③ deploy
 
 ### 17.2 속도 정합 (sim 데이터 ↔ 실기기)
 
-실기기 `so101_pick_cube_v2`(실측) within-task arm 속도 ≤2.5 rad/s. cuRobo 생성 데이터(`outputs/so101_sim_pick_cube_current_nearest_256`)는 **arm action max 5.0 rad/s·>2.5 가 4.95% frame**(wroll p95 3.05·span 2.83) — sim 이 더 빠름. 정합 방법 = **실행 rate 감속**(plan stride·seq_exec step수 ↑, motion 에 step 더 줘 ≤2.5 면서 완주). env arm `max_velocity` 하드캡(2.5)은 lock-step 파손이라 금지. 예산 ≤12s/cube.
+실기기 `so101_pick_cube_v2`(실측) within-task arm 속도 ≤2.5 rad/s(p99 1.15·max 2.49). 튜닝 전 cuRobo 데이터(`outputs/so101_sim_pick_cube_current_nearest_256`)는 **arm action max 5.0·>2.5 가 4.95% frame**(wroll p95 3.05) — sim 이 더 빠름.
+
+**해결 = 실행 rate 감속**(batch·demo 공통). `seq_exec`·`run_traj` 가 step 당 |Δq| ≤ `MAX_STEP`(=`--max_cmd_vel`/30Hz, 기본 2.3 rad/s) 이도록 sub-interpolate: `seq_exec` eff=`max(steps, ⌈maxΔ/MAX_STEP⌉)`, `run_traj` waypoint 간 sub-step. motion 에 step 을 더 줘 ≤2.5 면서 **완주**(env arm `max_velocity` 하드캡 2.5 는 lock-step lag 로 grasp 파손 → 금지, 5.0 유지). `MAX_VEL<2.5` 는 q_bias 가산 여유.
+
+**검증(seed 0 N=32 record):** arm action >2.5 **4.95→0.010%**(10/99910·max 2.98=q_bias 꼬리), p99 ≤2.29. 성공 all-4 87.5%(튜닝 전 90.6% 노이즈 범위 유지), episode **6.6s/cube**(<12 예산). 그리퍼는 `--gripper_speed 5.0` 유지 — 실기기 gripper 도 빠름(action max 6.98·>2.5 2.4%)이라 정합.
