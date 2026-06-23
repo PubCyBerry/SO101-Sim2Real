@@ -1,6 +1,8 @@
 datasets
 outputs
 models
+/logs/
+/ros2_ws/*.jsonl
 
 NvStreamer-*.etli
 
