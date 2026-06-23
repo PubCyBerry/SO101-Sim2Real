@@ -7,7 +7,7 @@
 
 목표는 두 가지를 동시에 만족하는 것이다.
 
-1. **개발 목표(WHAT)**: 50개 인간 시연으로 시작 → Isaac Lab 병렬 시뮬에서 RL 전문가 학습 → DR 롤아웃으로 대량 데이터 생성 → GR00T N1.5 증류(IL) → 실 SO-101 배포.
+1. **개발 목표(WHAT)**: 50개 인간 시연으로 시작 → Isaac Lab 병렬 시뮬에서 RL 전문가 학습 → DR 롤아웃으로 대량 데이터 생성 → SmolVLA·GR00T-N1.7 증류(IL) → 실 SO-101 배포.
 2. **실행 방식(HOW)**: AI Agent가 다른 AI Agent를 오케스트레이션하며 **장기간 무인 자율**로 진행. Context Compaction 전후로 방향이 유지되고, 모든 산출물이 **자기검증(self-verification)** 가능하며, **체크리스트로 현황 관리**가 된다.
 
 확정된 결정(5개):
@@ -48,7 +48,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 | codebase_version | `v3.0` |
 | robot_type | `so_follower` |
 | action / observation.state | 각 **6-dim joint position** (순서: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) |
-| 카메라 | `observation.images.{top, wrist}` · 480×640×3 · h264 · **fps 30** |
+| 카메라 | `observation.images.{top, wrist, front}` · 480×640×3 · h264 · **fps 30** |
 | task 문자열 | `"pick up the cube and place it in the bowl"` |
 
 이 계약을 **기계가 강제**하도록 `scripts/validate_lerobot_schema.py`(§7)를 가장 먼저 만든다. 모든 데이터 생성 단계는 이 validator를 통과해야 done 처리된다.
@@ -185,10 +185,10 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 - (선택) squint식 segmentation 배경 오버레이로 시각 갭 축소 — 카메라별 정합.
 - **게이트**: 생성 데이터셋이 `validate_lerobot_schema.py` 통과. 소규모(200ep)로 파이프라인 관통 검증 후 확장.
 
-### Phase D — GR00T N1.5 증류(IL) 🔧✅
-- 학습 인프라 ✅(`docker/Dockerfile.policy`·policy-entrypoint train·`env/groot.env`). 데이터 소스만 sim 롤아웃으로.
+### Phase D — SmolVLA·GR00T-N1.7 증류(IL) 🔧✅
+- SmolVLA는 `policy-server` 이미지, GR00T-N1.7은 Python/transformers 충돌을 피한 별도 `gr00t` 이미지와 gRPC↔ZMQ bridge를 사용한다.
 - (i)순차(sim 대량→50 real 미세조정) vs (ii)co-training(혼합) 둘 다 만들어 §E 비교.
-- modality config 재사용(2캠+state6+action6).
+- modality config 재사용(3캠+state6+action6).
 - **게이트**: 학습 완료 + held-out action MSE 산출 + checkpoint config.type=groot.
 
 ### Phase E — 평가 🆕
@@ -196,7 +196,7 @@ Compaction이 일어나도 Codex/Claude는 이 문서 + CONTEXT.md + TASKS.md만
 - **게이트**: 비교표 자동 생성 → 사용자 보고(여기까지 무인).
 
 ### Phase F~G — 실기기 배포·Sim2Real 루프 ⛔
-- LeRobot Async(서버 PolicyServer=GR00T, Windows RobotClient=so101_follower+2캠) ✅인프라.
+- LeRobot Async(서버 PolicyServer 또는 GR00T bridge, Windows RobotClient=so101_follower+3캠) ✅인프라.
 - **사용자 개입 필수**(USB·카메라·물리·안전). 자율 루프는 E 완료 시 멈추고 F 준비물 체크리스트를 사용자에게 제시.
 
 ---

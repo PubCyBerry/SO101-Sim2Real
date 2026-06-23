@@ -13,6 +13,30 @@
 
 ---
 
+## 작업 인계 (2026-06-23 — SmolVLA·GR00T 4-cube closed-loop 20%+ 개선 / 🔵 진행 중)
+
+- **목표**: 현재 40/50mm cube + convexHull + jaw/gripper SDF 설정에서 SmolVLA와 GR00T-N1.7의 4-cube all-success rate를 최소 20%, 목표 50%까지 끌어올린다. 추론 설정 sweep → 현재 설정 expert 256ep 생성 → 재학습 → multi-seed 평가 순으로 진행한다.
+- **기준선 재측정(SmolVLA 4cube_1024)**: 검증 프로필 `smolvla_4ceval`(chunk 32, gripper offset +0.2rad)로 실제 standard gRPC open-loop와 ROS bridge closed-loop를 수집했다.
+  - open-loop ep0 489f: overall MAE **4.004**(arm deg + gripper [0,100]), recorded action을 잘 추종.
+  - closed-loop seed0 1,888 tick: 최종 0/4, ever-in-bowl 1/4. action→state 추종은 arm 2.8~5.9deg 수준이나 정책이 짧은 pick-place 패턴을 반복하며 target을 재획득하지 못함.
+  - 산출물: `outputs/smolvla/{01_data_vs_openloop_actual_grpc_ep0.png,02_closedloop_actual_action_vs_state_seed0.png,03_data_openloop_closedloop_summary.png,metrics.json,pipeline_data_openloop_closedloop.npz}`.
+- **핵심 판단**: 기존 4cube 데이터의 expert 순서가 항상 `Cube1→Cube4`인데 네 큐브는 외형이 같고 spawn은 무작위라, 첫 target identity가 이미지에서 관측 불가능하다. 동일 관측에 서로 다른 첫 action이 붙는 label aliasing/multimodality가 반복 궤적의 주원인이다. 기존 4cube_1024는 2026-06-18 cube 확대·Option A 기록 변경 전 생성되어 현재 물리/시각/그리퍼 계약과도 불일치한다.
+- **데이터 생성 경로**: `pick_cube_state_machine.py`는 dataset writer가 없으므로, 같은 expert phase tape + 검증된 LeRobot v3 writer를 가진 `scripts/sim/pick_cube_curobo_batch.py --record_dir ... --record_episodes 256`을 사용한다. 현재 CUBE_SIZES 40/50mm와 절대 gripper action 기록이 이미 반영됨.
+- **observable-order A/B(N=256, 현 물리)**: fixed all-4 80.9%, nearest 79.3%, left-to-right 78.9%, isolated 76.2%. Expert 성능 손실이 거의 없고 매 frame에서 target을 재결정할 수 있는 `nearest`를 채택했다. 변경: `pick_cube_curobo_batch.py --order_mode {fixed,nearest,left_to_right,isolated}`.
+- **기록 병목 해결**: CPU libx264 + 전 pixel float64 image stats 때문에 4ep가 254초. 시스템 FFmpeg `h264_nvenc` + CQ23/p4, image stats 8×8 stride sampling을 추가해 동일 640×480 H.264/yuv420p/30fps 계약으로 4ep **103초**. `ffprobe`/schema/1,932 frame 검증 통과.
+- **✅ 신규 데이터 완료**: `outputs/so101_sim_pick_cube_current_nearest_256`, N=32, seed=20260622, nearest, **256ep/130,214f**, 11 rounds, 1.8GB, 생성 1,389초. schema/episode index/finite action-state/세 카메라 H.264 640×480 yuv420p 30fps 및 각 130,214 frame 검증 통과. HF `taehunkim/so101_sim_pick_cube_nearest_256`, main/tag `v3.0` commit=`f660675…`.
+- **✅ SmolVLA 1-epoch adaptation 완료**: 기존 4cube_1024 checkpoint → 신규 데이터 `4069×batch32`, 43분, loss `0.105→0.063`, final=`outputs/train/so101_smolvla_sim_pick_cube_nearest_256_adapt/checkpoints/004069/pretrained_model`.
+- **SmolVLA evaluator/배포 수정**: ① cube 실제 desk z=0.705인데 common stale 0.760으로 bowl cube를 실패 집계 ② episode reset 시 vla queue/timestep/obs cache 잔류 ③ timer 안 동기 gRPC(115~200ms)로 command refill 정지 ④ all-4 달성 후에도 fixed horizon 끝까지 실행해 cube를 다시 꺼냄. 수정: reset token 공유파일, inference background worker, recorder actuator velocity parity, cube z 기준, all-4 즉시 종료. `docs/TROUBLESHOOTING.md` 기록.
+- **✅ SmolVLA 목표 달성**: APC32/thr0.25, seed40, N=5, 180s에서 **all-4 40%**, per-cube 85%, avg 3.4/4, ever90%. 30s는 per-cube30%/avg1.2, 90s는55%/2.2, 180s에서 task 완료율이 목표 범위 진입. 결과=`outputs/vla_eval_nearest256/smolvla_apc32_thr0p25_seed40_n5_s180.json`.
+- **✅ GR00T adaptation 완료**: 기존 4cube_1024 checkpoint-80000 → 신규 nearest256 `16277×batch8` 완료. `checkpoint-{8000,16000,16277}`과 root final 모델 모두 완전하며 final trainer state=`global_step=max_steps=16277`, loss tail `0.0905→0.0841`.
+- **GR00T 평가**: checkpoint-8000 APC16/thr0.25는 all-4/final/ever 모두 0%. 최종 checkpoint-16277 open-loop ep0 MAE=4.799(wrist_roll10.13°, gripper1.06). 동일 closed-loop는 all-4 0%지만 **final per-cube25%, avg1.0/4, ever30%**로 회복(episode별 final 3/4·0/4·2/4·0/4·0/4).
+- **GR00T sweep**: APC16/thr0.5는 all-4/final 0%, ever10%로 thr0.25보다 악화. 갱신이 잦아지자 cube를 책상 밖으로 밀어내는 불안정성이 증가.
+- **GR00T sweep 추가**: APC16/thr0.0은 all-4 0%, final10%, avg0.4/4, ever20%로 thr0.25보다 낮음. best는 APC16/thr0.25.
+- **GR00T horizon/slew 진단**: best thr0.25 seed40/N1/300s는 final3/4·ever4/4(모두 한 번씩 옮겼지만 동시 유지 실패). 학습 action-term slew를 배포에 재적용한 A/B는 final2/4·ever2/4로 악화(이미 slew된 target의 이중 지연).
+- **🔵 현재 실행**: checkpoint-16277 기반 stage-2 1epoch(LR3e-5, color jitter off, state dropout0, batch8), output=`outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_stage2`, log=`outputs/vla_order_sweep/train_groot_nearest_256_stage2.log`. 2026-06-23 10:07 KST **8851/16277(54%)**, 최근 loss0.051~0.057, GPU39GB. 완료 후 best APC16/thr0.25 평가; 미달이면 recovery/perturbation data로 전환.
+- **Stage-2 wrapper 함정 해결**: host `ref_repos/.../finetune.sh` 수정은 NVIDIA 이미지 `/workspace`에 반영되지 않아 첫 run이 실제 LR1e-4+jitter on으로 시작됨 → checkpoint 전 중단. `docker/gr00t-finetune.sh` 신규 + compose `/host` mount + entrypoint 경로 변경. 재실행 최종 명령에서 LR3e-5/warmup0.03/dropout0/jitter 인자 없음 확인. `docs/TROUBLESHOOTING.md` 기록.
+- **상세 작업 기록**: `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md`에 성능 저하 원인, order A/B, 데이터 기록 병목, evaluator/async/reset 수정, SmolVLA 40% 결과, GR00T 진행 상태와 재현 명령을 기록한다. 후속 실험마다 갱신한다.
+
 ## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)
 
 - **✅ 완료(2026-06-18 13:24)**: 데이터 1024ep(504515 frame) + **3모델 전부 학습·HF push 완료**. ACT(b32×20k rc=0)·SmolVLA(b32×20k rc=0)·GR00T-N1.7(b8×80k rc=0, loss 0.13→0.055), 전부 640k samples 등량. HF: `taehunkim/so101_sim_pick_cube_4cube_1024`(데이터) + `so101_{act,smolvla,groot_n17}_sim_pick_cube_4cube_1024`(모델). 로컬 ckpt `outputs/train/...`(GR00T=checkpoint-80000 24GB). closed-loop eval=사용자 직접(범위 밖).

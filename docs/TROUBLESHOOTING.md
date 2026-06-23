@@ -11,6 +11,7 @@
 - [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
 - [LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패](#lerobot-051-gr00t-n15-학습-smoke가-단계별로-실패)
 - [GR00T 추론 서버에서 `policy-server-rtc`가 표준 추론으로 fallback](#gr00t-추론-서버에서-policy-server-rtc가-표준-추론으로-fallback)
+- [GR00T 학습 env override가 로그에만 보이고 실제 명령에는 미적용](#gr00t-학습-env-override가-로그에만-보이고-실제-명령에는-미적용)
 - [카메라 대역폭 제한](#카메라-대역폭-제한)
 - [Docker 컨테이너에서 Vulkan 초기화 실패 (Linux)](#docker-컨테이너에서-vulkan-초기화-실패-linux)
 - [WSL2 + Docker 에서 Isaac Sim Vulkan/GPU 가속 불가 (회피 불가)](#wsl2--docker-에서-isaac-sim-vulkangpu-가속-불가-회피-불가)
@@ -58,6 +59,7 @@
 - [시뮬레이션 기동 시 무시해도 되는 로그](#시뮬레이션-기동-시-무시해도-되는-로그)
 - [원격 WebRTC livestream 접속 실패 / 검은화면 (PUBLIC_IP 미설정 — LAN IP 만 ICE 광고)](#원격-webrtc-livestream-접속-실패--검은화면-public_ip-미설정--lan-ip-만-ice-광고)
 - [sim VLA 추론 동작 이상 — 서버측 RTC 오적용 (wall-clock leftover 추정 붕괴)](#sim-vla-추론-동작-이상--서버측-rtc-오적용-wall-clock-leftover-추정-붕괴)
+- [sim VLA eval 거짓 0%·episode 간 stale action·추론 refill 정지](#sim-vla-eval-거짓-0episode-간-stale-action추론-refill-정지)
 - [sim VLA 그리퍼 0.20rad 덜 열림 — use_default_offset 미복제](#sim-vla-그리퍼-020rad-덜-열림--use_default_offset-미복제)
 
 ---
@@ -645,6 +647,64 @@ ss -ltnp | grep ':8080'
 ```
 
 로그에 `PolicyServer started on 0.0.0.0:8080` 가 있고 RTC fallback warning 이 없으면 정상. 클라이언트는 `POLICY_TYPE=groot`, `POLICY_REPO_ID=taehunkim/so101_groot_n15_pick_pen`, `ACTIONS_PER_CHUNK=16` 로 접속한다.
+
+---
+
+## GR00T 학습 env override가 로그에만 보이고 실제 명령에는 미적용
+
+**현상**
+
+`LEARNING_RATE=3e-5`, `COLOR_JITTER_ENABLE=false`를 지정하고 stage-2 학습을 시작했는데 entrypoint의 요약 로그만 새 값을 표시하고, 실제 `launch_finetune.py`는 기본 LR과 color jitter로 실행된다.
+
+**오류 메시지**
+
+명시적 exception은 없고 shell trace에서 다음 불일치가 보인다.
+
+```text
+[INFO] LR=3e-5  Warmup=0.03  ColorJitter=false
+...
+exec python gr00t/experiment/launch_finetune.py \
+  --warmup_ratio 0.05 \
+  --learning_rate 1e-4 \
+  --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08
+```
+
+**원인**
+
+`gr00t` compose 서비스는 host의 `docker/gr00t-entrypoint.sh`만 `/host`에 bind-mount하고 NVIDIA GR00T repo 전체는 mount하지 않는다. 따라서 host의 `ref_repos/Isaac-GR00T/examples/finetune.sh`를 수정해도 컨테이너는 이미지 빌드 시 `/workspace/examples/finetune.sh`에 복사된 이전 사본을 실행한다. entrypoint가 env를 출력하는 것과 실제 학습 launcher의 인자는 별개다.
+
+**해결 방법**
+
+하이퍼파라미터 env를 처리하는 `docker/gr00t-finetune.sh`를 별도로 두고 compose에서 `/host/gr00t-finetune.sh:ro`로 mount한다. entrypoint의 finetune 분기도 이미지 내부 script 대신 이 wrapper를 실행한다.
+
+```yaml
+volumes:
+  - ../docker/gr00t-entrypoint.sh:/host/gr00t-entrypoint.sh:ro
+  - ../docker/gr00t-finetune.sh:/host/gr00t-finetune.sh:ro
+```
+
+```bash
+exec bash /host/gr00t-finetune.sh \
+  --base-model-path "${GROOT_BASE_MODEL}" \
+  --dataset-path "${DATASET_DIR}" \
+  --embodiment-tag "${GROOT_EMBODIMENT_TAG}" \
+  --output-dir "${OUT}"
+```
+
+의도와 다른 run은 checkpoint가 생기기 전에 중단하고 올바른 wrapper로 다시 시작한다.
+
+**확인 방법**
+
+학습 시작 직전 `set -x`가 출력하는 최종 명령을 확인한다.
+
+```text
+exec python gr00t/experiment/launch_finetune.py \
+  --warmup_ratio 0.03 \
+  --learning_rate 3e-5 \
+  --state_dropout_prob 0.0
+```
+
+`--color_jitter_params`가 없고 원하는 LR·dropout이 최종 `exec python` 줄에 직접 나타나면 정상이다.
 
 ---
 
@@ -3942,6 +4002,57 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --no-deps 
   'python /workspace/scripts/sim/compare_train_vs_rtc.py --episode 0'
 # overall: A-vs-rec ≈ B-vs-rec ≈ 4deg (non-RTC). RTC 면 B 가 15-28deg.
 ```
+
+---
+
+## sim VLA eval 거짓 0%·episode 간 stale action·추론 refill 정지
+
+### 현상
+
+신규 nearest-order 데이터로 open-loop와 실제 grasp 동작은 개선됐는데 closed-loop JSON은 계속
+all-4 0%, per-cube 0~5%로 나온다. 육안/pose 로그에는 bowl 중심에 들어간 cube가 있고, 긴 eval에서는
+네 cube가 차례로 들어가도 마지막 frame에서 다시 실패로 바뀐다.
+
+### 오류 메시지
+
+명시적 exception은 없다. 실패 cube pose가 아래처럼 bowl 중심에 있으면서 z만 기존 판정창보다 낮다.
+
+```text
+success window: z∈[0.765, 0.880]
+Cube4: x(6mm, z0.738)
+gRPC refill: 115~200ms 동안 vla timer callback block
+```
+
+### 원인
+
+1. bridge eval이 cube recorder/state machine의 실제 desk top `z=0.705` 대신 pen/common stale 값
+   `z=0.760`을 사용해 bowl 안 cube(`z≈0.73~0.76`)를 실패 처리했다.
+2. scene reset 후에도 `vla_policy_node`의 action queue/timestep/관측 cache가 유지돼 이전 episode action이
+   다음 episode 시작에 실행됐다.
+3. 30Hz timer 안에서 gRPC inference를 동기 호출해 refill마다 115~200ms command publish가 멈췄다.
+4. all-cube success가 발생해도 fixed horizon 끝까지 계속 실행해 이미 놓은 cube를 다시 건드린 뒤 마지막
+   frame만 판정했다. 실제 task termination과 달랐다.
+
+### 해결 방법
+
+- bridge cube success z 기준을 recorder와 같은 `0.705 + BOWL_HEIGHT_RANGE(+0.10 tolerance)`로 맞춘다.
+- bridge가 reset generation 파일을 원자 갱신하고, vla node가 변경을 감지하면 queue/timestep/obs cache를
+  비운다.
+- gRPC inference는 single background worker로 보내고 timer는 남은 queue를 계속 30Hz로 소비한다.
+- 모든 active cube가 동시에 bowl 안이면 즉시 episode 성공 종료한다.
+- `scripts/run_nearest_256_eval.sh`가 위 reset token과 `--vla_action_parity`를 자동 배선한다.
+
+### 확인 방법
+
+```bash
+bash scripts/run_nearest_256_eval.sh smolvla 32 0.25 40 5 180
+docker logs nearest_vla | grep "episode reset token"
+jq '{all_cubes_success_rate,per_cube_placement_rate,avg_cubes_placed}' \
+  outputs/vla_eval_nearest256/smolvla_apc32_thr0p25_seed40_n5_s180.json
+```
+
+수정 전 strict metric은 all-4 0%/per-cube 0%였지만, 수정 후 동일 모델·seed에서
+**all-4 40% / per-cube 85% / 평균 3.4/4**가 나와야 한다.
 
 ---
 

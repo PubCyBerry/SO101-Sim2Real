@@ -1,7 +1,7 @@
 # TASKS — SO-101 Sim2Real 자율 개발
 
 > **단일 진실 공급원.** Codex가 갱신. 매 사이클 SELECT 전 재로드.
-> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist} 480×640@30 · PickCube task 문자열).
+> North Star: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) §1 불변 계약 (v3.0 · so_follower · 6-dim action/state · {top,wrist,front} 480×640@30 · PickCube task 문자열).
 > 자율 계약: 마스터플랜 §0 — A~E 무인, F~G만 사용자 게이트.
 > RELOAD: 매 사이클 시작에 마스터플랜 §0·§1·§7 + 본 파일 + `CONTEXT.md` 최근 인계 1~2개.
 > 복구불가 블로커: 동일 task 3회 실패 시 `blocked` 기록 후 의존 없는 task로 우회.
@@ -59,6 +59,14 @@
 - [ ] **TE.1** closed-loop sim eval (success rate, 일반화 영역 포함) | machine:server | dep:TD.1,TD.2 | verify:success_rate 표 산출 | status:todo
 - [ ] **TE.2** 3원 비교표 (①인간50 only ②sim+GR00T ③순수RL) + 사용자 보고 | machine:any | dep:TE.1 | verify:비교표 생성 → **자율 트랙 종료 보고** | status:todo
 
+### Phase E-VLA — 현재 4-cube nearest256 성능 개선 트랙
+
+- [x] **TE.VLA.DATA** 현재 cube 물리·절대 gripper 규약으로 관측 가능한 `nearest` 순서 256ep 생성·검증·HF push | machine:server | dep:TA.CUBE.PHYSICS | verify:256ep/130,214f, 3cam H.264 640×480@30, schema/index/finite 검증, HF `taehunkim/so101_sim_pick_cube_nearest_256` v3.0 | status:done
+- [x] **TE.VLA.PIPELINE** 실제 배포 평가 경로의 stale queue·동기 gRPC refill 정지·잘못된 desk z·all-4 후 재교란 수정 | machine:server | dep:TE.VLA.DATA | verify:episode reset token 확인 + background inference + cube z=0.705 + all-4 즉시 종료 | status:done
+- [x] **TE.VLA.SMOLVLA** nearest256 1epoch adaptation + closed-loop 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:APC32/thr0.25, seed40, N=5, 180s에서 all-4 **40%**, final per-cube 85%, avg 3.4/4 | status:done
+- [ ] **TE.VLA.GROOT** GR00T-N1.7 nearest256 adaptation·stage-2·closed-loop 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로에서 N≥5 all-4 success rate **20~50% 이상** | status:in_progress — 1epoch final은 all-4 0%, final per-cube25%, ever30%; stage-2(LR3e-5·jitter off·state dropout0) 학습 중
+- [ ] **TE.VLA.REPORT** SmolVLA/GR00T data·open-loop·closed-loop 최종 비교 플롯·multi-seed 보고 | machine:server | dep:TE.VLA.SMOLVLA,TE.VLA.GROOT | verify:`outputs/smolvla` 최종 PNG/metrics + `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md` 결과표 | status:todo
+
 ## Phase F~G — 실기기 배포·Sim2Real 루프 (GATED — 자율 트랙 밖)
 
 - [ ] **TF.0** [GATED] 실기기 준비 체크리스트 제시 (USB 포워딩·카메라 인덱스·캘리브레이션·안전 정지) | machine:local | dep:TE.2 | 사용자 개입 필요 | status:gated
@@ -68,6 +76,9 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-23] TE.VLA.GROOT in_progress — GR00T-N1.7 nearest256 1epoch checkpoint-16277은 open-loop MAE 4.799, closed-loop APC16/thr0.25 seed40 N5 180s에서 all-4 0%·final25%·ever30%; 300s seed40은 final3/4·ever4/4로 retention/recovery 병목 확인. stage-2(LR3e-5·color jitter off·state dropout0) 학습 중 / 다음: stage-2 open-loop + 동일 closed-loop 평가
+- [2026-06-23] TE.VLA.SMOLVLA done — nearest256 1epoch adaptation 및 evaluator/async/reset 수정 후 APC32/thr0.25 seed40 N5 180s에서 all-4 40%·final per-cube85%·avg3.4/4 달성 / 다음: GR00T 목표 달성 후 multi-seed 비교
+- [2026-06-22] TE.VLA.DATA/PIPELINE done — fixed latent-ID label aliasing을 nearest observable order로 변경, 현재 물리 256ep/130,214f 생성·HF push; eval desk z 0.760→0.705, stale action reset, background inference, all-4 early termination 적용
 - [2026-06-08] North Star update — 사용자 지시로 sim/LeRobot 카메라 불변 계약을 `observation.images.{top,wrist,front}` 3cam으로 변경(2cam→3cam). 관련 소스 13개 파일 일괄 수정 완료. front 카메라 시뮬 기본 좌표 미튜닝 — `--tune_cameras`로 GUI 조정 후 env_cfg 상수 업데이트 필요. 기존 2cam 데이터셋은 front 채널 없어 validator WARNING(에러 아님) / 다음: front 카메라 물리 장착 후 `.env` 포트 확인, GUI tuner로 시뮬 좌표 확정, 3cam 데이터셋 수집·검증
 - [2026-06-05] TA.CUBE.RMPFLOW_CONTROLLER blocked — RMPFlow low-level controller는 1-cube smoke pass 후 4-cube fixed-spawn에서 `pick_cube_rmpflow_refine_4cube`, `pick_cube_rmpflow_graspwait_4cube`, `pick_cube_rmpflow_hardfirst_cycles2_shortgrasp_4cube` 모두 failed(`final_inside` 최대 2/4); 공통 `GRASP` close+settle 보강 후 direct `joint_fk` 4-cube 회귀 proof `/DISK1/so101-sim2real/outputs/pick_cube_jointfk_graspwait_regression_4cube_nocam_20260605.json`는 pass / 다음: direct FSM 2cam expert 기준으로 RL/IL 우회
 - [2026-06-05] TA.CUBE.STATE_MACHINE_V2 done — 사용자 전이표와 같은 명시 FSM(`IDLE→OPEN_GRIPPER→MOVE_TO_PRE_PICK→ORIENT_WRIST→DESCEND→GRASP→LIFT→MOVE_TO_PRE_PLACE→PLACE_DESCEND→RELEASE→MARK_DONE→ALL_DONE`)으로 서버 4-cube fixed-spawn proof 통과, 2cam LeRobot v3 dataset `/DISK1/so101-sim2real/outputs/pick_cube_state_machine_explicit_fsm_stackheight_4cube_2cam_20260605` 생성(9000 frames/300.0s/schema PASS, `Cube1~4=true`) / 다음: TA.CUBE.RMPFLOW_CONTROLLER
