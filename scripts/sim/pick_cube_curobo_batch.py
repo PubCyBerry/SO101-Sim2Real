@@ -44,8 +44,17 @@ parser.add_argument("--ik_seeds", type=int, default=48, help="배치 IK seed 수
 parser.add_argument("--plan_attempts", type=int, default=4)
 parser.add_argument("--close_steps", type=int, default=10)
 parser.add_argument("--max_retry", type=int, default=1, help="큐브당 grasp 실패 시 재시도 횟수(0=재시도 없음)")
-parser.add_argument("--order_mode", default="fixed", choices=["fixed", "isolated"],
-                    help="픽 순서: fixed=인덱스순(92.8% 동치), isolated=가장 고립 먼저")
+parser.add_argument(
+    "--order_mode",
+    default="fixed",
+    choices=["fixed", "nearest", "left_to_right", "isolated"],
+    help=(
+        "픽 순서: fixed=USD 인덱스순(기존 호환, 시각적으로 동일한 큐브에서는 latent-ID label aliasing), "
+        "nearest=로봇 base에 가장 가까운 큐브부터, left_to_right=world x 오름차순, "
+        "isolated=가장 고립된 큐브부터. VLA 데이터 생성에는 관측에서 결정 가능한 nearest/"
+        "left_to_right를 우선 검증한다."
+    ),
+)
 parser.add_argument("--face_yaw", action="store_true", help="grasp yaw=수직면 azimuth(tumbled 정합)")
 parser.add_argument("--pop_speed", type=float, default=2.5,
                     help="팝콘 판정 큐브 속도(m/s). 정상 그릇낙하≈1.5, 초과=폭발로 간주(성공률 제외)")
@@ -77,6 +86,36 @@ parser.add_argument("--record_overwrite", action="store_true", help="record_dir 
 parser.add_argument("--record_max_attempts", type=int, default=0,
                     help="기록 모드 최대 라운드 시도(0=auto: ceil(record_episodes/(0.6*N))+4)")
 parser.add_argument("--record_warmup", type=int, default=8, help="라운드 시작 카메라 렌더 워밍업 step(미기록)")
+parser.add_argument(
+    "--record_video_quality",
+    type=int,
+    default=8,
+    choices=range(0, 11),
+    metavar="[0-10]",
+    help="imageio/libx264 품질(기본 8≈CRF10). 대량 생성은 6≈CRF20 권장.",
+)
+parser.add_argument(
+    "--record_video_preset",
+    default="",
+    help="libx264 preset(빈값=ffmpeg 기본 medium). 대량 생성은 veryfast 권장.",
+)
+parser.add_argument(
+    "--record_video_codec",
+    choices=("libx264", "h264_nvenc"),
+    default="libx264",
+    help="비디오 encoder. h264_nvenc는 NVENC 지원 시스템 FFmpeg가 필요.",
+)
+parser.add_argument(
+    "--record_ffmpeg_exe",
+    default="",
+    help="imageio가 사용할 FFmpeg 경로. h264_nvenc 사용 시 보통 /usr/bin/ffmpeg.",
+)
+parser.add_argument(
+    "--record_nvenc_cq",
+    type=int,
+    default=23,
+    help="h264_nvenc constant quality(0=최고, 51=최저; 기본 23).",
+)
 from isaaclab.app import AppLauncher  # noqa: E402
 
 AppLauncher.add_app_launcher_args(parser)
@@ -290,8 +329,21 @@ def main() -> int:
     writer = None
     if record_mode:
         writer = LeRobotV3DatasetWriter(
-            args.record_dir, overwrite=args.record_overwrite, enable_videos=True)
-        log(f"[batch] 🎥 RECORD → {args.record_dir} (목표 {args.record_episodes} all-4, N={N})")
+            args.record_dir,
+            overwrite=args.record_overwrite,
+            enable_videos=True,
+            video_quality=args.record_video_quality,
+            video_preset=args.record_video_preset,
+            video_codec=args.record_video_codec,
+            video_ffmpeg_exe=args.record_ffmpeg_exe,
+            video_nvenc_cq=args.record_nvenc_cq,
+        )
+        log(
+            f"[batch] 🎥 RECORD → {args.record_dir} "
+            f"(목표 {args.record_episodes} all-4, N={N}, "
+            f"codec={args.record_video_codec}, quality={args.record_video_quality}, "
+            f"preset={args.record_video_preset or 'default'}, nvenc_cq={args.record_nvenc_cq})"
+        )
 
     pl = BatchPlanner(args.planner_host, args.planner_port)
     ping = pl.call({"cmd": "ping"})
@@ -548,7 +600,10 @@ def main() -> int:
         pl.world_batch(worlds)
 
     # 픽 순서(A): env별 미placed·retry미소진 큐브 선정.
-    #   order_mode="fixed": 고정 인덱스 순(옛 92.8% 동치). "isolated": 가장 고립(회귀 격리용).
+    #   fixed: USD 이름 인덱스 순. 네 큐브가 같은 외형인데 spawn 위치는 무작위라 VLA 관측에서
+    #          latent ID를 복원할 수 없어 action label aliasing이 생긴다(기존 호환 전용).
+    #   nearest/left_to_right/isolated: 현재 관측의 기하에서 결정되는 observable ordering.
+    #          동일 이미지에 항상 동일 target 규칙을 부여해 BC의 다중모드 action 충돌을 줄인다.
     def select_targets(sn_list, placed, failed):
         tgt = [None] * N
         for e in range(N):
@@ -559,6 +614,29 @@ def main() -> int:
                 continue
             if args.order_mode == "fixed" or len(cand) == 1:
                 tgt[e] = cand[0]
+                continue
+            if args.order_mode == "nearest":
+                # robot base-frame XY 거리. 거리 동률은 world x/y/name으로 고정해 완전 결정적.
+                tgt[e] = min(
+                    cand,
+                    key=lambda c: (
+                        float(np.linalg.norm(to_base(sn["obj"][c], sn)[:2])),
+                        float(sn["obj"][c][0]),
+                        float(sn["obj"][c][1]),
+                        c,
+                    ),
+                )
+                continue
+            if args.order_mode == "left_to_right":
+                # top camera에서 직접 관측 가능한 world x 오름차순. y/name은 동률 tie-break.
+                tgt[e] = min(
+                    cand,
+                    key=lambda c: (
+                        float(sn["obj"][c][0]),
+                        float(sn["obj"][c][1]),
+                        c,
+                    ),
+                )
                 continue
             best = None
             for c in cand:
@@ -881,6 +959,7 @@ def main() -> int:
             log(f"[batch] ⚠ 목표 {args.record_episodes} 미달({summary['total_episodes']}) "
                 f"— max_attempts({loop_n}) 소진")
         env.close()
+        simulation_app.close()
         return 0
 
     flat = [v for r in results for v in r]
@@ -931,6 +1010,7 @@ def main() -> int:
         log(f"[batch] dump_fail 저장: {args.dump_fail} (worst {len(dump)} env, placed={[last[e] for e in worst]})")
 
     env.close()
+    simulation_app.close()
     return 0
 
 

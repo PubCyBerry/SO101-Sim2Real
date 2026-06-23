@@ -18,6 +18,7 @@ ABI: `pyarrow`(<19 핀)·`imageio` 는 Isaac Sim 과의 ABI 충돌을 피하려 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,9 @@ class EpisodeRecord:
 
 @dataclass
 class ImageStats:
+    # 모든 640×480 pixel을 float64로 변환하면 video encoding보다 통계 계산이 더 느려진다.
+    # 규칙 격자 1/64 표본이면 channel mean/std 오차는 충분히 작고 처리량은 크게 줄어든다.
+    sample_stride: int = 8
     count: int = 0
     channel_min: np.ndarray = field(default_factory=lambda: np.full(3, 1.0, dtype=np.float64))
     channel_max: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
@@ -64,13 +68,13 @@ class ImageStats:
     channel_sumsq: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
 
     def update(self, image_u8: np.ndarray) -> None:
-        values = image_u8.astype(np.float64) / 255.0
+        values = image_u8[:: self.sample_stride, :: self.sample_stride].astype(np.float32) / 255.0
         flat = values.reshape(-1, 3)
         self.count += flat.shape[0]
         self.channel_min = np.minimum(self.channel_min, flat.min(axis=0))
         self.channel_max = np.maximum(self.channel_max, flat.max(axis=0))
-        self.channel_sum += flat.sum(axis=0)
-        self.channel_sumsq += np.square(flat).sum(axis=0)
+        self.channel_sum += flat.sum(axis=0, dtype=np.float64)
+        self.channel_sumsq += np.square(flat).sum(axis=0, dtype=np.float64)
 
     def to_json(self) -> dict[str, Any]:
         if self.count <= 0:
@@ -144,10 +148,26 @@ class LeRobotV3DatasetWriter:
         overwrite: bool = False,
         enable_videos: bool = True,
         robot_type: str = "so_follower",
+        video_quality: int = 8,
+        video_preset: str | None = None,
+        video_codec: str = "libx264",
+        video_ffmpeg_exe: str | None = None,
+        video_nvenc_cq: int = 23,
     ) -> None:
         self.root = Path(output_dir)
         self.enable_videos = enable_videos
         self.robot_type = robot_type
+        if not 0 <= int(video_quality) <= 10:
+            raise ValueError(f"video_quality must be in [0,10], got {video_quality}")
+        self.video_quality = int(video_quality)
+        self.video_preset = video_preset.strip() if video_preset else None
+        if video_codec not in {"libx264", "h264_nvenc"}:
+            raise ValueError(f"unsupported video_codec: {video_codec}")
+        if not 0 <= int(video_nvenc_cq) <= 51:
+            raise ValueError(f"video_nvenc_cq must be in [0,51], got {video_nvenc_cq}")
+        self.video_codec = video_codec
+        self.video_ffmpeg_exe = video_ffmpeg_exe.strip() if video_ffmpeg_exe else None
+        self.video_nvenc_cq = int(video_nvenc_cq)
         self._prepare_output_dir(self.root, overwrite)
         self.root = self.root.resolve()
 
@@ -181,17 +201,29 @@ class LeRobotV3DatasetWriter:
 
     # ── 비디오 writer (지연 import) ───────────────────────────────────────
     def _open_video_writers(self) -> None:
+        # imageio-ffmpeg 번들 바이너리는 NVENC 없이 빌드된 경우가 많다. 시스템 FFmpeg를
+        # 명시하면 import 전에 환경변수를 주입해 실제 encoder 목록을 사용하게 한다.
+        if self.video_ffmpeg_exe:
+            os.environ["IMAGEIO_FFMPEG_EXE"] = self.video_ffmpeg_exe
         import imageio.v2 as imageio  # noqa: PLC0415  (ABI: AppLauncher 부팅 후 import)
 
         for cam in CAMERA_KEYS:
             p = self.root / "videos" / f"observation.images.{cam}" / "chunk-000" / "file-000.mp4"
+            ffmpeg_params = ["-pix_fmt", "yuv420p"]
+            if self.video_preset:
+                ffmpeg_params = ["-preset", self.video_preset, *ffmpeg_params]
+            quality: int | None = self.video_quality
+            if self.video_codec == "h264_nvenc":
+                # NVENC는 imageio의 generic qscale 대신 constant-quality(CQ)를 직접 지정한다.
+                quality = None
+                ffmpeg_params = ["-cq", str(self.video_nvenc_cq), *ffmpeg_params]
             self._writers[cam] = imageio.get_writer(
                 p,
                 fps=FPS,
-                codec="libx264",
-                quality=8,
+                codec=self.video_codec,
+                quality=quality,
                 macro_block_size=1,
-                ffmpeg_params=["-pix_fmt", "yuv420p"],
+                ffmpeg_params=ffmpeg_params,
             )
 
     def _close_video_writers(self) -> None:
