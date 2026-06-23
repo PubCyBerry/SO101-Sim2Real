@@ -704,7 +704,15 @@ exec python gr00t/experiment/launch_finetune.py \
   --state_dropout_prob 0.0
 ```
 
-`--color_jitter_params`가 없고 원하는 LR·dropout이 최종 `exec python` 줄에 직접 나타나면 정상이다.
+`COLOR_JITTER_ENABLE=false`는 `--color_jitter_params`를 **값 없이** 전달해야 빈 dict `{}`가 된다. 인자를 완전히 생략하면 base checkpoint의 jitter 설정을 상속하므로 off가 아니다.
+
+```text
+--learning_rate 3e-5 \
+--color_jitter_params \
+--state_dropout_prob 0.0
+```
+
+저장된 `experiment_cfg/final_model_config.json`에서 `color_jitter_params: null` 또는 빈 설정이고 원하는 LR·dropout이 최종 `exec python` 줄에 직접 나타나면 정상이다.
 
 ---
 

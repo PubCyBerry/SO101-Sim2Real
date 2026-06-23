@@ -33,8 +33,11 @@
 - **GR00T sweep**: APC16/thr0.5는 all-4/final 0%, ever10%로 thr0.25보다 악화. 갱신이 잦아지자 cube를 책상 밖으로 밀어내는 불안정성이 증가.
 - **GR00T sweep 추가**: APC16/thr0.0은 all-4 0%, final10%, avg0.4/4, ever20%로 thr0.25보다 낮음. best는 APC16/thr0.25.
 - **GR00T horizon/slew 진단**: best thr0.25 seed40/N1/300s는 final3/4·ever4/4(모두 한 번씩 옮겼지만 동시 유지 실패). 학습 action-term slew를 배포에 재적용한 A/B는 final2/4·ever2/4로 악화(이미 slew된 target의 이중 지연).
-- **🔵 현재 실행**: checkpoint-16277 기반 stage-2 1epoch(LR3e-5, color jitter off, state dropout0, batch8), output=`outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_stage2`, log=`outputs/vla_order_sweep/train_groot_nearest_256_stage2.log`. 2026-06-23 10:07 KST **8851/16277(54%)**, 최근 loss0.051~0.057, GPU39GB. 완료 후 best APC16/thr0.25 평가; 미달이면 recovery/perturbation data로 전환.
+- **Stage-2 결과**: checkpoint-16277 기반 1epoch(LR3e-5, warmup0.03, state dropout0, batch8), 16277 steps/4770.9초/train loss0.0513/final tail0.0402→0.0412/GPU39GB. color jitter는 base 상속으로 유지. open-loop MAE4.689, closed-loop APC16/thr0.25 seed40/N5/180s = all-4 0%·final25%·avg1.0·ever25%로 개선 없음.
 - **Stage-2 wrapper 함정 해결**: host `ref_repos/.../finetune.sh` 수정은 NVIDIA 이미지 `/workspace`에 반영되지 않아 첫 run이 실제 LR1e-4+jitter on으로 시작됨 → checkpoint 전 중단. `docker/gr00t-finetune.sh` 신규 + compose `/host` mount + entrypoint 경로 변경. 재실행 최종 명령에서 LR3e-5/warmup0.03/dropout0/jitter 인자 없음 확인. `docs/TROUBLESHOOTING.md` 기록.
+- **jitter off 정정**: 인자 생략은 base config 상속이다. wrapper가 `COLOR_JITTER_ENABLE=false`일 때 값 없는 `--color_jitter_params`를 전달해 tyro `{}`로 파싱하도록 수정.
+- **visual grounding smoke**: stage2 기반 visual+projector만 train(diffusion frozen), batch8/LR1e-5/jitter off/dropout0 100-step 정상(trainable29.76%). open-loop MAE4.384로 개선했지만 seed40/N1/180s는 0/4.
+- **🔵 현재 실행**: `outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_visual_stage3`, visual encoder+projector 전용 1epoch(16277×batch8, LR1e-5, diffusion frozen, jitter off). 완료 후 open-loop→seed40/N5 closed-loop.
 - **상세 작업 기록**: `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md`에 성능 저하 원인, order A/B, 데이터 기록 병목, evaluator/async/reset 수정, SmolVLA 40% 결과, GR00T 진행 상태와 재현 명령을 기록한다. 후속 실험마다 갱신한다.
 
 ## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)

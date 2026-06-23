@@ -16,7 +16,7 @@
 | 데이터 | 과거 물리·기록 규약의 4-cube 1024ep | 현재 물리·절대 gripper 규약의 256ep |
 | SmolVLA all-4 성공률 | 0% (N=10) | **40% (2/5)** |
 | SmolVLA final per-cube | 0% | **85% (17/20)** |
-| GR00T-N1.7 | 기존 모델 0% | 1epoch final: all-4 0%, final per-cube 25%, ever 30%; stage-2 학습 중 |
+| GR00T-N1.7 | 기존 모델 0% | stage-2도 all-4 0%, final per-cube 25%; visual-only stage-3 학습 중 |
 
 SmolVLA의 목표 범위 진입은 실제 closed-loop 배포 경로에서 확인했다. 표본 수가 N=5이므로 후속 multi-seed 평가로 신뢰구간을 넓혀야 한다.
 
@@ -127,8 +127,9 @@ checkpoint 생성 전에 run을 중단하고, host의 `docker/gr00t-finetune.sh`
 --learning_rate 3e-5
 --warmup_ratio 0.03
 --state_dropout_prob 0.0
-# --color_jitter_params 없음
 ```
+
+후속 검증에서 `--color_jitter_params`를 완전히 생략하면 base checkpoint 값을 상속한다는 점을 확인했다. 실제 off는 값을 비운 `--color_jitter_params`를 명시해 tyro가 `{}`로 파싱하도록 수정했다.
 
 ## 4. 구현 변경
 
@@ -181,8 +182,12 @@ checkpoint 생성 전에 run을 중단하고, host의 `docker/gr00t-finetune.sh`
 - checkpoint-16277 closed-loop APC16/thr0.0: all-4 0%, final per-cube 10%, avg 0.4/4, ever 20% (N=5)
 - checkpoint-16277 APC16/thr0.25, seed40, 300s: final 3/4, ever 4/4. 시간 내 모든 cube를 옮겼지만 동시 유지에는 실패했다.
 - 같은 조건에 학습 action-term target slew(arm 5.0/gripper 2.5rad/s)를 재적용하면 final 2/4, ever 2/4로 악화됐다. 데이터가 이미 slew-limited라 이중 지연이 발생한 것으로 판단한다.
-- stage-2: checkpoint-16277에서 LR 3e-5, warmup 0.03, color jitter off, state dropout 0.0으로 추가 1epoch 학습 중
-- 2026-06-23 10:07 KST 기준 8,851/16,277(54%), 최근 loss 0.051~0.057, GPU 약 39GB
+- stage-2: checkpoint-16277에서 LR 3e-5, warmup 0.03, state dropout 0.0으로 추가 1epoch 완료
+- `color_jitter_params` 인자를 생략했지만 이는 off가 아니라 base checkpoint 값을 상속한다. 최종 config에 brightness0.3/contrast0.4/saturation0.5/hue0.08이 유지됐다.
+- 16,277 steps, 4,770.9초, train loss 0.0513, 최종 loss tail 0.0402→0.0412, GPU 약 39GB
+- stage-2 open-loop ep0 MAE 4.689, closed-loop APC16/thr0.25 seed40 N5 180s: all-4 0%, final per-cube 25%, avg1.0/4, ever25%
+- visual encoder+projector smoke(`tune_visual=true`, diffusion frozen, jitter 명시 off) 100-step: trainable 29.76%, batch8 정상, open-loop MAE 4.384. seed40 N1 180s는 0/4.
+- 현재 visual-only stage-3 1epoch(batch8, LR1e-5, jitter off, state dropout0) 학습 중
 
 ## 6. 검증 결과와 산출물
 
@@ -213,10 +218,10 @@ ever-in-bowl=90%
 
 ## 7. 다음 작업
 
-1. GR00T checkpoint-16277에서 stage-2 1 epoch를 수행한다.
-2. 설정은 LR 3e-5, color jitter off, state dropout 0.0으로 현재 sim의 시각·관절 상태 정합을 우선한다.
-3. stage-2 모델을 APC16/thr0.25, seed40/N5/180s로 평가한다.
-4. 미달이면 clean BC 반복보다 recovery/perturbation 데이터 생성으로 전환한다.
+1. visual-only stage-3 1epoch를 완료한다.
+2. stage-3 모델의 teacher-forced open-loop MAE를 측정한다.
+3. APC16/thr0.25, seed40/N5/180s closed-loop를 평가한다.
+4. 미달이면 clean BC 반복을 중단하고 recovery/perturbation 데이터 생성으로 전환한다.
 5. 목표를 통과한 GR00T checkpoint를 Hugging Face에 업로드한다.
 6. 두 모델을 다른 seed 구간에서 N=10 이상 재평가한다.
 7. data/open-loop/closed-loop와 모델별 성공률을 `outputs/smolvla`의 최종 비교 plot으로 저장한다.
