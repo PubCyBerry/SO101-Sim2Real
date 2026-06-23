@@ -134,6 +134,9 @@ LAUNCH_CMD=(
 
 if [ "$COLOR_JITTER_ENABLE" = "true" ]; then
     LAUNCH_CMD+=(--color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08)
+else
+    # tyro dict option을 값 없이 전달하면 {}가 되어 base checkpoint의 jitter 설정 상속을 끊는다.
+    LAUNCH_CMD+=(--color_jitter_params)
 fi
 
 if [ -n "$MODALITY_CONFIG_PATH" ]; then

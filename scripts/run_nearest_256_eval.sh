@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 신규 nearest-order 256ep adaptation 모델의 단일 closed-loop 평가.
-# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew]
+# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew] [label]
 set -uo pipefail
 
 REPO=/home/konan147/Workspaces/SO101-Sim2Real
@@ -13,6 +13,7 @@ SEED="${4:-0}"
 N="${5:-10}"
 EVAL_SECONDS="${6:-30}"
 COMMAND_SLEW="${7:-false}"
+RUN_LABEL="${8:-}"
 case "$COMMAND_SLEW" in
   true|false) ;;
   *) echo "command_slew는 true 또는 false여야 함: $COMMAND_SLEW" >&2; exit 2 ;;
@@ -28,6 +29,9 @@ esac
 TAG="${MODEL}_apc${APC}_thr${THRESHOLD}_seed${SEED}_n${N}_s${EVAL_SECONDS}"
 if [[ "$COMMAND_SLEW" == "true" ]]; then
   TAG="${TAG}_slew"
+fi
+if [[ -n "$RUN_LABEL" ]]; then
+  TAG="${TAG}_${RUN_LABEL}"
 fi
 TAG="${TAG//./p}"
 LOGDIR="$REPO/outputs/vla_eval_nearest256"
@@ -75,7 +79,7 @@ wait_log() {
   return 1
 }
 
-log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW"
+log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW label=${RUN_LABEL:-none}"
 if [[ "$MODEL" == "groot" ]]; then
   POLICY_PROFILE="$PROFILE" "${DC[@]}" run -d --name nearest_gr \
     gr00t zmq-server > "$LOGDIR/${TAG}_groot.log" 2>&1
@@ -126,6 +130,7 @@ TMP_JSON="${OUT}.tmp"
 jq \
   --arg model "$MODEL" \
   --arg profile "$PROFILE" \
+  --arg run_label "$RUN_LABEL" \
   --argjson actions_per_chunk "$APC" \
   --argjson chunk_size_threshold "$THRESHOLD" \
   --argjson seed "$SEED" \
@@ -133,6 +138,7 @@ jq \
   --arg trajectory_log "$TRAJ_HOST" \
   '.model = $model
    | .profile = $profile
+   | .run_label = $run_label
    | .actions_per_chunk = $actions_per_chunk
    | .chunk_size_threshold = $chunk_size_threshold
    | .seed = $seed
