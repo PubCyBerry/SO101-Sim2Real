@@ -300,8 +300,12 @@ def main() -> int:
     all_env_ids_cpu = torch.arange(N, dtype=torch.long, device="cpu")
     if args.bowl_mass > 0.0:
         bowl_masses = bowl_asset.root_physx_view.get_masses().clone()
+        bowl_mass_ratio = float(args.bowl_mass) / bowl_masses.clamp_min(1.0e-6)
         bowl_masses[:] = float(args.bowl_mass)
         bowl_asset.root_physx_view.set_masses(bowl_masses, all_env_ids_cpu)
+        bowl_inertias = bowl_asset.root_physx_view.get_inertias().clone()
+        bowl_inertias *= bowl_mass_ratio.reshape(N, 1)
+        bowl_asset.root_physx_view.set_inertias(bowl_inertias, all_env_ids_cpu)
         log(f"[batch] 물리 A/B: bowl mass={args.bowl_mass}kg")
     if args.bowl_friction is not None:
         static_friction, dynamic_friction = args.bowl_friction
