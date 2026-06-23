@@ -180,6 +180,10 @@ jq \
   "$OUT" > "$TMP_JSON"
 mv "$TMP_JSON" "$OUT"
 
+RECOVERY_LAYOUTS="${OUT%.json}_recovery_layouts.json"
+jq '[.episodes[] | select(.all_ok | not) | .recovery_layout | select(. != null)]' \
+  "$OUT" > "$RECOVERY_LAYOUTS"
+
 jq '{
   model,
   actions_per_chunk,
@@ -192,3 +196,4 @@ jq '{
   avg_cubes_placed
 }' "$OUT"
 log "eval done rc=$BRIDGE_RC → $OUT"
+log "recovery layouts → $RECOVERY_LAYOUTS"
