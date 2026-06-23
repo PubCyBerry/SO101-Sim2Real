@@ -837,7 +837,9 @@ def main() -> None:
     _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
     _MIN_BOWL_SEP = 0.14         # 큐브-그릇
     _MIN_BASE_SEP = 0.135        # 큐브-base 발치(inner-reach)
-    _VOLUME_INSET = 0.040 * 0.5 * (2 ** 0.5)   # ≈0.0283 = max 큐브 face 대각 절반(볼륨 in-rect)
+    # PickCubeEnvCfg._CUBE_VOLUME_INSET과 동일. 2026-06-18 최대 cube가 40→50mm로 커졌으므로
+    # 옛 40mm 기준(0.0283m)을 쓰면 50mm Cube3/4가 학습보다 경계 쪽에 spawn되는 OOD eval이 된다.
+    _VOLUME_INSET = 0.050 * 0.5 * (2 ** 0.5)   # ≈0.0354 = max cube face 대각 절반
     _BOWL_ARC_RADIUS = 0.44
     _BOWL_ARC_DEG = (-4.0, 8.0)
     _MAX_ATTEMPTS = 50

@@ -1023,7 +1023,7 @@ class PickCubeEventCfg:
     )
 
     # 큐브 4개를 매트 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
-    #   · 볼륨이 사각형 안: volume_inset(40mm face 대각 절반)
+    #   · 볼륨이 사각형 안: volume_inset(최대 50mm cube face 대각 절반)
     #   · 볼륨 비겹침: min_cube_sep=0.060 (40mm footprint 대각 절반 쌍 ≈0.057 + 여유),
     #                  min_bowl_sep=0.14 (그릇 반경0.06 + 큐브0.029 + arc 이동 0.05)
     #   · full_orient: 이산 stable-face + random yaw (face 다양·drift 0·z 띄움 불요)
