@@ -331,6 +331,7 @@ services:
       - ../logs:/host/logs
       # 우리 entrypoint + GR00T 설정 자산 (repo 무수정 — bind-mount 로만 주입)
       - ../docker/gr00t-entrypoint.sh:/host/gr00t-entrypoint.sh:ro
+      - ../docker/gr00t-finetune.sh:/host/gr00t-finetune.sh:ro
       - ../configs/groot:/host/configs:ro
       # convert 모드 별도 uv 환경(lerobot 핀)·캐시는 /host/outputs 하위(host UID 소유 bind-mount)에
       # 둔다 — root 소유 named volume 회피. (entrypoint convert 모드 참조)

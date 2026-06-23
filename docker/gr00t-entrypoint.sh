@@ -19,6 +19,7 @@
 #   convert    : GROOT_MODALITY_JSON(기본 /host/configs/so101_modality.json)
 #   finetune   : GROOT_BASE_MODEL  GROOT_MODALITY_CONFIG  JOB_NAME
 #                NUM_GPUS  TRAIN_STEPS  BATCH_SIZE  NUM_WORKERS  SAVE_STEPS  WANDB_ENABLE
+#                LEARNING_RATE  WARMUP_RATIO  WEIGHT_DECAY  COLOR_JITTER_ENABLE
 #   zmq-server : GROOT_CHECKPOINT  GROOT_ZMQ_PORT
 # =============================================================================
 set -euo pipefail
@@ -141,8 +142,9 @@ case "$CMD" in
     info "  Modality → ${GROOT_MODALITY_CONFIG}  (tag=${GROOT_EMBODIMENT_TAG})"
     info "  Output   → ${OUT}"
     info "  GPUs=${NUM_GPUS}  Steps=${MAX_STEPS}  GlobalBatch=${GLOBAL_BATCH_SIZE}  Workers=${DATALOADER_NUM_WORKERS}  WandB=${USE_WANDB}"
+    info "  LR=${LEARNING_RATE:-1e-4}  Warmup=${WARMUP_RATIO:-0.05}  WeightDecay=${WEIGHT_DECAY:-1e-5}  ColorJitter=${COLOR_JITTER_ENABLE:-true}"
     cd /workspace
-    exec bash examples/finetune.sh \
+    exec bash /host/gr00t-finetune.sh \
         --base-model-path "${GROOT_BASE_MODEL}" \
         --dataset-path "${DATASET_DIR}" \
         --embodiment-tag "${GROOT_EMBODIMENT_TAG}" \
