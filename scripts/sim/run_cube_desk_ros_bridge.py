@@ -157,7 +157,7 @@ if not args.no_cameras:
 
 import omni.graph.core as og  # noqa: E402
 import torch  # noqa: E402  (world→opengl quat 변환용)
-from pxr import Gf, UsdGeom, UsdPhysics  # noqa: E402
+from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics  # noqa: E402
 
 from isaaclab.utils.math import convert_camera_frame_orientation_convention  # noqa: E402
 
@@ -664,6 +664,7 @@ def main() -> None:
         bowl_rb = UsdPhysics.RigidBodyAPI.Apply(bowl_prim)
         bowl_rb.CreateRigidBodyEnabledAttr().Set(True)
         bowl_rb.CreateKinematicEnabledAttr().Set(True)
+        PhysxSchema.PhysxRigidBodyAPI.Apply(bowl_prim).CreateEnableCCDAttr().Set(False)
         print("[bridge] eval A/B: bowl kinematic 고정", flush=True)
 
     # 조명 parity: scene.usd 는 광원 prim 이 없어(PickCubeSceneCfg 가 /World 계층서 따로 author)
@@ -880,11 +881,12 @@ def main() -> None:
         pos = np.array([cx + _BOWL_ARC_RADIUS * np.sin(ang),
                         cy + _BOWL_ARC_RADIUS * np.cos(ang), bowl_default_z], dtype=np.float32)
         bowl_handle.set_world_pose(position=pos, orientation=bowl_default_quat)
-        try:
-            bowl_handle.set_linear_velocity(np.zeros(3, dtype=np.float32))
-            bowl_handle.set_angular_velocity(np.zeros(3, dtype=np.float32))
-        except Exception:
-            pass
+        if not args.eval_bowl_kinematic:
+            try:
+                bowl_handle.set_linear_velocity(np.zeros(3, dtype=np.float32))
+                bowl_handle.set_angular_velocity(np.zeros(3, dtype=np.float32))
+            except Exception:
+                pass
 
     def reset_scene(seed: int) -> None:
         """seed 로 DR 재현(큐브 scatter+6D face → 그릇 arc, 학습 순서) + 팔 home.
