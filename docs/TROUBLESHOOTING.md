@@ -4040,6 +4040,9 @@ gRPC refill: 115~200ms 동안 vla timer callback block
 3. 30Hz timer 안에서 gRPC inference를 동기 호출해 refill마다 115~200ms command publish가 멈췄다.
 4. all-cube success가 발생해도 fixed horizon 끝까지 계속 실행해 이미 놓은 cube를 다시 건드린 뒤 마지막
    frame만 판정했다. 실제 task termination과 달랐다.
+5. cube를 40/50mm로 확대한 뒤에도 bridge DR의 workspace inset은 옛 최대 40mm 기준
+   `0.0283m`였다. 학습 env는 최대 50mm 기준 `0.0354m`라, eval의 Cube3/4가 학습보다 경계에
+   가깝게 spawn되는 OOD 분포였다.
 
 ### 해결 방법
 
@@ -4048,6 +4051,8 @@ gRPC refill: 115~200ms 동안 vla timer callback block
   비운다.
 - gRPC inference는 single background worker로 보내고 timer는 남은 queue를 계속 30Hz로 소비한다.
 - 모든 active cube가 동시에 bowl 안이면 즉시 episode 성공 종료한다.
+- bridge의 `_VOLUME_INSET`을 `PickCubeEnvCfg._CUBE_VOLUME_INSET`과 같은
+  `0.050 * 0.5 * sqrt(2) ≈ 0.0354m`로 맞춘다.
 - `scripts/run_nearest_256_eval.sh`가 위 reset token과 `--vla_action_parity`를 자동 배선한다.
 
 ### 확인 방법
@@ -4055,6 +4060,7 @@ gRPC refill: 115~200ms 동안 vla timer callback block
 ```bash
 bash scripts/run_nearest_256_eval.sh smolvla 32 0.25 40 5 180
 docker logs nearest_vla | grep "episode reset token"
+rg "_VOLUME_INSET = 0.050" scripts/sim/run_cube_desk_ros_bridge.py
 jq '{all_cubes_success_rate,per_cube_placement_rate,avg_cubes_placed}' \
   outputs/vla_eval_nearest256/smolvla_apc32_thr0p25_seed40_n5_s180.json
 ```
