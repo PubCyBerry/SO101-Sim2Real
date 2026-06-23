@@ -857,6 +857,28 @@ def main() -> int:
         # 슬롯을 미리 True 로 두면 select_targets/push_world/commit 이 기존대로 동작(배정 큐브만 픽·집계).
         asg_sets = assign_and_park()
         placed = [[ci not in asg_sets[e] for ci in range(len(cubes))] for e in range(N)]
+        if fail_layouts is not None:
+            # VLA 실패 종료 pose를 recovery dataset으로 재생할 때 이미 bowl 안에 남아 있는
+            # cube는 완료 처리한다. 그렇지 않으면 expert가 안정적으로 배치된 cube까지 다시
+            # 꺼내며 recovery가 아니라 전체 task 재실행 데이터가 된다.
+            recovery_start = snap_all()
+            recovered_initial = 0
+            for e, snapshot in enumerate(recovery_start):
+                bowl_xy = snapshot["bowl"][:2]
+                for cube_index, cube_name in enumerate(cubes):
+                    if placed[e][cube_index]:
+                        continue
+                    cube_position = snapshot["obj"][cube_name]
+                    in_xy = float(np.linalg.norm(cube_position[:2] - bowl_xy)) < BOWL_SUCCESS_RADIUS
+                    z_relative = float(cube_position[2]) - DESK_TOP_Z
+                    in_z = BOWL_HEIGHT_RANGE[0] <= z_relative <= BOWL_HEIGHT_RANGE[1] + 0.10
+                    if in_xy and in_z:
+                        placed[e][cube_index] = True
+                        recovered_initial += 1
+            log(
+                f"[batch] recovery start: 이미 bowl 안 cube {recovered_initial}/"
+                f"{N * len(cubes)} 완료 처리"
+            )
         if record_mode:
             rec_capture[0] = True
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 35)
