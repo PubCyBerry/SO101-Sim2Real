@@ -88,6 +88,12 @@ parser.add_argument("--eval_warmup", type=float, default=25.0,
                          "구동 시작할 때까지 대기(미구동 시 ep1 거짓 실패 방지).")
 parser.add_argument("--eval_out", default="outputs/vla_eval.json",
                     help="eval 결과 JSON 경로(REPO_ROOT 상대).")
+parser.add_argument(
+    "--eval_bowl_kinematic",
+    action="store_true",
+    help="평가 A/B: bowl을 kinematic rigid body로 고정한다. 시각·충돌·DR pose는 유지하고 "
+         "로봇/큐브 접촉으로 target bowl이 밀려나는 효과만 제거한다.",
+)
 parser.add_argument("--dump_obs", default="",
                     help="진단: 지정 시 eval ep0 에서 bridge 렌더 3캠 프레임 + arm joint 를 이 디렉터리에 저장"
                          "(학습 recorder 프레임과 시각 비교용).")
@@ -151,7 +157,7 @@ if not args.no_cameras:
 
 import omni.graph.core as og  # noqa: E402
 import torch  # noqa: E402  (world→opengl quat 변환용)
-from pxr import Gf, UsdGeom  # noqa: E402
+from pxr import Gf, UsdGeom, UsdPhysics  # noqa: E402
 
 from isaaclab.utils.math import convert_camera_frame_orientation_convention  # noqa: E402
 
@@ -653,6 +659,12 @@ def main() -> None:
 
     # cube_desk scene.usd: SCENE_OFFSET 가 baked 돼 큐브/그릇이 이미 world 좌표에 author 됨.
     add_reference_to_stage(CUBE_DESK_USD_PATH, SCENE_PRIM)
+    if args.eval_bowl_kinematic:
+        bowl_prim = world.stage.GetPrimAtPath(f"{SCENE_PRIM}/{BOWL_NAME}")
+        bowl_rb = UsdPhysics.RigidBodyAPI.Apply(bowl_prim)
+        bowl_rb.CreateRigidBodyEnabledAttr().Set(True)
+        bowl_rb.CreateKinematicEnabledAttr().Set(True)
+        print("[bridge] eval A/B: bowl kinematic 고정", flush=True)
 
     # 조명 parity: scene.usd 는 광원 prim 이 없어(PickCubeSceneCfg 가 /World 계층서 따로 author)
     # bridge 만 디폴트 헤드라이트로 렌더돼 curobo demo 와 노출/색이 달랐다. curobo demo(=VLA 학습
@@ -1157,6 +1169,7 @@ def main() -> None:
                 "model": "taehunkim/so101_smolvla_sim_pick_cube",
                 "n_episodes": n_ep, "n_active_cubes": n_active,
                 "eval_seconds": args.eval_seconds, "eval_settle": args.eval_settle,
+                "eval_bowl_kinematic": bool(args.eval_bowl_kinematic),
                 "all_cubes_success_rate": round(all_rate, 4),
                 "per_cube_placement_rate": round(cube_rate, 4),
                 "avg_cubes_placed": round(avg_placed, 3),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 신규 nearest-order 256ep adaptation 모델의 단일 closed-loop 평가.
-# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew] [label]
+# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew] [label] [bowl_kinematic]
 set -uo pipefail
 
 REPO=/home/konan147/Workspaces/SO101-Sim2Real
@@ -14,9 +14,14 @@ N="${5:-10}"
 EVAL_SECONDS="${6:-30}"
 COMMAND_SLEW="${7:-false}"
 RUN_LABEL="${8:-}"
+BOWL_KINEMATIC="${9:-false}"
 case "$COMMAND_SLEW" in
   true|false) ;;
   *) echo "command_slew는 true 또는 false여야 함: $COMMAND_SLEW" >&2; exit 2 ;;
+esac
+case "$BOWL_KINEMATIC" in
+  true|false) ;;
+  *) echo "bowl_kinematic은 true 또는 false여야 함: $BOWL_KINEMATIC" >&2; exit 2 ;;
 esac
 CUBES=4
 PROFILE=
@@ -29,6 +34,9 @@ esac
 TAG="${MODEL}_apc${APC}_thr${THRESHOLD}_seed${SEED}_n${N}_s${EVAL_SECONDS}"
 if [[ "$COMMAND_SLEW" == "true" ]]; then
   TAG="${TAG}_slew"
+fi
+if [[ "$BOWL_KINEMATIC" == "true" ]]; then
+  TAG="${TAG}_bowlkin"
 fi
 if [[ -n "$RUN_LABEL" ]]; then
   TAG="${TAG}_${RUN_LABEL}"
@@ -79,7 +87,7 @@ wait_log() {
   return 1
 }
 
-log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW label=${RUN_LABEL:-none}"
+log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW bowl_kinematic=$BOWL_KINEMATIC label=${RUN_LABEL:-none}"
 if [[ "$MODEL" == "groot" ]]; then
   POLICY_PROFILE="$PROFILE" "${DC[@]}" run -d --name nearest_gr \
     gr00t zmq-server > "$LOGDIR/${TAG}_groot.log" 2>&1
@@ -109,6 +117,10 @@ POLICY_PROFILE="$PROFILE" "${DC[@]}" run -d --name nearest_vla \
 wait_log nearest_vla "sent instructions|instructions sent|VLA node up" 180 || exit 1
 
 rm -f "$OUT" "$RESET_HOST"
+BOWL_ARGS=()
+if [[ "$BOWL_KINEMATIC" == "true" ]]; then
+  BOWL_ARGS+=(--eval_bowl_kinematic)
+fi
 set +e
 OMNI_KIT_ACCEPT_EULA=YES timeout --kill-after=20s 900s \
   scripts/sim/run_cube_desk_ros_bridge.sh \
@@ -116,7 +128,7 @@ OMNI_KIT_ACCEPT_EULA=YES timeout --kill-after=20s 900s \
     --vla_action_parity \
     --vla_reset_file "$RESET_HOST" \
     --eval "$N" --eval_seconds "$EVAL_SECONDS" --eval_settle 1.5 --eval_warmup 30 \
-    --eval_out "$OUT" > "$BRIDGE_LOG" 2>&1
+    --eval_out "$OUT" "${BOWL_ARGS[@]}" > "$BRIDGE_LOG" 2>&1
 BRIDGE_RC=$?
 set -e
 
@@ -135,6 +147,7 @@ jq \
   --argjson chunk_size_threshold "$THRESHOLD" \
   --argjson seed "$SEED" \
   --argjson command_slew_limit "$COMMAND_SLEW" \
+  --argjson bowl_kinematic "$BOWL_KINEMATIC" \
   --arg trajectory_log "$TRAJ_HOST" \
   '.model = $model
    | .profile = $profile
@@ -143,6 +156,7 @@ jq \
    | .chunk_size_threshold = $chunk_size_threshold
    | .seed = $seed
    | .command_slew_limit = $command_slew_limit
+   | .eval_bowl_kinematic = $bowl_kinematic
    | .trajectory_log = $trajectory_log' \
   "$OUT" > "$TMP_JSON"
 mv "$TMP_JSON" "$OUT"
