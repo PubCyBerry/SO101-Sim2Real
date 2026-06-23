@@ -86,8 +86,11 @@ _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
 _MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)
 _CUBE_SCATTER_X_RANGE: tuple[float, float] = (_MAT_BL_ENV[0] + 0.16, _MAT_BL_ENV[0] + 0.56)  # (-0.18, 0.22)
 _CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1] + 0.11, _MAT_BL_ENV[1] + 0.25)  # (0.155, 0.295)
+# 큐브 한 변 (author CUBE_SCALES, 2026-06-18 30/40→40/50): Cube1/2=40mm, Cube3/4=50mm.
+# DR 의 큐브간·그릇 이격이 footprint 반경(s·√2/2)에 맞춰 큐브별로 커지게 하는 기준.
+_CUBE_SIZES_M: dict[str, float] = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
 # 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(50mm) face 대각 절반 ((s/2)·√2).
-_CUBE_VOLUME_INSET: float = 0.050 * 0.5 * (2 ** 0.5)  # ≈ 0.0354
+_CUBE_VOLUME_INSET: float = max(_CUBE_SIZES_M.values()) * 0.5 * (2 ** 0.5)  # ≈ 0.0354
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
@@ -403,6 +406,10 @@ def add_pick_cube_cameras(
 
 # pick_cube 전용 slew 상한: arm 5.0 유지, **그리퍼만 2.5 rad/s** 로 낮춤.
 # 닫을 때 명령 속도를 줄여 큐브를 튕겨내지 않게(정렬 유지 → grasp valley 완화).
+# ⚠ arm 2.5 하드캡은 **금물**: cuRobo batch 가 lock-step(고정 step수)으로 sparse plan 을 따라가는데
+#   arm 을 2.5 로 묶으면 transit/descend 를 정해진 step 안에 못 끝내고 lag → grasp/place 어긋남
+#   (동일 seed·DR layout 측정 all-4 90.6→59.4%). 게다가 생성 데이터는 arm 5.0 에서도 이미
+#   within-task max≈2.5 rad/s(실데이터 정합) → 추가 cap 은 이득 0·컨트롤러 파손.
 # 공유 상수(SO101_JOINT_TARGET_MAX_VELOCITY, pen 과 공용)는 건드리지 않는다.
 _PICKCUBE_JOINT_MAX_VELOCITY: dict[str, float] = {
     **SO101_JOINT_TARGET_MAX_VELOCITY,
@@ -1024,8 +1031,9 @@ class PickCubeEventCfg:
 
     # 큐브 4개를 매트 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
     #   · 볼륨이 사각형 안: volume_inset(최대 50mm cube face 대각 절반)
-    #   · 볼륨 비겹침: min_cube_sep=0.060 (40mm footprint 대각 절반 쌍 ≈0.057 + 여유),
-    #                  min_bowl_sep=0.14 (그릇 반경0.06 + 큐브0.029 + arc 이동 0.05)
+    #   · 볼륨 비겹침: cube_sizes 로 per-pair 이격 동적 계산 (r_i+r_j+margin). 50mm쌍 ≈0.071,
+    #                  40mm쌍 ≈0.061. min_cube_sep=0.060 은 cube_sizes 미지정 시 fallback.
+    #                  min_bowl_sep=0.14(40mm 정합)도 큐브별 +(r−r_40) 보정 → 50mm 면 ≈0.147.
     #   · full_orient: 이산 stable-face + random yaw (face 다양·drift 0·z 띄움 불요)
     randomize_cubes = randomize_cubes_scattered(
         CUBE_NAMES,
@@ -1036,6 +1044,7 @@ class PickCubeEventCfg:
         volume_inset=_CUBE_VOLUME_INSET,
         min_cube_sep=0.060,
         min_bowl_sep=0.14,
+        cube_sizes=[_CUBE_SIZES_M[n] for n in CUBE_NAMES],  # 큐브 크기 대응 이격
         # base 발치(inner-reach, r<~0.13)는 안전고도 접근 IK 부재로 수행 불가.
         min_base_sep=0.135,
     )

@@ -1045,6 +1045,10 @@ def main() -> int:
             f"all-{n_cubes} {full_excl}/{n_clean} ({full_excl/max(1,n_clean)*100:.1f}%) | "
             f"popcorn-fail 큐브 {n_popfail}/{n_total} ({n_popfail/n_total*100:.1f}%)")
         log(f"[batch] 큐브 vmax(m/s) pctl[50,90,95,99,max]={pct}  (thresh={args.pop_speed})")
+        per_cube = P.mean(axis=0).round(3).tolist()   # 큐브별(인덱스=cubes 순) 안착률
+        log("[batch] 큐브별 안착률: " + " ".join(
+            f"{cubes[ci]}({CUBE_SIZES[cubes[ci]]*1000:.0f}mm)={per_cube[ci]*100:.0f}%"
+            for ci in range(n_cubes)))
         if args.taxonomy:
             with open(args.taxonomy, "w") as fh:
                 json.dump({"num_envs": N, "loops": args.loop, "n_cubes": n_cubes,

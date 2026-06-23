@@ -178,6 +178,8 @@ def _randomize_cubes_scattered_fn(
     z_range: tuple[float, float] = (0.0, 0.0),
     full_orient: bool = False,
     volume_inset: float = 0.0,
+    cube_sizes: list[float] | None = None,
+    cube_sep_margin: float = 0.005,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -224,6 +226,15 @@ def _randomize_cubes_scattered_fn(
     min_bowl_sep_sq = min_bowl_sep ** 2
     min_cube_sep_sq = min_cube_sep ** 2
 
+    # 큐브 크기 대응: footprint 반경 r=s·√2/2 (임의 yaw 코너 최악)로 per-pair·per-bowl 최소
+    # 이격을 동적 계산. cube_sizes 미지정(legacy)=스칼라 min_cube_sep/min_bowl_sep 그대로.
+    #   큐브쌍: r_i + r_j + margin (40mm쌍 ≈0.057+margin → 기존 0.060 재현).
+    #   그릇  : min_bowl_sep(40mm 정합값) + (r_i − r_40). 50mm 면 +0.007.
+    radii = None
+    if cube_sizes is not None:
+        radii = [float(s) * (2.0 ** 0.5) / 2.0 for s in cube_sizes]
+        R_REF40 = 0.040 * (2.0 ** 0.5) / 2.0
+
     n_active = len(cube_cfgs) if num_active is None else max(1, min(len(cube_cfgs), int(num_active)))
 
     for cube_idx, cube_cfg in enumerate(cube_cfgs):
@@ -246,6 +257,11 @@ def _randomize_cubes_scattered_fn(
         final_y = default[:, 1].clone()
         placed = torch.zeros(n, dtype=torch.bool, device=device)
 
+        # 이 큐브의 그릇 이격 (크기 대응: 큰 큐브일수록 더 멀리)
+        cur_bowl_sep_sq = min_bowl_sep_sq
+        if radii is not None:
+            cur_bowl_sep_sq = (min_bowl_sep + (radii[cube_idx] - R_REF40)) ** 2
+
         for _ in range(max_attempts):
             unplaced_mask = ~placed
             if not unplaced_mask.any():
@@ -255,9 +271,9 @@ def _randomize_cubes_scattered_fn(
             cand_x = torch.rand(len(idx), device=device) * (x_hi - x_lo) + x_lo
             cand_y = torch.rand(len(idx), device=device) * (y_hi - y_lo) + y_lo
 
-            # 그릇 최소 거리 확인
+            # 그릇 최소 거리 확인 (큐브 크기 대응 이격)
             bxy = bowl_default_xy[idx]
-            ok = (cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= min_bowl_sep_sq
+            ok = (cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq
 
             # robot base 최소 거리 확인 (inner-reach spawn 금지)
             if base_xy is not None:
@@ -267,11 +283,14 @@ def _randomize_cubes_scattered_fn(
                     >= min_base_sep_sq
                 )
 
-            # 이미 배치된 큐브들과의 최소 거리 확인
-            for prev in placed_xy:
+            # 이미 배치된 큐브들과의 최소 거리 확인 (per-pair 크기 대응 이격)
+            for prev_idx, prev in enumerate(placed_xy):
+                pair_sep_sq = min_cube_sep_sq
+                if radii is not None:
+                    pair_sep_sq = (radii[cube_idx] + radii[prev_idx] + cube_sep_margin) ** 2
                 pxy = prev[idx]
                 ok = ok & (
-                    (cand_x - pxy[:, 0]).pow(2) + (cand_y - pxy[:, 1]).pow(2) >= min_cube_sep_sq
+                    (cand_x - pxy[:, 0]).pow(2) + (cand_y - pxy[:, 1]).pow(2) >= pair_sep_sq
                 )
 
             accept = idx[ok]
@@ -354,6 +373,8 @@ def randomize_cubes_scattered(
     z_range: tuple[float, float] = (0.0, 0.0),
     full_orient: bool = False,
     volume_inset: float = 0.0,
+    cube_sizes: list[float] | None = None,
+    cube_sep_margin: float = 0.005,
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
 
@@ -394,6 +415,8 @@ def randomize_cubes_scattered(
             "z_range": z_range,
             "full_orient": bool(full_orient),
             "volume_inset": float(volume_inset),
+            "cube_sizes": ([float(s) for s in cube_sizes] if cube_sizes is not None else None),
+            "cube_sep_margin": float(cube_sep_margin),
         },
     )
 

@@ -140,7 +140,6 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(top/wrist/front 3단 수직 분할 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
 | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
-| `environments/pick_cube_state_machine.py` | SO-101 해석적(closed-form) IK + joint position action 만으로 PickCube pick-and-place (Lula/DiffIK 미사용). side-approach grasp(닫힘축 비킴 하강→수평 SLIDE), 장애물(그릇·큐브) 회피 roll 후보, 동적 집기 순서, DRAG(inner-reach 끌기), 수평 jaw release, `--calibrate` 진단 모드. **seed 0 DR full 4env 16/16 (100%), 고정 spawn 4/4 ~20초**. 함정·해결책은 `docs/TROUBLESHOOTING.md` §SO-101 해석적 FK·§하강 grasp·§release 퍼올림·§base 발치 spawn 참조 |
 | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
 | `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽. **`--attention_overlay`** = `policy-server-attn`(SmolVLA) PUB 히트맵을 ZMQ SUB(`--attn_zmq_port`)해 top/wrist/front omni.ui 창에 JET 오버레이 + 토글(GUI/livestream 전용). |
 | `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |
@@ -232,4 +231,4 @@ SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose(위치+방향 동시)를
 
 ### sim 진입 스크립트 AppLauncher 인자 필터
 
-GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `pick_cube_state_machine.py`, `run_cube_desk_ros_bridge.py`. ⚠ Linux 에선 access violation 대신 **livestream viewport docking 이 조용히 실패**(커스텀 인자가 UI 초기화 방해)하는 형태로도 나타난다 — bridge livestream 3-cam 레이아웃 미적용 버그가 이 케이스(2026-06-15 수정).
+GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `run_cube_desk_ros_bridge.py`. ⚠ Linux 에선 access violation 대신 **livestream viewport docking 이 조용히 실패**(커스텀 인자가 UI 초기화 방해)하는 형태로도 나타난다 — bridge livestream 3-cam 레이아웃 미적용 버그가 이 케이스(2026-06-15 수정).

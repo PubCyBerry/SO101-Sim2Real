@@ -1677,6 +1677,20 @@ GPU 별 RT 코어 유무 빠른 가이드 (NVIDIA 공식 시스템 요구사항 
 
 ---
 
+## cuRobo PickCube 50mm 큐브 grasp/안착 저조 — DR 큐브 이격이 40mm 기준 (크기 확대 미반영)
+
+**현상**: 큐브 30/40→40/50mm 확대(2026-06-18) 후 cuRobo batch/demo 의 50mm 큐브(Cube3/4) 안착률이 40mm 보다 낮다. seed 0 N=32 baseline 에서 all-4 81%, 50mm 가 약한 고리.
+
+**원인**: `randomize_cubes_scattered` 의 큐브간 이격 `min_cube_sep=0.060` 이 **40mm footprint 기준**(40mm 쌍 대각 절반 합 ≈0.057+여유). 50mm 쌍은 최소 0.071 m 필요한데 0.060 으로 너무 가깝게 spawn → 이웃 큐브가 side-approach/slide 경로를 침범 → 밀침·grasp miss. `min_bowl_sep=0.14` 도 40mm 반경 기준이라 50mm 는 그릇에 조금 더 붙음. (`volume_inset` 은 이미 max 50mm 기준이라 OK.)
+
+**해결**: DR 이격을 큐브 **footprint 반경**(r=s·√2/2)으로 per-pair 동적 계산. `randomize_cubes_scattered(cube_sizes=[...])` 인자 추가 → 큐브쌍 이격 `r_i+r_j+margin`, 그릇 이격 `min_bowl_sep+(r_i−r_40)`. `env_cfg` 가 `_CUBE_SIZES_M`(Cube1/2=40·Cube3/4=50mm)을 전달. batch·demo 가 같은 `PickCubeEnvCfg` 를 쓰므로 양쪽 공통 적용.
+
+**확인**: seed 0 N=32 동일 비교 — all-4 **81→91%**, 50mm 큐브 **84→94~97%**, cube 93→97.7%.
+
+> ⚠ **헛다리(둘 다 악화 → 채택 금지)**: (1) 50mm 그리퍼 열림 0.85→1.05(SM `gripper_open_large` 규약 이식) — cuRobo 는 0.85 로 50mm 이미 잘 잡고, 넓히면 동일 layout all-4 81→66% 악화. (2) arm joint slew cap 5.0→2.5 — lock-step(고정 step수)이 sparse plan 못 따라가 lag → all-4 91→59%. cuRobo 데이터 속도 정합은 joint 하드캡이 아니라 **실행 rate(plan stride·seq_exec step수) 감속**으로 풀어야 한다(motion 에 step 더 주면 ≤2.5 면서 완주). env arm `max_velocity` 는 5.0 유지.
+
+---
+
 ## Isaac Lab `RigidObject` spawn 에서 parent prim 경로 누락
 
 **현상**: `InteractiveScene` 에 동적 물체를 추가한 뒤 scene 생성 단계에서 GUI 가 ready 로그까지 가지 못하고 `RigidObjectCfg` spawn 이 즉시 실패한다. 예를 들어 `prim_path="{ENV_REGEX_NS}/Pens/white_pen"` 처럼 아직 존재하지 않는 중간 그룹 prim 을 포함한 경로에서 재현된다.

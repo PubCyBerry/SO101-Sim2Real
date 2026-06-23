@@ -737,3 +737,24 @@ sim-time-aware 소비) ② bridge Python slew(학습 envelope 재현) ③ deploy
 - `pick_cube_curobo_batch.py`: `--mix_sizes`(크기 DR + uniform 재샘플 + per-env park).
 - `run_cube_desk_ros_bridge.py`: `--cube_name`·비활성 park·`home_q` 학습 frame-0 정합·`--dump_obs`.
 - 산출물: `outputs/eval_1cube_posefix/`·`outputs/compare_1cube/`(open-loop overlay PNG)·HF repo 2종.
+
+## 17. 40/50mm 큐브 대응 튜닝 + 속도 정합 (2026-06-23)
+
+데이터 생성기 = **cuRobo**(`pick_cube_curobo_batch.py` 데이터생성 / `pick_cube_curobo_demo.py` GUI 데모, 둘 다 `curobo_planner_server.py` 사이드카 + 동일 `PickCubeEnvCfg`). 옛 해석적 IK SM `pick_cube_state_machine.py` 는 **삭제**(별개 컨트롤러·데이터 경로 아님, AGENTS.md/AppLauncher 참조 정리).
+
+### 17.1 큐브 확대 대응 A/B (seed 0, N=32, 동일 layout)
+
+| 변경 | cube% | all-4% | 판정 |
+|---|--:|--:|---|
+| baseline | 93.0 | 81.2 | — |
+| 50mm 그리퍼 열림 1.05 | 90.6 | 65.6 | ❌ 악화(revert) |
+| **DR 크기대응 이격** | **97.7** | **90.6** | ✅ 채택 |
+| arm slew cap 2.5 | 87.5 | 59.4 | ❌ 악화(revert) |
+
+- **진범 = DR 이격 미갱신**(상세 `docs/TROUBLESHOOTING.md` §cuRobo PickCube 50mm). `min_cube_sep` 40mm 기준 → 50mm 쌍 crowding. footprint 반경 per-pair 이격으로 50mm 큐브 84→94~97%.
+- **헛다리**: 그리퍼 넓힘·arm 하드캡 둘 다 악화. cuRobo 는 0.85 로 50mm 잘 잡고, arm cap 은 lock-step lag 유발.
+- **all-4 < cube%** 는 4큐브 grasp 의 곱(0.977⁴≈0.91) — 단일 블로커 아님, 최약 50mm 가 지배.
+
+### 17.2 속도 정합 (sim 데이터 ↔ 실기기)
+
+실기기 `so101_pick_cube_v2`(실측) within-task arm 속도 ≤2.5 rad/s. cuRobo 생성 데이터(`outputs/so101_sim_pick_cube_current_nearest_256`)는 **arm action max 5.0 rad/s·>2.5 가 4.95% frame**(wroll p95 3.05·span 2.83) — sim 이 더 빠름. 정합 방법 = **실행 rate 감속**(plan stride·seq_exec step수 ↑, motion 에 step 더 줘 ≤2.5 면서 완주). env arm `max_velocity` 하드캡(2.5)은 lock-step 파손이라 금지. 예산 ≤12s/cube.
