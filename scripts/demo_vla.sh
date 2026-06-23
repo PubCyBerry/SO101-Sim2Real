@@ -28,9 +28,18 @@
 #   --gui         로컬 디스플레이 GUI (DISPLAY 필요, livestream 대신).
 #   --headless    화면 없이 실행(로그만, 관전 X).
 #
+# eval 거동 정합 옵션 (run_nearest_256_eval.sh 와 같은 추론·물리로 맞춤):
+#   --apc N       actions_per_chunk override (기본 = 프로필 값). eval best=32.
+#   --thr T       chunk_size_threshold override (기본 = 프로필 값/0.5). eval best=0.25.
+#   --seed S      bridge DR seed (기본 0). eval 은 40 사용.
+#   --no-parity   --vla_action_parity 끔 (기본 켜짐 — VLA recorder actuator 상한 10 정합).
+#   --slew        학습 PickCube action term target slew 재적용 (기본 off; 데이터가 이미 slew라 보통 off).
+#   ⚠ 연속 데모는 success 판정·all-4 종료가 없어 수치(JSON)는 안 나온다. 정확 수치는 run_nearest_256_eval.sh.
+#
 # 예:
 #   scripts/demo_vla.sh start                              # .env POLICY_PROFILE 그대로
 #   scripts/demo_vla.sh start smolvla_nearest256 --ip 10.10.16.147
+#   scripts/demo_vla.sh start smolvla_nearest256 --apc 32 --thr 0.25 --seed 40 --ip 10.10.16.147  # eval best 거동
 #   scripts/demo_vla.sh start groot --ip 10.10.16.147
 #   scripts/demo_vla.sh start smolvla --cubes 1
 #   scripts/demo_vla.sh stop
@@ -43,6 +52,10 @@ DC="docker compose --env-file .env -f docker/docker-compose.yaml"
 BRIDGE="scripts/sim/run_cube_desk_ros_bridge.sh"
 PIDFILE="$LOGDIR/demo_vla.pid"
 BRIDGE_LOG="$LOGDIR/demo_vla_bridge.log"
+# bridge↔node 공유 reset token (수동 R/N reset 시 stale queue 초기화 — eval 정합). 같은 물리 파일.
+RESET_HOST="$REPO/logs/demo_vla_reset.token"
+RESET_CONTAINER="/workspace/logs/demo_vla_reset.token"
+VLA_PARAMS=/workspace/ros2_ws/src/so101_vla_policy/config/vla_policy.yaml
 # --ckpt override 시에만 쓰는 임시 프로필 (cleanup 대상). 평소엔 실 프로필을 그대로 쓴다.
 OVERRIDE_PROFILE=demo_override
 # 정리 대상 임시 프로필 파일 (옛 *_demo.env 도 호환 정리)
@@ -74,9 +87,25 @@ stop_all(){
   fi
   pkill -9 -f "run_cube_desk_ros_bridge.py" 2>/dev/null || true
   docker rm -f "${NAMES[@]}" >/dev/null 2>&1 || true
-  rm -f "${PROF_FILES[@]}" 2>/dev/null || true
+  rm -f "${PROF_FILES[@]}" "$RESET_HOST" 2>/dev/null || true
   sleep 2
   log "정지 완료."
+}
+
+# vla-ros 기동 — eval(run_nearest_256_eval.sh) 과 동일하게 params-file + ros param 으로
+# APC/thr/reset/slew 를 명시 주입한다(연속 데모도 같은 추론 설정). 전역 active/g_apc/g_thr/g_slew 사용.
+run_vla_node(){
+  POLICY_PROFILE=$active $DC run -d --name vla_demo_node \
+    -e POLICY_PROFILE=$active -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" \
+    vla-ros \
+    ros2 run so101_vla_policy vla_policy_node --ros-args \
+      --params-file "$VLA_PARAMS" \
+      -p "actions_per_chunk:=$g_apc" \
+      -p "chunk_size_threshold:=$g_thr" \
+      -p "vla_reset_file:=$RESET_CONTAINER" \
+      -p "command_slew_limit:=$g_slew" \
+    > "$LOGDIR/demo_vla_node.log" 2>&1
+  wait_log vla_demo_node "sent instructions|instructions sent|VLA node up" 150
 }
 
 status(){
@@ -110,13 +139,18 @@ start(){
   # 첫 인자가 옵션(--)이 아니면 프로필 이름으로 소비
   local prof_arg=""
   if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then prof_arg=$1; shift; fi
-  local ckpt="" cubes=4 ip="" disp="stream"
+  local ckpt="" cubes=4 ip="" disp="stream" seed=0 parity=1 slew=false apc_ov="" thr_ov=""
   while [ $# -gt 0 ]; do case "$1" in
     --ckpt) ckpt=$2; shift 2;;
     --cubes) cubes=$2; shift 2;;
     --ip) ip=$2; shift 2;;
     --gui) disp="gui"; shift;;
     --headless) disp="headless"; shift;;
+    --apc) apc_ov=$2; shift 2;;
+    --thr) thr_ov=$2; shift 2;;
+    --seed) seed=$2; shift 2;;
+    --no-parity) parity=0; shift;;
+    --slew) slew=true; shift;;
     *) log "알 수 없는 옵션: $1"; exit 1;;
   esac; done
 
@@ -155,10 +189,11 @@ start(){
     model_path=$ckpt
     log "  --ckpt override → 임시 프로필 env/$active.env"
   fi
-  local apc thr
-  apc=$(prof_get "$active" ACTIONS_PER_CHUNK)
-  thr=$(prof_get "$active" CHUNK_SIZE_THRESHOLD)
-  log "  모델=$model_path  APC=${apc:-?}  thr=${thr:-none}"
+  # APC/thr: --apc/--thr override 우선, 없으면 프로필값(노드 기본 8/0.5 과 정합)
+  local g_apc g_thr g_slew=$slew
+  g_apc=${apc_ov:-$(prof_get "$active" ACTIONS_PER_CHUNK)}; [ -z "$g_apc" ] && g_apc=8
+  g_thr=${thr_ov:-$(prof_get "$active" CHUNK_SIZE_THRESHOLD)}; [ -z "$g_thr" ] && g_thr=0.5
+  log "  모델=$model_path  APC=$g_apc  thr=$g_thr  parity=$parity  slew=$slew  seed=$seed"
 
   # ── 모델 타입별 서비스 기동 ──
   case "$ptype" in
@@ -167,11 +202,8 @@ start(){
       POLICY_PROFILE=$active $DC run -d --name vla_demo_ps policy-server policy-server \
         > "$LOGDIR/demo_vla_ps.log" 2>&1
       sleep 8
-      log "  vla-ros 기동"
-      POLICY_PROFILE=$active $DC run -d --name vla_demo_node -e POLICY_PROFILE=$active \
-        -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" vla-ros \
-        > "$LOGDIR/demo_vla_node.log" 2>&1
-      wait_log vla_demo_node "sent instructions" 150
+      log "  vla-ros 기동 (APC=$g_apc thr=$g_thr slew=$g_slew)"
+      run_vla_node
       ;;
     groot_n17)
       log "  gr00t zmq-server 기동 (3B 로드 ~30-60s, ckpt=$model_path)"
@@ -182,19 +214,19 @@ start(){
       POLICY_PROFILE=$active $DC run -d --name vla_demo_pg policy-server policy-server-groot \
         > "$LOGDIR/demo_vla_pg.log" 2>&1
       wait_log vla_demo_pg "listening|ready|GrootBridge|8080" 90
-      log "  vla-ros 기동"
-      POLICY_PROFILE=$active $DC run -d --name vla_demo_node -e POLICY_PROFILE=$active \
-        -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" vla-ros \
-        > "$LOGDIR/demo_vla_node.log" 2>&1
-      wait_log vla_demo_node "sent instructions" 150
+      log "  vla-ros 기동 (APC=$g_apc thr=$g_thr slew=$g_slew)"
+      run_vla_node
       ;;
     *) log "POLICY_TYPE 은 act|smolvla|groot_n17 중 하나여야 함: $ptype"; exit 1;;
   esac
 
   # ── Isaac bridge (연속 추론, eval 아님) — detached ──
+  # eval 정합: --vla_action_parity(actuator max vel 10), --seed, --vla_reset_file(공유 reset token)
+  local bridge_extra=(--seed "$seed" --vla_reset_file "$RESET_HOST")
+  [ "$parity" = 1 ] && bridge_extra+=(--vla_action_parity)
   log "  Isaac bridge 기동 → $BRIDGE_LOG"
   nohup setsid env OMNI_KIT_ACCEPT_EULA=YES "$BRIDGE" \
-    --num_cubes "$cubes" --seed 0 "${disp_args[@]}" \
+    --num_cubes "$cubes" "${bridge_extra[@]}" "${disp_args[@]}" \
     > "$BRIDGE_LOG" 2>&1 &
   echo $! > "$PIDFILE"
   log "데모 가동. bridge pid=$(cat "$PIDFILE")"
@@ -209,5 +241,5 @@ case "${1:-}" in
   start)  shift; start "$@";;
   stop)   stop_all;;
   status) status;;
-  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] | stop | status}";;
+  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] [--apc N] [--thr T] [--seed S] [--no-parity] [--slew] | stop | status}";;
 esac
