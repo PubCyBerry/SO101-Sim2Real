@@ -102,6 +102,12 @@ parser.add_argument(
     default=None,
     help="평가 A/B: bowl physics material의 static/dynamic friction을 런타임 override한다.",
 )
+parser.add_argument(
+    "--eval_bowl_mass",
+    type=float,
+    default=0.0,
+    help="평가 A/B: 0이면 USD 기본값, 양수면 bowl mass(kg)를 world reset 전에 override한다.",
+)
 parser.add_argument("--dump_obs", default="",
                     help="진단: 지정 시 eval ep0 에서 bridge 렌더 3캠 프레임 + arm joint 를 이 디렉터리에 저장"
                          "(학습 recorder 프레임과 시각 비교용).")
@@ -674,6 +680,10 @@ def main() -> None:
         bowl_rb.CreateKinematicEnabledAttr().Set(True)
         PhysxSchema.PhysxRigidBodyAPI.Apply(bowl_prim).CreateEnableCCDAttr().Set(False)
         print("[bridge] eval A/B: bowl kinematic 고정", flush=True)
+    if args.eval_bowl_mass > 0.0:
+        bowl_prim = world.stage.GetPrimAtPath(f"{SCENE_PRIM}/{BOWL_NAME}")
+        UsdPhysics.MassAPI.Apply(bowl_prim).CreateMassAttr().Set(float(args.eval_bowl_mass))
+        print(f"[bridge] eval A/B: bowl mass={args.eval_bowl_mass}kg", flush=True)
     if args.eval_bowl_friction is not None:
         static_friction, dynamic_friction = args.eval_bowl_friction
         bowl_material_prim = world.stage.GetPrimAtPath(
@@ -1206,6 +1216,7 @@ def main() -> None:
                 "n_episodes": n_ep, "n_active_cubes": n_active,
                 "eval_seconds": args.eval_seconds, "eval_settle": args.eval_settle,
                 "eval_bowl_kinematic": bool(args.eval_bowl_kinematic),
+                "eval_bowl_mass": float(args.eval_bowl_mass),
                 "eval_bowl_friction": (
                     [float(value) for value in args.eval_bowl_friction]
                     if args.eval_bowl_friction is not None
