@@ -1053,13 +1053,37 @@ def main() -> None:
                 if not simulation_app.is_running():
                     break
                 world.step(render=True)
-            ever = {n: False for n in active_cubes}     # 한 번이라도 그릇 안(진단용)
+            bowl_start = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
+            bowl_max_xy_m = 0.0
+            bowl_max_z_m = 0.0
+            initial_inside = {n: cube_in_bowl(h)[0] for n, h in cube_handles.items()}
+            ever = dict(initial_inside)                  # 한 번이라도 그릇 안(진단용)
+            prev_inside = dict(initial_inside)
+            inside_streak = {n: 0 for n in active_cubes}
+            cube_history = {
+                n: {
+                    "first_in_step": 0 if initial_inside[n] else None,
+                    "last_in_step": 0 if initial_inside[n] else None,
+                    "last_exit_step": None,
+                    "entry_count": 1 if initial_inside[n] else 0,
+                    "exit_count": 0,
+                    "inside_steps": 0,
+                    "max_inside_streak": 0,
+                }
+                for n in active_cubes
+            }
             success_step: int | None = None
             for si in range(ep_steps):
                 if not simulation_app.is_running():
                     break
                 world.step(render=True)
                 _attention_tick()   # SmolVLA attention 오버레이 갱신(활성 시)
+                bowl_now = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
+                bowl_max_xy_m = max(
+                    bowl_max_xy_m,
+                    float(np.hypot(bowl_now[0] - bowl_start[0], bowl_now[1] - bowl_start[1])),
+                )
+                bowl_max_z_m = max(bowl_max_z_m, abs(float(bowl_now[2] - bowl_start[2])))
                 if ep == 0 and _dump_annots and si in (1, ep_steps // 2, ep_steps - 2):
                     _save_dump(f"ep0_s{si:03d}")   # bridge 렌더 + arm joint (start/mid/end)
                 current_inside = {}
@@ -1068,6 +1092,22 @@ def main() -> None:
                     current_inside[n] = inside
                     if inside:
                         ever[n] = True
+                        cube_history[n]["inside_steps"] += 1
+                        inside_streak[n] += 1
+                        cube_history[n]["max_inside_streak"] = max(
+                            cube_history[n]["max_inside_streak"], inside_streak[n]
+                        )
+                        if cube_history[n]["first_in_step"] is None:
+                            cube_history[n]["first_in_step"] = si
+                        cube_history[n]["last_in_step"] = si
+                    else:
+                        inside_streak[n] = 0
+                    if inside and not prev_inside[n]:
+                        cube_history[n]["entry_count"] += 1
+                    elif prev_inside[n] and not inside:
+                        cube_history[n]["exit_count"] += 1
+                        cube_history[n]["last_exit_step"] = si
+                    prev_inside[n] = inside
                 # 실제 task termination과 같이 all-cube 동시 성공 즉시 episode 종료.
                 # 고정 horizon 끝까지 명령을 계속 보내면 이미 놓은 cube를 다시 건드려 거짓 실패가 된다.
                 if current_inside and all(current_inside.values()):
@@ -1078,19 +1118,34 @@ def main() -> None:
             n_final = sum(1 for v in final.values() if v[0])
             n_ever = sum(ever.values())
             all_ok = success_step is not None or (n_final == n_active)
+            bowl_final = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
             episodes.append({
                 "episode": ep,
                 "n_final": n_final, "n_ever": n_ever, "all_ok": all_ok,
                 "success_step": success_step,
+                "bowl_motion": {
+                    "max_xy_mm": round(bowl_max_xy_m * 1000, 1),
+                    "max_z_mm": round(bowl_max_z_m * 1000, 1),
+                    "final_xy_mm": round(
+                        float(np.hypot(
+                            bowl_final[0] - bowl_start[0],
+                            bowl_final[1] - bowl_start[1],
+                        )) * 1000,
+                        1,
+                    ),
+                    "final_z_mm": round(float(bowl_final[2] - bowl_start[2]) * 1000, 1),
+                },
                 "cubes": {n: {"in_bowl": bool(final[n][0]),
                               "xy_mm": round(final[n][1] * 1000, 1),
                               "z": round(final[n][2], 4),
-                              "ever": bool(ever[n])} for n in active_cubes},
+                              "ever": bool(ever[n]),
+                              **cube_history[n]} for n in active_cubes},
             })
             per_cube = " ".join(f"{n}:{'O' if final[n][0] else 'x'}"
                                 f"({final[n][1] * 1000:.0f}mm,z{final[n][2]:.3f})" for n in active_cubes)
             print(f"[eval] ep {ep + 1}/{args.eval}: {n_final}/{n_active} placed "
-                  f"(ever {n_ever}) all_ok={all_ok} | {per_cube}", flush=True)
+                  f"(ever {n_ever}) all_ok={all_ok} · bowl max Δxy={bowl_max_xy_m * 1000:.1f}mm "
+                  f"| {per_cube}", flush=True)
 
         n_ep = len(episodes)
         if n_ep:
