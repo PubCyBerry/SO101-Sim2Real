@@ -39,7 +39,10 @@
 - **visual grounding smoke**: stage2 기반 visual+projector만 train(diffusion frozen), batch8/LR1e-5/jitter off/dropout0 100-step 정상(trainable29.76%). open-loop MAE4.384로 개선했지만 seed40/N1/180s는 0/4.
 - **✅ GR00T visual stage-3 완료**: `outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_visual_stage3/checkpoint-16277`, visual encoder+projector 전용 1epoch(16277×batch8, LR1e-5, diffusion frozen, jitter off), 5,290.4초, train loss 0.040655. open-loop ep0 MAE 4.453.
 - **GR00T visual stage-3 closed-loop**: APC16/thr0.25, seed40, N=5, 180s에서 **all-4 0%**, final per-cube 60%, avg 2.4/4, ever65%. seed44/N1/300s는 final3/4·ever4/4로, 성공 cube 재교란과 미회수 cube가 all-4를 막는다. 결과=`outputs/vla_eval_nearest256/groot_apc16_thr0p25_seed40_n5_s180_visual_stage3.json`.
-- **🔵 현재 작업**: 배치 성공 이후 cube 이탈 원인을 분리하기 위해 bowl 이동량·cube 입출 이력을 계측한다. bowl 동역학이 원인이면 물리 A/B, 그렇지 않으면 recovery/perturbation 데이터로 전환한다.
+- **retention 계측**: 동적 bowl 진단 run에서 최대 XY **319.2mm**, Z **67.8mm** 이동했다. target container 자체가 로봇 접촉으로 밀리는 것이 명확한 실패 원인이다.
+- **kinematic bowl A/B**: bowl 이동은 0mm가 됐다. 기본 마찰(0.12/0.10) seed44/N1/300s는 final1/4·ever3/4, 마찰 0.6/0.5는 final2/4·ever3/4. 후자는 Cube1/4를 각각 8,120/7,094 step 유지했지만 Cube2는 짧게 진입 후 2회 이탈했다.
+- **recovery 데이터 경로**: eval JSON에 cube 입출 이력·bowl 이동·실패 종료 7D pose를 저장하고 `*_recovery_layouts.json`을 자동 추출한다. cuRobo `--load_fail`은 시작부터 bowl 안 cube를 완료 처리해 미배치 cube만 회수한다.
+- **🔵 현재 실행**: kinematic bowl + friction 0.6/0.5의 SmolVLA seed40/N5/180s A/B. 유효하면 GR00T N5를 같은 조건으로 평가하고, 미달분은 recovery dataset으로 보강한다.
 - **상세 작업 기록**: `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md`에 성능 저하 원인, order A/B, 데이터 기록 병목, evaluator/async/reset 수정, SmolVLA 40% 결과, GR00T 진행 상태와 재현 명령을 기록한다. 후속 실험마다 갱신한다.
 
 ## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)

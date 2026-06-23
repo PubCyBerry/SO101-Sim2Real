@@ -131,6 +131,27 @@ checkpoint 생성 전에 run을 중단하고, host의 `docker/gr00t-finetune.sh`
 
 후속 검증에서 `--color_jitter_params`를 완전히 생략하면 base checkpoint 값을 상속한다는 점을 확인했다. 실제 off는 값을 비운 `--color_jitter_params`를 명시해 tyro가 `{}`로 파싱하도록 수정했다.
 
+### 3.5 동적 bowl 이동과 배치 cube 이탈
+
+visual stage-3의 seed44 300초 run은 네 cube 모두 한 번 bowl에 들어갔지만 종료 시 3개만 남았다.
+이를 분리하기 위해 eval에 bowl 이동량과 cube별 최초 진입·마지막 이탈·연속 유지 step을 추가했다.
+
+동적 bowl 재실행에서는 bowl이 최대 XY 319.2mm, Z 67.8mm 이동했다. 150mm bowl 자체가 로봇 접촉으로
+30cm 넘게 밀리므로 정책이 보던 target이 episode 중 크게 바뀌었다. 실제 작업에서도 bowl을 논슬립
+패드나 fixture로 고정하는 것이 일반적이므로 kinematic bowl A/B를 추가했다.
+
+| 조건 | GR00T seed44 N1 300s | Bowl 최대 이동 | 관찰 |
+|---|---:|---:|---|
+| dynamic, friction 0.12/0.10 | final0/4, ever0/4 | 319.2mm | target 자체가 밀림 |
+| kinematic, friction 0.12/0.10 | final1/4, ever3/4 | 0mm | 2개는 1초 미만 진입 후 이탈 |
+| kinematic, friction 0.6/0.5 | final2/4, ever3/4 | 0mm | 2개는 7천 step 이상 유지 |
+
+단일 GR00T run은 diffusion sampling과 비동기 timing 변동이 커서 성능 결론에는 N=5 이상 A/B가
+필요하다. 다만 bowl 이동 319.2mm와 kinematic 0mm는 정책 sampling과 무관한 물리 원인이다.
+
+미달에 대비해 eval 실패 종료 pose를 cuRobo `--load_fail` 형식으로 저장하고, 이미 bowl 안에 남은
+cube는 완료 처리한 뒤 미배치 cube만 expert가 회수하는 recovery 데이터 경로를 구현했다.
+
 ## 4. 구현 변경
 
 | 파일 | 변경 |
@@ -221,10 +242,10 @@ ever-in-bowl=90%
 
 ## 7. 다음 작업
 
-1. eval JSON에 bowl 이동량과 cube별 bowl 진입·이탈 이력을 추가한다.
-2. 동일 stage-3 checkpoint로 진단 episode를 재실행해 동적 bowl과 정책 재교란을 분리한다.
-3. bowl 동역학이 주원인이면 마찰·고정 여부를 현재 expert 회귀와 함께 A/B한다.
-4. 정책 재교란/미회수가 주원인이면 clean BC 반복을 중단하고 recovery/perturbation 데이터를 생성한다.
+1. kinematic bowl + friction 0.6/0.5를 SmolVLA와 GR00T 각각 seed40/N5/180s로 A/B한다.
+2. current expert를 같은 물리에서 N≥64 회귀해 80~90% 목표를 지탱하는지 확인한다.
+3. 정책 재교란/미회수분은 자동 추출한 실패 pose에서 recovery dataset을 생성한다.
+4. nearest256 clean data와 recovery data를 혼합해 두 모델을 추가 adaptation한다.
 5. SmolVLA와 GR00T를 같은 개선 설정에서 N≥10, 180s로 재평가한다.
 6. data/open-loop/closed-loop와 모델별 성공률을 `outputs/smolvla`의 최종 비교 plot으로 저장한다.
 7. all-4 80~90%를 통과한 checkpoint만 Hugging Face에 업로드한다.

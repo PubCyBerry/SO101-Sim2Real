@@ -64,7 +64,7 @@
 - [x] **TE.VLA.DATA** 현재 cube 물리·절대 gripper 규약으로 관측 가능한 `nearest` 순서 256ep 생성·검증·HF push | machine:server | dep:TA.CUBE.PHYSICS | verify:256ep/130,214f, 3cam H.264 640×480@30, schema/index/finite 검증, HF `taehunkim/so101_sim_pick_cube_nearest_256` v3.0 | status:done
 - [x] **TE.VLA.PIPELINE** 실제 배포 평가 경로의 stale queue·동기 gRPC refill 정지·잘못된 desk z·all-4 후 재교란 수정 | machine:server | dep:TE.VLA.DATA | verify:episode reset token 확인 + background inference + cube z=0.705 + all-4 즉시 종료 | status:done
 - [ ] **TE.VLA.SMOLVLA** nearest256 adaptation·closed-loop·recovery 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로, 180s, N≥10에서 all-4 success rate **80~90% 이상** | status:in_progress — APC32/thr0.25 seed40 N5에서 all-4 40%·final85%; 목표 미달
-- [ ] **TE.VLA.GROOT** GR00T-N1.7 nearest256 adaptation·visual grounding·recovery 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로, 180s, N≥10에서 all-4 success rate **80~90% 이상** | status:in_progress — visual stage-3 all-4 0%·final60%·ever65%; retention/recovery 원인 계측 중
+- [ ] **TE.VLA.GROOT** GR00T-N1.7 nearest256 adaptation·visual grounding·recovery 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로, 180s, N≥10에서 all-4 success rate **80~90% 이상** | status:in_progress — visual stage-3 all-4 0%·final60%·ever65%; 동적 bowl 최대319mm 이동 확인, kinematic+friction/recovery A/B 중
 - [ ] **TE.VLA.REPORT** SmolVLA/GR00T data·open-loop·closed-loop 최종 비교 플롯·multi-seed 보고 | machine:server | dep:TE.VLA.SMOLVLA,TE.VLA.GROOT | verify:`outputs/smolvla` 최종 PNG/metrics + `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md` 결과표 | status:todo
 
 ## Phase F~G — 실기기 배포·Sim2Real 루프 (GATED — 자율 트랙 밖)
@@ -76,6 +76,7 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
+- [2026-06-23] TE.VLA.RECOVERY in_progress — eval에 bowl 최대 이동·cube entry/exit·실패 종료 7D pose 계측 추가. 동적 bowl 최대319.2mm 이동 확인. kinematic은 0mm, friction0.6/0.5 GR00T seed44 N1은 final2/4·ever3/4. 실패 layout 자동 추출 및 cuRobo 미배치 cube recovery 경로 구현 / 다음: SmolVLA·GR00T N5 물리 A/B
 - [2026-06-23] TE.VLA.GROOT in_progress — visual stage-3(visual encoder+projector 1epoch, diffusion frozen, jitter off) 완료. open-loop MAE4.453, APC16/thr0.25 seed40 N5 180s에서 all-4 0%·final60%·avg2.4/4·ever65%. seed44 300s는 final3/4·ever4/4 / 다음: bowl 이동·cube 이탈 계측 후 물리 A/B 또는 recovery 데이터
 - [2026-06-23] TE.VLA.SMOLVLA in_progress — nearest256 1epoch adaptation 및 evaluator/async/reset 수정 후 APC32/thr0.25 seed40 N5 180s에서 all-4 40%·final per-cube85%·avg3.4/4. 활성 goal 80~90%에는 미달 / 다음: GR00T와 공통 retention/recovery 개선 후 N≥10 재평가
 - [2026-06-22] TE.VLA.DATA/PIPELINE done — fixed latent-ID label aliasing을 nearest observable order로 변경, 현재 물리 256ep/130,214f 생성·HF push; eval desk z 0.760→0.705, stale action reset, background inference, all-4 early termination 적용
