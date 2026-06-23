@@ -665,7 +665,10 @@ def main() -> int:
                 placed.add(target)
         if record_mode:                      # 끝 READY 복귀(retract/idle)는 미기록 → episode 는 마지막 release frame 에서 종료
             rec_capture[0] = False
-        settle(READY, args.grip_open, 30)   # 라운드 끝: 대기 자세 복귀(흘러내림 방지)
+        # 라운드 끝 HOME 복귀: 마지막 release pose 에서 READY 로 슬루(≤MAX_VEL) 후 정착.
+        # settle 직접 호출은 보간 없이 READY 를 1-step 명령 → 텔레포트. seq_exec 로 sub-interpolate.
+        seq_exec(READY, args.grip_open, 16, "→HOME")
+        settle(READY, args.grip_open, 30)   # 대기 자세 정착(흘러내림 방지)
         sim_t = (nstep[0] - s0) * CONTROL_DT
         log("=" * 60)
         log(f"[demo] ===== ROUND 결과: {len(placed)}/{len(cubes)} placed | "
