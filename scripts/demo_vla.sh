@@ -3,13 +3,23 @@
 # VLA closed-loop 데모 런처 — Isaac Sim bridge + vla-ros + policy-server 를 띄워
 #   ACT / SmolVLA / GR00T-N1.7 추론을 라이브로 관전(livestream/GUI).  eval 아님(연속 1씬).
 #
+# 모델·추론 파라미터는 Docker compose 와 동일하게 `.env` + `env/<POLICY_PROFILE>.env`
+# 에서 읽는다. 더 이상 스크립트 안에 모델 경로를 하드코딩하지 않는다.
+#   - 활성 프로필 = `.env` 의 POLICY_PROFILE (positional 인자로 override 가능)
+#   - 모델 타입   = 프로필의 POLICY_TYPE (act|smolvla|groot_n17) → 서비스 라우팅
+#   - 모델 경로   = 프로필의 POLICY_REPO_ID(act/smolvla) 또는 GROOT_CHECKPOINT(groot)
+#
 # 사용:
-#   scripts/demo_vla.sh start <act|smolvla|groot> [옵션]
+#   scripts/demo_vla.sh start [profile] [옵션]
 #   scripts/demo_vla.sh stop
 #   scripts/demo_vla.sh status
 #
+# start 인자:
+#   profile       env/<profile>.env 이름 (예: smolvla, smolvla_nearest256, groot_n17, act).
+#                 생략 시 `.env` 의 POLICY_PROFILE 사용. `groot` 는 `groot_n17` 별칭.
+#
 # start 옵션:
-#   --ckpt PATH   모델 경로 override (기본 = 4cube_1024 로컬 체크포인트)
+#   --ckpt PATH   모델 경로 override (기본 = 프로필의 POLICY_REPO_ID / GROOT_CHECKPOINT)
 #                 act/smolvla = 컨테이너경로 /workspace/... 또는 HF repo
 #                 groot       = 컨테이너경로 /host/outputs/.../checkpoint-XXXXX
 #   --cubes N     큐브 수 1~4 (기본 4)
@@ -19,6 +29,8 @@
 #   --headless    화면 없이 실행(로그만, 관전 X).
 #
 # 예:
+#   scripts/demo_vla.sh start                              # .env POLICY_PROFILE 그대로
+#   scripts/demo_vla.sh start smolvla_nearest256 --ip 10.10.16.147
 #   scripts/demo_vla.sh start groot --ip 10.10.16.147
 #   scripts/demo_vla.sh start smolvla --cubes 1
 #   scripts/demo_vla.sh stop
@@ -31,16 +43,27 @@ DC="docker compose --env-file .env -f docker/docker-compose.yaml"
 BRIDGE="scripts/sim/run_cube_desk_ros_bridge.sh"
 PIDFILE="$LOGDIR/demo_vla.pid"
 BRIDGE_LOG="$LOGDIR/demo_vla_bridge.log"
-PROF_FILES=(env/act_demo.env env/smolvla_demo.env env/groot_n17_demo.env)
+# --ckpt override 시에만 쓰는 임시 프로필 (cleanup 대상). 평소엔 실 프로필을 그대로 쓴다.
+OVERRIDE_PROFILE=demo_override
+# 정리 대상 임시 프로필 파일 (옛 *_demo.env 도 호환 정리)
+PROF_FILES=(env/"$OVERRIDE_PROFILE".env env/act_demo.env env/smolvla_demo.env env/groot_n17_demo.env)
 NAMES=(vla_demo_ps vla_demo_node vla_demo_gr vla_demo_pg)
 
 ts(){ date '+%H:%M:%S'; }
 log(){ echo "[$(ts)] $*"; }
 
-# 기본 4cube_1024 모델 경로 (컨테이너 기준)
-ACT_DEF=/workspace/outputs/train/so101_act_sim_pick_cube_4cube_1024/checkpoints/last/pretrained_model
-SMOL_DEF=/workspace/outputs/train/so101_smolvla_sim_pick_cube_4cube_1024/checkpoints/last/pretrained_model
-GROOT_DEF=/host/outputs/train/so101_groot_n17_sim_pick_cube_4cube_1024/checkpoint-80000
+# `.env` / 프로필 파일에서 KEY 값 읽기 (마지막 정의·`KEY=` prefix 제거)
+env_get(){  grep -E "^$1=" .env 2>/dev/null         | tail -1 | cut -d= -f2-; }
+prof_get(){ grep -E "^$2=" "env/$1.env" 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# 활성 프로필 결정: 인자 없으면 .env POLICY_PROFILE, `groot` 는 groot_n17 별칭
+resolve_profile(){  # $1=arg(빈문자 가능) -> stdout=profile name
+  local a="$1"
+  [ -z "$a" ] && a=$(env_get POLICY_PROFILE)
+  [ -z "$a" ] && a=groot_n17   # compose 기본값과 정합
+  [ "$a" = groot ] && a=groot_n17
+  echo "$a"
+}
 
 stop_all(){
   log "데모 정지 — 컨테이너·bridge 정리"
@@ -73,10 +96,10 @@ wait_log(){
   log "  [$name] '$pat' 미확인(${to}s) — 계속 진행(bridge warmup 이 버팀)"; return 0
 }
 
-# 임시 데모 프로필 생성: base 복사 + 모델 경로만 교체 (vla node _load_env override 회피)
-make_profile(){  # $1=base(act|smolvla|groot_n17) $2=demo_name $3=model_path
+# 임시 override 프로필 생성: 활성 프로필 복사 + 모델 경로만 교체 (vla node _load_env override 회피)
+make_profile(){  # $1=src_profile $2=dst_name $3=model_path $4=ptype
   cp "env/$1.env" "env/$2.env"
-  if [ "$1" = groot_n17 ]; then
+  if [ "$4" = groot_n17 ]; then
     sed -i "s#^GROOT_CHECKPOINT=.*#GROOT_CHECKPOINT=$3#" "env/$2.env"
   else
     sed -i "s#^POLICY_REPO_ID=.*#POLICY_REPO_ID=$3#" "env/$2.env"
@@ -84,7 +107,9 @@ make_profile(){  # $1=base(act|smolvla|groot_n17) $2=demo_name $3=model_path
 }
 
 start(){
-  local model=$1; shift
+  # 첫 인자가 옵션(--)이 아니면 프로필 이름으로 소비
+  local prof_arg=""
+  if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then prof_arg=$1; shift; fi
   local ckpt="" cubes=4 ip="" disp="stream"
   while [ $# -gt 0 ]; do case "$1" in
     --ckpt) ckpt=$2; shift 2;;
@@ -95,8 +120,17 @@ start(){
     *) log "알 수 없는 옵션: $1"; exit 1;;
   esac; done
 
+  # ── 프로필 해석 + 검증 ──
+  local profile; profile=$(resolve_profile "$prof_arg")
+  if [ ! -f "env/$profile.env" ]; then
+    log "프로필 없음: env/$profile.env  (사용 가능: $(ls env/*.env | sed 's#env/##;s#\.env##' | tr '\n' ' '))"
+    exit 1
+  fi
+  local ptype; ptype=$(prof_get "$profile" POLICY_TYPE)
+  [ -z "$ptype" ] && { log "env/$profile.env 에 POLICY_TYPE 없음"; exit 1; }
+
   stop_all   # 멱등: 기존 데모 정리 후 시작
-  log "데모 시작 — model=$model cubes=$cubes display=$disp"
+  log "데모 시작 — profile=$profile type=$ptype cubes=$cubes display=$disp"
 
   # ── 디스플레이 인자 ──
   local disp_args=()
@@ -107,38 +141,54 @@ start(){
     headless) disp_args=(--headless); log "  headless (관전 X, 로그만)";;
   esac
 
-  # ── 모델별 서비스 기동 ──
-  case "$model" in
+  # ── 활성 프로필 결정: --ckpt override 시 임시 복사, 아니면 실 프로필 직접 사용 ──
+  local active=$profile
+  local model_path
+  if [ "$ptype" = groot_n17 ]; then
+    model_path=$(prof_get "$profile" GROOT_CHECKPOINT)
+  else
+    model_path=$(prof_get "$profile" POLICY_REPO_ID)
+  fi
+  if [ -n "$ckpt" ]; then
+    active=$OVERRIDE_PROFILE
+    make_profile "$profile" "$active" "$ckpt" "$ptype"
+    model_path=$ckpt
+    log "  --ckpt override → 임시 프로필 env/$active.env"
+  fi
+  local apc thr
+  apc=$(prof_get "$active" ACTIONS_PER_CHUNK)
+  thr=$(prof_get "$active" CHUNK_SIZE_THRESHOLD)
+  log "  모델=$model_path  APC=${apc:-?}  thr=${thr:-none}"
+
+  # ── 모델 타입별 서비스 기동 ──
+  case "$ptype" in
     act|smolvla)
-      local base=$model demo="${model}_demo" def
-      [ "$model" = act ] && def="$ACT_DEF" || def="$SMOL_DEF"
-      make_profile "$base" "$demo" "${ckpt:-$def}"
       log "  policy-server 기동"
-      POLICY_PROFILE=$demo $DC run -d --name vla_demo_ps policy-server policy-server \
+      POLICY_PROFILE=$active $DC run -d --name vla_demo_ps policy-server policy-server \
         > "$LOGDIR/demo_vla_ps.log" 2>&1
       sleep 8
-      log "  vla-ros 기동 (model=${ckpt:-$def})"
-      POLICY_PROFILE=$demo $DC run -d --name vla_demo_node -e POLICY_PROFILE=$demo vla-ros \
+      log "  vla-ros 기동"
+      POLICY_PROFILE=$active $DC run -d --name vla_demo_node -e POLICY_PROFILE=$active \
+        -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" vla-ros \
         > "$LOGDIR/demo_vla_node.log" 2>&1
       wait_log vla_demo_node "sent instructions" 150
       ;;
-    groot|groot_n17)
-      local demo="groot_n17_demo"
-      make_profile groot_n17 "$demo" "${ckpt:-$GROOT_DEF}"
-      log "  gr00t zmq-server 기동 (3B 로드 ~30-60s, ckpt=${ckpt:-$GROOT_DEF})"
-      POLICY_PROFILE=$demo $DC run -d --name vla_demo_gr -e GROOT_CHECKPOINT="${ckpt:-$GROOT_DEF}" \
+    groot_n17)
+      log "  gr00t zmq-server 기동 (3B 로드 ~30-60s, ckpt=$model_path)"
+      POLICY_PROFILE=$active $DC run -d --name vla_demo_gr -e GROOT_CHECKPOINT="$model_path" \
         gr00t zmq-server > "$LOGDIR/demo_vla_gr.log" 2>&1
       wait_log vla_demo_gr "ready|listening|5555|Server|dit\.py" 240
       log "  policy-server-groot bridge 기동"
-      POLICY_PROFILE=$demo $DC run -d --name vla_demo_pg policy-server policy-server-groot \
+      POLICY_PROFILE=$active $DC run -d --name vla_demo_pg policy-server policy-server-groot \
         > "$LOGDIR/demo_vla_pg.log" 2>&1
       wait_log vla_demo_pg "listening|ready|GrootBridge|8080" 90
       log "  vla-ros 기동"
-      POLICY_PROFILE=$demo $DC run -d --name vla_demo_node -e POLICY_PROFILE=$demo vla-ros \
+      POLICY_PROFILE=$active $DC run -d --name vla_demo_node -e POLICY_PROFILE=$active \
+        -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" vla-ros \
         > "$LOGDIR/demo_vla_node.log" 2>&1
       wait_log vla_demo_node "sent instructions" 150
       ;;
-    *) log "model 은 act|smolvla|groot 중 하나"; exit 1;;
+    *) log "POLICY_TYPE 은 act|smolvla|groot_n17 중 하나여야 함: $ptype"; exit 1;;
   esac
 
   # ── Isaac bridge (연속 추론, eval 아님) — detached ──
@@ -156,8 +206,8 @@ start(){
 
 # ── dispatch ──
 case "${1:-}" in
-  start)  shift; [ $# -ge 1 ] || { echo "사용: demo_vla.sh start <act|smolvla|groot> [옵션]"; exit 1; }; start "$@";;
+  start)  shift; start "$@";;
   stop)   stop_all;;
   status) status;;
-  *) echo "사용: scripts/demo_vla.sh {start <act|smolvla|groot> [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] | stop | status}";;
+  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] | stop | status}";;
 esac
