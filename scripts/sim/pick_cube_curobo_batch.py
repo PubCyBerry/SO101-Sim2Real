@@ -69,6 +69,20 @@ parser.add_argument("--mix_sizes", action="store_true",
                          " 나머지는 z=-1 park(카메라 밖). active_objects 무시(1-per-env).")
 parser.add_argument("--cube_clear", type=float, default=0.022)
 parser.add_argument("--bowl_clear", type=float, default=0.055)
+parser.add_argument(
+    "--bowl_mass",
+    type=float,
+    default=0.0,
+    help="물리 A/B: 0이면 USD 기본 mass, 양수면 bowl mass(kg)를 런타임 override.",
+)
+parser.add_argument(
+    "--bowl_friction",
+    type=float,
+    nargs=2,
+    metavar=("STATIC", "DYNAMIC"),
+    default=None,
+    help="물리 A/B: bowl collision shape의 static/dynamic friction을 런타임 override.",
+)
 parser.add_argument("--no_dr", action="store_true", help="DR 끄고 고정 spawn")
 parser.add_argument("--stride", type=int, default=3, help="plan traj subsample stride")
 parser.add_argument("--taxonomy", default="", help="결과 JSON 저장 경로(빈값=미저장)")
@@ -282,6 +296,23 @@ def main() -> int:
     scene = env.scene
     device = env.device
     robot = scene["robot"]
+    bowl_asset = scene[BOWL_NAME]
+    all_env_ids_cpu = torch.arange(N, dtype=torch.long, device="cpu")
+    if args.bowl_mass > 0.0:
+        bowl_masses = bowl_asset.root_physx_view.get_masses().clone()
+        bowl_masses[:] = float(args.bowl_mass)
+        bowl_asset.root_physx_view.set_masses(bowl_masses, all_env_ids_cpu)
+        log(f"[batch] 물리 A/B: bowl mass={args.bowl_mass}kg")
+    if args.bowl_friction is not None:
+        static_friction, dynamic_friction = args.bowl_friction
+        bowl_materials = bowl_asset.root_physx_view.get_material_properties().clone()
+        bowl_materials[..., 0] = float(static_friction)
+        bowl_materials[..., 1] = float(dynamic_friction)
+        bowl_asset.root_physx_view.set_material_properties(bowl_materials, all_env_ids_cpu)
+        log(
+            f"[batch] 물리 A/B: bowl friction static={static_friction} "
+            f"dynamic={dynamic_friction}"
+        )
     # 크기 DR(mix_sizes): planner 는 4 큐브 다 알되 env별 1개만 배정·나머지 park → per-env 크기 무작위.
     mix = bool(args.mix_sizes)
     cubes = list(CUBE_NAMES) if mix else list(CUBE_NAMES[: args.active_objects])
