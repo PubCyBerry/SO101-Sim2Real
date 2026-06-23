@@ -94,6 +94,14 @@ parser.add_argument(
     help="평가 A/B: bowl을 kinematic rigid body로 고정한다. 시각·충돌·DR pose는 유지하고 "
          "로봇/큐브 접촉으로 target bowl이 밀려나는 효과만 제거한다.",
 )
+parser.add_argument(
+    "--eval_bowl_friction",
+    type=float,
+    nargs=2,
+    metavar=("STATIC", "DYNAMIC"),
+    default=None,
+    help="평가 A/B: bowl physics material의 static/dynamic friction을 런타임 override한다.",
+)
 parser.add_argument("--dump_obs", default="",
                     help="진단: 지정 시 eval ep0 에서 bridge 렌더 3캠 프레임 + arm joint 를 이 디렉터리에 저장"
                          "(학습 recorder 프레임과 시각 비교용).")
@@ -666,6 +674,19 @@ def main() -> None:
         bowl_rb.CreateKinematicEnabledAttr().Set(True)
         PhysxSchema.PhysxRigidBodyAPI.Apply(bowl_prim).CreateEnableCCDAttr().Set(False)
         print("[bridge] eval A/B: bowl kinematic 고정", flush=True)
+    if args.eval_bowl_friction is not None:
+        static_friction, dynamic_friction = args.eval_bowl_friction
+        bowl_material_prim = world.stage.GetPrimAtPath(
+            f"{SCENE_PRIM}/{BOWL_NAME}/Looks/BowlFriction"
+        )
+        bowl_material = UsdPhysics.MaterialAPI.Apply(bowl_material_prim)
+        bowl_material.CreateStaticFrictionAttr().Set(float(static_friction))
+        bowl_material.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+        print(
+            f"[bridge] eval A/B: bowl friction static={static_friction} "
+            f"dynamic={dynamic_friction}",
+            flush=True,
+        )
 
     # 조명 parity: scene.usd 는 광원 prim 이 없어(PickCubeSceneCfg 가 /World 계층서 따로 author)
     # bridge 만 디폴트 헤드라이트로 렌더돼 curobo demo 와 노출/색이 달랐다. curobo demo(=VLA 학습
@@ -1183,6 +1204,11 @@ def main() -> None:
                 "n_episodes": n_ep, "n_active_cubes": n_active,
                 "eval_seconds": args.eval_seconds, "eval_settle": args.eval_settle,
                 "eval_bowl_kinematic": bool(args.eval_bowl_kinematic),
+                "eval_bowl_friction": (
+                    [float(value) for value in args.eval_bowl_friction]
+                    if args.eval_bowl_friction is not None
+                    else None
+                ),
                 "all_cubes_success_rate": round(all_rate, 4),
                 "per_cube_placement_rate": round(cube_rate, 4),
                 "avg_cubes_placed": round(avg_placed, 3),

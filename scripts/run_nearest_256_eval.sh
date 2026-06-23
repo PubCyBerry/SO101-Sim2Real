@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 신규 nearest-order 256ep adaptation 모델의 단일 closed-loop 평가.
-# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew] [label] [bowl_kinematic]
+# 사용: bash scripts/run_nearest_256_eval.sh <smolvla|groot> [actions_per_chunk] [threshold] [seed] [episodes] [seconds] [command_slew] [label] [bowl_kinematic] [bowl_static_friction] [bowl_dynamic_friction]
 set -uo pipefail
 
 REPO=/home/konan147/Workspaces/SO101-Sim2Real
@@ -15,6 +15,8 @@ EVAL_SECONDS="${6:-30}"
 COMMAND_SLEW="${7:-false}"
 RUN_LABEL="${8:-}"
 BOWL_KINEMATIC="${9:-false}"
+BOWL_STATIC_FRICTION="${10:-}"
+BOWL_DYNAMIC_FRICTION="${11:-}"
 case "$COMMAND_SLEW" in
   true|false) ;;
   *) echo "command_slew는 true 또는 false여야 함: $COMMAND_SLEW" >&2; exit 2 ;;
@@ -23,6 +25,15 @@ case "$BOWL_KINEMATIC" in
   true|false) ;;
   *) echo "bowl_kinematic은 true 또는 false여야 함: $BOWL_KINEMATIC" >&2; exit 2 ;;
 esac
+if [[ -n "$BOWL_STATIC_FRICTION" || -n "$BOWL_DYNAMIC_FRICTION" ]]; then
+  if [[ -z "$BOWL_STATIC_FRICTION" || -z "$BOWL_DYNAMIC_FRICTION" ]]; then
+    echo "bowl friction은 static/dynamic 값을 모두 지정해야 함" >&2
+    exit 2
+  fi
+  BOWL_FRICTION_JSON="[$BOWL_STATIC_FRICTION,$BOWL_DYNAMIC_FRICTION]"
+else
+  BOWL_FRICTION_JSON=null
+fi
 CUBES=4
 PROFILE=
 case "$MODEL" in
@@ -37,6 +48,9 @@ if [[ "$COMMAND_SLEW" == "true" ]]; then
 fi
 if [[ "$BOWL_KINEMATIC" == "true" ]]; then
   TAG="${TAG}_bowlkin"
+fi
+if [[ -n "$BOWL_STATIC_FRICTION" ]]; then
+  TAG="${TAG}_bowlfr${BOWL_STATIC_FRICTION}-${BOWL_DYNAMIC_FRICTION}"
 fi
 if [[ -n "$RUN_LABEL" ]]; then
   TAG="${TAG}_${RUN_LABEL}"
@@ -87,7 +101,7 @@ wait_log() {
   return 1
 }
 
-log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW bowl_kinematic=$BOWL_KINEMATIC label=${RUN_LABEL:-none}"
+log "eval start model=$MODEL apc=$APC threshold=$THRESHOLD seed=$SEED n=$N seconds=$EVAL_SECONDS command_slew=$COMMAND_SLEW bowl_kinematic=$BOWL_KINEMATIC bowl_friction=${BOWL_STATIC_FRICTION:-default}/${BOWL_DYNAMIC_FRICTION:-default} label=${RUN_LABEL:-none}"
 if [[ "$MODEL" == "groot" ]]; then
   POLICY_PROFILE="$PROFILE" "${DC[@]}" run -d --name nearest_gr \
     gr00t zmq-server > "$LOGDIR/${TAG}_groot.log" 2>&1
@@ -121,6 +135,9 @@ BOWL_ARGS=()
 if [[ "$BOWL_KINEMATIC" == "true" ]]; then
   BOWL_ARGS+=(--eval_bowl_kinematic)
 fi
+if [[ -n "$BOWL_STATIC_FRICTION" ]]; then
+  BOWL_ARGS+=(--eval_bowl_friction "$BOWL_STATIC_FRICTION" "$BOWL_DYNAMIC_FRICTION")
+fi
 set +e
 OMNI_KIT_ACCEPT_EULA=YES timeout --kill-after=20s 900s \
   scripts/sim/run_cube_desk_ros_bridge.sh \
@@ -148,6 +165,7 @@ jq \
   --argjson seed "$SEED" \
   --argjson command_slew_limit "$COMMAND_SLEW" \
   --argjson bowl_kinematic "$BOWL_KINEMATIC" \
+  --argjson bowl_friction "$BOWL_FRICTION_JSON" \
   --arg trajectory_log "$TRAJ_HOST" \
   '.model = $model
    | .profile = $profile
@@ -157,6 +175,7 @@ jq \
    | .seed = $seed
    | .command_slew_limit = $command_slew_limit
    | .eval_bowl_kinematic = $bowl_kinematic
+   | .eval_bowl_friction = $bowl_friction
    | .trajectory_log = $trajectory_log' \
   "$OUT" > "$TMP_JSON"
 mv "$TMP_JSON" "$OUT"
