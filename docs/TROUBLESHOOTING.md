@@ -4064,6 +4064,44 @@ jq '{all_cubes_success_rate,per_cube_placement_rate,avg_cubes_placed}' \
 
 ---
 
+## kinematic bowl A/B에서 CCD·velocity write PhysX 오류
+
+### 현상
+
+VLA eval에서 접촉으로 bowl이 밀리는 영향을 분리하려고 rigid body를 kinematic으로 바꾸면 시작과
+episode reset 때 PhysX 오류가 반복된다.
+
+### 오류 메시지
+
+```text
+PhysX error: kinematic bodies with CCD enabled are not supported! CCD will be ignored.
+PhysX error: PxRigidDynamic::setLinearVelocity: Body must be non-kinematic!
+PhysX error: PxRigidDynamic::setAngularVelocity: Body must be non-kinematic!
+```
+
+### 원인
+
+기존 동적 bowl USD는 CCD가 켜져 있고, `randomize_bowl()`은 reset마다 선속도·각속도를 0으로 쓴다.
+PhysX kinematic body는 CCD를 지원하지 않으며 velocity 직접 쓰기도 허용하지 않는다.
+
+### 해결 방법
+
+`--eval_bowl_kinematic` 적용 시 bowl의 `physxRigidBody:enableCCD=false`를 함께 author하고,
+`randomize_bowl()`의 linear/angular velocity reset을 생략한다. pose randomization은 kinematic
+target pose 쓰기이므로 그대로 유지한다.
+
+### 확인 방법
+
+```bash
+bash scripts/run_nearest_256_eval.sh groot 16 0.25 44 1 300 false bowl_kin_ab true
+rg "kinematic bodies with CCD|Body must be non-kinematic" \
+  outputs/vla_eval_nearest256/*bowl_kin_ab*_bridge.log
+```
+
+수정 후 `rg` 출력이 없어야 하고 eval JSON의 `episodes[0].bowl_motion.max_xy_mm`는 `0.0`이어야 한다.
+
+---
+
 ## sim VLA 그리퍼 0.20rad 덜 열림 — use_default_offset 미복제
 
 ### 현상
