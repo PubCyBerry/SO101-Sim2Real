@@ -15,6 +15,11 @@
     rename_map: ""
     policy_device: ""
     chunk_size_threshold: 0.0
+    vla_reset_file: ""
+    # true이면 학습 PickCube action term과 같은 target slew를 배포 명령에 적용한다.
+    command_slew_limit: false
+    arm_target_max_velocity: 5.0
+    gripper_target_max_velocity: 2.5
     poll_timeout: 5.0
     fps: 30
     # 토픽 (sim 기본; 실기기는 joint_states_topic=/follower/joint_states 등으로 override)

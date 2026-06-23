@@ -25,6 +25,7 @@ import os
 import pickle  # nosec
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import grpc
@@ -192,6 +193,15 @@ class VlaPolicyNode(Node):
         self.chunk_size_threshold = float(
             p("chunk_size_threshold", 0.0).value or os.getenv("CHUNK_SIZE_THRESHOLD") or 0.5
         )
+        self.vla_reset_file = (
+            p("vla_reset_file", "").value or os.getenv("VLA_RESET_FILE", "")
+        ).strip()
+        # 학습 env의 SlewLimitedJointPositionAction을 배포 경로에서도 선택적으로 재현한다.
+        # 데이터 action 자체는 slew-limited지만 정책의 OOD 예측 점프까지 보장되지는 않으므로,
+        # 안전/정합 실험에서만 켜고 기본 경로는 기존 동작을 유지한다.
+        self.command_slew_limit = bool(p("command_slew_limit", False).value)
+        self.arm_target_max_velocity = float(p("arm_target_max_velocity", 5.0).value)
+        self.gripper_target_max_velocity = float(p("gripper_target_max_velocity", 2.5).value)
         poll_timeout = float(p("poll_timeout", 5.0).value)
         self.fps = int(p("fps", 30).value)
         self.joint_states_topic = p("joint_states_topic", "/isaac_joint_states").value
@@ -239,6 +249,32 @@ class VlaPolicyNode(Node):
         self._images: dict[str, np.ndarray] = {}
         self._queue: deque = deque()
         self._timestep = 0
+        self._reset_token: str | None = None
+        self._inference_generation = 0
+        self._inference_future: Future | None = None
+        self._inference_future_generation = 0
+        self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vla-infer")
+        self._last_target_rad: np.ndarray | None = None
+        self._target_max_step = np.full(
+            len(SO101_JOINT_ORDER),
+            self.arm_target_max_velocity / max(self.fps, 1),
+            dtype=np.float32,
+        )
+        self._target_max_step[self._gripper_idx] = (
+            self.gripper_target_max_velocity / max(self.fps, 1)
+        )
+
+        # closed-loop 궤적 로깅(진단) — VLA_TRAJ_LOG 설정 시 매 tick (timestep, state, action)
+        # 을 LeRobot 단위(arm deg, gripper[0,100])로 JSONL append. open-loop overlay 와 동일 단위라
+        # 직접 비교 가능. groot_openloop_overlay.py 의 recorded/pred 와 대조용.
+        self._traj_fh = None
+        _traj_path = os.getenv("VLA_TRAJ_LOG", "").strip()
+        if _traj_path:
+            try:
+                self._traj_fh = open(_traj_path, "w", buffering=1)  # line-buffered
+                print(f"[vla] TRAJ LOG → {_traj_path}", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[vla] TRAJ LOG 열기 실패: {exc}", flush=True)
 
         self.create_subscription(JointState, self.joint_states_topic, self._joint_cb, 10)
         for cam, topic in _CAMERA_TOPICS.items():
@@ -250,6 +286,14 @@ class VlaPolicyNode(Node):
             f"VLA node up. obs={self.joint_states_topic}+cameras → cmd={self.joint_commands_topic}, "
             f"task={self.task_instruction!r}, fps={self.fps}"
         )
+        if self.vla_reset_file:
+            self.get_logger().info(f"episode reset token file: {self.vla_reset_file}")
+        if self.command_slew_limit:
+            self.get_logger().info(
+                "command target slew 활성: "
+                f"arm={self.arm_target_max_velocity:.2f}rad/s, "
+                f"gripper={self.gripper_target_max_velocity:.2f}rad/s"
+            )
 
     # ── 콜백 ────────────────────────────────────────────────────────────────
     def _joint_cb(self, msg: JointState) -> None:
@@ -274,6 +318,62 @@ class VlaPolicyNode(Node):
     def _ready(self) -> bool:
         return self._joint_rad is not None and all(c in self._images for c in CAMERA_KEYS)
 
+    def _check_external_reset(self) -> bool:
+        """bridge reset token 변경 시 이전 episode의 queued action/timestep을 폐기한다."""
+        if not self.vla_reset_file:
+            return False
+        try:
+            token = Path(self.vla_reset_file).read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError):
+            return False
+        if not token or token == self._reset_token:
+            return False
+        self._reset_token = token
+        self._queue.clear()
+        self._timestep = 0
+        self._inference_generation += 1
+        # reset 직전 callback cache를 버려 다음 ROS frame의 home state/새 이미지만 추론에 쓴다.
+        self._joint_rad = None
+        self._images.clear()
+        self._last_target_rad = None
+        self.get_logger().info(f"episode reset token={token}: action queue/timestep/obs cache cleared")
+        return True
+
+    def _merge_finished_inference(self) -> None:
+        future = self._inference_future
+        if future is None or not future.done():
+            return
+        generation = self._inference_future_generation
+        self._inference_future = None
+        try:
+            timed_actions = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"policy-server inference 실패: {exc}", throttle_duration_sec=5.0)
+            return
+        if generation != self._inference_generation:
+            return
+        if not timed_actions:
+            self.get_logger().warn("policy-server 빈 chunk (timeout)", throttle_duration_sec=5.0)
+            return
+        merged = {ts: act for ts, act in self._queue}
+        for ta in timed_actions:
+            ts = int(ta.get_timestep())
+            if ts < self._timestep:
+                continue
+            merged[ts] = ta.get_action().detach().cpu().numpy().astype(np.float32)
+        self._queue = deque(sorted(merged.items(), key=lambda kv: kv[0]))
+
+    def _start_inference(self) -> None:
+        if self._inference_future is not None:
+            return
+        generation = self._inference_generation
+        raw_obs = self._build_raw_obs()
+        timestep = self._timestep
+        self._inference_future_generation = generation
+        self._inference_future = self._inference_executor.submit(
+            self.session.predict_chunk, raw_obs, timestep
+        )
+
     def _build_raw_obs(self) -> dict:
         state_lerobot = to_lerobot_units(self._joint_rad)
         obs: dict = {name: float(state_lerobot[i]) for i, name in enumerate(JOINT_FEATURE_NAMES)}
@@ -284,20 +384,13 @@ class VlaPolicyNode(Node):
         return obs
 
     def _control_tick(self) -> None:
+        if self._check_external_reset():
+            return
         if not self._ready():
             return
-        if len(self._queue) <= self._refill_floor:
-            timed_actions = self.session.predict_chunk(self._build_raw_obs(), self._timestep)
-            if not timed_actions:
-                self.get_logger().warn("policy-server 빈 chunk (timeout)", throttle_duration_sec=5.0)
-                return
-            merged = {ts: act for ts, act in self._queue}
-            for ta in timed_actions:
-                ts = int(ta.get_timestep())
-                if ts < self._timestep:
-                    continue
-                merged[ts] = ta.get_action().detach().cpu().numpy().astype(np.float32)
-            self._queue = deque(sorted(merged.items(), key=lambda kv: kv[0]))
+        self._merge_finished_inference()
+        if len(self._queue) <= self._refill_floor and self._inference_future is None:
+            self._start_inference()
 
         if not self._queue:
             return
@@ -306,7 +399,19 @@ class VlaPolicyNode(Node):
         raw_rad = from_lerobot_units(action_lerobot)
         # use_default_offset 재적용(그리퍼만; arm offset=0). sim 데이터의 pre-offset action → 절대 target.
         raw_rad[self._gripper_idx] += self.gripper_cmd_offset
-        target_rad = clamp_joint_rad(raw_rad)
+        desired_rad = clamp_joint_rad(raw_rad)
+        if self.command_slew_limit:
+            if self._last_target_rad is None:
+                self._last_target_rad = np.asarray(self._joint_rad, dtype=np.float32).copy()
+            delta = np.clip(
+                np.asarray(desired_rad, dtype=np.float32) - self._last_target_rad,
+                -self._target_max_step,
+                self._target_max_step,
+            )
+            target_rad = clamp_joint_rad(self._last_target_rad + delta)
+            self._last_target_rad = np.asarray(target_rad, dtype=np.float32).copy()
+        else:
+            target_rad = desired_rad
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -314,7 +419,16 @@ class VlaPolicyNode(Node):
         msg.position = [float(v) for v in target_rad]
         self.cmd_pub.publish(msg)
 
+        if self._traj_fh is not None:
+            state_lerobot = to_lerobot_units(self._joint_rad)
+            self._traj_fh.write(json.dumps({
+                "t": time.time(), "ts": int(ts),
+                "state": [float(v) for v in state_lerobot],   # 모델이 본 현재 관절(피드백)
+                "action": [float(v) for v in action_lerobot],  # 모델이 낸 target(보정 전)
+            }) + "\n")
+
     def destroy_node(self) -> bool:
+        self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self.session.close()
         return super().destroy_node()
 

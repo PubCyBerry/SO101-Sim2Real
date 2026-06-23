@@ -91,6 +91,18 @@ parser.add_argument("--eval_out", default="outputs/vla_eval.json",
 parser.add_argument("--dump_obs", default="",
                     help="진단: 지정 시 eval ep0 에서 bridge 렌더 3캠 프레임 + arm joint 를 이 디렉터리에 저장"
                          "(학습 recorder 프레임과 시각 비교용).")
+parser.add_argument(
+    "--vla_action_parity",
+    action="store_true",
+    help="VLA 모델이 이미 slew-limited target을 출력하므로 물리 joint velocity limit은 "
+         "학습 env actuator와 같은 10rad/s headroom을 사용. PATH E 기본값은 기존 근사 유지.",
+)
+parser.add_argument(
+    "--vla_reset_file",
+    default="",
+    help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
+         "episode 경계에서 stale action queue/timestep을 초기화한다.",
+)
 # ── SmolVLA cross-attention 오버레이 (SmolVLA 전용) ──────────────────────────
 parser.add_argument("--attention_overlay", action="store_true",
                     help="policy-server-attn(SmolVLA)이 PUB 하는 cross-attention 히트맵을 SUB 해 "
@@ -168,9 +180,9 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     _WRIST_CAM_LOCAL_ROT,
     _WRIST_CAMERA_FOCAL,
 )
-# 성공 판정 z 기준 — terminations.task_done 과 동일(DESK_TOP_Z + height_range). VLA eval 의
-# cube-in-bowl 카운트가 학습 env 의 success 정의를 그대로 쓰도록 import(하드코딩 금지).
-from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z  # noqa: E402
+# cube recorder/state machine이 실제 cube_desk 상판과 맞춰 사용하는 z 기준.
+# common MDP의 0.760은 pen desk 기준 stale 값이라 bowl 안 cube(z≈0.73~0.76)를 실패 처리한다.
+CUBE_DESK_TOP_Z = 0.705
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
 
 # 순수 isaacsim 경로의 stage prim 레이아웃 (env 네임스페이스 없음).
@@ -723,12 +735,19 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] set_max_efforts 실패: {exc}", flush=True)
 
-    # joint 최대속도 상한 (slew 근사): arm 5.0 · gripper 2.5 rad/s.
-    max_vel = np.full(n_dof, ARM_MAX_JOINT_VEL, dtype=np.float32)
-    max_vel[gi] = GRIPPER_MAX_JOINT_VEL
+    # recorder: target 자체를 arm 5.0/gripper 2.5 rad/s로 slew하고, actuator 물리 상한은
+    # 10rad/s로 둬 tracking headroom을 확보한다. VLA는 그 processed target을 학습했으므로
+    # --vla_action_parity에서는 물리 상한을 10으로 맞춘다. PATH E는 기존 근사를 보존한다.
+    if args.vla_action_parity:
+        max_vel = np.full(n_dof, 10.0, dtype=np.float32)
+        max_vel_label = "10.0 (VLA recorder actuator parity)"
+    else:
+        max_vel = np.full(n_dof, ARM_MAX_JOINT_VEL, dtype=np.float32)
+        max_vel[gi] = GRIPPER_MAX_JOINT_VEL
+        max_vel_label = f"arm={ARM_MAX_JOINT_VEL} · gripper={GRIPPER_MAX_JOINT_VEL}"
     try:
         robot._articulation_view.set_max_joint_velocities(np.array([max_vel], dtype=np.float32))
-        print(f"[bridge] joint max vel: arm={ARM_MAX_JOINT_VEL} · gripper={GRIPPER_MAX_JOINT_VEL} rad/s", flush=True)
+        print(f"[bridge] joint max vel: {max_vel_label} rad/s", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] set_max_joint_velocities 실패: {exc}", flush=True)
 
@@ -871,10 +890,38 @@ def main() -> None:
                 pass
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] arm home reset 실패: {exc}", flush=True)
+        if args.vla_reset_file:
+            reset_path = os.path.abspath(args.vla_reset_file)
+            os.makedirs(os.path.dirname(reset_path), exist_ok=True)
+            reset_generation["value"] += 1
+            tmp_path = f"{reset_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(f"{reset_generation['value']}\n")
+            os.replace(tmp_path, reset_path)
+            print(
+                f"[bridge] VLA reset token={reset_generation['value']} → {reset_path}",
+                flush=True,
+            )
+        # 진단: 동일 레이아웃 SM 재현용 — 현 spawn(world pose, wxyz)을 SM --replay_spawn 포맷 JSON 으로
+        # 덤프(gated LAYOUT_DUMP). num_envs=1 SM 은 env_origin=0 이라 world==env-local.
+        _ld = os.getenv("LAYOUT_DUMP", "").strip()
+        if _ld:
+            import json as _json
+            _lay = {"active_objects": int(args.num_cubes), "seed": int(seed),
+                    "envs": [{"env": 0, "placed": 0, "clean": False, "cubes": {}, "bowl": None}]}
+            for _nm, _h in cube_handles.items():
+                _pp, _qq = _h.get_world_pose()
+                _lay["envs"][0]["cubes"][_nm] = [float(v) for v in (*_pp[:3], *_qq[:4])]
+            _bp2, _bq2 = bowl_handle.get_world_pose()
+            _lay["envs"][0]["bowl"] = [float(v) for v in (*_bp2[:3], *_bq2[:4])]
+            with open(_ld, "w") as _f:
+                _json.dump(_lay, _f, indent=2)
+            print(f"[bridge] LAYOUT DUMP → {_ld} (seed={seed})", flush=True)
         print(f"[bridge] scene reset + DR (seed={seed})", flush=True)
 
     # 시작 시 DR 1회(학습 reset=DR 정합). 이후 R/N 으로 재리셋.
     current_seed = {"v": int(args.seed)}
+    reset_generation = {"value": 0}
     reset_scene(current_seed["v"])
 
     # 키보드: R = 동일 seed 리셋(재현) · N = 무작위 seed 리셋. GUI 모드만.
@@ -927,7 +974,7 @@ def main() -> None:
     print(f"[bridge] camera topics: {cam_topics}", flush=True)
 
     # ── VLA 성공률 eval 모드 ─────────────────────────────────────────────────
-    # terminations.task_done 과 동일한 cube-in-bowl 판정(컨테이너 xy=그릇 root, z=DESK_TOP_Z+range).
+    # recorder/state machine success-only 선별과 동일한 cube-in-bowl 판정.
     # bridge 는 env origin=0 이라 world pose == env-local pose.
     def cube_in_bowl(cube_h) -> tuple[bool, float, float]:
         cp = np.asarray(cube_h.get_world_pose()[0], dtype=np.float64)
@@ -935,7 +982,9 @@ def main() -> None:
         dxy = float(np.hypot(cp[0] - bp[0], cp[1] - bp[1]))
         z = float(cp[2])
         in_xy = dxy < BOWL_SUCCESS_RADIUS
-        in_z = (DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]) < z < (DESK_TOP_Z + BOWL_HEIGHT_RANGE[1])
+        in_z = (CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]) < z < (
+            CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10
+        )
         return (in_xy and in_z), dxy, z
 
     if args.eval > 0:
@@ -947,8 +996,8 @@ def main() -> None:
         episodes: list[dict] = []
         print(f"[bridge] 🎯 EVAL 시작: {args.eval} 에피소드 × {args.eval_seconds}s "
               f"(settle {args.eval_settle}s) · {n_active} 큐브 · success radius "
-              f"{BOWL_SUCCESS_RADIUS}m · z∈[{DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]:.3f},"
-              f"{DESK_TOP_Z + BOWL_HEIGHT_RANGE[1]:.3f}]", flush=True)
+              f"{BOWL_SUCCESS_RADIUS}m · z∈[{CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]:.3f},"
+              f"{CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10:.3f}]", flush=True)
         # 진단 dump: bridge 렌더 3캠 annotator(render_product 직결 = 정책이 받는 이미지와 동일).
         _dump_annots = []
         if args.dump_obs:
@@ -1005,6 +1054,7 @@ def main() -> None:
                     break
                 world.step(render=True)
             ever = {n: False for n in active_cubes}     # 한 번이라도 그릇 안(진단용)
+            success_step: int | None = None
             for si in range(ep_steps):
                 if not simulation_app.is_running():
                     break
@@ -1012,17 +1062,26 @@ def main() -> None:
                 _attention_tick()   # SmolVLA attention 오버레이 갱신(활성 시)
                 if ep == 0 and _dump_annots and si in (1, ep_steps // 2, ep_steps - 2):
                     _save_dump(f"ep0_s{si:03d}")   # bridge 렌더 + arm joint (start/mid/end)
+                current_inside = {}
                 for n, h in cube_handles.items():
-                    if cube_in_bowl(h)[0]:
+                    inside = cube_in_bowl(h)[0]
+                    current_inside[n] = inside
+                    if inside:
                         ever[n] = True
+                # 실제 task termination과 같이 all-cube 동시 성공 즉시 episode 종료.
+                # 고정 horizon 끝까지 명령을 계속 보내면 이미 놓은 cube를 다시 건드려 거짓 실패가 된다.
+                if current_inside and all(current_inside.values()):
+                    success_step = si
+                    break
             # 에피소드 종료 시점 판정(엄격 = task_done 정의)
             final = {n: cube_in_bowl(h) for n, h in cube_handles.items()}
             n_final = sum(1 for v in final.values() if v[0])
             n_ever = sum(ever.values())
-            all_ok = (n_final == n_active)
+            all_ok = success_step is not None or (n_final == n_active)
             episodes.append({
                 "episode": ep,
                 "n_final": n_final, "n_ever": n_ever, "all_ok": all_ok,
+                "success_step": success_step,
                 "cubes": {n: {"in_bowl": bool(final[n][0]),
                               "xy_mm": round(final[n][1] * 1000, 1),
                               "z": round(final[n][2], 4),
@@ -1048,7 +1107,10 @@ def main() -> None:
                 "avg_cubes_placed": round(avg_placed, 3),
                 "per_cube_ever_rate": round(ever_rate, 4),
                 "success_radius_m": BOWL_SUCCESS_RADIUS,
-                "z_window": [DESK_TOP_Z + BOWL_HEIGHT_RANGE[0], DESK_TOP_Z + BOWL_HEIGHT_RANGE[1]],
+                "z_window": [
+                    CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0],
+                    CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10,
+                ],
                 "episodes": episodes,
             }
             out_path = os.path.join(REPO_ROOT, args.eval_out) if not os.path.isabs(args.eval_out) else args.eval_out
