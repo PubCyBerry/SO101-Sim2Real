@@ -63,8 +63,8 @@
 
 - [x] **TE.VLA.DATA** 현재 cube 물리·절대 gripper 규약으로 관측 가능한 `nearest` 순서 256ep 생성·검증·HF push | machine:server | dep:TA.CUBE.PHYSICS | verify:256ep/130,214f, 3cam H.264 640×480@30, schema/index/finite 검증, HF `taehunkim/so101_sim_pick_cube_nearest_256` v3.0 | status:done
 - [x] **TE.VLA.PIPELINE** 실제 배포 평가 경로의 stale queue·동기 gRPC refill 정지·잘못된 desk z·all-4 후 재교란 수정 | machine:server | dep:TE.VLA.DATA | verify:episode reset token 확인 + background inference + cube z=0.705 + all-4 즉시 종료 | status:done
-- [x] **TE.VLA.SMOLVLA** nearest256 1epoch adaptation + closed-loop 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:APC32/thr0.25, seed40, N=5, 180s에서 all-4 **40%**, final per-cube 85%, avg 3.4/4 | status:done
-- [ ] **TE.VLA.GROOT** GR00T-N1.7 nearest256 adaptation·visual grounding·closed-loop 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로에서 N≥5 all-4 success rate **20~50% 이상** | status:in_progress — stage-2도 all-4 0%·final25%; visual encoder+projector 전용 stage-3 학습 중
+- [ ] **TE.VLA.SMOLVLA** nearest256 adaptation·closed-loop·recovery 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로, 180s, N≥10에서 all-4 success rate **80~90% 이상** | status:in_progress — APC32/thr0.25 seed40 N5에서 all-4 40%·final85%; 목표 미달
+- [ ] **TE.VLA.GROOT** GR00T-N1.7 nearest256 adaptation·visual grounding·recovery 튜닝 | machine:server | dep:TE.VLA.PIPELINE | verify:동일 실제 배포 경로, 180s, N≥10에서 all-4 success rate **80~90% 이상** | status:in_progress — visual stage-3 all-4 0%·final60%·ever65%; retention/recovery 원인 계측 중
 - [ ] **TE.VLA.REPORT** SmolVLA/GR00T data·open-loop·closed-loop 최종 비교 플롯·multi-seed 보고 | machine:server | dep:TE.VLA.SMOLVLA,TE.VLA.GROOT | verify:`outputs/smolvla` 최종 PNG/metrics + `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md` 결과표 | status:todo
 
 ## Phase F~G — 실기기 배포·Sim2Real 루프 (GATED — 자율 트랙 밖)
@@ -76,8 +76,8 @@
 ## 작업 로그 (Codex 갱신 — 최근이 위)
 
 <!-- 사이클마다 1줄: [날짜] Tx.y done/blocked — 핵심 결과 / 다음 -->
-- [2026-06-23] TE.VLA.GROOT in_progress — stage-2(LR3e-5·dropout0)는 open-loop MAE 4.689, closed-loop all-4 0%·final25%·ever25%로 목표 미달. visual-only 100-step smoke는 MAE 4.384로 개선했으나 seed40 closed-loop 0/4. action diffusion을 고정하고 visual encoder+projector만 1epoch 학습하는 stage-3(batch8·LR1e-5·jitter 명시 off) 시작 / 다음: stage-3 open/closed-loop 평가
-- [2026-06-23] TE.VLA.SMOLVLA done — nearest256 1epoch adaptation 및 evaluator/async/reset 수정 후 APC32/thr0.25 seed40 N5 180s에서 all-4 40%·final per-cube85%·avg3.4/4 달성 / 다음: GR00T 목표 달성 후 multi-seed 비교
+- [2026-06-23] TE.VLA.GROOT in_progress — visual stage-3(visual encoder+projector 1epoch, diffusion frozen, jitter off) 완료. open-loop MAE4.453, APC16/thr0.25 seed40 N5 180s에서 all-4 0%·final60%·avg2.4/4·ever65%. seed44 300s는 final3/4·ever4/4 / 다음: bowl 이동·cube 이탈 계측 후 물리 A/B 또는 recovery 데이터
+- [2026-06-23] TE.VLA.SMOLVLA in_progress — nearest256 1epoch adaptation 및 evaluator/async/reset 수정 후 APC32/thr0.25 seed40 N5 180s에서 all-4 40%·final per-cube85%·avg3.4/4. 활성 goal 80~90%에는 미달 / 다음: GR00T와 공통 retention/recovery 개선 후 N≥10 재평가
 - [2026-06-22] TE.VLA.DATA/PIPELINE done — fixed latent-ID label aliasing을 nearest observable order로 변경, 현재 물리 256ep/130,214f 생성·HF push; eval desk z 0.760→0.705, stale action reset, background inference, all-4 early termination 적용
 - [2026-06-08] North Star update — 사용자 지시로 sim/LeRobot 카메라 불변 계약을 `observation.images.{top,wrist,front}` 3cam으로 변경(2cam→3cam). 관련 소스 13개 파일 일괄 수정 완료. front 카메라 시뮬 기본 좌표 미튜닝 — `--tune_cameras`로 GUI 조정 후 env_cfg 상수 업데이트 필요. 기존 2cam 데이터셋은 front 채널 없어 validator WARNING(에러 아님) / 다음: front 카메라 물리 장착 후 `.env` 포트 확인, GUI tuner로 시뮬 좌표 확정, 3cam 데이터셋 수집·검증
 - [2026-06-05] TA.CUBE.RMPFLOW_CONTROLLER blocked — RMPFlow low-level controller는 1-cube smoke pass 후 4-cube fixed-spawn에서 `pick_cube_rmpflow_refine_4cube`, `pick_cube_rmpflow_graspwait_4cube`, `pick_cube_rmpflow_hardfirst_cycles2_shortgrasp_4cube` 모두 failed(`final_inside` 최대 2/4); 공통 `GRASP` close+settle 보강 후 direct `joint_fk` 4-cube 회귀 proof `/DISK1/so101-sim2real/outputs/pick_cube_jointfk_graspwait_regression_4cube_nocam_20260605.json`는 pass / 다음: direct FSM 2cam expert 기준으로 RL/IL 우회

@@ -2,7 +2,7 @@
 
 > 최종 갱신: 2026-06-23
 > 대상: SmolVLA, GR00T-N1.7
-> 성공 기준: 실제 배포 경로(`policy server → gRPC → ROS 2 VLA node → Isaac Sim bridge`)에서 한 episode 안에 4개 cube를 모두 bowl에 배치한 비율 20~50% 이상
+> 성공 기준: 실제 배포 경로(`policy server → gRPC → ROS 2 VLA node → Isaac Sim bridge`)에서 3분 안에 4개 cube를 모두 bowl에 배치한 비율 **80~90% 이상**(최종 N≥10)
 
 ## 1. 요약
 
@@ -16,9 +16,9 @@
 | 데이터 | 과거 물리·기록 규약의 4-cube 1024ep | 현재 물리·절대 gripper 규약의 256ep |
 | SmolVLA all-4 성공률 | 0% (N=10) | **40% (2/5)** |
 | SmolVLA final per-cube | 0% | **85% (17/20)** |
-| GR00T-N1.7 | 기존 모델 0% | stage-2도 all-4 0%, final per-cube 25%; visual-only stage-3 학습 중 |
+| GR00T-N1.7 | 기존 모델 0% | visual stage-3 all-4 0%, final per-cube 60%, ever 65% |
 
-SmolVLA의 목표 범위 진입은 실제 closed-loop 배포 경로에서 확인했다. 표본 수가 N=5이므로 후속 multi-seed 평가로 신뢰구간을 넓혀야 한다.
+SmolVLA는 기존 0%에서 40%까지 개선됐지만 활성 목표 80~90%에는 미달한다. GR00T는 visual grounding 학습으로 최종 배치율이 25%에서 60%로 증가했지만 all-4 동시 성공은 아직 없다. 두 모델 모두 success retention과 실패 복구가 다음 병목이다.
 
 ## 2. 기존 모델이 잘 나오지 않았던 이유
 
@@ -187,7 +187,10 @@ checkpoint 생성 전에 run을 중단하고, host의 `docker/gr00t-finetune.sh`
 - 16,277 steps, 4,770.9초, train loss 0.0513, 최종 loss tail 0.0402→0.0412, GPU 약 39GB
 - stage-2 open-loop ep0 MAE 4.689, closed-loop APC16/thr0.25 seed40 N5 180s: all-4 0%, final per-cube 25%, avg1.0/4, ever25%
 - visual encoder+projector smoke(`tune_visual=true`, diffusion frozen, jitter 명시 off) 100-step: trainable 29.76%, batch8 정상, open-loop MAE 4.384. seed40 N1 180s는 0/4.
-- 현재 visual-only stage-3 1epoch(batch8, LR1e-5, jitter off, state dropout0) 학습 중
+- visual-only stage-3 1epoch 완료: batch8, LR1e-5, jitter off, state dropout0, 16,277 steps, 5,290.4초, train loss 0.040655
+- stage-3 open-loop ep0 MAE 4.453
+- stage-3 closed-loop APC16/thr0.25, seed40, N=5, 180s: all-4 0%, final per-cube 60%, avg2.4/4, ever65%
+- stage-3 seed44, N=1, 300s: final3/4, ever4/4. Cube1은 한 번 bowl에 들어갔지만 종료 시 bowl 중심에서 103.6mm 떨어진 desk 위로 이탈했다.
 
 ## 6. 검증 결과와 산출물
 
@@ -218,13 +221,13 @@ ever-in-bowl=90%
 
 ## 7. 다음 작업
 
-1. visual-only stage-3 1epoch를 완료한다.
-2. stage-3 모델의 teacher-forced open-loop MAE를 측정한다.
-3. APC16/thr0.25, seed40/N5/180s closed-loop를 평가한다.
-4. 미달이면 clean BC 반복을 중단하고 recovery/perturbation 데이터 생성으로 전환한다.
-5. 목표를 통과한 GR00T checkpoint를 Hugging Face에 업로드한다.
-6. 두 모델을 다른 seed 구간에서 N=10 이상 재평가한다.
-7. data/open-loop/closed-loop와 모델별 성공률을 `outputs/smolvla`의 최종 비교 plot으로 저장한다.
+1. eval JSON에 bowl 이동량과 cube별 bowl 진입·이탈 이력을 추가한다.
+2. 동일 stage-3 checkpoint로 진단 episode를 재실행해 동적 bowl과 정책 재교란을 분리한다.
+3. bowl 동역학이 주원인이면 마찰·고정 여부를 현재 expert 회귀와 함께 A/B한다.
+4. 정책 재교란/미회수가 주원인이면 clean BC 반복을 중단하고 recovery/perturbation 데이터를 생성한다.
+5. SmolVLA와 GR00T를 같은 개선 설정에서 N≥10, 180s로 재평가한다.
+6. data/open-loop/closed-loop와 모델별 성공률을 `outputs/smolvla`의 최종 비교 plot으로 저장한다.
+7. all-4 80~90%를 통과한 checkpoint만 Hugging Face에 업로드한다.
 
 ## 8. 재현 명령
 

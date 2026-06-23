@@ -13,9 +13,9 @@
 
 ---
 
-## 작업 인계 (2026-06-23 — SmolVLA·GR00T 4-cube closed-loop 20%+ 개선 / 🔵 진행 중)
+## 작업 인계 (2026-06-23 — SmolVLA·GR00T 4-cube closed-loop 80~90% 개선 / 🔵 진행 중)
 
-- **목표**: 현재 40/50mm cube + convexHull + jaw/gripper SDF 설정에서 SmolVLA와 GR00T-N1.7의 4-cube all-success rate를 최소 20%, 목표 50%까지 끌어올린다. 추론 설정 sweep → 현재 설정 expert 256ep 생성 → 재학습 → multi-seed 평가 순으로 진행한다.
+- **목표**: 현재 40/50mm cube + convexHull + jaw/gripper SDF 설정에서 SmolVLA와 GR00T-N1.7의 3분 4-cube all-success rate를 **80~90% 이상**으로 끌어올린다. 추론 설정 sweep → 현재 설정 expert 256ep 생성 → 재학습 → recovery 데이터/시뮬 물리 개선 → multi-seed 평가 순으로 진행한다.
 - **기준선 재측정(SmolVLA 4cube_1024)**: 검증 프로필 `smolvla_4ceval`(chunk 32, gripper offset +0.2rad)로 실제 standard gRPC open-loop와 ROS bridge closed-loop를 수집했다.
   - open-loop ep0 489f: overall MAE **4.004**(arm deg + gripper [0,100]), recorded action을 잘 추종.
   - closed-loop seed0 1,888 tick: 최종 0/4, ever-in-bowl 1/4. action→state 추종은 arm 2.8~5.9deg 수준이나 정책이 짧은 pick-place 패턴을 반복하며 target을 재획득하지 못함.
@@ -27,7 +27,7 @@
 - **✅ 신규 데이터 완료**: `outputs/so101_sim_pick_cube_current_nearest_256`, N=32, seed=20260622, nearest, **256ep/130,214f**, 11 rounds, 1.8GB, 생성 1,389초. schema/episode index/finite action-state/세 카메라 H.264 640×480 yuv420p 30fps 및 각 130,214 frame 검증 통과. HF `taehunkim/so101_sim_pick_cube_nearest_256`, main/tag `v3.0` commit=`f660675…`.
 - **✅ SmolVLA 1-epoch adaptation 완료**: 기존 4cube_1024 checkpoint → 신규 데이터 `4069×batch32`, 43분, loss `0.105→0.063`, final=`outputs/train/so101_smolvla_sim_pick_cube_nearest_256_adapt/checkpoints/004069/pretrained_model`.
 - **SmolVLA evaluator/배포 수정**: ① cube 실제 desk z=0.705인데 common stale 0.760으로 bowl cube를 실패 집계 ② episode reset 시 vla queue/timestep/obs cache 잔류 ③ timer 안 동기 gRPC(115~200ms)로 command refill 정지 ④ all-4 달성 후에도 fixed horizon 끝까지 실행해 cube를 다시 꺼냄. 수정: reset token 공유파일, inference background worker, recorder actuator velocity parity, cube z 기준, all-4 즉시 종료. `docs/TROUBLESHOOTING.md` 기록.
-- **✅ SmolVLA 목표 달성**: APC32/thr0.25, seed40, N=5, 180s에서 **all-4 40%**, per-cube 85%, avg 3.4/4, ever90%. 30s는 per-cube30%/avg1.2, 90s는55%/2.2, 180s에서 task 완료율이 목표 범위 진입. 결과=`outputs/vla_eval_nearest256/smolvla_apc32_thr0p25_seed40_n5_s180.json`.
+- **🟡 SmolVLA 중간 기준선**: APC32/thr0.25, seed40, N=5, 180s에서 **all-4 40%**, per-cube 85%, avg 3.4/4, ever90%. 기존 0%보다 개선됐지만 활성 goal 80~90%에는 미달한다. 결과=`outputs/vla_eval_nearest256/smolvla_apc32_thr0p25_seed40_n5_s180.json`.
 - **✅ GR00T adaptation 완료**: 기존 4cube_1024 checkpoint-80000 → 신규 nearest256 `16277×batch8` 완료. `checkpoint-{8000,16000,16277}`과 root final 모델 모두 완전하며 final trainer state=`global_step=max_steps=16277`, loss tail `0.0905→0.0841`.
 - **GR00T 평가**: checkpoint-8000 APC16/thr0.25는 all-4/final/ever 모두 0%. 최종 checkpoint-16277 open-loop ep0 MAE=4.799(wrist_roll10.13°, gripper1.06). 동일 closed-loop는 all-4 0%지만 **final per-cube25%, avg1.0/4, ever30%**로 회복(episode별 final 3/4·0/4·2/4·0/4·0/4).
 - **GR00T sweep**: APC16/thr0.5는 all-4/final 0%, ever10%로 thr0.25보다 악화. 갱신이 잦아지자 cube를 책상 밖으로 밀어내는 불안정성이 증가.
@@ -37,7 +37,9 @@
 - **Stage-2 wrapper 함정 해결**: host `ref_repos/.../finetune.sh` 수정은 NVIDIA 이미지 `/workspace`에 반영되지 않아 첫 run이 실제 LR1e-4+jitter on으로 시작됨 → checkpoint 전 중단. `docker/gr00t-finetune.sh` 신규 + compose `/host` mount + entrypoint 경로 변경. 재실행 최종 명령에서 LR3e-5/warmup0.03/dropout0/jitter 인자 없음 확인. `docs/TROUBLESHOOTING.md` 기록.
 - **jitter off 정정**: 인자 생략은 base config 상속이다. wrapper가 `COLOR_JITTER_ENABLE=false`일 때 값 없는 `--color_jitter_params`를 전달해 tyro `{}`로 파싱하도록 수정.
 - **visual grounding smoke**: stage2 기반 visual+projector만 train(diffusion frozen), batch8/LR1e-5/jitter off/dropout0 100-step 정상(trainable29.76%). open-loop MAE4.384로 개선했지만 seed40/N1/180s는 0/4.
-- **🔵 현재 실행**: `outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_visual_stage3`, visual encoder+projector 전용 1epoch(16277×batch8, LR1e-5, diffusion frozen, jitter off). 완료 후 open-loop→seed40/N5 closed-loop.
+- **✅ GR00T visual stage-3 완료**: `outputs/train/so101_groot_n17_sim_pick_cube_nearest_256_visual_stage3/checkpoint-16277`, visual encoder+projector 전용 1epoch(16277×batch8, LR1e-5, diffusion frozen, jitter off), 5,290.4초, train loss 0.040655. open-loop ep0 MAE 4.453.
+- **GR00T visual stage-3 closed-loop**: APC16/thr0.25, seed40, N=5, 180s에서 **all-4 0%**, final per-cube 60%, avg 2.4/4, ever65%. seed44/N1/300s는 final3/4·ever4/4로, 성공 cube 재교란과 미회수 cube가 all-4를 막는다. 결과=`outputs/vla_eval_nearest256/groot_apc16_thr0p25_seed40_n5_s180_visual_stage3.json`.
+- **🔵 현재 작업**: 배치 성공 이후 cube 이탈 원인을 분리하기 위해 bowl 이동량·cube 입출 이력을 계측한다. bowl 동역학이 원인이면 물리 A/B, 그렇지 않으면 recovery/perturbation 데이터로 전환한다.
 - **상세 작업 기록**: `docs/VLA_4CUBE_NEAREST256_IMPROVEMENT.md`에 성능 저하 원인, order A/B, 데이터 기록 병목, evaluator/async/reset 수정, SmolVLA 40% 결과, GR00T 진행 상태와 재현 명령을 기록한다. 후속 실험마다 갱신한다.
 
 ## 작업 인계 (2026-06-17~18 — 4-cube 1024 데이터 + ACT/SmolVLA/GR00T 등량 학습 파이프라인 / ✅ 완료)
