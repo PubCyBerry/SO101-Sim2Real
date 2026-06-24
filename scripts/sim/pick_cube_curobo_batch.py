@@ -104,6 +104,9 @@ parser.add_argument("--record_overwrite", action="store_true", help="record_dir 
 parser.add_argument("--record_max_attempts", type=int, default=0,
                     help="기록 모드 최대 라운드 시도(0=auto: ceil(record_episodes/(0.6*N))+4)")
 parser.add_argument("--record_warmup", type=int, default=8, help="라운드 시작 카메라 렌더 워밍업 step(미기록)")
+parser.add_argument("--no_record_home", action="store_true",
+                    help="끝 READY(HOME) 복귀를 episode 에 미포함(옛 거동: place/release frame 에서 종료). "
+                         "기본은 성공 env 의 HOME 복귀 retract 까지 기록 → episode 가 HOME 자세에서 종료.")
 parser.add_argument(
     "--record_video_quality",
     type=int,
@@ -969,9 +972,18 @@ def main() -> int:
                     ci = cubes.index(tgt[e])
                     if not placed[e][ci]:
                         failed[e][ci] += 1
-        if record_mode:                                    # 끝 READY 복귀(retract/idle)는 미기록 → episode 는 마지막 release frame 에서 종료
-            rec_capture[0] = False
+        # 끝 READY(HOME) 복귀: 기본은 episode 에 포함(성공 env 만 unfreeze 해 retract→HOME 기록).
+        # release 직후 gripper open 상태라 깨끗한 retract. 실패 env 는 frozen 유지(success-only commit 폐기).
+        # --no_record_home 이면 옛 거동(rec_capture off → place/release frame 에서 종료).
+        if record_mode:
+            if args.no_record_home:
+                rec_capture[0] = False
+            else:
+                for e in range(N):
+                    rec_freeze[e] = not all(placed[e])     # 성공 env 만 HOME 복귀 기록
         settle(np.tile(READY, (N, 1)), np.full(N, args.grip_open, np.float32), 30)
+        if record_mode and not args.no_record_home:
+            rec_capture[0] = False
         per_env = [sum(p) for p in placed]
         total = sum(per_env)
         sim_t = (nstep[0] - s0) * CONTROL_DT

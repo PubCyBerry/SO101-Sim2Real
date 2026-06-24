@@ -33,7 +33,11 @@
 #   --thr T       chunk_size_threshold override (기본 = 프로필 값/0.5). eval best=0.25.
 #   --seed S      bridge DR seed (기본 0). eval 은 40 사용.
 #   --no-parity   --vla_action_parity 끔 (기본 켜짐 — VLA recorder actuator 상한 10 정합).
-#   --slew        학습 PickCube action term target slew 재적용 (기본 off; 데이터가 이미 slew라 보통 off).
+#   --slew        node command target slew 적용 (기본 ON). raw 모델 출력 점프(최대 116 rad/s teleport)를
+#                 arm 5.0 / gripper 2.5 rad/s 로 제한 → actuator cap 포화 폭주 방지. 학습데이터는 ≤2.5 rad/s.
+#   --no-slew     slew 끔 (옛 기본 동작; raw 모델 target 직접 publish — 팔이 actuator 상한속도로 휙휙).
+#   --arm-vel V   slew arm 상한 rad/s (기본 2.3 = 데이터생성 pick_cube_curobo_batch --max_cmd_vel 정합).
+#                 학습데이터 arm 속도가 p99≈2.3·≤2.5 라 같은 값으로 맞춤. gripper 상한은 node 기본 2.5(=데이터).
 #   ⚠ 연속 데모는 success 판정·all-4 종료가 없어 수치(JSON)는 안 나온다. 정확 수치는 run_nearest_256_eval.sh.
 #
 # 예:
@@ -104,6 +108,7 @@ run_vla_node(){
       -p "chunk_size_threshold:=$g_thr" \
       -p "vla_reset_file:=$RESET_CONTAINER" \
       -p "command_slew_limit:=$g_slew" \
+      -p "arm_target_max_velocity:=$g_armvel" \
     > "$LOGDIR/demo_vla_node.log" 2>&1
   wait_log vla_demo_node "sent instructions|instructions sent|VLA node up" 150
 }
@@ -139,7 +144,7 @@ start(){
   # 첫 인자가 옵션(--)이 아니면 프로필 이름으로 소비
   local prof_arg=""
   if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then prof_arg=$1; shift; fi
-  local ckpt="" cubes=4 ip="" disp="stream" seed=0 parity=1 slew=false apc_ov="" thr_ov=""
+  local ckpt="" cubes=4 ip="" disp="stream" seed=0 parity=1 slew=true apc_ov="" thr_ov="" armvel=2.3
   while [ $# -gt 0 ]; do case "$1" in
     --ckpt) ckpt=$2; shift 2;;
     --cubes) cubes=$2; shift 2;;
@@ -151,6 +156,8 @@ start(){
     --seed) seed=$2; shift 2;;
     --no-parity) parity=0; shift;;
     --slew) slew=true; shift;;
+    --no-slew) slew=false; shift;;
+    --arm-vel) armvel=$2; shift 2;;
     *) log "알 수 없는 옵션: $1"; exit 1;;
   esac; done
 
@@ -189,11 +196,12 @@ start(){
     model_path=$ckpt
     log "  --ckpt override → 임시 프로필 env/$active.env"
   fi
-  # APC/thr: --apc/--thr override 우선, 없으면 프로필값(노드 기본 8/0.5 과 정합)
-  local g_apc g_thr g_slew=$slew
-  g_apc=${apc_ov:-$(prof_get "$active" ACTIONS_PER_CHUNK)}; [ -z "$g_apc" ] && g_apc=8
-  g_thr=${thr_ov:-$(prof_get "$active" CHUNK_SIZE_THRESHOLD)}; [ -z "$g_thr" ] && g_thr=0.5
-  log "  모델=$model_path  APC=$g_apc  thr=$g_thr  parity=$parity  slew=$slew  seed=$seed"
+  # APC/thr: --apc/--thr override 우선, 없으면 프로필값(env/<profile>.env), 그다음 .env,
+  #          마지막에 노드 기본(8/0.5)과 정합. compose 와 동일하게 .env 도 조회한다.
+  local g_apc g_thr g_slew=$slew g_armvel=$armvel
+  g_apc=${apc_ov:-$(prof_get "$active" ACTIONS_PER_CHUNK)}; [ -z "$g_apc" ] && g_apc=$(env_get ACTIONS_PER_CHUNK); [ -z "$g_apc" ] && g_apc=8
+  g_thr=${thr_ov:-$(prof_get "$active" CHUNK_SIZE_THRESHOLD)}; [ -z "$g_thr" ] && g_thr=$(env_get CHUNK_SIZE_THRESHOLD); [ -z "$g_thr" ] && g_thr=0.5
+  log "  모델=$model_path  APC=$g_apc  thr=$g_thr  parity=$parity  slew=$slew(arm≤${g_armvel})  seed=$seed"
 
   # ── 모델 타입별 서비스 기동 ──
   case "$ptype" in
@@ -241,5 +249,5 @@ case "${1:-}" in
   start)  shift; start "$@";;
   stop)   stop_all;;
   status) status;;
-  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] [--apc N] [--thr T] [--seed S] [--no-parity] [--slew] | stop | status}";;
+  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] [--apc N] [--thr T] [--seed S] [--no-parity] [--slew(기본on)|--no-slew] [--arm-vel V(기본2.3)] | stop | status}";;
 esac
