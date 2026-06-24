@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import faulthandler
 import json
 import math
 import multiprocessing
@@ -23,6 +24,11 @@ import weakref
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from isaaclab.app import AppLauncher
+
+# C 레벨 크래시(access violation 등)의 Python traceback 을 파일로 덤프.
+os.makedirs(os.path.join(ROOT, "outputs"), exist_ok=True)
+_FH_FILE = open(os.path.join(ROOT, "outputs", "teleop_faulthandler.txt"), "w")
+faulthandler.enable(file=_FH_FILE)
 
 
 if multiprocessing.get_start_method() != "spawn":
@@ -216,10 +222,26 @@ if args_cli.teleop_device not in {"keyboard", "so101leader"}:
     )
 if args_cli.remote_endpoint:
     raise NotImplementedError("--remote_endpoint is not available in the pure Isaac Lab local teleop path.")
-if args_cli.enable_cameras and not args_cli.experience:
-    # Windows Isaac Sim 5.1 camera rendering is more stable with this experience.
+# Windows Isaac Sim 5.1 의 full-GUI experience(isaaclab.python.kit)는 메뉴/hotkey 확장
+# (isaacsim.gui.menu · omni.kit.window.toolbar · viewport menubar 등)을 로드하다 "app ready"
+# 직후 omni.kit.hotkeys.core/key_combination.py:as_string 에서 access violation(exit 139)으로
+# 즉사한다. 카메라 sensor 가 없어도 rendering experience(isaaclab.python.rendering.kit)는 위
+# 메뉴/hotkey 확장을 싣지 않아 GUI 프로세스가 유지된다. 그래서 명시 experience 가 없고
+# headless 가 아니면(=로컬 GUI/livestream) --enable_cameras 여부와 무관하게 rendering.kit 로
+# 고정한다. 근거: docs/TROUBLESHOOTING.md §"신규 viewer 스크립트가 ... rendering.kit 로 고정".
+if not args_cli.experience and (args_cli.enable_cameras or not args_cli.headless):
     args_cli.experience = "isaaclab.python.rendering.kit"
-simulation_app = AppLauncher(vars(args_cli)).app
+
+# vars(args_cli) 전체를 넘기면 top_pos/wrist_rot/public_ip 등 tuple·str 커스텀 인자가
+# AppLauncher → carb 설정 경로로 전달되어 Windows 에서 _prepare_ui access violation 발생
+# (crash: omni.kit.hotkeys.core/key_combination.py as_string). AppLauncher 가 실제로 쓰는
+# 키만 필터링해서 전달한다. 근거: AGENTS.md §sim 진입 스크립트 AppLauncher 인자 필터.
+_LAUNCHER_KEYS = {
+    "headless", "livestream", "enable_cameras", "experience", "device", "cpu",
+    "disable_fabric", "offscreen_render", "kit_args",
+}
+_launcher_args = {k: v for k, v in vars(args_cli).items() if k in _LAUNCHER_KEYS}
+simulation_app = AppLauncher(_launcher_args).app
 
 import carb  # noqa: E402
 import gymnasium as gym  # noqa: E402
@@ -416,10 +438,25 @@ class SO101LeaderJointController(WallClockLimiterMixin):
         print(f"[leader] connecting SO-101 leader on {args_cli.port} (id={args_cli.leader_id})")
         self.teleop.connect(calibrate=args_cli.recalibrate)
         if not self.teleop.is_calibrated:
-            raise RuntimeError(
-                "SO-101 leader calibration is missing or mismatched. Re-run with --recalibrate, "
-                "or calibrate the leader with LeRobot first."
-            )
+            # connect(calibrate=False) 는 모터 레지스터에 캘리브레이션을 쓰지 않는다. 그래서
+            # 캘리브레이션 파일이 있어도 모터의 Homing_Offset/Min/Max 레지스터가 파일과 다르면
+            # is_calibrated=False 가 된다(SOLeader.is_calibrated = 모터 레지스터 vs 파일 비교).
+            # 보유한 캘리브레이션 파일을 모터에 1회 기록해 정합시킨다 — LeRobot calibrate() 의
+            # "ENTER=기존 캘리브레이션 파일 사용" 경로(bus.write_calibration)와 동일한 비대화형 동작.
+            if self.teleop.calibration:
+                print("[leader] motor registers != calibration file → writing existing calibration to motors")
+                try:
+                    self.teleop.bus.write_calibration(self.teleop.calibration)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[leader] write_calibration failed ({exc}); continuing with file-based normalization")
+            if not self.teleop.is_calibrated:
+                # get_action() 의 정규화는 self.bus.calibration(파일)로 이뤄지므로 모터 레지스터가
+                # 끝내 안 맞아도 읽기값은 올바른 degree 다. GUI teleop 을 죽이지 말고 경고만 남긴다.
+                # (정밀 캘리브레이션이 필요하면 --recalibrate 로 재캘리브레이션.)
+                print(
+                    "[leader] WARNING: leader calibration still mismatched after write; proceeding with "
+                    "file-based normalization (run with --recalibrate to recalibrate the leader)."
+                )
         print("[leader] connected")
 
     def reset(self) -> None:

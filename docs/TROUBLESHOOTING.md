@@ -49,6 +49,8 @@
 - [Isaac Lab manipulator 가 작업영역 일부만 도달 / 가까운 물체에서 ee 가 위로 솟음](#isaac-lab-manipulator-가-작업영역-일부만-도달--가까운-물체에서-ee-가-위로-솟음)
 - [SO-101 5DOF grasp 가 불안정 (정합·제어점·자세 3중 오차) — Franka 권장](#so-101-5dof-grasp-가-불안정-정합제어점자세-3중-오차--franka-권장)
 - [Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)](#windows-isaac-sim-_prepare_ui-access-violation-tuple-인자를-applauncher-에-전달)
+- [teleop GUI 가 `--enable_cameras` 없이 부팅 직후 즉사 (omni.kit.hotkeys.core access violation, exit 139)](#teleop-gui-가---enable_cameras-없이-부팅-직후-즉사-omnikithotkeyscore-access-violation-exit-139)
+- [so101leader teleop 이 `[leader] connecting` 직후 조용히 종료 (is_calibrated False → 마스킹된 exit 0)](#so101leader-teleop-이-leader-connecting-직후-조용히-종료-is_calibrated-false--마스킹된-exit-0)
 - [(PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`](#path-e-isaac-sim-헤드리스에서-omnigraph-생성-실패--unable-to-create-prim-for-graph)
 - [(PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` — inotify watch 고갈](#path-e-isaac-sim-부팅-중-errno28-no-space-left-on-device-가-수천-줄--inotify-watch-고갈)
 - [(PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1`](#path-e-해결-isaac-lab-bridge-의-omnigraph-jointstate-가-device-0-vs--1-로-joint_states-미publish)
@@ -1072,6 +1074,78 @@ Full App UI 자체가 필요하면 먼저 사용자 설정을 초기화해 재�
 1. `.\.venv\Scripts\isaacsim.exe <isaaclab ... rendering.kit>` 실행 시 로그 폴더가 `Kit\Isaac-Sim\5.1\...` 로 잡히고 GUI 프로세스가 유지되는지 확인.
 2. teleop task 는 `--enable_cameras` 를 둔 기존 명령으로 실행해 PickOrange scene 과 camera observation 이 뜨는지 확인.
 3. bare Full App 재검증이 필요하면 `Get-WinEvent -LogName Application` 에 새 `rtx.scenedb.plugin.dll` / `0xc0000005` APPCRASH 가 추가되지 않았는지 확인.
+
+---
+
+## teleop GUI 가 `--enable_cameras` 없이 부팅 직후 즉사 (omni.kit.hotkeys.core access violation, exit 139)
+
+**현상**: `teleop_se3_agent.py --teleop_device so101leader --port COM8` 처럼 `--enable_cameras` 없이 GUI teleop 을 띄우면 Isaac 확장이 모두 로드된 직후(`app ready`, ~12s) `Windows fatal exception: access violation` 으로 즉사한다(exit code 139). 같은 명령에 `--enable_cameras` 를 붙이면 정상.
+
+**오류 메시지**:
+
+```text
+[12.644s] app ready
+Windows fatal exception: access violation
+
+Thread 0x00004470 (most recent call first):
+  File "...omni.kit.hotkeys.core-1.3.10.../omni/kit/hotkeys/core/key_combination.py", line 72 in as_string
+  File "...omni.kit.hotkeys.core.../omni/kit/hotkeys/core/hotkey.py"...
+...
+[crash] lastCommand = 'SetLightingMenuModeCommand(lighting_mode=stage,...)'
+```
+
+(faulthandler 파일은 비고, breakpad minidump 는 0 byte. crash metadata `appState = 'started'`.)
+
+### 원인
+
+AppLauncher 는 headless 가 아니고 `enable_cameras=False` 면 full-GUI experience `isaaclab.python.kit` 를 선택한다(`app_launcher.py:_resolve_experience_file`). 이 kit 은 `isaacsim.gui.menu` · `omni.kit.menu.*` · `omni.kit.window.toolbar` · `omni.kit.viewport.menubar.*` 등 메뉴/hotkey 확장을 싣는데, 이 Windows + Isaac Sim 5.1 + 드라이버 조합에서 hotkey 등록(`omni.kit.hotkeys.core/key_combination.py:as_string`)이 access violation 으로 죽는다. (AppLauncher 인자 필터(`_LAUNCHER_KEYS`)로 잡는 `_prepare_ui` 크래시와는 별개 — 커스텀 인자 문제가 아니라 full-GUI kit 자체 메뉴 init 크래시다.)
+
+`isaaclab.python.rendering.kit` 는 이 메뉴/hotkey 확장을 싣지 않아(`enableStdoutOutput=false` 인 minimal rendering app) 크래시가 없고 GUI 프로세스가 유지된다. cube_desk ROS bridge 가 이 experience(`enable_cameras=True` 경유)로 GUI livestream 을 정상 구동하는 것과 같은 근거.
+
+### 해결 방법
+
+`teleop_se3_agent.py` 가 **headless 가 아니면 `--enable_cameras` 여부와 무관하게** `isaaclab.python.rendering.kit` 로 experience 를 고정하도록 수정했다(카메라 sensor 없이도 rendering experience 면 메뉴/hotkey 확장 없이 GUI 유지). 카메라 sensor 는 여전히 `--enable_cameras` 일 때만 scene 에 주입된다.
+
+```python
+# teleop_se3_agent.py (AppLauncher 호출 직전)
+if not args_cli.experience and (args_cli.enable_cameras or not args_cli.headless):
+    args_cli.experience = "isaaclab.python.rendering.kit"
+```
+
+### 확인 방법
+
+1. `--enable_cameras` 없이 GUI teleop 실행 시 로그에 `Loading experience file: ...isaaclab.python.rendering.kit` 가 찍히고 `app ready` 이후 크래시 없이 env 가 뜨는지 확인.
+2. exit code 139 access violation 이 사라지고 teleop 루프가 유지되는지 확인.
+
+---
+
+## so101leader teleop 이 `[leader] connecting` 직후 조용히 종료 (is_calibrated False → 마스킹된 exit 0)
+
+**현상**: `teleop_se3_agent.py --teleop_device so101leader` 가 `[leader] connecting SO-101 leader on COMx` 출력 직후 `[leader] connected` 없이 **exit code 0** 으로 조용히 종료된다. Traceback 도 faulthandler 덤프도 없다. (stdout 을 파일로 리다이렉트하면 로그가 줄 중간에서 잘려 끝나는 것처럼 보인다 — 버퍼가 flush 되기 전에 프로세스가 hard-exit 되기 때문.)
+
+### 원인
+
+- 표준 LeRobot `SOLeader.connect(calibrate=False)` 는 모터 레지스터에 캘리브레이션을 쓰지 않는다. 그래서 `~/.cache/huggingface/lerobot/calibration/.../<id>.json` 캘리브레이션 파일이 있어도 leader 모터의 `Homing_Offset`/`Min/Max_Position_Limit` 레지스터가 파일과 다르면 `SOLeader.is_calibrated`(= 모터 레지스터 vs 파일 비교)가 **False** 가 된다.
+- teleop 컨트롤러는 `if not is_calibrated: raise RuntimeError(...)` 로 막는데, 이 예외가 `main()` 의 `finally` 블록(`env.close()` → `simulation_app.close()`)을 타고, **Isaac `simulation_app.close()` 가 프로세스를 hard-exit(code 0)** 시키면서 원래 예외와 Traceback 을 통째로 삼킨다. → 원인이 안 보이는 silent exit.
+- 실제로 leader 는 정상 연결·읽기된다(`get_action()` 의 정규화는 모터 레지스터가 아니라 `bus.calibration`(파일)으로 수행하므로 degree 값은 올바름). is_calibrated 가드만 과하게 엄격했다.
+
+### 해결 방법
+
+teleop 컨트롤러에서 is_calibrated 가 False 면 **보유한 캘리브레이션 파일을 모터에 1회 기록**(`bus.write_calibration` — LeRobot `calibrate()` 의 "ENTER=기존 캘리브레이션 사용" 경로와 동일한 비대화형 동작)해 정합시킨다. 그래도 안 맞으면 RuntimeError 대신 **경고만 남기고 진행**한다(파일 기반 정규화로 읽기는 정상). 정밀 재캘리브레이션이 필요하면 `--recalibrate`.
+
+```python
+self.teleop.connect(calibrate=args_cli.recalibrate)
+if not self.teleop.is_calibrated:
+    if self.teleop.calibration:
+        self.teleop.bus.write_calibration(self.teleop.calibration)  # 비대화형, 기존 파일 사용
+    if not self.teleop.is_calibrated:
+        print("[leader] WARNING: ... proceeding with file-based normalization")  # raise 안 함
+```
+
+### 확인 방법
+
+1. `[leader] motor registers != calibration file → writing existing calibration to motors` 다음에 `[leader] connected` 가 찍히고(또는 WARNING 후 진행) teleop 이 종료되지 않는지 확인.
+2. 디버깅 시 stdout 버퍼 손실을 피하려면 `PYTHONUNBUFFERED=1` 로 실행해 실제 흐름/예외를 본다.
 
 ---
 
