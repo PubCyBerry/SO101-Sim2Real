@@ -127,7 +127,7 @@ CAM_PATHS = [
     ("Wrist Camera", "/World/envs/env_0/Robot/gripper/WristCamera"),
     ("Front Camera", "/World/envs/env_0/Robot/shoulder/FrontCamera"),
 ]
-from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
+from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES, CUBE_SIZES  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from so101_kinematics import SO101Kinematics  # noqa: E402  (PAN_X·_fold_45 — closing-axis)
@@ -308,8 +308,7 @@ def main() -> int:
     robot = scene["robot"]
     g_idx = list(robot.data.body_names).index("gripper")
     cubes = list(CUBE_NAMES[: args.active_objects])
-    # 큐브 한 변(author CUBE_SCALES, 2026-06-18 30/40→40/50 확대): Cube1/2=40mm, Cube3/4=50mm.
-    CUBE_SIZES = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
+    # 큐브 한 변 = cube_specs 단일 진실 소스(import). Cube1/2=40mm, Cube3/4=50mm.
     q_bias = torch.zeros((1, 5), device=device)
 
     # ── LeRobot v3 기록 상태 (record 모드 전용) ──

@@ -24,6 +24,7 @@ isaacsim 을 headless 부팅한 뒤에만 import 된다. 따라서 ``main()`` �
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -36,6 +37,22 @@ Usd = UsdGeom = UsdPhysics = UsdLux = UsdShade = Sdf = Gf = Vt = PhysxSchema = N
 SCENE_DIR = Path(__file__).resolve().parents[2] / "assets" / "scenes" / "cube_desk"
 SCENE_USD_PATH = SCENE_DIR / "scene.usd"
 OBJECTS_DIR = SCENE_DIR / "objects"
+
+# 큐브 크기 단일 진실 소스(cube_specs)를 importlib 파일 로드로 직접 읽는다.
+# `from sim_to_real...` 는 패키지 __init__ 의 isaaclab_tasks 의존 때문에 AppLauncher
+# 부팅 전엔 크래시 → 자족 leaf 파일만 직접 exec(패키지 init 우회).
+def _load_cube_specs():
+    import sys
+
+    path = Path(__file__).resolve().parents[2] / "src" / "sim_to_real" / "utils" / "cube_specs.py"
+    spec = importlib.util.spec_from_file_location("_cube_specs", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclass 가 cls.__module__ 를 sys.modules 에서 찾음 → 선등록 필수
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_CUBE_SPECS = _load_cube_specs().CUBE_SPECS
 
 # 로봇 base 를 world 원점(XY)에 두기 위한 offset (recenter delta=(-1.84,+0.565,0) 반영).
 # offset.x = 0.36: 책상 중심(scene-local x=0)이 world x=0.36 → 로봇 발치 x=0 이 책상 위.
@@ -51,34 +68,30 @@ MATERIALS = {
     "Ceiling": ((0.88, 0.86, 0.82), 0.95, 0.0),
 }
 
-# 큐브 4개 scene-local 배치 (이름, translate, yaw°). 매트 앞쪽에 흩뿌림.
-# z = 매트 윗면(scene-local 0.004) + 큐브 반높이 + slack(0.001).
-#   40mm: 0.004 + 0.020 + 0.001 = 0.025,  50mm: 0.004 + 0.025 + 0.001 = 0.030
-CUBES = (
-    ("Cube1", (-0.50, 0.08, 0.025), 20.0),   # 작은 큐브 40mm
-    ("Cube2", (-0.22, 0.06, 0.025), -35.0),  # 작은 큐브 40mm
-    ("Cube3", (-0.46, 0.17, 0.030), 50.0),   # 큰  큐브 50mm
-    ("Cube4", (-0.27, 0.14, 0.030), -20.0),  # 큰  큐브 50mm
+# 큐브 4개 scene-local 평면 배치 (이름 → x, y, yaw°). 매트 앞쪽에 흩뿌림.
+# z 와 scale·mass 는 cube_specs(단일 진실 소스)에서 파생 — 크기 변경은 cube_specs 만.
+_CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {
+    "Cube1": (-0.50, 0.08, 20.0),
+    "Cube2": (-0.22, 0.06, -35.0),
+    "Cube3": (-0.46, 0.17, 50.0),
+    "Cube4": (-0.27, 0.14, -20.0),
+}
+_MAT_TOP_LOCAL: float = 0.004   # 매트 윗면 scene-local z
+_CUBE_Z_SLACK: float = 0.001    # spawn 침투 방지 여유
+# z 중심 = 매트 윗면 + 큐브 반높이 + slack (40mm→0.025, 50mm→0.030).
+CUBES = tuple(
+    (name, (x, y, _MAT_TOP_LOCAL + _CUBE_SPECS[name].half_extent + _CUBE_Z_SLACK), yaw)
+    for name, (x, y, yaw) in _CUBE_LAYOUT.items()
 )
 
 # 그릇 scene-local (바닥 중심).
 BOWL_LOCAL: tuple[float, float, float] = (-0.58, 0.26, 0.010)
 
-CUBE_SCALES: dict[str, tuple[float, float, float]] = {
-    "Cube1": (0.04, 0.04, 0.04),
-    "Cube2": (0.04, 0.04, 0.04),
-    "Cube3": (0.05, 0.05, 0.05),
-    "Cube4": (0.05, 0.05, 0.05),
-}
+CUBE_SCALES: dict[str, tuple[float, float, float]] = {n: s.scale for n, s in _CUBE_SPECS.items()}
 
 # ── 물리 상수 (docs/GRASP_PHYSICS.md 근거 — 임의 변경 금지) ──────────────────
-# 큐브 질량 — 크기별 차등. 의자다리 커버 폼은 속이 약간 비어 부피 완전비례보다
-#   가볍게, 쉘(표면적 ∝ 변²)비례로 잡는다. 40mm(Cube1/2): 35 g, 50mm(Cube3/4): 55 g
-#   (35×(50/40)²≈54.7 → 55g).
-CUBE_MASSES: dict[str, float] = {
-    "Cube1": 0.035, "Cube2": 0.035,
-    "Cube3": 0.055, "Cube4": 0.055,
-}
+# 큐브 질량 — cube_specs 에서 파생(크기별 차등, 쉘 ∝ 변² 비례. 40mm=35g·50mm=55g).
+CUBE_MASSES: dict[str, float] = {n: s.mass for n, s in _CUBE_SPECS.items()}
 CONTACT_OFFSET_DEFAULT = 0.004      # 정적·두꺼운 면(책상/매트/그릇)
 CUBE_CONTACT_OFFSET = 0.002         # grasp 대상 큐브 전용(convexHull 접촉이 안정적이라 좁은 margin OK)
 # 큐브 시각 형태 — 실물은 회색 펠트로 감싼 쿠션형(코너 반경 큼). 라운드 박스로 author.

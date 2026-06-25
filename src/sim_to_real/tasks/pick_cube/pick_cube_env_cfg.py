@@ -28,7 +28,13 @@ from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (
     _pinhole_camera_cfg,
     _yaw_quat,
 )
-from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES
+from sim_to_real.utils.constant import (
+    BOWL_NAME,
+    CUBE_HALF_EXTENTS,
+    CUBE_NAMES,
+    CUBE_SIZES,
+    MAX_CUBE_FOOTPRINT_RADIUS,
+)
 from sim_to_real.utils.domain_randomization import (
     randomize_camera_focal,
     randomize_cubes_scattered,
@@ -57,13 +63,22 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
-# 매트 윗면 world z=0.709. z중심 = 0.709 + 반높이 + slack(0.001).
-#   작은(Cube1/2, 40mm): 0.709+0.020+0.001=0.730, 큰(Cube3/4, 50mm): 0.709+0.025+0.001=0.735.
+# xy/yaw 는 평면 배치, z 는 cube_specs 파생(반높이) — author CUBES 와 동일 규약.
+#   z중심 = 매트 윗면(0.709) + 큐브 반높이 + slack(0.001). 40mm→0.730, 50mm→0.735.
+_MAT_TOP_WORLD_Z: float = 0.709
+_CUBE_Z_SLACK: float = 0.001
+_CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {  # name -> (x, y, yaw°)
+    "Cube1": (-0.14, 0.135, 20.0),
+    "Cube2": (0.14, 0.115, -35.0),
+    "Cube3": (-0.10, 0.225, 50.0),
+    "Cube4": (0.09, 0.195, -20.0),
+}
 _CUBE_INIT_STATES = {
-    "Cube1": ((-0.14, 0.135, 0.730), _yaw_quat(20.0)),
-    "Cube2": ((0.14, 0.115, 0.730), _yaw_quat(-35.0)),
-    "Cube3": ((-0.10, 0.225, 0.735), _yaw_quat(50.0)),
-    "Cube4": ((0.09, 0.195, 0.735), _yaw_quat(-20.0)),
+    name: (
+        (x, y, _MAT_TOP_WORLD_Z + CUBE_HALF_EXTENTS[name] + _CUBE_Z_SLACK),
+        _yaw_quat(yaw),
+    )
+    for name, (x, y, yaw) in _CUBE_LAYOUT.items()
 }
 # BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(0.36, 0.045, 0.705) = (-0.22, 0.305, 0.715), +y 0.01 → 0.315.
 _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
@@ -86,11 +101,11 @@ _BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
 _MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)
 _CUBE_SCATTER_X_RANGE: tuple[float, float] = (_MAT_BL_ENV[0] + 0.16, _MAT_BL_ENV[0] + 0.56)  # (-0.18, 0.22)
 _CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1] + 0.11, _MAT_BL_ENV[1] + 0.25)  # (0.155, 0.295)
-# 큐브 한 변 (author CUBE_SCALES, 2026-06-18 30/40→40/50): Cube1/2=40mm, Cube3/4=50mm.
+# 큐브 한 변 (cube_specs 단일 진실 소스): Cube1/2=40mm, Cube3/4=50mm.
 # DR 의 큐브간·그릇 이격이 footprint 반경(s·√2/2)에 맞춰 큐브별로 커지게 하는 기준.
-_CUBE_SIZES_M: dict[str, float] = {"Cube1": 0.040, "Cube2": 0.040, "Cube3": 0.050, "Cube4": 0.050}
+_CUBE_SIZES_M: dict[str, float] = dict(CUBE_SIZES)
 # 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(50mm) face 대각 절반 ((s/2)·√2).
-_CUBE_VOLUME_INSET: float = max(_CUBE_SIZES_M.values()) * 0.5 * (2 ** 0.5)  # ≈ 0.0354
+_CUBE_VOLUME_INSET: float = MAX_CUBE_FOOTPRINT_RADIUS  # ≈ 0.0354
 
 # 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
 # fallback(default 위치) 동작을 유도하는 데 사용한다.
@@ -530,9 +545,10 @@ class PickCubeObservationsCfg:
                 "include_velocities": True,  # joint_vel+ee vel+cube vel 추가(부분관측 해소) → 43→64dim
                 "include_orientation": True,  # cube yaw+half-extent+ee quat+grasp→cup → 64→83dim
                 "include_container_orientation": True,  # 그릇 quat → 83→87dim(동적 그릇 tilt/엎힘 관측)
-                # 큐브 크기(half-extent, m): Cube1/2=30mm→0.015, Cube3/4=40mm→0.020.
-                # 평행 jaw 벌림 폭 매칭에 필수(크기 2종). CUBE_NAMES 순서와 일치.
-                "object_half_extents": (0.015, 0.015, 0.020, 0.020),
+                # 큐브 크기(half-extent, m) — cube_specs 파생(40mm→0.020, 50mm→0.025).
+                # 평행 jaw 벌림 폭 매칭에 필수. 하드코딩 금지(예전 drift→실측보다 작게 관측한
+                # 잠복 결함 원인). CUBE_NAMES 순서와 일치.
+                "object_half_extents": tuple(CUBE_HALF_EXTENTS[n] for n in CUBE_NAMES),
             },
             noise=GaussianNoiseCfg(mean=0.0, std=0.005),
         )

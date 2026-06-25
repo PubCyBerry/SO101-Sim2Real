@@ -203,7 +203,11 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
 # cube recorder/state machine이 실제 cube_desk 상판과 맞춰 사용하는 z 기준.
 # common MDP의 0.760은 pen desk 기준 stale 값이라 bowl 안 cube(z≈0.73~0.76)를 실패 처리한다.
 CUBE_DESK_TOP_Z = 0.705
-from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
+from sim_to_real.utils.constant import (  # noqa: E402
+    BOWL_NAME,
+    CUBE_NAMES,
+    MAX_CUBE_FOOTPRINT_RADIUS,
+)
 
 # 순수 isaacsim 경로의 stage prim 레이아웃 (env 네임스페이스 없음).
 SCENE_PRIM = "/World/Scene"
@@ -239,7 +243,7 @@ DRIVE_STIFFNESS = 17.8        # arm·gripper 공통 (PickCubeEnvCfg actuator sti
 DRIVE_DAMPING = 0.6           # PickCubeEnvCfg actuator damping
 ARM_EFFORT_LIMIT = 10.0       # PickCubeEnvCfg arm/gripper effort_limit_sim (정적 cap)
 # 그리퍼 effort = leisaac dynamic_reset_gripper_effort_limit: clamp(nearest_mass/0.15, 0.5, 10).
-# 우리 큐브(20·35g): 0.020~0.035/0.15 = 0.13~0.23 < 0.5 → 전부 하한 0.5Nm 으로 클램프되므로
+# 우리 큐브(35·55g): 0.035~0.055/0.15 = 0.23~0.37 < 0.5 → 전부 하한 0.5Nm 으로 클램프되므로
 # static 0.5 가 동치(>0.5 는 그릇 0.25kg 근접 시뿐, 그땐 grip 불요 → grasp 거동 동일). gentle =
 # 가벼운 큐브 안 으깸·sim2real.
 GRIPPER_EFFORT_LIMIT = 0.5
@@ -847,9 +851,9 @@ def main() -> None:
     _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
     _MIN_BOWL_SEP = 0.14         # 큐브-그릇
     _MIN_BASE_SEP = 0.135        # 큐브-base 발치(inner-reach)
-    # PickCubeEnvCfg._CUBE_VOLUME_INSET과 동일. 2026-06-18 최대 cube가 40→50mm로 커졌으므로
-    # 옛 40mm 기준(0.0283m)을 쓰면 50mm Cube3/4가 학습보다 경계 쪽에 spawn되는 OOD eval이 된다.
-    _VOLUME_INSET = 0.050 * 0.5 * (2 ** 0.5)   # ≈0.0354 = max cube face 대각 절반
+    # PickCubeEnvCfg._CUBE_VOLUME_INSET과 동일 — cube_specs 단일 진실 소스에서 파생해
+    # env_cfg 와 자동 일치(하드코딩 시 크기 변경 누락→OOD eval 위험 차단).
+    _VOLUME_INSET = MAX_CUBE_FOOTPRINT_RADIUS   # ≈0.0354 = max cube(50mm) face 대각 절반
     _BOWL_ARC_RADIUS = 0.44
     _BOWL_ARC_DEG = (-4.0, 8.0)
     _MAX_ATTEMPTS = 50

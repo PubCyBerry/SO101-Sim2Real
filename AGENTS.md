@@ -124,7 +124,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 ### USD 에셋 (`assets/`)
 
 - `scenes/pen_desk/scene.usd` + `objects/<Pen*,PenCup>/<Name>.usd` — kitchen_with_orange 패턴 (객체별 self-contained USD + `prepend payload` 참조)
-- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = **Cube1/2 40mm·Cube3/4 50mm**(2026-06-18 30/40→40/50 확대) 회색 펠트(라운드 visual + grasp 물리 mass 35/55g, contactOffset 0.004, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
+- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = **Cube1/2 40mm·Cube3/4 50mm**(2026-06-18 30/40→40/50 확대; 크기/질량 단일 진실 소스 = `src/sim_to_real/utils/cube_specs.py`, 변경은 거기 한 곳만) 회색 펠트(라운드 visual + grasp 물리 mass 35/55g, contactOffset 0.004, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
 - `robots/` — SO-101 follower USD + 편집용 URDF
 - **충돌 근사**: grasp 관여 mesh 를 형상별로 — 오목(jaw/gripper, bowl)은 SDF/convexDecomposition, **볼록(큐브)은 convexHull**. jaw/gripper collider = `/so101_new_calib/{jaw,gripper}/collisions`(convexDecomposition→sdf, `set_gripper_jaw_sdf_collision.py`). 팔 링크는 convexDecomposition 유지(grasp 무관·저비용). **⚠ 큐브 collider 정정(2026-06-22)**: 2026-06-18 에 큐브를 SDF 라운드 mesh 로 바꿨으나, 큐브는 **볼록**이라 SDF 가 불필요했고 평평한 책상 접촉에서 normal 이 매 step 뒤집혀 **제자리 회전 버즈(~2.9 rad/s 진동, "덜그럭")** + 그 불안정이 **grasp 도 망가뜨림**(고정 spawn SM 3/16=19%). **convexHull 로 교체**(같은 라운드 표면을 볼록 형상이라 정확 표현) → jitter 해소(0.056 rad/s 정지, 50배↓) + **grasp 복원(13/16=81%)**. SDF 는 오목 형상에만 쓴다(triangle/meshSimplification 은 동적서 convexHull fallback). 측정: `scripts/test/measure_cube_jitter.py`
 - **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 큐브 collider 는 self-contained USD 에 `PhysicsCollisionAPI`+convexHull 직접 부여 (별도 proxy 미사용)
