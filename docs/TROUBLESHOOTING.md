@@ -51,6 +51,7 @@
 - [Windows Isaac Sim `_prepare_ui` access violation (tuple 인자를 AppLauncher 에 전달)](#windows-isaac-sim-_prepare_ui-access-violation-tuple-인자를-applauncher-에-전달)
 - [teleop GUI 가 `--enable_cameras` 없이 부팅 직후 즉사 (omni.kit.hotkeys.core access violation, exit 139)](#teleop-gui-가---enable_cameras-없이-부팅-직후-즉사-omnikithotkeyscore-access-violation-exit-139)
 - [so101leader teleop 이 `[leader] connecting` 직후 조용히 종료 (is_calibrated False → 마스킹된 exit 0)](#so101leader-teleop-이-leader-connecting-직후-조용히-종료-is_calibrated-false--마스킹된-exit-0)
+- [cube_desk 큐브가 GUI 에서 검은색으로 렌더 (USD 에 박힌 리눅스 절대 텍스처 경로)](#cube_desk-큐브가-gui-에서-검은색으로-렌더-usd-에-박힌-리눅스-절대-텍스처-경로)
 - [(PATH E) Isaac Sim 헤드리스에서 OmniGraph 생성 실패 — `Unable to create prim for graph`](#path-e-isaac-sim-헤드리스에서-omnigraph-생성-실패--unable-to-create-prim-for-graph)
 - [(PATH E) Isaac Sim 부팅 중 `errno=28 No space left on device` — inotify watch 고갈](#path-e-isaac-sim-부팅-중-errno28-no-space-left-on-device-가-수천-줄--inotify-watch-고갈)
 - [(PATH E, 해결) Isaac Lab bridge 의 OmniGraph JointState 가 `device 0 vs -1`](#path-e-해결-isaac-lab-bridge-의-omnigraph-jointstate-가-device-0-vs--1-로-joint_states-미publish)
@@ -1146,6 +1147,46 @@ if not self.teleop.is_calibrated:
 
 1. `[leader] motor registers != calibration file → writing existing calibration to motors` 다음에 `[leader] connected` 가 찍히고(또는 WARNING 후 진행) teleop 이 종료되지 않는지 확인.
 2. 디버깅 시 stdout 버퍼 손실을 피하려면 `PYTHONUNBUFFERED=1` 로 실행해 실제 흐름/예외를 본다.
+
+---
+
+## cube_desk 큐브가 GUI 에서 검은색으로 렌더 (USD 에 박힌 리눅스 절대 텍스처 경로)
+
+**현상**: Windows 에서 teleop/sim GUI(`SimToReal-SO101-PickCube-v0`)를 띄우면 책상·그릇은 정상인데 **큐브 4개만 새까맣게** 렌더된다. 조명/experience 설정을 바꿔도(예: `rtx.indirectDiffuse` 재활성) 그대로다.
+
+### 원인
+
+큐브 머티리얼 `GrayFelt` 는 `UsdPreviewSurface` 이고 **diffuse 를 텍스처에서만** 받는다(`Preview.inputs:diffuseColor = None` → 폴백 상수색 없음). 그런데 `Cube1~4.usd` 의 `DiffuseTex`/`NormalTex` `inputs:file` 이 **리눅스 학습 서버의 절대경로**로 박혀 있다:
+
+```text
+inputs:file = @/home/konan147/Workspaces/SO101-Sim2Real/assets/scenes/cube_desk/textures/cube_felt_albedo.png@
+```
+
+Windows(`C:\Users\...\SO101-LeRobot-VLA\...`)에는 그 경로가 없어 텍스처 로드 실패 → diffuse=검정 → 큐브 검정. (책상은 같은 패턴이지만 `scene.usd` 가 `./textures/desk_top.png` **상대경로**라 정상.) `author_pick_cube_scene.py` 는 이미 상대경로(`../../textures/cube_felt_albedo.png`)를 쓰지만, **committed USD 가 옛날 리눅스에서 절대경로로 author 된 stale 상태**였다. 텍스처 파일 자체는 repo 의 `assets/scenes/cube_desk/textures/` 에 존재.
+
+> 이건 조명·rendering.kit 와 무관한 **에셋 경로 portability** 문제다. `.usd` 가 binary(usdc)라 `grep` 으로는 경로가 안 보이고 `pxr.Usd` 로 stage 를 열어야 보인다.
+
+### 해결 방법
+
+`Cube1~4.usd` 의 절대 텍스처 경로를 **레이어 기준 상대경로로 외과 패치**(usd-core, geometry/physics·collider 무손상). 재author 는 피한다 — 2026-06-22 큐브 collider convexHull 정정이 author 스크립트에 반영 안 됐을 수 있어 되돌릴 위험. `scene.usd` 의 큐브 텍스처는 객체 USD 를 reference composition 한 것이라 객체 USD 만 고치면 자동 해결.
+
+```python
+# pxr.Usd 로 stage 열어 Shader.inputs:file 의 절대경로를 상대로 치환 후 저장
+from pxr import Usd, Sdf
+st = Usd.Stage.Open("assets/scenes/cube_desk/objects/Cube1/Cube1.usd")
+for prim in st.Traverse():
+    if prim.GetTypeName() == "Shader":
+        a = prim.GetAttribute("inputs:file")
+        ap = a.Get().path if a and a.Get() else None
+        if ap and ap.startswith("/"):  # 리눅스 절대경로
+            a.Set(Sdf.AssetPath("../../textures/" + os.path.basename(ap)))
+st.GetRootLayer().Save()
+```
+
+### 확인 방법
+
+1. `pxr.Usd` 로 전 USD 의 `Shader.inputs:file` 을 스캔해 절대경로(`/...` 또는 `X:\...`)가 0 개인지 확인.
+2. GUI 실행 시 로그에 텍스처 resolve 실패 경고가 없고, 큐브가 회색 펠트로 보이는지 확인.
 
 ---
 
