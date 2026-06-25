@@ -164,13 +164,62 @@ def _new_stage(default_prim_name: str, usda_path: Path) -> "Usd.Stage":
     return stage
 
 
+def _relativize_asset_paths(usd_path: Path) -> None:
+    """export 된 .usd 레이어의 절대 asset path(텍스처 등)를 레이어 디렉터리 기준 상대경로로 정규화.
+
+    ⚠ USD 의 layer Export 는 일부 플랫폼/버전(특히 리눅스)에서 작성한 relative asset path 를
+    author 머신의 절대경로로 re-anchor 한다. 그 절대경로(`/home/<user>/.../textures/...`)가
+    바이너리 .usd 에 박히면 다른 머신(Windows)에서 텍스처가 resolve 안 돼 로드 실패 → 큐브가
+    검정으로 렌더된다(docs/TROUBLESHOOTING.md §"cube_desk 큐브가 GUI 에서 검은색"). committed
+    .usd 가 항상 포터블한 상대경로를 갖도록, export 직후 절대 asset path 를 상대로 되돌린다.
+    레이어 밖을 가리켜 상대화 불가한 절대경로가 남으면 author 시점에 RuntimeError(트립와이어).
+    """
+    layer = Sdf.Layer.FindOrOpen(str(usd_path))
+    if layer is None:
+        raise RuntimeError(f"cannot reopen exported layer for asset-path check: {usd_path}")
+    layer_dir = str(usd_path.resolve().parent)
+
+    def _is_abs(p: str) -> bool:
+        return p.startswith("/") or (len(p) > 2 and p[1] == ":")
+
+    remaining: list[str] = []
+
+    def _walk(prim_spec) -> None:
+        for prop in prim_spec.properties:
+            if not isinstance(prop, Sdf.AttributeSpec) or prop.typeName != Sdf.ValueTypeNames.Asset:
+                continue
+            val = prop.default
+            if val is None:
+                continue
+            p = val.path
+            if not p or not _is_abs(p):
+                continue
+            rel = os.path.relpath(os.path.abspath(p), layer_dir).replace(os.sep, "/")
+            if _is_abs(rel):
+                remaining.append(p)  # 레이어 밖(다른 드라이브 등) — 상대화 불가
+            else:
+                prop.default = Sdf.AssetPath(rel)
+        for child in prim_spec.nameChildren:
+            _walk(child)
+
+    for root in layer.rootPrims:
+        _walk(root)
+    if remaining:
+        raise RuntimeError(
+            f"absolute asset paths could not be relativized in {usd_path}: {remaining}"
+        )
+    layer.Save()
+
+
 def _export_pair(stage: "Usd.Stage", path_no_ext: Path) -> None:
-    """.usda(텍스트) 저장 + .usd(usdc 바이너리) export."""
+    """.usda(텍스트) 저장 + .usd(usdc 바이너리) export. 텍스처 경로는 항상 상대로 정규화."""
     usda_path = path_no_ext.with_suffix(".usda")
     usd_path = path_no_ext.with_suffix(".usd")
     stage.GetRootLayer().Save()  # 이미 .usda 로 CreateNew 했으므로 텍스트 저장
     if not stage.GetRootLayer().Export(str(usd_path), args={"format": "usdc"}):
         raise RuntimeError(f"Failed to export binary USD: {usda_path} -> {usd_path}")
+    # Export 가 절대경로로 re-anchor 한 텍스처 경로를 상대로 되돌린다(큐브 검정 재발 방지).
+    _relativize_asset_paths(usd_path)
     print(f"[INFO]: Authored {usda_path}  +  {usd_path}")
 
 
