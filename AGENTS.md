@@ -25,7 +25,7 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | **실행 방식** | Docker (`docker/docker-compose.yaml run lerobot <mode>`) | Docker (`docker compose up` policy-server·isaac-sim·vla-ros) |
 | **진입점** | LeRobot CLI (teleop·record·replay·calibrate·policy-client) | Isaac Lab `SimToReal-SO101-PickCube-v0` Gym env (ROS2 bridge via isaac-sim) |
 | **정책 종류** | ACT · SmolVLA · **GR00T-N1.7** | 동일 (env=추론/데이터 substrate, RL 제거) |
-| **스택** | LeRobot 0.4.4 (lerobot) / 0.5.1 (policy-server) | Isaac Sim 5.1 / IsaacLab 2.3.2 / leisaac 0.4.0 (git tag v0.4.0) |
+| **스택** | LeRobot 0.4.4 (lerobot) / 0.5.1 (policy-server) | Isaac Sim 5.1 / IsaacLab 2.3.2 (leisaac 코드 vendor됨) |
 | **서비스 3종** | `lerobot`(실기기 + 데이터) / `policy-server`(async gRPC) / `gr00t`(GR00T-N1.7 ZMQ) | `isaac-sim`(official nvcr 5.1, ROS2 bridge·WebRTC livestream) / `policy-server` / `vla-ros`(폐루프 노드) |
 
 - 시뮬 env는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
@@ -173,14 +173,14 @@ USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성
 
 - **패키지 이름** `sim_to_real` (`pyproject.toml`). `[build-system] requires=["setuptools<82"]`, `[tool.setuptools.packages.find] where=["src"]` 로 `src/sim_to_real/` editable 설치.
 - **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, `usd-core>=26.5` (순수 Python USD 작성·검증용 공용. 펜 author·USD 구조 검증은 usd-core 만으로 가능. 단 `author_pick_cube_scene.py` 는 PhysxSchema 정식 API 를 써 isaac 그룹(`uv run --group isaac`) 필요).
-- **`leisaac`** 는 `[tool.uv.sources]` 의 git tag `v0.4.0` 에서 설치 (vendored 사본 없음).
+- **`leisaac`** 는 runtime 의존성이 아니다. 유용한 leisaac 코드(devices, datagen, assets/robots)는 `src/sim_to_real/` 과 `src/so101_contract/leader_calibration.py` 에 vendor 되었으며, leisaac 내부 import 는 우리 코드로 대체되었다.
 
 | 의존성 그룹 | 내용 |
 |---|---|
 | `teleop` | 실기기 (ffmpeg + evdev Linux 한정) |
 | `policy` | lerobot[smolvla] + accelerate + num2words |
 | `async` | grpcio + protobuf |
-| `isaac` | isaacsim[all,extscache]==5.1.0 + leisaac[isaaclab,gr00t] |
+| `isaac` | isaacsim[all,extscache]==5.1.0 + isaaclab[all,isaacsim]==2.3.2 + ikpy |
 | `dev` | ipykernel |
 
 ### ABI 호환성 핀

@@ -20,6 +20,16 @@ def _extend_isaaclab_pip_namespace() -> None:
 
 _extend_isaaclab_pip_namespace()
 
+# IsaacLab 임시 패치(TerminationManager) 적용 — best-effort.
+# isaacsim 앱 컨텍스트 밖(host schema 검증 등)에선 isaaclab.managers import 가 실패할 수
+# 있으므로 어떤 예외든 삼키고 스킵한다(패치는 순수 최적화·버그수정이라 없어도 import 는 진행).
+try:
+    from .utils.monkey_patch import monkey_patch
+
+    monkey_patch()
+except Exception:
+    pass
+
 try:
     from .tasks import *
 except ModuleNotFoundError as exc:

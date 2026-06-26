@@ -84,8 +84,8 @@ flowchart TD
 | lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
 | grpcio | 1.73.1 | `async` |
 | isaacsim | 5.1.0 `[all,extscache]` | `isaac` |
-| isaaclab | 2.3.2 | `isaac` (leisaac extras) |
-| leisaac | 0.4.0 | `isaac` (git tag v0.4.0) |
+| isaaclab | 2.3.2 | `isaac` (`[all,isaacsim]`) |
+| ikpy | ≥3.4 | `isaac` (5-DOF IK 백엔드) |
 | usd-core | ≥26.5 | (공용) |
 
 ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `packaging<26` / `setuptools<82`. 자세한 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.

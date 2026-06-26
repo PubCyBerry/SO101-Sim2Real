@@ -7,7 +7,6 @@ import math
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
-from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -20,7 +19,8 @@ from isaaclab.sensors import TiledCameraCfg, ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg
 
-from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH, ROBOT_USD_PATH
+from sim_to_real.assets.robots.lerobot import SO101_FOLLOWER_CFG
+from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH
 from so101_contract import SO101_JOINT_ORDER
 from sim_to_real.tasks.common.utils import (
     SO101_JOINT_TARGET_MAX_VELOCITY,
@@ -191,56 +191,23 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.01, 0.0)),
     )
 
-    # SO-101 follower articulation
-    robot: ArticulationCfg = ArticulationCfg(
+    # SO-101 follower articulation — 단일소스 SO101_FOLLOWER_CFG(assets/robots/lerobot.py,
+    # leisaac 이식)에서 검증된 actuator/solver/rigid_props 값을 가져오고, 씬 특화 필드만 덮어쓴다.
+    #  - prim_path: per-env 네임스페이스
+    #  - spawn: contact sensor 활성(jaw/gripper ↔ 큐브 접촉 리포트) — base spawn 의 usd_path·
+    #    rigid_props·articulation_props 는 그대로 유지하고 activate_contact_sensors 만 토글.
+    #  - init_state: 우리 base pose + gripper 0.20.
+    #    gripper offset(=init 값). action target = raw*scale(1.0)+offset, clip 1.0 → 도달범위
+    #    [offset-1, offset+1]. offset 0.20(닫힘쪽) → do-nothing target 이 잡은 큐브 유지,
+    #    open 1.20 까지(30mm grasp 충분)·close -0.174 full 도달.
+    robot: ArticulationCfg = SO101_FOLLOWER_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=ROBOT_USD_PATH,
-            # ContactSensor(jaw/gripper ↔ 큐브 접촉)용 — 로봇 rigid body 접촉 리포트 활성화.
-            activate_contact_sensors=True,
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                fix_root_link=True,
-                # leisaac SO101_FOLLOWER_CFG 검증값(enabled_self_collisions + solver 4/4).
-                enabled_self_collisions=True,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=4,
-            ),
-        ),
+        spawn=SO101_FOLLOWER_CFG.spawn.replace(activate_contact_sensors=True),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=_ROBOT_POS,
             rot=_ROBOT_ROT,
-            # gripper offset(=이 init 값). action target = raw*scale(1.0)+offset, clip 1.0
-            # → 도달범위 [offset-1, offset+1]. 트레이드오프:
-            #  - offset 큼(0.80): "아무것도 안 함(action≈0)" → target 0.80 = 활짝 열림.
-            #    부트스트랩으로 큐브를 잡고 시작해도 정책이 손을 벌려 곧 놓침(하류 학습 저해).
-            #  - offset 0.20: do-nothing target 0.20(닫힘쪽, open 판정<0.6) → 잡은 큐브 유지.
-            #    open 은 1.20 까지(30mm 큐브 grasp 충분), close 는 -0.174 full 도달.
-            # pregrasp 공짜획득 우려는 pregrasp 보상 재설계(weight 0.5, diff 0.045)로 해소됨.
             joint_pos={**{j: 0.0 for j in SO101_JOINT_ORDER}, "gripper": 0.20},
         ),
-        actuators={
-            # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
-            # assets/robots/lerobot.py). Feetech STS3215 를 낮은 stiffness(soft PD)
-            # + 높은 effort 상한으로 모델링한다. 그리퍼가 큐브에 막혀도 클램프
-            # 토크가 최대 10 Nm 까지 올라가 grasp 가 유지된다(이전 1.5 Nm 상한은
-            # stiffness 300 에서 ~0.3° 만에 포화돼 들어올릴 때 미끄러짐).
-            "arm_joints": ImplicitActuatorCfg(
-                joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex",
-                                  "wrist_flex", "wrist_roll"],
-                effort_limit_sim=10.0,
-                velocity_limit_sim=10.0,
-                stiffness=17.8,
-                damping=0.6,
-            ),
-            "gripper": ImplicitActuatorCfg(
-                joint_names_expr=["gripper"],
-                effort_limit_sim=10.0,
-                velocity_limit_sim=10.0,
-                stiffness=17.8,
-                damping=0.6,
-            ),
-        },
-        soft_joint_pos_limit_factor=1.0,
     )
 
     # Rigid objects inside the scene USD (spawn=None → wrap existing prims)
@@ -707,6 +674,30 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
     terminations: PickCubeTerminationsCfg = PickCubeTerminationsCfg()
     events: PickCubeEventCfg = PickCubeEventCfg()
     dynamic_reset_gripper_effort_limit: bool = True
+    # 활성 teleop/datagen device 타입 (use_teleop_device 가 설정). 기본=실 leader.
+    task_type: str = "so101leader"
+
+    def use_teleop_device(self, teleop_device: str) -> None:
+        """teleop/datagen device 선택. leisaac task 템플릿 등가.
+
+        task_type 저장 + 직접 joint 제어(키보드/게임패드/state-machine) 시 중력 off
+        (떨림 없는 결정적 제어). action term 구성(init_action_cfg)은 teleop/SM 드라이버가
+        필요 시 별도 호출한다(우리 기본 action = VLA용 slew joint target).
+        """
+        self.task_type = teleop_device
+        if teleop_device in ["keyboard", "gamepad", "so101_state_machine"]:
+            self.scene.robot.spawn.rigid_props.disable_gravity = True
+
+    def preprocess_device_action(self, action: dict, teleop_device) -> "object":
+        """device 출력 → action tensor. vendored devices.action_process 에 위임.
+
+        ``Device.advance()`` 가 호출한다. devices 는 isaac-sim 런타임서만 import 되므로
+        지연 import(serial/lerobot 미설치 컨테이너서 패키지 import 안전 — Docker 정합 규칙1).
+        """
+        from sim_to_real.devices.action_process import preprocess_device_action
+
+        return preprocess_device_action(action, teleop_device)
+
     def __post_init__(self) -> None:
         super().__post_init__()
         # Physics: 120 Hz simulation, 30 Hz policy (decimation=4)
