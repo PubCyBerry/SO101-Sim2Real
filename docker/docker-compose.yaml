@@ -258,7 +258,7 @@ services:
     tty: true
 
   # ── VLA 추론 ROS 노드 (sim) ───────────────────────────────────────────
-  # 상주 Isaac Sim bridge(호스트: scripts/sim/run_cube_desk_ros_bridge.sh)가 publish 하는
+  # 상주 Isaac Sim bridge(호스트: scripts/inference/run_cube_desk_ros_bridge.sh)가 publish 하는
   # /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 policy-server(gRPC)로
   # VLA 추론하고 /isaac_joint_commands 를 publish 한다. cuMotion/MoveIt 미경유(joint 직접).
   #
@@ -288,6 +288,112 @@ services:
     volumes:
       - ..:/workspace
     entrypoint: ["bash", "/workspace/docker/vla-ros-entrypoint.sh"]
+    stdin_open: true
+    tty: true
+
+  # ── Isaac Sim 5.1 + ROS 2 Bridge (시뮬레이션 & VLA 추론 토폴로지) ──────────
+  # cube_desk 씬 + SO-101 로봇 물리 시뮬 + ROS 2 토픽(joint_states/joint_commands) publish/subscribe
+  #
+  # ■ VLA 폐루프 토폴로지
+  #   policy-server(gRPC :8080)   [추론 엔진: SmolVLA / GR00T]
+  #      ↔ isaac-sim 서비스       [이 컨테이너: sim + ROS bridge + livestream]
+  #      ↔ vla-ros 서비스         [ROS 노드: /isaac_joint_states 읽어 policy-server 호출]
+  #
+  # ■ VLA 추론 플로우
+  #   1. isaac-sim 기동: cube_desk scene load + 카메라 렌더 + ROS 2 bridge init
+  #   2. policy-server 기동: 모델 로드 (gRPC 서버 준비)
+  #   3. vla-ros 기동: /isaac_joint_states 구독, policy-server gRPC 호출
+  #   4. 폐루프: isaac-sim 이 /isaac_joint_commands 받아 joint 제어 → 렌더 → 다음 step
+  #
+  # ■ 빌드·실행 예시
+  #   빌드:  docker compose -f docker/docker-compose.yaml build isaac-sim
+  #   실행:  docker compose --env-file .env -f docker/docker-compose.yaml up isaac-sim
+  #   함께:  docker compose --env-file .env -f docker/docker-compose.yaml up policy-server isaac-sim vla-ros
+  #
+  # ■ WebRTC Livestream 시청 (GUI)
+  #   - 호스트 localhost: http://localhost:49100
+  #   - 원격(Tailscale 등): PUBLIC_IP=<public-ip> env 필수 (.env 에서 설정)
+  isaac-sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.isaac_sim
+      args:
+        BUILDKT_INLINE_CACHE: "1"
+    image: so101-isaac-sim:5.1.0
+    container_name: so101_isaac_sim
+    restart: "no"
+    # ── GPU (Isaac Sim 물리·렌더) ────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # ── 볼륨 ─────────────────────────────────────────────────────────────
+    # Isaac Sim 캐시/설정: 컨테이너 재생성 후에도 유지
+    #   - cache/main          : 커널 캐시 (부팅 속도)
+    #   - cache/computecache  : GPU 커널 컴파일 캐시
+    #   - logs                : Isaac Sim 로그
+    #   - config              : 사용자 설정·레이아웃
+    #   - data                : 레이어 파일
+    #   - pkg                 : 확장 패키지
+    # 프로젝트 코드: 실시간 편집 반영 위해 bind-mount
+    #   - src/sim_to_real     : Gym 환경 등록 및 씬 자산
+    #   - scripts/inference   : run_cube_desk_ros_bridge.py 및 diagnostic
+    #   - assets              : USD 씬 파일
+    #   - outputs             : 평가 결과·로그 저장
+    volumes:
+      # Isaac Sim 캐시 (named volume, 호스트 docker 관리)
+      - isaac_sim_cache_main:/isaac-sim/.cache:rw
+      - isaac_sim_cache_computecache:/isaac-sim/.nv/ComputeCache:rw
+      - isaac_sim_logs:/isaac-sim/.nvidia-omniverse/logs:rw
+      - isaac_sim_config:/isaac-sim/.nvidia-omniverse/config:rw
+      - isaac_sim_data:/isaac-sim/.local/share/ov/data:rw
+      - isaac_sim_pkg:/isaac-sim/.local/share/ov/pkg:rw
+      # 프로젝트 코드 bind-mount
+      - ../src:/workspace/src
+      - ../scripts:/workspace/scripts
+      - ../assets:/workspace/assets
+      - ../outputs:/workspace/outputs
+    # ── 환경 변수 ──────────────────────────────────────────────────────────
+    env_file:
+      # ../.env = 머신·통합 설정 (PUBLIC_IP, LIVESTREAM, NUM_CUBES 등)
+      # ../env/${POLICY_PROFILE}.env = 활성 VLA 모델 프로필 (SmolVLA/GR00T/ACT)
+      - ../.env
+      - ../env/${POLICY_PROFILE:-groot_n17}.env
+    environment:
+      # Isaac Sim EULA 수락 (기본값)
+      ACCEPT_EULA:                  "Y"
+      PRIVACY_CONSENT:              "Y"
+      # GPU 지정
+      NVIDIA_VISIBLE_DEVICES:       all
+      NVIDIA_DRIVER_CAPABILITIES:   compute,utility,graphics
+      # Livestream 활성화 (native WebRTC, 포트 :49100)
+      LIVESTREAM:                   "1"
+      # PUBLIC_IP: .env 에서 설정 (원격 relay 용). 지정 안 하면 localhost 만 가능.
+      # 예: PUBLIC_IP=100.79.237.116 (Tailscale)
+      PUBLIC_IP:                    "${PUBLIC_IP:-}"
+      # 시뮬 설정
+      NUM_CUBES:                    "${NUM_CUBES:-4}"
+      # 추가 bridge 인자 (--eval, --headless 등)
+      BRIDGE_EXTRA_ARGS:            "${BRIDGE_EXTRA_ARGS:-}"
+    # ── 네트워크 ─────────────────────────────────────────────────────────
+    # host 모드: ROS 2 DDS(fastrtps) + WebRTC(:49100) 를 호스트 인터페이스로 노출
+    network_mode: host
+    ipc: host
+    # ── 사용자 설정 ────────────────────────────────────────────────────────
+    # non-root UID 1234 (NVIDIA isaac-sim 이미지 기본값)
+    user: "1234:1234"
+    # ── 헬스체크 ───────────────────────────────────────────────────────────
+    # bridge 초기화까지 30-60초 소요 (Isaac Sim 부팅 + USD 로드)
+    # 이 시간 동안 policy-server/vla-ros 는 대기
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /workspace/outputs/bridge_faulthandler.txt || echo 'warming up'"]
+      interval: 10s
+      timeout: 5s
+      retries: 60  # 최대 10분 대기
+      start_period: 30s
     stdin_open: true
     tty: true
 
@@ -356,3 +462,16 @@ services:
 volumes:
   hf_cache:
     name: lerobot_hf_cache   # 컨테이너 재생성 후에도 HF 캐시 유지
+  # Isaac Sim 캐시 (6개 named volume — 컨테이너 재생성 후에도 유지, 부팅 시간 단축)
+  isaac_sim_cache_main:
+    name: isaac_sim_cache_main
+  isaac_sim_cache_computecache:
+    name: isaac_sim_cache_computecache
+  isaac_sim_logs:
+    name: isaac_sim_logs
+  isaac_sim_config:
+    name: isaac_sim_config
+  isaac_sim_data:
+    name: isaac_sim_data
+  isaac_sim_pkg:
+    name: isaac_sim_pkg
