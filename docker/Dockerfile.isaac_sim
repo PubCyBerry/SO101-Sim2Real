@@ -1,110 +1,47 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Dockerfile.isaac_sim — Isaac Sim 5.1 + IsaacLab 2.3.2 + ROS 2 Bridge 서비스
+# Dockerfile.isaac_sim — Isaac Lab 2.3.2 (Isaac Sim 5.1 통합) + VLA 추론 bridge
 #
-# Base  : nvcr.io/nvidia/isaac-sim:5.1.0 (NVIDIA 공식 이미지, ROS 2 Jazzy 번들)
-# Python: /isaac-sim/python.sh (번들 Python, 기본 3.10)
-# Role  : cube_desk scene + SO-101 로봇 시뮬 + ROS 2 bridge + VLA 추론 토폴로지
+# Base : nvcr.io/nvidia/isaac-lab:2.3.2 (NVIDIA 공식 통합 이미지)
+#        → Isaac Sim 5.1(`/isaac-sim`, repo `_isaac_sim`→`/isaac-sim` 심링크)
+#          + Isaac Lab(`/workspace/isaaclab`) + isaaclab_tasks(wheel 내부 source)
+#          + torch 2.7.0+cu128 + numpy 1.26.0 + cv2 4.11 전부 사전 설치.
+#        ※ `isaac-sim:5.1.0` 단독 이미지는 isaaclab 미포함이고 `pip install isaaclab`
+#          가 build-wheel 단계서 실패 → 사용하지 않고 이 통합 이미지를 쓴다.
+# Python: `/workspace/isaaclab/isaaclab.sh -p <script>` (번들 isaacsim python 래퍼,
+#          USD/pxr·kit 환경을 셋업한 뒤 스크립트 실행). user = root.
+# Role : cube_desk + SO-101 시뮬 + `isaacsim.ros2.bridge` + WebRTC livestream(:49100)
 #
-# ■ VLA 폐루프 토폴로지 (3-서비스)
-#   policy-server(gRPC :8080) ↔ isaac-sim(ROS /isaac_joint_states, /isaac_joint_commands)
-#                    ↔ vla-ros(gRPC client → ROS 2 노드)
+# ■ 의존성 전략 — docker 자체 관리(uv/pyproject 와 독립)
+#   - isaaclab·isaacsim·torch·numpy·cv2 = 베이스 이미지 보유 → 설치/re-pin 안 함
+#     (torch 2.7+cu128 덮어쓰면 GPU 깨짐, 베이스 신뢰)
+#   - 추가 설치: pyzmq (attention overlay `--attention_overlay` ZMQ SUB 용)
+#   - 우리 패키지(sim_to_real·so101_contract) = PYTHONPATH(/workspace/src), 런타임 bind-mount
 #
-# ■ VLA 추론 흐름
-#   1. policy-server: SmolVLA / GR00T 모델 로드 (gRPC 서버)
-#   2. isaac-sim: 시뮬 재생 + 카메라 렌더 + ROS 2 토픽 publish
-#   3. vla-ros: /isaac_joint_states 받아 → policy-server 호출 → /isaac_joint_commands publish
-#   4. isaac-sim: 명령 수신해 joint 제어 → 다음 step으로
-#
-# ■ 의존성 전략
-#   - 베이스 이미지(isaac-sim:5.1.0)의 numpy 1.26·torch 2.7+cu128 을 신뢰(re-pin 안 함).
-#   - 브리지 실행에 필요한 추가분만 설치: isaaclab 2.3.2(NVIDIA pip index) + pyzmq.
-#   - 우리 패키지(sim_to_real·so101_contract)는 PYTHONPATH(/workspace/src) 로 import.
-#   - leisaac·데이터/학습 deps 는 브리지에 불필요 → 미설치.
-#
-# ■ 빌드 검증 포인트 (사용자, GPU 필요)
-#   - isaaclab[all,isaacsim]==2.3.2 가 isaac-sim 5.1.0 번들 python 에 pypi.nvidia.com
-#     에서 깨끗이 설치되는지. 실패 시 IsaacLab 공식 설치(repo clone + ./isaaclab.sh -i)로 대체.
-#   - `import isaaclab; import sim_to_real` 성공 + 브리지 livestream(:49100) 접속 확인.
+# ■ 빌드/실행 검증 게이트(GPU 필요)
+#   - `import sim_to_real`(Gym 등록) + 브리지 livestream(:49100) WebRTC 접속
 # =============================================================================
 
-FROM nvcr.io/nvidia/isaac-sim:5.1.0
+FROM nvcr.io/nvidia/isaac-lab:2.3.2
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=Asia/Seoul
+ENV DEBIAN_FRONTEND=noninteractive
 
-# ── Isaac Sim 번들 Python 에 필요한 런타임 패키지 설치 ─────────────────────
-# OpenCV / ffmpeg 는 sim_to_real 패키지가 import 단계에서 의존하므로 유지.
-# 빌드 도구는 불필요 (ROS 2 bridge는 extensibility 기반, 컴파일 불필요).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        # OpenCV / video codec (sim_to_real import 의존)
-        ffmpeg \
-        libsm6 \
-        libxext6 \
-        libgl1 \
-        libglib2.0-0 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /workspace
-
-# ── Python 의존성 (isaac-sim 번들 python, uv 미사용) ──────────────────────
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir --upgrade pip setuptools
-
-# ── ABI: 베이스 이미지 신뢰(numpy 1.26·torch 2.7+cu128 이미 포함) ──────────
-# isaac-sim:5.1.0 번들 python 의 numpy/torch 를 re-pin 하지 않는다 — pip 로 torch 를
-# 다시 받으면 CUDA 빌드(+cu128)가 PyPI 기본 빌드로 덮여 GPU 가 깨질 수 있다.
-# 브리지에 추가로 필요한 것만 설치: pyzmq(attention overlay ZMQ SUB). 데이터/학습
-# deps(pyarrow·datasets·h5py·hf-xet)는 브리지에 불필요하므로 설치하지 않는다.
+# ── 추가 의존성 (베이스에 없는 것만) ──────────────────────────────────────────
+# pyzmq: SmolVLA cross-attention overlay ZMQ SUB. isaaclab·cv2·torch 는 베이스 보유.
+# /isaac-sim/python.sh = isaaclab.sh -p 가 쓰는 번들 isaacsim python(동일 site-packages).
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir "pyzmq>=27.1.0"
 
-# ── isaaclab[all,isaacsim]==2.3.2 ────────────────────────────────────────
-# https://docs.robotics.isaac-lab.io/main/source/setup/installation/from_pip.html 참조
-# isaaclab[all,isaacsim]: isaaclab + isaacsim bridge + all extras 설치.
-# ⚠ 주의: 빌드 중 실패 시 isaaclab/isaacsim 버전 호환성 재검증 필요.
-# isaaclab/isaacsim 은 NVIDIA 전용 pip index(pypi.nvidia.com)에서만 받는다
-# (pyproject [tool.uv.sources] 의 `nvidia` index 와 동일 출처).
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
-        --extra-index-url https://pypi.nvidia.com \
-        "isaaclab[all,isaacsim]==2.3.2"
-
-# ── leisaac 미설치 ─────────────────────────────────────────────────────────
-# 브리지(run_cube_desk_ros_bridge.py)·pick_cube env 는 leisaac 를 import 하지 않는다.
-# leisaac 는 호스트 teleop 스크립트 전용(list_envs·replay·so101_joint_state_server).
-# 이 이미지의 역할(VLA 폐루프 bridge)에는 isaaclab + isaacsim 만 필요.
-
-# ── 우리 패키지 (PYTHONPATH, editable 불요) ────────────────────────────────
-# sim_to_real(Gym 환경 등록) + so101_contract(정책 I/O 계약)는 순수 python 이라
-# /workspace/src 를 PYTHONPATH(아래 ENV)에 두면 bind-mount 된 소스에서 직접 import 된다.
-# 빌드 시 src 를 COPY 하지 않는다 — 런타임 bind-mount 가 overlay 하므로 build-time
-# editable install 은 무의미(소스 부재로 실패).
-
-# ── 진입점 복사 ────────────────────────────────────────────────────────────
-COPY docker/isaac-sim-entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# ── 환경 변수 설정 ──────────────────────────────────────────────────────────
-# PYTHONUNBUFFERED: 실시간 로그 출력 (Docker 용)
-# PYTHONDONTWRITEBYTECODE: .pyc 생성 생략 (빌드 속도 향상)
-# PYTHONNOUSERSITE: user site-packages 미스캔 (시작 속도 향상)
-# PYTHONUTF8: locale 감지 없이 UTF-8 강제
-# PYTHONPATH: bind-mount 된 우리 패키지(src/{sim_to_real,so101_contract}) import 경로.
+# ── 우리 패키지 (PYTHONPATH, editable 불요) ────────────────────────────────────
+# sim_to_real(Gym 등록) + so101_contract(정책 I/O 계약)는 순수 python → bind-mount 된
+# /workspace/src 를 PYTHONPATH 에 두면 직접 import. (이미지 IsaacLab 은 /workspace/isaaclab
+# 에 있어 /workspace/src 와 sibling — 충돌 없음. /workspace 통째 마운트 금지.)
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONNOUSERSITE=1 \
     PYTHONUTF8=1 \
     PYTHONPATH=/workspace/src
 
-# ── 권한 & 디렉터리 설정 ────────────────────────────────────────────────────
-# /workspace 를 non-root UID 1234 가 접근 가능하도록 개방.
-# /root 는 traverse 가능 (symlink 해결용).
-RUN mkdir -p /workspace/{outputs,logs} \
-    && chmod -R 0777 /workspace \
-    && chmod 0755 /root
-
-# ── non-root UID 1234 로 실행 (NVIDIA 공식 이미지 기본값과 일치) ────────────
-USER 1234:1234
+# ── 진입점 ─────────────────────────────────────────────────────────────────────
+COPY docker/isaac-sim-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["bridge"]

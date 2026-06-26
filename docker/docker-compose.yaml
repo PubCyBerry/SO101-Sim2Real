@@ -331,26 +331,25 @@ services:
               count: 1
               capabilities: [gpu]
     # ── 볼륨 ─────────────────────────────────────────────────────────────
-    # Isaac Sim 캐시/설정: 컨테이너 재생성 후에도 유지
-    #   - cache/main          : 커널 캐시 (부팅 속도)
-    #   - cache/computecache  : GPU 커널 컴파일 캐시
-    #   - logs                : Isaac Sim 로그
-    #   - config              : 사용자 설정·레이아웃
-    #   - data                : 레이어 파일
-    #   - pkg                 : 확장 패키지
-    # 프로젝트 코드: 실시간 편집 반영 위해 bind-mount
-    #   - src/sim_to_real     : Gym 환경 등록 및 씬 자산
-    #   - scripts/inference   : run_cube_desk_ros_bridge.py 및 diagnostic
-    #   - assets              : USD 씬 파일
-    #   - outputs             : 평가 결과·로그 저장
+    # Isaac Lab(isaac-lab:2.3.2, root) 캐시/로그: 컨테이너 재생성 후에도 유지.
+    # 컨테이너 경로는 사용자 검증 `docker run nvcr.io/nvidia/isaac-lab:2.3.2` 마운트와 동일.
+    #   - kit/cache             : Kit 셰이더·익스텐션 캐시 (부팅 속도)
+    #   - .cache/ov, GLCache    : Omniverse·GL 캐시
+    #   - .nv/ComputeCache      : GPU 커널 컴파일 캐시
+    #   - .cache/pip            : pip 캐시
+    #   - .nvidia-omniverse/logs, ov/data, Documents : 로그·레이어·문서
+    # 프로젝트 코드(bind-mount, 실시간 편집): /workspace/src(우리 패키지=PYTHONPATH),
+    #   /workspace/scripts(inference/* 브리지), /workspace/assets(USD), /workspace/outputs.
+    #   ※ /workspace 통째 마운트 금지 — 이미지 IsaacLab(/workspace/isaaclab) overlay 방지.
     volumes:
-      # Isaac Sim 캐시 (named volume, 호스트 docker 관리)
-      - isaac_sim_cache_main:/isaac-sim/.cache:rw
-      - isaac_sim_cache_computecache:/isaac-sim/.nv/ComputeCache:rw
-      - isaac_sim_logs:/isaac-sim/.nvidia-omniverse/logs:rw
-      - isaac_sim_config:/isaac-sim/.nvidia-omniverse/config:rw
-      - isaac_sim_data:/isaac-sim/.local/share/ov/data:rw
-      - isaac_sim_pkg:/isaac-sim/.local/share/ov/pkg:rw
+      - isaac_lab_cache_kit:/isaac-sim/kit/cache:rw
+      - isaac_lab_cache_ov:/root/.cache/ov:rw
+      - isaac_lab_cache_pip:/root/.cache/pip:rw
+      - isaac_lab_cache_gl:/root/.cache/nvidia/GLCache:rw
+      - isaac_lab_cache_compute:/root/.nv/ComputeCache:rw
+      - isaac_lab_logs:/root/.nvidia-omniverse/logs:rw
+      - isaac_lab_data:/root/.local/share/ov/data:rw
+      - isaac_lab_docs:/root/Documents:rw
       # 프로젝트 코드 bind-mount
       - ../src:/workspace/src
       - ../scripts:/workspace/scripts
@@ -382,9 +381,7 @@ services:
     # host 모드: ROS 2 DDS(fastrtps) + WebRTC(:49100) 를 호스트 인터페이스로 노출
     network_mode: host
     ipc: host
-    # ── 사용자 설정 ────────────────────────────────────────────────────────
-    # non-root UID 1234 (NVIDIA isaac-sim 이미지 기본값)
-    user: "1234:1234"
+    # user 미지정 — isaac-lab:2.3.2 는 root 기본(검증된 run 과 동일).
     # ── 헬스체크 ───────────────────────────────────────────────────────────
     # bridge 초기화까지 30-60초 소요 (Isaac Sim 부팅 + USD 로드)
     # 이 시간 동안 policy-server/vla-ros 는 대기
@@ -462,16 +459,20 @@ services:
 volumes:
   hf_cache:
     name: lerobot_hf_cache   # 컨테이너 재생성 후에도 HF 캐시 유지
-  # Isaac Sim 캐시 (6개 named volume — 컨테이너 재생성 후에도 유지, 부팅 시간 단축)
-  isaac_sim_cache_main:
-    name: isaac_sim_cache_main
-  isaac_sim_cache_computecache:
-    name: isaac_sim_cache_computecache
-  isaac_sim_logs:
-    name: isaac_sim_logs
-  isaac_sim_config:
-    name: isaac_sim_config
-  isaac_sim_data:
-    name: isaac_sim_data
-  isaac_sim_pkg:
-    name: isaac_sim_pkg
+  # Isaac Lab(isaac-lab:2.3.2) 캐시/로그 (named volume — 재생성 후에도 유지, 부팅 단축)
+  isaac_lab_cache_kit:
+    name: isaac_lab_cache_kit
+  isaac_lab_cache_ov:
+    name: isaac_lab_cache_ov
+  isaac_lab_cache_pip:
+    name: isaac_lab_cache_pip
+  isaac_lab_cache_gl:
+    name: isaac_lab_cache_gl
+  isaac_lab_cache_compute:
+    name: isaac_lab_cache_compute
+  isaac_lab_logs:
+    name: isaac_lab_logs
+  isaac_lab_data:
+    name: isaac_lab_data
+  isaac_lab_docs:
+    name: isaac_lab_docs

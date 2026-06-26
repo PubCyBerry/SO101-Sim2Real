@@ -39,6 +39,12 @@ PUBLIC_IP="${PUBLIC_IP:-}"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
 
+# isaacsim 번들 ROS 2 Jazzy lib — librmw_implementation.so 의 libament_index_cpp.so
+# 의존성 해소. 동적 링커가 프로세스 시작 시 읽으므로 python 안에서 설정 불가 →
+# 여기서 export 해야 isaacsim.ros2.bridge 확장이 로드된다(미설정 시 "ROS2 Bridge startup failed").
+_ROS_BRIDGE_LIB="/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib"
+export LD_LIBRARY_PATH="${_ROS_BRIDGE_LIB}:${LD_LIBRARY_PATH:-}"
+
 # ── 실행 모드 분기 ────────────────────────────────────────────────────────
 MODE="${1:-bridge}"
 
@@ -60,9 +66,9 @@ case "${MODE}" in
       export PUBLIC_IP
     fi
 
-    # /isaac-sim/python.sh: Isaac Sim 번들 Python 인터프리터
-    # run_cube_desk_ros_bridge.py: 실제 시뮬+bridge 로직
-    exec /isaac-sim/python.sh \
+    # isaaclab.sh -p: USD/pxr·kit 환경 셋업 후 번들 isaacsim python 으로 스크립트 실행
+    # (사용자 검증 패턴: ./isaaclab.sh -p <script> --headless --livestream 2).
+    exec "${ISAACLAB_SH:-/workspace/isaaclab/isaaclab.sh}" -p \
       "${SO101_BRIDGE_SCRIPT}" \
       --livestream 2 \
       --num_cubes "${NUM_CUBES}" \
@@ -76,11 +82,11 @@ case "${MODE}" in
     ;;
 
   python)
-    # ■ Python 직접 실행 (위치 인자로 스크립트·모듈 명세)
+    # ■ Python 직접 실행 (isaaclab.sh -p, USD/kit 환경 셋업됨)
     # 예: docker compose run isaac-sim python -c "import isaaclab; print(isaaclab.__version__)"
-    # 예: docker compose run isaac-sim python diagnostic.py
+    # 예: docker compose run isaac-sim python /workspace/scripts/<diagnostic>.py
     shift  # 첫 인자(python) 제거
-    exec /isaac-sim/python.sh "$@"
+    exec "${ISAACLAB_SH:-/workspace/isaaclab/isaaclab.sh}" -p "$@"
     ;;
 
   *)
