@@ -1,4 +1,4 @@
-"""Cube Pick-and-Place 전용 관측 함수."""
+"""Cube Pick-and-Place 전용 관측 함수 — 레퍼런스 정합 저차원 상태(ref_state)."""
 
 from __future__ import annotations
 
@@ -6,52 +6,73 @@ import torch
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import euler_xyz_from_quat
 
-from sim_to_real.tasks.common.mdp._geometry import JAW_GRASP_OFFSET, _quat_apply_wxyz, _yaw_from_quat_wxyz
+from sim_to_real.tasks.common.mdp._geometry import JAW_GRASP_OFFSET, _quat_apply_wxyz
 
 
-def grasp_focus_state(
+def _euler3(quat: torch.Tensor) -> torch.Tensor:
+    """wxyz quaternion → euler XYZ(roll,pitch,yaw) (N,3), rad (-π,π]."""
+    r, p, y = euler_xyz_from_quat(quat)
+    return torch.stack([r, p, y], dim=-1)
+
+
+def ref_state(
     env: ManagerBasedRLEnv | DirectRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     cube_name: str = "Cube1",
+    container_name: str = "Bowl",
     gripper_body_name: str = "gripper",
 ) -> torch.Tensor:
-    """RND novelty 전용 grasp 부분공간 상태 (~27-dim).
+    """레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 저차원 상태 (54-dim).
 
-    전체 rl_state(83)는 reach 완성 후에도 EE 미세이동 등 grasp 무관 novelty 를 카운트해
-    RND 탐색이 분산된다. 이 함수는 **grasp 와 직결된 차원만** 모아 RND novelty 를 정렬·닫기·
-    들기 탐색에 집중시킨다: joint pos/vel + grasp point + gripper open + 활성 큐브 pos/vel +
-    grasp→cube 상대 + cube yaw sin/cos. (단일 큐브 스테이지 = cube_name 1개 기준.)
+    구성 (순서대로 concat, 위치는 env-origin 상대; obs_normalization 이 상수 offset 흡수):
+      joint_pos   6   (5축 + 그리퍼)
+      joint_vel   6
+      tcp pose    6   (grasp point pos 3 + euler RPY 3)
+      tcp vel     6   (lin 3 + ang 3, world frame)
+      cube pose   6   (pos 3 + euler RPY 3)
+      cube vel    6   (lin 3 + ang 3)
+      bowl pose   6   (pos 3 + euler RPY 3)
+      bowl vel    6   (lin 3 + ang 3)
+      last_action 6   (raw 정책 출력 — env.action_manager.action)
+
+    TCP = jaw grasp point(JAW_GRASP_OFFSET 적용). 단일 큐브(cube_name) 전용.
     """
     robot: Articulation = env.scene[robot_cfg.name]
     origins = env.scene.env_origins
 
-    joint_pos = robot.data.joint_pos          # (N, 6)
-    joint_vel = robot.data.joint_vel          # (N, 6)
+    joint_pos = robot.data.joint_pos
+    joint_vel = robot.data.joint_vel
 
     body_names: list[str] = robot.data.body_names
     if "jaw" in body_names:
-        jaw_idx = body_names.index("jaw")
+        ee_idx = body_names.index("jaw")
         off = torch.tensor(JAW_GRASP_OFFSET, device=env.device, dtype=robot.data.body_pos_w.dtype)
         off = off.unsqueeze(0).expand(env.num_envs, -1)
-        grasp_pos_w = robot.data.body_pos_w[:, jaw_idx, :] + _quat_apply_wxyz(robot.data.body_quat_w[:, jaw_idx, :], off)
-        ee_idx = jaw_idx
+        ee_quat = robot.data.body_quat_w[:, ee_idx, :]
+        tcp_pos = robot.data.body_pos_w[:, ee_idx, :] + _quat_apply_wxyz(ee_quat, off) - origins
     else:
         ee_idx = next((i for i, n in enumerate(body_names) if gripper_body_name in n), 0)
-        grasp_pos_w = robot.data.body_pos_w[:, ee_idx, :]
-    grasp_pos = grasp_pos_w - origins         # (N, 3)
-    ee_vel = robot.data.body_lin_vel_w[:, ee_idx, :]  # (N, 3)
-    gripper_open = joint_pos[:, -1:].clamp(0.0, 1.0)  # (N, 1)
+        ee_quat = robot.data.body_quat_w[:, ee_idx, :]
+        tcp_pos = robot.data.body_pos_w[:, ee_idx, :] - origins
+    tcp_pose = torch.cat([tcp_pos, _euler3(ee_quat)], dim=-1)
+    tcp_vel = torch.cat(
+        [robot.data.body_lin_vel_w[:, ee_idx, :], robot.data.body_ang_vel_w[:, ee_idx, :]], dim=-1
+    )
 
     cube: RigidObject = env.scene[cube_name]
-    cube_pos = cube.data.root_pos_w - origins  # (N, 3)
-    cube_vel = cube.data.root_lin_vel_w        # (N, 3)
-    rel = cube_pos - grasp_pos                 # (N, 3)
-    yaw = _yaw_from_quat_wxyz(cube.data.root_quat_w)
-    yaw_sc = torch.stack([torch.sin(yaw), torch.cos(yaw)], dim=-1)  # (N, 2)
+    cube_pose = torch.cat([cube.data.root_pos_w - origins, _euler3(cube.data.root_quat_w)], dim=-1)
+    cube_vel = torch.cat([cube.data.root_lin_vel_w, cube.data.root_ang_vel_w], dim=-1)
 
-    state = torch.cat(
-        [joint_pos, joint_vel, grasp_pos, ee_vel, gripper_open, cube_pos, cube_vel, rel, yaw_sc],
+    bowl: RigidObject = env.scene[container_name]
+    bowl_pose = torch.cat([bowl.data.root_pos_w - origins, _euler3(bowl.data.root_quat_w)], dim=-1)
+    bowl_vel = torch.cat([bowl.data.root_lin_vel_w, bowl.data.root_ang_vel_w], dim=-1)
+
+    last_action = env.action_manager.action
+
+    return torch.cat(
+        [joint_pos, joint_vel, tcp_pose, tcp_vel,
+         cube_pose, cube_vel, bowl_pose, bowl_vel, last_action],
         dim=-1,
-    )  # 6+6+3+3+1+3+3+3+2 = 30
-    return state.float()
+    ).float()

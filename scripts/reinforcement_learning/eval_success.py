@@ -40,7 +40,7 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--episodes", type=int, default=100, help="수집할 에피소드 수")
 parser.add_argument("--max_episode_steps", type=int, default=900,
                     help="에피소드 최대 스텝 수 (policy hz 기준 — env.episode_length_s 를 이 값으로 override)")
-parser.add_argument("--obs_group", default="rl_policy",
+parser.add_argument("--obs_group", default="ref_policy",
                     help="actor 에 사용할 obs 그룹 이름 (학습 시와 동일해야 함)")
 parser.add_argument("--critic_obs_group", default=None,
                     help="critic 에 사용할 obs 그룹 이름 (기본값: --obs_group 과 동일)")
@@ -49,7 +49,11 @@ parser.add_argument("--min_success_rate", type=float, default=None,
                     help="설정하면 success_rate 가 이 값 미만일 때 exit code 1 로 종료")
 parser.add_argument("--stochastic", action="store_true",
                     help="deterministic act_inference 대신 stochastic policy.act()로 평가")
-parser.add_argument("--init_noise_std", type=float, default=0.5,
+parser.add_argument("--policy_hidden_dims", type=int, nargs="+", default=[128, 64, 32],
+                    help="ActorCritic MLP hidden dims (학습 시와 동일, 레퍼런스 [128,64,32])")
+parser.add_argument("--obs_normalization", action=argparse.BooleanOptionalAction, default=True,
+                    help="actor/critic 관측 정규화 (학습 시와 동일, 기본 on)")
+parser.add_argument("--init_noise_std", type=float, default=1.0,
                     help="학습 시 ActorCritic init_noise_std (checkpoint load shape 재현용)")
 parser.add_argument("--override_policy_std", type=float, default=None,
                     help="checkpoint 로드 후 policy action std를 이 값으로 덮어씀")
@@ -59,8 +63,8 @@ parser.add_argument("--num_mini_batches", type=int, default=4,
                     help="학습 시 PPO minibatch 수")
 # 커리큘럼 파라미터 — 학습 시와 동일한 설정을 사용해야 분포가 일치
 parser.add_argument("--active_objects", "--active_pens", dest="active_objects",
-                    type=int, default=4, choices=[1, 2, 3, 4],
-                    help="평가에 사용할 대상 수. --active_pens는 호환 alias.")
+                    type=int, default=1, choices=[1, 2, 3, 4],
+                    help="평가에 사용할 대상 수 (기본 1=Cube1 40mm). --active_pens는 호환 alias.")
 parser.add_argument("--object_radius_scale", "--pen_radius_scale", dest="object_radius_scale",
                     type=float, default=1.0,
                     help="대상 reset ellipse 반경 배율")
@@ -113,11 +117,11 @@ def _build_train_cfg(args: argparse.Namespace) -> dict:
         "policy": {
             "class_name": "ActorCritic",
             "init_noise_std": args.init_noise_std,
-            "actor_hidden_dims": [128, 128],
-            "critic_hidden_dims": [128, 128],
+            "actor_hidden_dims": list(args.policy_hidden_dims),
+            "critic_hidden_dims": list(args.policy_hidden_dims),
             "activation": "elu",
-            "actor_obs_normalization": False,
-            "critic_obs_normalization": False,
+            "actor_obs_normalization": args.obs_normalization,
+            "critic_obs_normalization": args.obs_normalization,
         },
         "algorithm": {
             "class_name": "PPO",

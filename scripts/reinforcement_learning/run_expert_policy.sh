@@ -1,106 +1,47 @@
 #!/usr/bin/env bash
-# SO-101 PickCube — pick-and-place RL expert policy (단일 end-to-end, BC + reverse curriculum).
+# SO-101 PickCube — 레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 PPO 학습.
 #
-# 전략(2026-06-12, scratch-only 폐기 후 재설계): scratch reward-shaping(8회)·demo-reset-only
-# (v16~20) 실패의 공통 누락 = expert ACTION 미주입. 검증된 SM(해석적 IK side-approach, 1-cube
-# ~90%) 전궤적을 BC clone(obs→action) → RL finetune(camp-free full_bc 프리셋) + reverse
-# curriculum(demo_reset_prob anneal, NVIDIA IndustReal/RFCL 정석). 단일 정책 end-to-end
-# (skill-chaining 폐기 — 데모 있으면 단일정책 우세, VLA 궤적 연속).
+# 성공이 확인된 레퍼런스의 보상/obs/arch/PPO 를 SO-101+그릇 환경에 그대로 맞춘 단일 경로.
+# train.py 기본값이 이미 ref 정합이라 이 스크립트는 num_envs/iteration/DR 레벨만 지정한다.
+#   - 보상 : ref dense 4항(reaching1·lifting30·tracking16·lowering7) + smoothness −1e-4 (env_cfg 기본)
+#            tracking/lowering 이 큐브를 그릇 **안**(3D center)으로 끌어 "그릇에 넣기" 학습.
+#   - obs  : ref_policy 54-dim (joint_pos/vel + TCP/cube/bowl 6d pose+vel + last_action)
+#   - arch : MLP [128,64,32] + obs_normalization, init_noise_std 1.0
+#   - PPO  : γ0.98, lr 8e-5(adaptive), entropy 0.006, 24/5/4, max_grad_norm 0.4
+#   - 큐브 : 40mm 1개(active_objects 1 = Cube1). 그리퍼 연속(North Star 6-dim).
+#   - DR   : DR_LEVEL(기본 0=완전고정) → 1 spawn → 2 sensor → 3 물리/시각. 단계적으로 올린다.
 #
-# 사용: bash scripts/reinforcement_learning/run_expert_policy.sh [demos|bc|train|all]
-#   resume/mid-run 튜닝 자유(재현성 제약 해제). MLP [256,128] no-norm(BC 가 MLP 전용).
-#
-# 검증: monitor_eval.py --skill full --bootstrap_prob 0 --demo_reset_prob 0 → success ≥0.90.
+# 사용:
+#   DR_LEVEL=0 bash scripts/reinforcement_learning/run_expert_policy.sh        # 완전고정 학습
+#   DR_LEVEL=1 RESUME=<ckpt> bash scripts/reinforcement_learning/run_expert_policy.sh  # 이어서 spawn 랜덤
+# 검증: eval_success.py (success_rate) 로 단일 큐브 성공률 확인.
 set -euo pipefail
 
 ROOT=/home/konan147/Workspaces/SO101-Sim2Real
-# 이 스크립트가 위치한 worktree 루트로 이동(과거 lstm-ppo-pickcube 하드코딩 → 이전됨).
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 export OMNI_KIT_ACCEPT_EULA=YES
 export PYTHONPATH="$(pwd)/src"
 
-EXP=lstm_ppo_pickcube
 LOGROOT="$ROOT/outputs/rl/rsl_rl"
-RUNDIR="$LOGROOT/$EXP"
-SM_DEMO_DIR="$(pwd)/outputs/demos/sm_c1"     # SM 전문가 전궤적(BC + demo-reset 양쪽)
-BC_DIR="$RUNDIR/bc_full_lstm"                 # BC warmstart 산출 LSTM ckpt
-RUN=lstm_ppo_gb                               # 순수 PPO scratch + grasp-bootstrap run 이름
-# LSTM + **순수 PPO scratch** (BC·SM·demo-reset 미사용 — 사용자 지시 2026-06-13).
-# grasp_bootstrap 은 기하적 reset(default 자세 grasp point, SM 데이터 아님)이라 사용 OK.
-RECURRENT="--recurrent --rnn_type lstm --rnn_hidden_dim 256 --rnn_num_layers 1"
-COMMON_PPO="--num_envs 4096 --num_steps_per_env 48 --num_learning_epochs 6 --num_mini_batches 4 \
-  --schedule adaptive --learning_rate 1e-4 --entropy_coef 0.005 --gamma 0.99 --lam 0.95 \
-  --device cuda:0 --headless --seed 42 --save_interval 25 \
-  --experiment_name $EXP --log_root_path $LOGROOT"
+DR_LEVEL="${DR_LEVEL:-0}"
+NUM_ENVS="${NUM_ENVS:-4096}"
+MAX_ITERS="${MAX_ITERS:-4000}"
+DEVICE="${DEVICE:-cuda:0}"
+RESUME="${RESUME:-}"   # DR 단계 상승 시 이전 단계 체크포인트(.pt) 경로
 
-# Stage demos — SM 전문가 시연 수집(1-cube 성공 전궤적). 이미 있으면 skip 가능.
-stage_demos() {
-  echo "[expert] STAGE demos: SM 전문가 demo 수집 → $SM_DEMO_DIR"
-  $PY scripts/environments/pick_cube_state_machine.py \
-    --record_demos "$SM_DEMO_DIR" --demo_tag c1 \
-    --active_objects 1 --num_envs 512 --num_episodes 4 --headless --device cuda:0
-}
+resume_args=()
+if [[ -n "$RESUME" ]]; then
+  resume_args=(--resume_checkpoint "$RESUME")
+fi
 
-# Stage bc — SM 전궤적을 MLP ActorCritic 에 BC clone(actor MSE). full task phase 유지
-#   (settle/retreat/home 만 제외 = reach→grasp→lift→transport→lower→release). SM 은 성공만
-#   저장하므로 --no-require_success 안전(meta.placed_and_released 키 부재 회피).
-stage_bc() {
-  echo "[expert] STAGE bc: BC warmstart(full task) → $BC_DIR"
-  $PY scripts/reinforcement_learning/bc_warmstart.py \
-    --task SimToReal-SO101-PickCube-v0 $RECURRENT \
-    --expert_dataset_pt "$SM_DEMO_DIR"/demo_*.pt --output_dir "$BC_DIR" \
-    --no-require_success --exclude_phase_contains SETTLE RETREAT HOME DONE DRAG \
-    --active_objects 1 --epochs 50 --device cuda:0
-}
-
-# Stage train — **순수 PPO scratch + grasp-bootstrap 중심**(BC·demo-reset 없음, 사용자 지시).
-#   grasp_v4 가 유일하게 scratch grasp 점화시킨 구조(LSTM+PPO+grasp_bootstrap+grasp shaping+RND).
-#   - grasp_bootstrap **0.7**(↑) anneal→0 over 1200: full-grasp(든 큐브, **다양한 yaw 쿼터니온** →
-#     하류 transport/place robust + 다양 궤적) + pre-grasp(pregrasp_frac 0.3 = 그리퍼 open→닫기 연습).
-#   - 다양 quat = `_bootstrap_grasp` 가 full-grasp 큐브를 random yaw + wrist_roll 정합(grip 유효)으로 reset.
-#   - 보상 full_bc: grasp_align 1.0 + grasp_close 3.0(γ=0.99 라 camp-free 점화) + task_progress 80 + place + terminal.
-#   - RND grasp_focus: grasp close 탐색.
-stage_train() {
-  echo "[expert] STAGE train: 순수 PPO scratch (full_bc, LSTM, grasp-bootstrap 0.7 + 다양 quat + RND)"
-  $PY scripts/reinforcement_learning/train.py --task SimToReal-SO101-PickCube-v0 \
-    --skill full_bc $RECURRENT $COMMON_PPO \
-    --max_iterations 1500 --active_objects 1 \
-    --grasp_bootstrap_prob 0.7 --grasp_bootstrap_prob_final 0.0 --grasp_bootstrap_anneal_iters 1200 \
-    --grasp_bootstrap_pregrasp_frac 0.3 \
-    --rnd --rnd_weight 0.5 --rnd_state_group grasp_focus \
-    --run_name $RUN
-}
-
-# Stage ref — 레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 학습.
-#   성공 확인된 레퍼런스의 보상/arch/gamma 를 SO-101+그릇 환경에 그대로 맞춘다.
-#   - 보상: --skill ref (apply_skill_ref) = reaching 1·lifting 30·tracking 16·lowering 7
-#     + action_rate/joint_vel −1e-4. success 종료 없음(5s 풀 에피소드). 그 외 우리 shaping/PBRS/
-#     bootstrap/RND 전부 off.
-#   - arch: feedforward MLP [128,64,32] + obs_normalization (NO --recurrent). init_noise_std 1.0.
-#   - PPO: gamma 0.98, lam 0.95, entropy 0.006, lr 8e-5 adaptive, epochs 5, minibatch 4,
-#     num_steps_per_env 24, max_grad_norm 0.4 (= 레퍼런스 LiftCubePlacePPORunnerCfg).
-#   - bootstrap/RND 미사용(레퍼런스는 순수 dense scratch). active_objects 1.
-stage_ref() {
-  echo "[expert] STAGE ref: 레퍼런스 정합 (MLP[128,64,32]+obs_norm, dense 6항, γ0.98, NO bootstrap/RND)"
-  $PY scripts/reinforcement_learning/train.py --task SimToReal-SO101-PickCube-v0 \
-    --skill ref \
-    --num_envs 4096 --num_steps_per_env 24 --num_learning_epochs 5 --num_mini_batches 4 \
-    --policy_hidden_dims 128 64 32 --obs_normalization --init_noise_std 1.0 \
-    --schedule adaptive --learning_rate 8e-5 --entropy_coef 0.006 \
-    --gamma 0.98 --lam 0.95 --max_grad_norm 0.4 \
-    --device cuda:0 --headless --seed 42 --save_interval 50 \
-    --experiment_name ref_lift_place --log_root_path "$LOGROOT" \
-    --max_iterations 4000 --active_objects 1 \
-    --run_name ref
-}
-
-case "${1:-train}" in
-  demos) stage_demos ;;         # (이력) SM demo 수집 — 현 전략 미사용
-  bc)    stage_bc ;;            # (이력) BC warmstart — 현 전략 미사용(사용자 지시)
-  train) stage_train ;;         # 순수 PPO scratch (현 전략)
-  ref)   stage_ref ;;           # 레퍼런스(Lift-Cube-Place) 정합
-  all)   stage_train ;;
-  *) echo "usage: $0 [train|ref]  (train=순수 PPO; ref=레퍼런스 정합; demos/bc 는 이력)"; exit 1 ;;
-esac
-echo "[expert] done: ${1:-all}"
+echo "[ref] STAGE train: 레퍼런스 정합 (DR_LEVEL=$DR_LEVEL, num_envs=$NUM_ENVS, iters=$MAX_ITERS)"
+$PY scripts/reinforcement_learning/train.py \
+  --task SimToReal-SO101-PickCube-v0 \
+  --active_objects 1 --dr_level "$DR_LEVEL" \
+  --num_envs "$NUM_ENVS" --max_iterations "$MAX_ITERS" \
+  --device "$DEVICE" --headless --seed 42 --save_interval 50 \
+  --experiment_name ref_lift_place --log_root_path "$LOGROOT" \
+  --run_name "ref_dr${DR_LEVEL}" \
+  "${resume_args[@]}"
+echo "[ref] done (DR_LEVEL=$DR_LEVEL)"

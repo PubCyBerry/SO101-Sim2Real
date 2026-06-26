@@ -16,7 +16,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import TiledCameraCfg, ContactSensorCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg
 
@@ -132,10 +132,6 @@ _FRONT_CAMERA_FOCAL = 18.0
 # ---------------------------------------------------------------------------
 # Scene
 # ---------------------------------------------------------------------------
-
-
-# ContactSensor 큐브 필터(모듈 상수 — scene 클래스 속성으로 두면 asset 으로 오인됨)
-_CUBE_CONTACT_FILTER: list[str] = [f"{{ENV_REGEX_NS}}/Scene/{n}" for n in CUBE_NAMES]
 
 
 @configclass
@@ -265,21 +261,6 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
             pos=_BOWL_INIT_STATE[0],
             rot=_BOWL_INIT_STATE[1],
         ),
-    )
-
-    # 두 손가락(jaw=가동, gripper=고정) ↔ 큐브 접촉 센서. force_matrix_w 로 큐브별 접촉력.
-    # 양 손가락이 같은 큐브에 접촉 = 실제 envelop grasp 신호(기하 proxy 보다 직접적).
-    # 필터 목록은 모듈 상수(_CUBE_CONTACT_FILTER) — 클래스 속성이면 InteractiveScene 이
-    # asset 으로 오인하므로 클래스 밖에 둔다.
-    contact_jaw: ContactSensorCfg = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/jaw",
-        update_period=0.0,
-        filter_prim_paths_expr=_CUBE_CONTACT_FILTER,
-    )
-    contact_gripper: ContactSensorCfg = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/gripper",
-        update_period=0.0,
-        filter_prim_paths_expr=_CUBE_CONTACT_FILTER,
     )
 
     # ------------------------------------------------------------------
@@ -430,14 +411,12 @@ class PickCubeActionsCfg:
 
 @configclass
 class PickCubeObservationsCfg:
-    """Observations: policy (6-dim joint pos) + subtask signals + rl_policy (privileged RL state).
+    """Observations: policy (6-dim joint pos, North Star/VLA 계약) + ref_policy (RL 학습용 54-dim).
 
     Groups:
-      policy      — 6-dim joint pos (North Star contract, immutable).
-      subtask_terms — per-cube placement signals.
-      rl_policy   — TB.3 privileged state (43-dim) for RL actor/critic.
-                    Does NOT contain the policy group; use obs_groups in train.py
-                    to map both policy and critic to rl_policy.
+      policy     — 6-dim joint pos (North Star contract, VLA rollout 용, immutable).
+      ref_policy — 레퍼런스 정합 저차원 상태 (54-dim). RL actor/critic 입력.
+                   train.py 의 obs_groups 로 policy/critic 둘 다 ref_policy 에 매핑.
     """
 
     @configclass
@@ -459,88 +438,21 @@ class PickCubeObservationsCfg:
             self.concatenate_terms = True
 
     @configclass
-    class SubtaskCfg(ObsGroup):
-        """Per-cube placement signals (cube-in-bowl, gripper open check)."""
+    class RefPolicyCfg(ObsGroup):
+        """ref(ref_repos/pick_and_place) 정합 저차원 상태 (54-dim).
 
-        place_cube1 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube1"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-        place_cube2 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube2"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-        place_cube3 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube3"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-        place_cube4 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube4"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = False
-
-    @configclass
-    class RlPolicyCfg(ObsGroup):
-        """TB.3 privileged state for RL training (83-dim, concatenated).
-
-        Includes joint pos, gripper body pos, all cube/bowl positions relative to env
-        origin, gripper→cube relative vectors, gripper open fraction, velocities,
-        그리고 grasp 정렬용 방향·크기(cube yaw, half-extent, ee quat, grasp→cup).
-        No FrameTransformer dependency — resolves gripper body by name.
+        joint_pos6 + joint_vel6 + TCP 6d pose/vel(12) + cube 6d pose/vel(12) +
+        bowl 6d pose/vel(12) + last_action6. 단일 40mm 큐브(CUBE_NAMES[0]) 전용.
+        DR L0(완전고정)에선 obs 노이즈 없음(enable_corruption=False) —
+        apply_dr_level(level>=2)가 Gaussian 노이즈를 켠다.
         """
 
-        # 센서 노이즈(DR): 상태에 보수적 Gaussian(σ=0.005) 주입 → 추정/엔코더
-        # 오차에 대한 robust 화. 단위가 섞여 있어 작은 std 로 시작(필요 시 항목별 분리).
-        rl_state_obs = ObsTerm(
-            func=task_mdp.rl_state,
+        ref_state_obs = ObsTerm(
+            func=task_mdp.ref_state,
             params={
-                "object_names": CUBE_NAMES,
+                "cube_name": CUBE_NAMES[0],
                 "container_name": BOWL_NAME,
-                "include_velocities": True,  # joint_vel+ee vel+cube vel 추가(부분관측 해소) → 43→64dim
-                "include_orientation": True,  # cube yaw+half-extent+ee quat+grasp→cup → 64→83dim
-                "include_container_orientation": True,  # 그릇 quat → 83→87dim(동적 그릇 tilt/엎힘 관측)
-                # 큐브 크기(half-extent, m): Cube1/2=30mm→0.015, Cube3/4=40mm→0.020.
-                # 평행 jaw 벌림 폭 매칭에 필수(크기 2종). CUBE_NAMES 순서와 일치.
-                "object_half_extents": (0.015, 0.015, 0.020, 0.020),
             },
-            noise=GaussianNoiseCfg(mean=0.0, std=0.005),
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = True  # DR: rl_state 에 노이즈 적용
-            self.concatenate_terms = True
-
-    @configclass
-    class GraspFocusCfg(ObsGroup):
-        """RND novelty 전용 grasp 부분공간(~30dim). 전체 rl_state 대신 grasp 직결 차원만."""
-
-        grasp_focus_obs = ObsTerm(
-            func=task_mdp.grasp_focus_state,
-            params={"cube_name": CUBE_NAMES[0]},
         )
 
         def __post_init__(self) -> None:
@@ -548,9 +460,7 @@ class PickCubeObservationsCfg:
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
-    subtask_terms: SubtaskCfg = SubtaskCfg()
-    rl_policy: RlPolicyCfg = RlPolicyCfg()
-    grasp_focus: GraspFocusCfg = GraspFocusCfg()
+    ref_policy: RefPolicyCfg = RefPolicyCfg()
 
 
 # ---------------------------------------------------------------------------
@@ -560,382 +470,27 @@ class PickCubeObservationsCfg:
 
 @configclass
 class PickCubeRewardsCfg:
-    """단계형 보상 — reach → grasp → lift → transport → insert → release."""
+    """레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 dense 보상.
 
-    # Stage 1: EE → 가장 가까운 미배치 큐브 접근 (밀집)
-    reach_cube = RewTerm(
-        func=task_mdp.reach_reward,
-        weight=0.0,  # v24: 1→0 (든 큐브=미배치@EE → reach 1.0 지급 = hover income. grasp_align 이 접근 대체)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
+    reaching 1 · lifting 30 · tracking 16 · lowering 7 (target_region → 그릇 BOWL 매핑)
+    + action_rate/joint_vel −1e-4 (레퍼런스와 동일 함수·weight). active 큐브(apply_curriculum
+    이 object_cfgs 주입) 합산 — active_objects=1 이면 레퍼런스와 수치 동일.
+    """
 
-    # Stage 1.5: 열린 그리퍼를 큐브에 정밀 3D 정렬 (밀집, 탐색 valley 메움)
-    # weight 1.0(<close 3.0): open→closed 보상 합이 단조 증가가 되도록 align 을 close 보다
-    # 낮춤. hover 캠프 매력 최소화 — 닫을수록 이득이 커져 valley 가 사라진다.
-    grasp_align_cube = RewTerm(
-        func=task_mdp.grasp_align_reward,
-        weight=1.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            # tolerance 확대(0.05/0.06 → 0.12/0.10): early exploration 의 arm drift(3~5cm) 가
-            # tight 창을 벗어나 reward=0 → gradient 死. 완화로 "대충 정렬한 큐브도 보상" →
-            # 점화 gradient 밀도↑(rl-expert). 점화 후 재축소 가능.
-            "align_xy": 0.12,
-            "align_z": 0.10,
-        },
-    )
-
-    # Stage 1.7: 정렬된 채 닫기 (align→lift valley 메움). align(open) 의 거울(closed).
-    # 그리퍼가 열림→닫힘으로 갈 때 align 은 줄지만 이 항은 늘어 연속 그래디언트 → "닫는
-    # 행동"으로 넘어가게 한다(align hover 캠프 탈출). lift 게이트 없음.
-    grasp_close_cube = RewTerm(
-        func=task_mdp.grasp_close_reward,
-        weight=3.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            # tolerance 확대(0.05/0.06 → 0.12/0.10): grasp_align 과 동일 이유 — arm drift 가
-            # 보상창 벗어나 grasp_close=0.0005(死)이던 것 densify → 닫기 점화 gradient 부활.
-            "align_xy": 0.12,
-            "align_z": 0.10,
-            # lift-gate OFF: 처음부터 켜니 desk-camp(책상서 잡고 안 듦) 유발(v26 succ→0). anneal 로 대체.
-            "disable_when_lifted": False,
-            # weight anneal 3.0→0.3 (iter 80→350, step=iter×48): per-step grasp_close 가 점화엔
-            # 필수지만 점화 후엔 hold income→camp(v23 in-air camp·v26 desk camp). 점화 완료(~iter50)
-            # 후 감쇠해 camp value↓(0.3×0.9/(1-γ)=27≪terminal 300) → camp-free spine(task_progress)
-            # 가 carry 인수. grasp 는 이미 학습돼 low weight 서도 유지.
-            "anneal_start_step": 3840.0,   # iter 80
-            "anneal_end_step": 16800.0,    # iter 350
-            "anneal_final_scale": 0.1,     # 3.0 → 0.3
-        },
-    )
-
-    # Stage 1.8: 양 손가락이 같은 큐브에 물리 접촉(ContactSensor) — 직접 grasp 신호.
-    # 기하 proxy 보다 직접적으로 "손가락 사이에 큐브가 끼었음"을 보상 → 점화 가속.
-    grasp_contact_cube = RewTerm(
-        func=task_mdp.grasp_contact_reward,
-        weight=0.0,  # v24: 2→0 (잡고있으면 접촉=hover income. grasp 는 학습됨+align/close 유지)
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    # Stage 2: 그리퍼 닫힘 + 큐브 근접 (sparse bonus, 미배치 큐브 한정)
-    # weight 0.5→0.2: grasp_align(열림+정밀)과 open/close 가 상충하므로 축소.
-    # "닫은 채 근접" camping 유인을 최소화하고 align 이 접근 신호를 주도.
-    pregrasp_cube = RewTerm(
-        func=task_mdp.pregrasp_bonus,
-        weight=0.0,  # v24: 0.2→0 (closed+near=hover income)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            "diff_threshold": 0.045,
-        },
-    )
-
-    guided_lift_cube = RewTerm(
-        func=task_mdp.guided_lift_reward,
-        weight=0.0,  # v24: →0 (lifting=hover income; lift 는 학습됨+place_pbrs inside 가 instrumental 유도)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    grasp_cube = RewTerm(
-        func=task_mdp.grasp_bonus,
-        weight=0.0,  # v24: 1→0 (grasped+lifted+held=hover income; grasp 학습됨)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    # Stage 2.5: 닫힌 그리퍼 + 들린 큐브 + 그릇 방향 운반 (밀집 도우미)
-    # weight 4→8: 부트스트랩 큐브를 "잡은 채 유지"하도록 강한 유인(놓치면 보상 급감).
-    carry_cube = RewTerm(
-        func=task_mdp.carry_object,
-        weight=0.0,  # v23: 1.5→0 (hover income 제거; grasp+carry 는 학습됨, place_pbrs 가 운반 유도)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    # Stage 3: 큐브를 책상에서 들어올린 높이 (밀집)
-    lift_cube = RewTerm(
-        func=task_mdp.lift_reward,
-        weight=0.0,  # v23: 2→0 (height hover income 제거; lift 는 학습됨)
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-        },
-    )
-
-    # Stage 4: 들어올린 큐브의 XY → 그릇 접근 (밀집)
-    transport_cube = RewTerm(
-        func=task_mdp.transport_reward,
-        weight=0.0,  # v23: 3→0 (transport hover income 제거; place_pbrs xy-progress 가 대체)
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-        },
-    )
-
-    # Stage 4.5: 그릇 XY 근처에서 그릇 안 높이로 낮추기 (밀집)
-    # v7: xy_range 0.18(느슨)→0.08 — 그릇 중심 정밀 정렬 유도(가장자리 hover 보상 차단).
-    # place 정밀도 부족(v6 over_bowl 0.86→placed 0.10)의 핵심 레버.
-    place_height_cube = RewTerm(
-        func=task_mdp.place_height_reward,
-        weight=0.0,  # v11: PBRS(place_pbrs)로 대체 — dense 유지 제거(hover 차단)
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            "xy_range": 0.08,
-            "require_carry": False,
-        },
-    )
-
-    # Stage 5: 그릇 안 삽입 — 그리퍼 조건 없음 (밀집, 큐브 수 비례)
-    insert_cube = RewTerm(
-        func=task_mdp.insert_reward,
-        weight=0.0,  # v11: PBRS(place_pbrs)의 inside 항으로 대체 — dense 유지 제거
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    place_pbrs_cube = RewTerm(
-        func=task_mdp.place_pbrs_reward,
-        weight=50.0,
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            "xy_range": 0.60,
-            "gamma": 0.997,
-        },
-    )
-
-    # 전체 task progress PBRS — reach→grasp→lift→transport→place 단조 Φ(telescoping).
-    # hold income 0(grasp-camp 구조적 차단) + grasp=Φ점프(점화) + monotonic(grasp→lift dip 없음).
-    # 기본 weight 0 (full/place 비활성). apply_skill_acquire 가 주 driver 로 켠다.
-    # 전용 버퍼 _task_progress_potential_prev (place_pbrs 와 분리).
-    task_progress_pbrs_cube = RewTerm(
-        func=task_mdp.task_progress_pbrs_reward,
-        weight=0.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            "reach_range": 0.20,
-            "grasp_dist": 0.06,
-            "close_threshold": 0.50,
-            "lift_min": 0.02,
-            "lift_ref": 0.10,
-            "transport_range": 0.30,
-            "gamma": 0.997,
-        },
-    )
-
-    # Stage 6: 그릇 안 + 그리퍼 열림 완료 (밀집, 배치된 큐브 수)
-    release_cube = RewTerm(
-        func=task_mdp.release_bonus,
-        weight=20.0,  # v23: 10→20 (drop/release 강화 — hover dense 제거와 함께 placed 견인)
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    # Stage 5.5: 그릇 위에서 그리퍼 열기 유도 — release valley 메움 (밀집)
-    # carry(8)+transport(8) 잡고-버티기 local optimum 탈출. inside 게이트 없이
-    # '그릇 중심 + 들림 + open_frac' 에 연속 gradient → 그릇 위에서 손 펴 떨구기.
-    # v7: close_ref 0.20→0.40, xy_range 0.10→0.06.
-    # v13: xy_range 0.12, close_ref 0.35.
-    # v14: dense(open_frac 직접) → PBRS화(over_bowl_drop_pbrs_reward). carry와 경쟁 안 함.
-    #      gripper offset=0.20에서 정책이 안 열어 dense open_frac 보상이 무의미했음(rl-expert).
-    #      PBRS φ: over_bowl위(0.6+0.2·open_frac+0.2·(1-z)) + 밖(0.3·xy+0.1·open_frac).
-    over_bowl_drop_cube = RewTerm(
-        func=task_mdp.over_bowl_drop_pbrs_reward,
-        weight=16.0,  # v23: 12→16 (그릇 위 열기 PBRS 강화)
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "xy_range": 0.12,
-            "open_threshold": 0.60,
-            "close_ref": 0.30,  # v15: 0.35→0.30 (75% open으로 보상, release valley 추가 완화)
-            "gamma": 0.997,
-        },
-    )
-
-    # 그릇 교란 패널티 — 운반/place 중 그릇 밀치기/엎기 억제(tilt 주신호 + xy 변위).
-    # v7: -5→-3 완화. 과한 패널티가 그릇 근처 정밀 접근을 위축시켜 place(안착)를 막는
-    # 것으로 의심(v6: over_bowl 0.86인데 placed 0.10). 엎기 억제는 유지하되 접근 허용.
-    bowl_disturb = RewTerm(
-        func=task_mdp.bowl_disturb_penalty,
-        weight=-3.0,
-        params={"bowl_cfg": SceneEntityCfg(BOWL_NAME), "disp_coef": 4.0},
-    )
-
-    # 큐브 변위 패널티 — 잡기 전 큐브를 쳐서 밀어내기 억제(정밀 grasp proxy).
-    # 안 들린 큐브의 초기 xy 대비 변위(m). 정밀 접근하면 ≈0, 거칠게 치면 패널티.
-    # weight 중간: 큐브 ~10cm 밀면 -0.3/step(reach 1.0과 균형). grasp 시도 자체는 안 막게.
-    cube_predisturb = RewTerm(
-        func=task_mdp.cube_predisturb_penalty,
-        weight=-3.0,
-        params={"object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES], "lift_min": 0.02},
-    )
-
-    # 전체 성공 보너스 — 4개 큐브 전부 배치 완료
-    task_success = RewTerm(
-        func=task_mdp.task_success_bonus,
-        weight=200.0,  # v10: 50→200 복원·강화 — 완료(terminal)가 value 최대가 되게(hover 차단)
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-            # PickCube termination은 "큐브가 그릇 안에 있음"과 일치한다.
-            # release_cube가 gripper open을 별도로 보상한다.
-            "require_open": False,
-        },
-    )
-
-    # 행동률·관절 속도 페널티 — smoothness. v7: -1e-4→-1e-3(10×). v13: -1e-3→-1e-2(10×).
-    # v12 실측: joint_vel raw 30.4/ep → -1e-3 페널티=-0.030, carry(3) 대비 100배 약해 무비용.
-    # -1e-2로 올리면 -0.30/ep → carry 10% 비용, 진동이 경제적으로 불리해짐. sim2real 필수.
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-2)
-    joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
-        weight=-1e-2,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-
-    # 속도 형상화 — 느린 정책 페널티 + 빠른 성공 보너스.
-    # reward hacking 아님: 성공 반경/grasp 물리 불변, "시간"만 형상화한다.
-    # v8: success 200→50·early_finish 100→30 압축에 맞춰 time_penalty 도 비례 축소
-    #   (-0.02→-0.006). 시간 형상화(±)와 성공 보상의 상대 비율 유지 — 성공 압축 후
-    #   "빨리 끝내기"가 성공보다 과해지는 것 방지. 행동 교정 페널티(bowl_disturb/
-    #   cube_predisturb/smoothness)는 절대값 작고 상대 비율이 곧 교정 의도라 유지.
-    time_penalty = RewTerm(
-        func=task_mdp.time_penalty,
-        weight=-0.02,  # v10: -0.006→-0.02 복원 — 버티기 시간 비용(hover 차단)
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-    # task_done(전부 배치)가 곧 종료라 이 보너스는 완료 step 에 1회 지급되는
-    # 터미널 보너스로 동작한다. 완료 시각에 따라 ~100(즉시)→~17(25s) 차등.
-    early_finish_bonus = RewTerm(
-        func=task_mdp.early_finish_bonus,
-        weight=100.0,  # v10: 30→100 복원 — 빨리 완료 강제(hover 차단)
-        params={
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "container_radius": BOWL_SUCCESS_RADIUS,
-            "container_height_range": BOWL_HEIGHT_RANGE,
-        },
-    )
-
-    # Skill-1(acquire+transport) terminal 보너스 — '그릇 위 grasp' 도달 시 1회 지급.
-    # 기본 weight 0 (full-task/skill2 에선 비활성). apply_skill_acquire 가 켠다.
-    # 종료 조건(terminations.over_bowl_grasped)과 동일 판정이라 도달 step=terminal 보너스.
-    over_bowl_grasped_bonus = RewTerm(
-        func=task_mdp.over_bowl_grasped_bonus,
-        weight=0.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "over_bowl_xy": 0.10,
-            "lift_min": 0.02,
-            "grasp_dist": 0.07,
-            "close_threshold": 0.50,
-        },
-    )
-
-    # -----------------------------------------------------------------------
-    # 레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 보상항.
-    # 기본 weight 0 (full/acquire/place/full_bc 비활성). apply_skill_ref 가 켠다.
-    # target_region → 그릇(BOWL) 매핑, 높이는 DESK_TOP_Z 기준. 단일 객체 레시피라
-    # active 큐브 합산(active_objects=1 이면 레퍼런스와 동일).
-    # -----------------------------------------------------------------------
+    # EE → 큐브 접근 (tanh)
     ref_reaching = RewTerm(
         func=task_mdp.reaching_object_ref,
-        weight=0.0,
+        weight=1.0,
         params={
             "std": 0.1,
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
             "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
         },
     )
+    # 그릇에서 멀고 들렸을 때 높이 비례 보상 (암묵적 grasp 신호, camp-free)
     ref_lifting = RewTerm(
         func=task_mdp.lifting_object_dist_limit_ref,
-        weight=0.0,
+        weight=30.0,
         params={
             "minimal_height": 0.04,
             "minimal_dist": 0.05,
@@ -944,9 +499,10 @@ class PickCubeRewardsCfg:
             "container_cfg": SceneEntityCfg(BOWL_NAME),
         },
     )
+    # 큐브 → 그릇 안(3D center) 접근 (tanh) — "그릇에 넣기" 유도
     ref_tracking = RewTerm(
         func=task_mdp.object_target_region_distance_ref,
-        weight=0.0,
+        weight=16.0,
         params={
             "std": 0.3,
             "object_cfgs": [SceneEntityCfg(n) for n in CUBE_NAMES],
@@ -954,9 +510,10 @@ class PickCubeRewardsCfg:
             "container_cfg": SceneEntityCfg(BOWL_NAME),
         },
     )
+    # 그릇 근처에서 큐브가 내려가는 동안만 (delta 보상 → camp-free)
     ref_lowering = RewTerm(
         func=task_mdp.object_lowering_ref,
-        weight=0.0,
+        weight=7.0,
         params={
             "std": 0.1,
             "minimal_dist": 0.05,
@@ -964,6 +521,14 @@ class PickCubeRewardsCfg:
             "container_center_xy": BOWL_CENTER_XY,
             "container_cfg": SceneEntityCfg(BOWL_NAME),
         },
+    )
+
+    # smoothness 페널티 (레퍼런스와 동일 함수·weight)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
+    joint_vel = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-1e-4,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
 
@@ -1083,30 +648,8 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
     rewards: PickCubeRewardsCfg = PickCubeRewardsCfg()
     terminations: PickCubeTerminationsCfg = PickCubeTerminationsCfg()
     events: PickCubeEventCfg = PickCubeEventCfg()
+    # leisaac 동적 gripper effort 배선(PickCubeEnv.step 이 읽는다). soft-PD SO-101 grasp 안정.
     dynamic_reset_gripper_effort_limit: bool = True
-    # 초기상태 grasp 부트스트랩(backward curriculum) — PickCubeEnv 가 읽는다.
-    # prob>0 이면 reset 시 해당 비율의 env 를 '큐브가 그리퍼에 잡힌 상태'로 시작.
-    grasp_bootstrap_prob: float = 0.0
-    grasp_bootstrap_close: float = -0.05   # 부트스트랩 시 gripper joint 닫힘 각(rad)
-    grasp_bootstrap_lift: float = 0.0      # grasp point z 에 더할 들어올림(m)
-    # annealing + graded backward curriculum (PickCubeEnv 가 읽는다)
-    grasp_bootstrap_prob_final: float = 0.0   # prob 를 이 값으로 선형 감쇠(정상-env grasp 압력↑)
-    grasp_bootstrap_anneal_steps: float = 0.0 # 감쇠 구간(common_step_counter 단위). 0=감쇠 없음
-    grasp_bootstrap_pregrasp_open: float = 0.65  # pre-grasp 시 gripper open 각(rad). 0.90→0.65: 너무 벌린 시작이 "닫기 마무리" 학습을 방해 → 큐브 받아들일 최소폭으로
-    grasp_bootstrap_rest_z: float = 0.726        # pre-grasp 큐브 책상 resting z(env-local, m)
-    grasp_bootstrap_pregrasp_frac: float = -1.0  # pre-grasp 비율 오버라이드(>=0). -1=anneal p(학습 기본). 모니터용.
-
-    # place 부트스트랩 — 큐브를 그릇 위에 든 채 시작(over_bowl→placed 하류 학습 가속)
-    place_bootstrap_prob: float = 0.0   # place 부트스트랩 비율(고정, annealing 없음)
-    place_bootstrap_z: float = 0.09    # 그릇 rim 위 큐브 높이 offset (env-local, m)
-
-    # demo-state reset (RFCL reverse curriculum) — PickCubeEnv 가 읽는다.
-    # SM 성공 궤적의 실제 scene 상태를 reset 분포로 주입(상태만 seed, 행동 클론 아님).
-    demo_reset_prob: float = 0.0       # reset 시 데모 상태로 시작할 env 비율
-    demo_dataset_dir: str | None = None  # demo_*.pt 디렉터리(pick_cube_state_machine --record_demos 산출)
-    demo_anneal_steps: float = 0.0     # reverse curriculum 구간(common_step_counter). frac>=1-p sample. 0=전구간 uniform
-    demo_subsample: int = 2            # 궤적 매 k step 만 적재(메모리)
-    demo_max_files: int = 4000         # 적재할 demo 파일 상한
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -1139,62 +682,27 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
 # 커리큘럼 적용 헬퍼 — gym.make() 이전에 env_cfg 에 in-place 적용
 # ---------------------------------------------------------------------------
 
+# ref dense 보상 4항 — active 큐브 subset 을 object_cfgs 로 받는다.
 _CUBE_REWARD_TERMS = (
-    "reach_cube",
-    "grasp_align_cube",
-    "grasp_close_cube",
-    "grasp_contact_cube",
-    "pregrasp_cube",
-    "guided_lift_cube",
-    "grasp_cube",
-    "carry_cube",
-    "lift_cube",
-    "transport_cube",
-    "place_height_cube",
-    "insert_cube",
-    "place_pbrs_cube",
-    "task_progress_pbrs_cube",
-    "release_cube",
-    "over_bowl_drop_cube",
-    "over_bowl_grasped_bonus",
-    "cube_predisturb",
-    "task_success",
-    # 속도 보상도 활성 큐브 수에 맞춰 pen_cfgs 갱신
-    "time_penalty",
-    "early_finish_bonus",
-)
-_BOWL_RADIUS_REWARD_TERMS = (
-    "reach_cube",
-    "grasp_align_cube",
-    "grasp_close_cube",
-    "grasp_contact_cube",
-    "pregrasp_cube",
-    "guided_lift_cube",
-    "grasp_cube",
-    "carry_cube",
-    "place_height_cube",
-    "insert_cube",
-    "place_pbrs_cube",
-    "task_progress_pbrs_cube",
-    "release_cube",
-    "task_success",
-    # 속도 보상의 cup_radius 도 동기화(반경 스케일 1.0 고정이라 사실상 no-op)
-    "time_penalty",
-    "early_finish_bonus",
+    "ref_reaching",
+    "ref_lifting",
+    "ref_tracking",
+    "ref_lowering",
 )
 
 
 def apply_curriculum(
     env_cfg: PickCubeEnvCfg,
     *,
-    active_objects: int = 4,
+    active_objects: int = 1,
     object_radius_scale: float = 1.0,
     container_angle_scale: float = 1.0,
     container_radius_scale: float = 1.0,
 ) -> None:
     """PickCube curriculum을 env_cfg에 in-place 적용.
 
-    활성 큐브 수, reset 랜덤화 범위, bowl 성공 반경만 조정한다.
+    활성 큐브 수, reset 랜덤화 범위, bowl 성공 반경만 조정한다. ref 보상은 단일 큐브
+    레시피라 active subset(보통 1)만 합산한다.
     """
 
     active_objects = max(1, min(4, active_objects))
@@ -1206,11 +714,8 @@ def apply_curriculum(
         term = getattr(env_cfg.rewards, term_name, None)
         if term is not None:
             term.params["object_cfgs"] = active_cfgs
-    for term_name in _BOWL_RADIUS_REWARD_TERMS:
-        term = getattr(env_cfg.rewards, term_name, None)
-        if term is not None:
-            term.params["container_radius"] = bowl_radius
 
+    # success(task_done) 종료 — active 큐브 + 성공 반경
     env_cfg.terminations.success.params["objects_cfg"] = active_cfgs
     env_cfg.terminations.success.params["radius"] = bowl_radius
     # 큐브 추락 종료도 활성 큐브만 검사(비활성 큐브는 지면 아래라 오탐 방지)
@@ -1218,20 +723,13 @@ def apply_curriculum(
     if cube_lost_term is not None:
         cube_lost_term.params["objects_cfg"] = active_cfgs
 
-    # rl_state 관측의 비활성 큐브 마스킹(distractor 제거 + RND novelty 집중)
-    rl_obs = getattr(env_cfg.observations.rl_policy, "rl_state_obs", None)
-    if rl_obs is not None:
-        rl_obs.params["num_active"] = active_objects
-
     # 비활성 큐브 물리 비활성화(지면 아래로) — scatter event 에 active 수 전달
-    scatter = getattr(env_cfg.events, "randomize_cubes", None)
-    if scatter is not None:
-        scatter.params["num_active"] = active_objects
+    scatter_term = getattr(env_cfg.events, "randomize_cubes", None)
+    if scatter_term is not None:
+        scatter_term.params["num_active"] = active_objects
 
     # 큐브 scatter workspace 를 scale 에 비례해 중심으로부터 확장/축소.
-    # scale=0: DR 비활성화 → authored default fixed-spawn.
-    # scale=1: 전체 workspace 사용.
-    scatter_term = getattr(env_cfg.events, "randomize_cubes", None)
+    # scale=0: DR 비활성화 → authored default fixed-spawn. scale=1: 전체 workspace.
     if scatter_term is not None and object_radius_scale <= 0.0:
         env_cfg.events.randomize_cubes = None
     elif scatter_term is not None and object_radius_scale != 1.0:
@@ -1253,268 +751,80 @@ def apply_curriculum(
         lo, hi = bowl_term.params["angle_range_deg"]
         bowl_term.params["angle_range_deg"] = (lo * container_angle_scale, hi * container_angle_scale)
 
-    for cube_name in CUBE_NAMES:
-        obs_name = "place_" + cube_name.lower()
-        term = getattr(env_cfg.observations.subtask_terms, obs_name, None)
-        if term is not None:
-            term.params["radius"] = bowl_radius
-
 
 # ---------------------------------------------------------------------------
-# Skill chaining 프리셋 — apply_curriculum 이후 호출 (acquire | place)
+# DR(domain randomization) 점진 사다리 — apply_curriculum 이후 호출
 # ---------------------------------------------------------------------------
 
 
-def _active_cfgs_from(env_cfg: "PickCubeEnvCfg") -> list[SceneEntityCfg]:
-    """apply_curriculum 이 success 종료에 주입한 활성 큐브 cfg 목록을 회수."""
-    cfgs = env_cfg.terminations.success.params.get("objects_cfg")
-    if cfgs:
-        return cfgs
-    return [SceneEntityCfg(n) for n in CUBE_NAMES]
+def apply_dr_level(env_cfg: "PickCubeEnvCfg", level: int, *, active_objects: int = 1) -> None:
+    """DR 사다리를 env_cfg.events / obs 에 in-place 적용. **apply_curriculum 이후** 호출.
 
+    레퍼런스 정합(ref) 학습은 처음엔 DR 없이 시작해 단계적으로 추가한다. 레벨별 누적:
 
-def _set_reward_weights(env_cfg: "PickCubeEnvCfg", weights: dict) -> None:
-    for name, w in weights.items():
-        term = getattr(env_cfg.rewards, name, None)
-        if term is not None:
-            term.weight = float(w)
+    | level | 추가되는 것 |
+    |---|---|
+    | 0 (완전고정) | 큐브 1개 고정 위치/자세(비활성 큐브 sink)·그릇 고정·jitter 0·물리/시각/obs noise off |
+    | 1 (+spawn)   | 큐브 scatter + 그릇 arc 랜덤화 on |
+    | 2 (+sensor)  | robot joint jitter(±0.05) + obs Gaussian noise(σ0.005) on |
+    | 3 (+물리/시각)| 큐브 mass/friction + light/focal 랜덤화 on (full sim2real) |
 
-
-def apply_skill_acquire(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 15.0) -> None:
-    """Skill-1(acquire+transport) 프리셋 — scratch 단일 run 으로 '그릇 위 grasp' 도달.
-
-    **고정 config(재현용 source of truth).** over_bowl_grasped 종료로 끊어 skill2 에 handoff.
-    **apply_curriculum 이후** 호출. scratch + sustained grasp_bootstrap 으로 한 번에.
-
-    **scratch5 = 순수 camp-free + 그리퍼 open init** — 7회 실패 종합 결론:
-    γ=0.997 에서 per-step *상태* 보상(reach/align/close/lift/carry)은 무엇이든 hold 가치를
-    income×333 로 만들어 terminal 을 압도 → 그 상태서 camp(v1/scratch1/2). hold income 을
-    조금이라도 남기면 camp, 다 빼면(scratch3/4) grasp shaping 소실로 ram(cube_lost 25~36%).
-    → camp-free 한 것만 사용: **telescoping PBRS·terminal·penalty.**
-    - **task_progress_pbrs 80(유일 driver)**: 접근(reach_prog)→grasp(Φ점프=점화)→lift→transport
-      단조 Φ. telescoping 이라 hold=0(camp 구조적 불가), 진행 시에만 +.
-    - **그리퍼 init 0.70 OPEN**(scratch1~4 는 0.20 닫힘 → 닫힌 채 접근=ram + grasp_align 死):
-      열린 그리퍼로 부드럽게 접근→큐브 위서 닫기가 자연스러운 grasp = ram·cube_lost 동시 완화.
-    - per-step 상태 보상 **전부 0**(reach/align/close 포함 — 어떤 것도 hover-camp 유발).
-    - cube_predisturb −5(anti-ram), over_bowl_grasped_bonus 250(terminal).
-    - 점화: sustained grasp_bootstrap(0.6, 항상 시연 → v20 PBRS-단독 blowup 회피) + RND grasp_focus
-      + task_progress grasp Φ점프. (pure-telescoping 이 scratch grasp 점화 가능한지의 시험.)
-    이력: v1/scratch1/2 camp(hold income)·v2/v3 blowup(resume+std reset)·scratch3/4 ram(hold
-    income 0 인데 grasp shaping 도 같이 소실+닫힌 그리퍼) → scratch5 = pure PBRS + open gripper.
+    L0 은 authored randomize_cubes 를 degenerate range(폭 0) 변형으로 교체해 Cube1 을 고정
+    위치·자세로 spawn 하면서 비활성 큐브는 num_active 로 지면 아래 sink 한다. L1+ 는 authored
+    randomize_cubes(full scatter)/randomize_bowl(arc) 를 그대로 둔다.
     """
-    active_cfgs = _active_cfgs_from(env_cfg)
-    env_cfg.terminations.success = DoneTerm(
-        func=task_mdp.over_bowl_grasped,
-        params={
-            "objects_cfg": active_cfgs,
-            "robot_cfg": SceneEntityCfg("robot", body_names=["gripper"]),
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "over_bowl_xy": 0.10,
-            "lift_min": 0.02,
-            "grasp_dist": 0.07,
-            "close_threshold": 0.50,
-        },
-    )
-    # 그리퍼 init OPEN(0.70) — scratch1~4 의 0.20(닫힘)이 ram + grasp_align 死의 원인.
-    # 열린 그리퍼로 접근→닫기가 자연스러운 grasp(scratch5 핵심 레버). bootstrap envs 는
-    # 자체적으로 gripper 를 덮어쓰므로(full=닫힘/pre=열림) 비-bootstrap scratch env 에만 적용.
-    try:
-        env_cfg.scene.robot.init_state.joint_pos["gripper"] = 0.70
-    except Exception:
-        pass
-    _set_reward_weights(env_cfg, {
-        # === scratch5: 순수 camp-free(telescoping PBRS·terminal·penalty 만) ===
-        # per-step 상태 보상은 무엇이든 camp(γ=0.997 → hold 가치 income×333 ≫ terminal). 전부 0.
-        "reach_cube": 0.0,
-        "grasp_align_cube": 0.0,
-        "grasp_close_cube": 0.0,
-        # task_progress_pbrs = 유일 driver(80). 접근→grasp(Φ점프=점화)→lift→transport 단조 Φ.
-        # telescoping → hold=0(camp 구조적 불가). 80 으로 강화(접근/grasp 신호 충분히 강하게).
-        "task_progress_pbrs_cube": 80.0,
-        "over_bowl_grasped_bonus": 250.0,   # terminal
-        "cube_predisturb": -5.0,            # anti-ram (open gripper 와 함께 cube_lost 억제)
-        # per-step 상태 보상 전부 off (camp 원천 차단)
-        "grasp_contact_cube": 0.0,
-        "pregrasp_cube": 0.0,
-        "guided_lift_cube": 0.0,
-        "grasp_cube": 0.0,
-        "carry_cube": 0.0,
-        "lift_cube": 0.0,
-        "transport_cube": 0.0,
-        "place_height_cube": 0.0,
-        "insert_cube": 0.0,
-        "place_pbrs_cube": 0.0,
-        "release_cube": 0.0,
-        "over_bowl_drop_cube": 0.0,
-        "task_success": 0.0,
-        "early_finish_bonus": 0.0,
-    })
-    env_cfg.rewards.over_bowl_grasped_bonus.params["object_cfgs"] = active_cfgs
-    env_cfg.rewards.task_progress_pbrs_cube.params["object_cfgs"] = active_cfgs
-    env_cfg.episode_length_s = float(episode_length_s)
+    ev = env_cfg.events
+    level = int(level)
+    spawn_random = level >= 1
+    sensor_dr = level >= 2
+    physics_visual = level >= 3
 
+    # --- 큐브/그릇 배치 ---
+    if not spawn_random:
+        # L0: Cube1 고정 위치/자세. degenerate range(폭 0)+full_orient off → 결정적.
+        # 비활성 큐브는 num_active 로 지면 아래 sink(_randomize_cubes_scattered_fn).
+        px, py = _CUBE_INIT_STATES[CUBE_NAMES[0]][0][:2]
+        env_cfg.events.randomize_cubes = randomize_cubes_scattered(
+            CUBE_NAMES,
+            BOWL_NAME,
+            x_range=(px, px),
+            y_range=(py, py),
+            yaw_range_deg=(0.0, 0.0),
+            full_orient=False,
+            volume_inset=0.0,
+            min_cube_sep=0.0,
+            min_bowl_sep=0.0,
+            min_base_sep=0.0,
+            num_active=active_objects,
+        )
+        env_cfg.events.randomize_bowl = None
+    # L1+: authored randomize_cubes(full scatter) + randomize_bowl(arc) 유지.
 
-def apply_skill_full_bc(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 20.0) -> None:
-    """Full pick-place 프리셋 — BC warmstart 정책의 RL finetune 용 (camp-free, 단일 end-to-end).
+    # --- robot joint jitter (sensor DR) ---
+    if getattr(ev, "reset_robot_joints", None) is not None:
+        ev.reset_robot_joints.params["position_range"] = (-0.05, 0.05) if sensor_dr else (0.0, 0.0)
 
-    전략 전환(2026-06-12): scratch reward-shaping(8회)·demo-reset-only(v16~20) 실패의 공통
-    누락 = expert ACTION 미주입. 검증된 SM(해석적 IK side-approach, 1-cube ~90%) 전궤적을
-    BC clone(obs→action) → 이 프리셋으로 RL finetune. BC init 이 reach→grasp→lift→transport
-    →release 전체를 이미 수행 → terminal 즉시 도달로 credit assignment 해결(grasp 점화·hover
-    동시 우회). reverse curriculum(demo_reset_prob, train.py CLI)로 grasped/transport 상태
-    분포 유지 → erosion 방지(RFCL/IndustReal 정석, sim2real 83~99%).
+    # --- 물리(mass/friction) + 시각(light/focal) DR ---
+    if not physics_visual:
+        if hasattr(ev, "randomize_lights"):
+            env_cfg.events.randomize_lights = None
+        if hasattr(ev, "randomize_camera_focal"):
+            env_cfg.events.randomize_camera_focal = None
+        for name in CUBE_NAMES:
+            for suffix in ("material", "mass"):
+                attr = f"randomize_{name.lower()}_{suffix}"
+                if hasattr(ev, attr):
+                    setattr(env_cfg.events, attr, None)
 
-    보상 = grasp 점화 dense(v4 레버) + camp-free spine. **핵심: γ=0.99** 에서 dense grasp 가
-    camp-free — camp value = w/(1−γ) = grasp_close 3.0×100 = 300 < terminal ~350 → 완료가 hold
-    압도(γ0.997 이면 ×333=1000 ≫ terminal 이라 camp = 8회 실패 원인). 즉 γ 가 camp/점화 분기.
-    - grasp_align 1.0 + grasp_close 3.0: scratch grasp 점화(v4 가 유일하게 점화시킨 dense 레버).
-    - task_progress_pbrs 80: full-task 단조 Φ(reach→grasp Φ점프→lift→transport→inside) telescoping.
-    - over_bowl_drop_pbrs 16 + release 20: 그릇 위 열기·release 강조(PBRS+1회 bonus, camp-free).
-    - task_success 200(require_open=True → 그릇에 든 채 success 금지, VLA clean release) + early_finish 100.
-    - cube_predisturb −5 + bowl_disturb −3 + action_rate/joint_vel −1e-2(base 유지): 교정 페널티.
-    **apply_curriculum 이후** 호출. terminations.success 는 base(full-place) 그대로. 그리퍼 init
-    0.70 OPEN(demo/bootstrap env 는 자체 덮어씀).
-    """
-    active_cfgs = _active_cfgs_from(env_cfg)
-    try:
-        env_cfg.scene.robot.init_state.joint_pos["gripper"] = 0.70
-    except Exception:
-        pass
-    _set_reward_weights(env_cfg, {
-        # camp-free spine — full-task telescoping PBRS (BC 가 grasp 제공 → per-step 상태보상 불요)
-        "task_progress_pbrs_cube": 80.0,
-        # release/drop 강조 (camp-free: PBRS + 1회 bonus)
-        "over_bowl_drop_cube": 16.0,
-        "release_cube": 20.0,
-        # terminal
-        "task_success": 200.0,
-        "early_finish_bonus": 100.0,
-        # grasp 점화 레버(v4 가 유일하게 scratch grasp 점화) — γ=0.99 에서 dense 가 camp-free
-        # (camp value = w/(1−γ) = 3.0×100 = 300 < terminal ~350 → 완료가 hold 압도). BC reach 0.32
-        # 가 접근 head start, grasp_close 가 닫기 점화. reach 는 BC+task_progress 담당(per-step off).
-        "reach_cube": 0.0,
-        "grasp_align_cube": 1.0,   # 열린 그리퍼 정렬(pre-grasp 접근 유도)
-        "grasp_close_cube": 3.0,   # 정렬된 채 닫기 dense → grasp 점화(v4 weight)
-        "grasp_contact_cube": 0.0, # ContactSensor 필요 — align/close 로 충분
-        "pregrasp_cube": 0.0,
-        "guided_lift_cube": 0.0,
-        "grasp_cube": 0.0,
-        "carry_cube": 0.0,
-        "lift_cube": 0.0,
-        "transport_cube": 0.0,
-        "place_height_cube": 0.0,
-        "insert_cube": 0.0,
-        "place_pbrs_cube": 0.0,             # task_progress_pbrs 가 대체(중복 progress 방지)
-        "over_bowl_grasped_bonus": 0.0,
-    })
-    # require_open=True — 그릇에 든 채 success 금지(VLA release 품질).
-    try:
-        env_cfg.rewards.task_success.params["require_open"] = True
-    except Exception:
-        pass
-    # active subset 만 보상 계산(apply_curriculum 이후)
-    for _name in ("task_progress_pbrs_cube", "over_bowl_drop_cube", "release_cube",
-                  "task_success", "early_finish_bonus", "grasp_align_cube", "grasp_close_cube"):
-        _term = getattr(env_cfg.rewards, _name, None)
-        if _term is not None and "object_cfgs" in _term.params:
-            _term.params["object_cfgs"] = active_cfgs
-    env_cfg.episode_length_s = float(episode_length_s)
-
-
-def apply_skill_ref(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 5.0) -> None:
-    """레퍼런스(ref_repos/pick_and_place, IsaacLab Lift-Cube-Place) 정합 프리셋.
-
-    성공이 확인된 레퍼런스의 보상·종료 구조를 SO-101+그릇 환경에 그대로 재현한다.
-    우리 dense shaping(grasp_align/close·task_progress·PBRS·bootstrap·RND·terminal) 전부 끄고
-    레퍼런스 6항만 사용:
-      ref_reaching 1.0 · ref_lifting 30 · ref_tracking 16 · ref_lowering 7
-      + action_rate −1e-4 · joint_vel −1e-4 (레퍼런스와 동일 함수·weight).
-    종료도 레퍼런스와 동일: **success 종료 없음**(time_out + cube_lost(≈object_dropping)만).
-    success 로 조기 종료하면 tracking/lowering 보상이 잘려 레퍼런스 MDP 와 달라지므로 끈다.
-    그리퍼 init 은 우리 OPEN(0.70)로 둔다(레퍼런스 hand joint 0.0=open 과 의도 동일,
-    SO-101 부호 규약이 달라 0.0 은 near-closed 라 grasp 불가). episode 5s.
-    **apply_curriculum 이후** 호출. arch/gamma 는 run_expert_policy.sh ref 스테이지가 맞춘다
-    (MLP[128,64,32]+obs_normalization, γ0.98, init_noise_std 1.0, entropy 0.006, lr 8e-5).
-    """
-    active_cfgs = _active_cfgs_from(env_cfg)
-    try:
-        env_cfg.scene.robot.init_state.joint_pos["gripper"] = 0.70
-    except Exception:
-        pass
-    _set_reward_weights(env_cfg, {
-        # 레퍼런스 6항 (target_region→그릇 매핑)
-        "ref_reaching": 1.0,
-        "ref_lifting": 30.0,
-        "ref_tracking": 16.0,
-        "ref_lowering": 7.0,
-        "action_rate": -1e-4,
-        "joint_vel": -1e-4,
-        # 우리 dense/shaping/PBRS/terminal/penalty 전부 off
-        "reach_cube": 0.0, "grasp_align_cube": 0.0, "grasp_close_cube": 0.0,
-        "grasp_contact_cube": 0.0, "pregrasp_cube": 0.0, "guided_lift_cube": 0.0,
-        "grasp_cube": 0.0, "carry_cube": 0.0, "lift_cube": 0.0, "transport_cube": 0.0,
-        "place_height_cube": 0.0, "insert_cube": 0.0, "place_pbrs_cube": 0.0,
-        "task_progress_pbrs_cube": 0.0, "release_cube": 0.0, "over_bowl_drop_cube": 0.0,
-        "over_bowl_grasped_bonus": 0.0, "task_success": 0.0, "early_finish_bonus": 0.0,
-        "bowl_disturb": 0.0, "cube_predisturb": 0.0, "time_penalty": 0.0,
-    })
-    # active subset 만 보상 계산(apply_curriculum 이후)
-    for _name in ("ref_reaching", "ref_lifting", "ref_tracking", "ref_lowering"):
-        _term = getattr(env_cfg.rewards, _name, None)
-        if _term is not None and "object_cfgs" in _term.params:
-            _term.params["object_cfgs"] = active_cfgs
-    # 레퍼런스: success 종료 없음 — 5s 풀 에피소드(tracking/lowering 누적). cube_lost(추락) 유지.
-    try:
-        env_cfg.terminations.success = None
-    except Exception:
-        pass
-    env_cfg.episode_length_s = float(episode_length_s)
-
-
-def apply_skill_place(env_cfg: "PickCubeEnvCfg", *, episode_length_s: float = 5.0) -> None:
-    """Skill-2(place+release) 프리셋 — over-bowl-grasped init 에서 lower+open 만.
-
-    grasp_close/align(hold income) 제거가 핵심 — 이게 v24 hover 의 뿌리였다. require_open
-    종료로 release 강제. 단기 horizon(기본 5s) → terminal 이 압도(hover 누적 불가).
-    demo_reset(skill1 수집 상태)은 train.py CLI 로 주입. **apply_curriculum 이후** 호출.
-    """
-    active_cfgs = _active_cfgs_from(env_cfg)
-    bowl_radius = env_cfg.terminations.success.params.get("radius", BOWL_SUCCESS_RADIUS)
-    env_cfg.terminations.success = DoneTerm(
-        func=task_mdp.cube_placed_open,
-        params={
-            "objects_cfg": active_cfgs,
-            "robot_cfg": SceneEntityCfg("robot"),
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "radius": bowl_radius,
-            "height_range": BOWL_HEIGHT_RANGE,
-            "open_threshold": 0.60,
-        },
-    )
-    _set_reward_weights(env_cfg, {
-        # acquire/hold income 전부 제거 (grasp_close 가 hover 의 뿌리)
-        "reach_cube": 0.0,
-        "grasp_align_cube": 0.0,
-        "grasp_close_cube": 0.0,
-        "grasp_contact_cube": 0.0,
-        "pregrasp_cube": 0.0,
-        "guided_lift_cube": 0.0,
-        "grasp_cube": 0.0,
-        "carry_cube": 0.0,
-        "lift_cube": 0.0,
-        "transport_cube": 0.0,
-        "place_height_cube": 0.0,
-        "insert_cube": 0.0,
-        "over_bowl_grasped_bonus": 0.0,
-        # place 진행·드롭·release·완료
-        "place_pbrs_cube": 50.0,
-        "over_bowl_drop_cube": 24.0,
-        "release_cube": 30.0,
-        "task_success": 200.0,
-        # early_finish 는 'placed-but-closed' farming 위험 → 끈다(단기 horizon+task_success 로 충분)
-        "early_finish_bonus": 0.0,
-    })
-    env_cfg.rewards.task_success.params["require_open"] = True
-    env_cfg.episode_length_s = float(episode_length_s)
+    # --- obs Gaussian noise (sensor DR) ---
+    ref_grp = getattr(env_cfg.observations, "ref_policy", None)
+    if ref_grp is not None:
+        ref_term = getattr(ref_grp, "ref_state_obs", None)
+        if sensor_dr:
+            ref_grp.enable_corruption = True
+            if ref_term is not None:
+                ref_term.noise = GaussianNoiseCfg(mean=0.0, std=0.005)
+        else:
+            ref_grp.enable_corruption = False
+            if ref_term is not None:
+                ref_term.noise = None

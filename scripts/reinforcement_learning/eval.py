@@ -29,7 +29,7 @@ parser.add_argument("--num_episodes", type=int, default=512, help="집계할 최
 parser.add_argument("--seed", type=int, default=123)
 # --device 는 AppLauncher 가 등록
 parser.add_argument("--rl_device", default=None)
-parser.add_argument("--obs_group", default="rl_policy")
+parser.add_argument("--obs_group", default="ref_policy")
 parser.add_argument("--critic_obs_group", default=None)
 parser.add_argument("--clip_actions", type=float, default=1.0)
 parser.add_argument("--deterministic", action="store_true", default=False,
@@ -46,10 +46,10 @@ parser.add_argument("--recurrent", action="store_true", default=False)
 parser.add_argument("--rnn_type", default="lstm", choices=["lstm", "gru"])
 parser.add_argument("--rnn_hidden_dim", type=int, default=256)
 parser.add_argument("--rnn_num_layers", type=int, default=1)
-parser.add_argument("--obs_normalization", action="store_true", default=False)
-parser.add_argument("--init_noise_std", type=float, default=0.5)
-# 커리큘럼 (평가는 기본 full 난이도 + DR on)
-parser.add_argument("--active_objects", type=int, default=4, choices=[1, 2, 3, 4])
+parser.add_argument("--obs_normalization", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--init_noise_std", type=float, default=1.0)
+# 커리큘럼 (평가는 ref 기본: 단일 40mm 큐브)
+parser.add_argument("--active_objects", type=int, default=1, choices=[1, 2, 3, 4])
 parser.add_argument("--object_radius_scale", type=float, default=1.0)
 parser.add_argument("--container_angle_scale", type=float, default=1.0)
 # 주의: container_radius_scale 은 1.0 고정 (성공 반경 스케일링 금지)
@@ -83,8 +83,8 @@ def _build_eval_cfg() -> dict:
     policy_cfg = {
         "class_name": "ActorCritic",
         "init_noise_std": args.init_noise_std,
-        "actor_hidden_dims": [256, 128] if args.recurrent else [128, 128],
-        "critic_hidden_dims": [256, 128] if args.recurrent else [128, 128],
+        "actor_hidden_dims": [256, 128] if args.recurrent else [128, 64, 32],
+        "critic_hidden_dims": [256, 128] if args.recurrent else [128, 64, 32],
         "activation": "elu",
         "actor_obs_normalization": args.obs_normalization,
         "critic_obs_normalization": args.obs_normalization,

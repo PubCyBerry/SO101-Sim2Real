@@ -56,10 +56,14 @@ parser.add_argument("--max_episode_steps", type=int, default=900)
 parser.add_argument("--num_envs", type=int, default=1, help="TC.1 recorder currently supports only 1 env")
 parser.add_argument("--rl_device", default=None, help="RL device; defaults to --device")
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--obs_group", default="rl_policy")
+parser.add_argument("--obs_group", default="ref_policy")
 parser.add_argument("--critic_obs_group", default=None)
 parser.add_argument("--clip_actions", type=float, default=1.0)
-parser.add_argument("--init_noise_std", type=float, default=0.2)
+parser.add_argument("--init_noise_std", type=float, default=1.0)
+parser.add_argument("--policy_hidden_dims", type=int, nargs="+", default=[128, 64, 32],
+                    help="ActorCritic MLP hidden dims (학습 시와 동일, 레퍼런스 [128,64,32])")
+parser.add_argument("--obs_normalization", action=argparse.BooleanOptionalAction, default=True,
+                    help="actor/critic 관측 정규화 (학습 시와 동일, 기본 on)")
 parser.add_argument("--num_learning_epochs", type=int, default=20)
 parser.add_argument("--num_mini_batches", type=int, default=4)
 parser.add_argument("--overwrite", action="store_true", help="Replace output_dir if it already exists")
@@ -69,7 +73,7 @@ parser.add_argument("--warmup_steps", type=int, default=5, help="Camera/render w
 
 # Curriculum defaults.
 parser.add_argument("--active_objects", "--active_pens", dest="active_objects",
-                    type=int, default=4, choices=[1, 2, 3, 4])
+                    type=int, default=1, choices=[1, 2, 3, 4])
 parser.add_argument("--object_radius_scale", "--pen_radius_scale", dest="object_radius_scale",
                     type=float, default=1.0)
 parser.add_argument("--container_angle_scale", "--cup_angle_scale", dest="container_angle_scale",
@@ -127,11 +131,11 @@ def _build_train_cfg(cli_args: argparse.Namespace) -> dict[str, Any]:
         "policy": {
             "class_name": "ActorCritic",
             "init_noise_std": cli_args.init_noise_std,
-            "actor_hidden_dims": [128, 128],
-            "critic_hidden_dims": [128, 128],
+            "actor_hidden_dims": list(cli_args.policy_hidden_dims),
+            "critic_hidden_dims": list(cli_args.policy_hidden_dims),
             "activation": "elu",
-            "actor_obs_normalization": False,
-            "critic_obs_normalization": False,
+            "actor_obs_normalization": cli_args.obs_normalization,
+            "critic_obs_normalization": cli_args.obs_normalization,
         },
         "algorithm": {
             "class_name": "PPO",
