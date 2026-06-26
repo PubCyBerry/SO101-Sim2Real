@@ -25,7 +25,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 - 시뮬 env 는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
 - 그리퍼 codec = **affine 전용** (feature [0,100] ↔ sim joint [-10°,100°]); offset 제거됨 (절대 joint target, `use_default_offset=False`). 단일 소스 = `src/so101_contract/feature_codec.py`.
-- **데이터 생성 = 수동만(현재)**: 실기기 LeRobot `record`(Windows) + sim 수동 teleop(`teleop_se3_agent.py`). 자동 생성기(State Machine·cuRobo batch)는 VLA-only 리팩토링 때 **제거됨**; SM 기반 재도입 준비 중(isaac 그룹 `ikpy` IK 백엔드 추가)이나 코드 미완 — 현재 데이터 경로 아님.
+- **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim 수동 teleop(`teleop_se3_agent.py`). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). cuRobo batch 생성기는 제거됨.
 
 ## 환경 사양
 
@@ -97,7 +97,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 - `policy-server-rtc`(서버 측 Real-Time Chunking) · `policy-server-attn`(SmolVLA cross-attention 히트맵 PUB)는 백엔드 스크립트(`policy_server_rtc.py` · `policy_server_attention_bridge.py`)가 이 branch 에 없어 **entrypoint 에서 제거됨**. 두 기능 재도입 시 스크립트 + entrypoint 모드 + bridge `--attention_overlay` SUB(`run_cube_desk_ros_bridge.py`)를 함께 복원.
 
 **`isaac-sim-entrypoint.sh`** (isaac-sim, CMD 기본값 `bridge`):
-`bridge`(run_cube_desk_ros_bridge.py 래퍼) · `bash` · `python`
+`bridge`(run_cube_desk_ros_bridge.py 래퍼) · `datagen`(record_state_machine.py — SM 데이터 생성, `DATAGEN_TASK`/`NUM_DEMOS`/`DATAGEN_EXTRA_ARGS`) · `bash` · `python`
 
 **`vla-ros-entrypoint.sh`** (vla-ros):
 컨테이너 안에서 `colcon build --packages-select so101_vla_policy` 후 `vla_policy_node` 직접 실행 (호스트 빌드 아님; `..:/workspace` bind-mount).
@@ -136,7 +136,10 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | `tasks/pick_cube/` | `SimToReal-SO101-PickCube-v0` (entry point `pick_cube_env_cfg:PickCubeEnvCfg`, env class `ManagerBasedRLEnv`). **RL 제거됨**: 커리큘럼 없음, 보상 없음 (PickCubeRewardsCfg=empty stub), obs/action/termination/events 만 유지. Action term = `SlewLimitedJointPositionActionCfg(use_default_offset=False)` 절대 joint target |
 | `tasks/common/` | `utils.py` (수학·카메라 헬퍼) + `mdp/` (공용 obs/termination 컴포넌트) — 도메인 중립 |
 | `data/` | `lerobot_recorder.py` (LeRobot v3 writer 라이브러리) + `lerobot_units.py` (단위 변환, 단일 소스 = `src/so101_contract/feature_codec.py`) |
-| `utils/{constant,domain_randomization,cube_specs,gripper_effort}.py` | `CUBE_NAMES`·`BOWL_NAME` + DR 헬퍼, 큐브 크기/질량 단일 소스 (`cube_specs.py`), 그리퍼 effort clamp |
+| `utils/{constant,domain_randomization,cube_specs,gripper_effort,env_utils,general_assets,math_utils,monkey_patch}.py` | `CUBE_NAMES`·`BOWL_NAME` + DR 헬퍼, 큐브 크기/질량 단일 소스 (`cube_specs.py`), 그리퍼 effort clamp + vendored leisaac 유틸(`env_utils`·`general_assets`·`math_utils`·`monkey_patch`=IsaacLab 2.3.2 TerminationManager 버그 게이트 패치) |
+| `datagen/` | **SM 데이터 생성 scaffold**(leisaac식): `state_machine/{base,pick_cube}.py`(StateMachineBase + PickCube SM) + `sm_actions.py`. 드라이버 = `scripts/datagen/record_state_machine.py` |
+| `devices/` | **vendored leisaac teleop 스택**: `device_base`·`action_process`·`keyboard`(SO101Keyboard)·`gamepad`(SO101Gamepad)·`lerobot`(SO101Leader/Remote). lazy `__init__`(serial/lerobot 없이 import 가능). lekiwi/bi-arm 제외 |
+| `assets/robots/lerobot.py` | `SO101_FOLLOWER_CFG` 단일 소스(leisaac vendor). `pick_cube_env_cfg` 가 `.replace()` 로 씬 특화만 override. limit/motor/rest 테이블은 `so101_contract.leader_calibration` 에서 가져옴(값 중복 0) |
 
 > `tasks/pick_pen/`·`tasks/pick_cube_franka/` 는 미등록 잔재(env config 없음, RL 리팩토링 때 prune). 신규 task 추가 시 참고만.
 
@@ -169,6 +172,9 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
 | | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |
+| **데이터 생성** | `datagen/record_state_machine.py` | SM 데이터 생성 드라이버. SM action → env step → LeRobot v3 writer 기록. isaac-sim `datagen` 모드가 실행 (`--task`·`--num_demos`·`--dataset_dir`) |
+| | `datagen/replay_state_machine.py` | 기록된 SM 데모 재생 |
+| | `convert/isaaclab2lerobotv3.py` (+`_lerobot_features.py`) | Isaac Lab HDF5 → LeRobot v3 변환 (**host-only fallback**; in-container recorder 우선, end-to-end 미검증) |
 | **데이터** | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER |
 | **기타** | `ece_4560/` | 과정 프로젝트 (보유) |
 
@@ -180,7 +186,7 @@ USD 6개 (`scene.usd` + 객체 5개) 는 `author_pick_cube_scene.py` 로 일괄 
 
 - **패키지 이름** `sim_to_real` (`pyproject.toml`). `[build-system] requires=["setuptools<82"]`, `[tool.setuptools.packages.find] where=["src"]` 로 `src/sim_to_real/` editable 설치.
 - **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, `usd-core>=26.5` (순수 Python USD 작성·검증 공용. 단 `author_pick_cube_scene.py` 는 PhysxSchema 정식 API 라 isaac 그룹 필요).
-- **isaaclab** 은 직접 의존(`isaaclab[all,isaacsim]==2.3.2`, 외부 래퍼/leisaac 제거됨). PickCube state machine IK 백엔드용 `ikpy>=3.4,<3.5` 포함.
+- **isaaclab** 은 직접 의존(`isaaclab[all,isaacsim]==2.3.2`, 외부 래퍼/leisaac 제거됨). PickCube SM IK 백엔드용 `ikpy>=3.4,<3.5` 포함. **leisaac 은 런타임 의존성이 아니다** — 유용한 코드(`devices`·`datagen`·`assets/robots`·`utils`)는 `src/sim_to_real/` 와 `src/so101_contract/leader_calibration.py` 로 vendor, leisaac 내부 import 0(IsaacLab/lerobot/sim_to_real 로 대체).
 
 | 의존성 그룹 | 내용 | 사용처 |
 |---|---|---|
@@ -258,6 +264,7 @@ ad-hoc 작업으로 코드가 산발하지 않도록:
 - **그리퍼 codec = affine only**: feature [0, 100] (정책 출력) ↔ sim joint [-10°, 100°] (환경). 공식: `deg = feature / 100 * 110 - 10`. 단일 소스 = `src/so101_contract/feature_codec.py`.
 - **그리퍼 offset 제거**: `use_default_offset=False`. 모든 action = 절대 joint target (31.75 배수 제거). sim·real·bridge 공통.
 - 데이터 기록/재생: `src/sim_to_real/data/lerobot_units.py` 가 codec 참조, LeRobot v3 [0,100] ↔ sim [-10°,100°] 변환.
+- **실 leader ↔ sim 은 별도 계약**: `src/so101_contract/leader_calibration.py`. feature_codec 이 policy-feature ↔ sim radian 이라면, 이건 **실 leader 모터 정규화값 ↔ sim radian** 양방향. arm 은 leader [-100,100] → USD joint(관절별 비대칭) per-joint scale+offset remap(codec 의 arm 1:1 degree 로는 재현 불가), gripper affine 은 feature_codec 과 수식 동일. teleop·datagen 에서 사용.
 
 ### 5-DOF IK 공통 원칙 (sim)
 
