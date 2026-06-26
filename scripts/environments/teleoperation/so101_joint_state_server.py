@@ -17,14 +17,13 @@ import time
 import zmq
 
 try:
-    from leisaac.devices.lerobot.common.motors import (
-        FeetechMotorsBus,
-        Motor,
-        MotorCalibration,
-        MotorNormMode,
-    )
+    from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+    from lerobot.motors.feetech import FeetechMotorsBus
 except ImportError as e:
-    raise ImportError("leisaac is required. Install with: pip install leisaac[remote]") from e
+    raise ImportError(
+        "lerobot[feetech] is required. Install with: uv sync "
+        "(lerobot[feetech]>=0.4.4 is a project dep). 이 스크립트는 실 leader 머신(host uv)에서 실행한다."
+    ) from e
 
 MOTORS = {
     "shoulder_pan": Motor(1, "sts3215", MotorNormMode.RANGE_M100_100),

@@ -7,6 +7,8 @@
 # ■ 실행 모드 (CMD 첫 번째 인자)
 #   bridge   : (기본) scripts/inference/run_cube_desk_ros_bridge.py 실행
 #              → Isaac Sim + ROS 2 bridge + WebRTC livestream
+#   datagen  : scripts/datagen/record_state_machine.py 실행
+#              → state-machine 기반 LeRobot v3 데이터 생성
 #   bash     : 인터랙티브 Bash 쉘 (디버깅)
 #   python   : Python 직접 실행 (diagnostic script)
 #   <기타>   : 명령 그대로 exec (고급)
@@ -15,6 +17,8 @@
 #   공통  : LIVESTREAM (1=활성), PUBLIC_IP (원격 WebRTC relay용)
 #   bridge: NUM_CUBES (1~4), BRIDGE_EXTRA_ARGS (--eval, --headless 등)
 #   bridge: SO101_BRIDGE_SCRIPT (스크립트 경로, /workspace/scripts/inference/... 기본)
+#   datagen: DATAGEN_TASK (환경명, SimToReal-SO101-PickCube-v0 기본)
+#   datagen: NUM_DEMOS (데모 수, 50 기본), DATAGEN_EXTRA_ARGS (추가 인자)
 #
 # ■ 주의사항
 #   - ROS 2 bridge 는 DDS 환경변수에 영향을 받으므로 compose 에서 통일
@@ -30,6 +34,11 @@ set -euo pipefail
 SO101_BRIDGE_SCRIPT="${SO101_BRIDGE_SCRIPT:-/workspace/scripts/inference/run_cube_desk_ros_bridge.py}"
 NUM_CUBES="${NUM_CUBES:-4}"
 BRIDGE_EXTRA_ARGS="${BRIDGE_EXTRA_ARGS:-}"
+
+# datagen 모드 변수
+DATAGEN_TASK="${DATAGEN_TASK:-SimToReal-SO101-PickCube-v0}"
+NUM_DEMOS="${NUM_DEMOS:-50}"
+DATAGEN_EXTRA_ARGS="${DATAGEN_EXTRA_ARGS:-}"
 
 # 공통 변수 (livestream)
 LIVESTREAM="${LIVESTREAM:-1}"
@@ -73,6 +82,23 @@ case "${MODE}" in
       --livestream 2 \
       --num_cubes "${NUM_CUBES}" \
       ${BRIDGE_EXTRA_ARGS}
+    ;;
+
+  datagen)
+    # ■ State Machine 기반 LeRobot v3 데이터 생성 모드
+    #   cube_desk 시뮬 + 결정적 state machine 정책
+    #   → 성공 에피소드만 LeRobot v3 형식으로 기록
+    #
+    # 구성:
+    #   - --task DATAGEN_TASK: 환경명 (기본: SimToReal-SO101-PickCube-v0)
+    #   - --num_demos NUM_DEMOS: 생성할 데모 에피소드 수 (기본: 50)
+    #   - 추가 인자: ${DATAGEN_EXTRA_ARGS} (e.g., --headless, --livestream 0)
+
+    exec "${ISAACLAB_SH:-/workspace/isaaclab/isaaclab.sh}" -p \
+      /workspace/scripts/datagen/record_state_machine.py \
+      --task "${DATAGEN_TASK}" \
+      --num_demos "${NUM_DEMOS}" \
+      ${DATAGEN_EXTRA_ARGS}
     ;;
 
   bash|shell)

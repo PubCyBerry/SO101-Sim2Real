@@ -31,6 +31,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # /isaac-sim/python.sh = isaaclab.sh -p 가 쓰는 번들 isaacsim python(동일 site-packages).
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir "pyzmq>=27.1.0"
 
+# LeRobot v3 레코더 의존성 (state-machine datagen 스크립트용)
+#   - pyarrow<19: numpy 1.26 ABI 호환(19+ 는 numpy 2.x ABI 전용 — AGENTS.md pin 참조)
+#   - pandas: tasks.parquet DataFrame 인덱싱(v3 컨벤션)
+#   - imageio + imageio-ffmpeg: 비디오 인코딩(h264 yuv420p)
+#   - prettytable: device_base.py 장치 상태 테이블 표시
+# (베이스 이미지가 이미 일부를 보유한 경우 pip install 은 no-op)
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    "pyarrow<19" \
+    "pandas" \
+    "imageio" \
+    "imageio-ffmpeg" \
+    "prettytable"
+
 # ── 우리 패키지 (PYTHONPATH, editable 불요) ────────────────────────────────────
 # sim_to_real(Gym 등록) + so101_contract(정책 I/O 계약)는 순수 python → bind-mount 된
 # /workspace/src 를 PYTHONPATH 에 두면 직접 import. (이미지 IsaacLab 은 /workspace/isaaclab

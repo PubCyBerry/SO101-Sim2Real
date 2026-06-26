@@ -4,12 +4,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Script to print all the available environments in LeIsaac.
+Script to print all the available environments in SimToReal.
 
 The script iterates over all registered environments and stores the details in a table.
 It prints the name of the environment, the entry point and the config file.
 
-All the environments are registered in the `leisaac` package. They start with `LeIsaac` in their name.
+All the environments are registered in the `sim_to_real` package. They start with `SimToReal` in their name.
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -26,14 +26,14 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 from prettytable import PrettyTable
 
-import leisaac  # noqa: F401
+import sim_to_real  # noqa: F401
 
 
 def main():
-    """Print all environments registered in `leisaac` package."""
+    """Print all environments registered in `sim_to_real` package."""
     # print all the available environments
     table = PrettyTable(["S. No.", "Task Name", "Entry Point", "Config"])
-    table.title = "Available Environments in LeIsaac"
+    table.title = "Available Environments in SimToReal"
     # set alignment of table columns
     table.align["Task Name"] = "l"
     table.align["Entry Point"] = "l"
@@ -41,9 +41,9 @@ def main():
 
     # count of environments
     index = 0
-    # acquire all LeIsaac environments names
+    # acquire all SimToReal environments names
     for task_spec in gym.registry.values():
-        if "LeIsaac" in task_spec.id:
+        if "SimToReal" in task_spec.id:
             # add details to table
             table.add_row([index + 1, task_spec.id, task_spec.entry_point, task_spec.kwargs["env_cfg_entry_point"]])
             # increment count
