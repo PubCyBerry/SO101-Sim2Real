@@ -206,13 +206,9 @@ class VlaPolicyNode(Node):
         self.fps = int(p("fps", 30).value)
         self.joint_states_topic = p("joint_states_topic", "/isaac_joint_states").value
         self.joint_commands_topic = p("joint_commands_topic", "/isaac_joint_commands").value
-        # 그리퍼 command offset(rad) — sim cuRobo 데이터셋은 action 을 use_default_offset 의
-        # pre-offset 값(grip_target - 0.20)으로 기록한다. 학습 env 의 action term 이 +0.20 을
-        # 재적용하므로, sim bridge 추론 시 동일하게 그리퍼 target 에 더해줘야 한다(arm offset=0).
-        # 실기기(절대각 기록)는 0. sim 추론은 GRIPPER_CMD_OFFSET=0.2.
-        self.gripper_cmd_offset = float(
-            p("gripper_cmd_offset", 0.0).value or os.getenv("GRIPPER_CMD_OFFSET") or 0.0
-        )
+        # gripper offset 제거(VLA-only 리팩토링): affine codec + env action term
+        # use_default_offset=False 로 action = 절대 joint target. sim·실기기 동일,
+        # rad-space offset 없음(LeIsaac 순수 affine 동형).
         self._gripper_idx = list(SO101_JOINT_ORDER).index("gripper")
 
         if "${" in (pretrained or ""):
@@ -397,8 +393,6 @@ class VlaPolicyNode(Node):
         ts, action_lerobot = self._queue.popleft()
         self._timestep = ts + 1
         raw_rad = from_lerobot_units(action_lerobot)
-        # use_default_offset 재적용(그리퍼만; arm offset=0). sim 데이터의 pre-offset action → 절대 target.
-        raw_rad[self._gripper_idx] += self.gripper_cmd_offset
         desired_rad = clamp_joint_rad(raw_rad)
         if self.command_slew_limit:
             if self._last_target_rad is None:
