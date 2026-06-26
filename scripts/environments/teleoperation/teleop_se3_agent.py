@@ -1,4 +1,4 @@
-"""Local GUI teleoperation for SimToReal-SO101 Pick&Place tasks (PickPen / PickCube).
+"""Local GUI teleoperation for SimToReal-SO101 PickCube task.
 
 This entry point intentionally keeps the old leisaac CLI shape, but the runtime
 is pure Isaac Lab + LeRobot. It supports the SO-101 leader arm on Windows COM
@@ -90,7 +90,7 @@ def _quat(text: str) -> tuple[float, float, float, float]:
     return _parse_floats(text, 4, "quat")  # type: ignore[return-value]
 
 
-parser = argparse.ArgumentParser(description="SO-101 pick-pen GUI teleoperation")
+parser = argparse.ArgumentParser(description="SO-101 PickCube GUI teleoperation")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument(
     "--teleop_device",
@@ -180,7 +180,7 @@ parser.add_argument(
 parser.add_argument("--joint_step", type=float, default=0.035, help="Keyboard arm joint step in radians")
 parser.add_argument("--gripper_step", type=float, default=0.05, help="Keyboard gripper joint step")
 
-# Camera overrides. Defaults live in pick_pen_env_cfg.py.
+# Camera overrides. Defaults live in pick_cube_env_cfg.py.
 parser.add_argument("--top_pos", type=_vec3, default=None, help="x,y,z world position")
 parser.add_argument("--top_target", type=_vec3, default=None, help="x,y,z world look-at target")
 parser.add_argument("--top_focal", type=float, default=None, help="top focal length in mm")
@@ -253,17 +253,9 @@ import torch  # noqa: E402
 
 import sim_to_real  # noqa: E402,F401  # registers the gym env
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
-from sim_to_real.tasks.pick_pen.pick_pen_env_cfg import (  # noqa: E402
-    SO101_JOINT_ORDER,
-    add_pick_pen_cameras,
-)
+from so101_contract import SO101_JOINT_ORDER  # noqa: E402
+from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import add_pick_cube_cameras  # noqa: E402
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
-
-# Task별 카메라 주입 함수 import (PickCube는 향후 추가됨)
-try:
-    from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import add_pick_cube_cameras  # noqa: E402
-except ImportError:
-    add_pick_cube_cameras = None  # PickCube 모듈이 아직 없을 수 있음
 
 
 class RateLimiter:
@@ -1007,19 +999,12 @@ def main() -> None:  # noqa: C901
             front_focal=args_cli.front_focal,
         )
         # PickCube: front 카메라가 shoulder_link 로컬 좌표 — front_local_pos/rot 사용.
-        # 그 외 (PickPen 등): front 카메라가 world 좌표 — front_pos/front_target 사용.
-        if args_cli.task and "Cube" in args_cli.task and add_pick_cube_cameras is not None:
-            add_pick_cube_cameras(
-                env_cfg.scene,
-                **_common_cam_kwargs,
-                front_local_pos=args_cli.front_local_pos,
-                front_local_rot=args_cli.front_local_rot,
-            )
-        else:
-            add_pick_pen_cameras(
-                env_cfg.scene,
-                **_common_cam_kwargs,
-            )
+        add_pick_cube_cameras(
+            env_cfg.scene,
+            **_common_cam_kwargs,
+            front_local_pos=args_cli.front_local_pos,
+            front_local_rot=args_cli.front_local_rot,
+        )
         # 카메라 sensor update_period 는 task cfg 기본값(1/30s)을 쓴다.
         # 이는 North Star observation.images.* fps 30 계약과 leisaac 템플릿 설정에 맞춘 값이다.
         # 실시간 성능은 보조 viewport docking 을 --tune_cameras 일 때만 켜서 확보한다.

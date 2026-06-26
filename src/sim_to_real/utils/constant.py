@@ -18,8 +18,5 @@ from .cube_specs import (  # noqa: F401
     CubeSpec,
 )
 
-PEN_NAMES: list[str] = ["PenWhite", "PenGray", "PenBlack", "PenBlue"]
-PEN_CUP_NAME: str = "PenCup"
-
 CUBE_NAMES: list[str] = ["Cube1", "Cube2", "Cube3", "Cube4"]
 BOWL_NAME: str = "Bowl"
