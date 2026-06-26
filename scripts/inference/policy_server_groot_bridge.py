@@ -16,8 +16,8 @@ ZMQ 서버로 돌린다(:5555). 반면 sim 폐루프(vla_policy_node)는 LeRobot
 
   vla_policy_node ──gRPC :8080──▶ [이 bridge] ──ZMQ :5555──▶ gr00t 이미지(Gr00tPolicy)
 
-policy_server_rtc.py(RTCPolicyServer) 와 동일하게 lerobot 의 PolicyServer 를
-서브클래싱하므로 gRPC 핸드셰이크·관측 스트리밍·청크 직렬화는 전부 재사용하고,
+lerobot 의 PolicyServer 를 서브클래싱하므로 gRPC 핸드셰이크·관측 스트리밍·
+청크 직렬화는 전부 재사용하고,
 2개 지점만 오버라이드한다:
   1. SendPolicyInstructions — lerobot 정책 로드를 건너뛰고(GR00T 체크포인트는
      lerobot 포맷 아님) GR00T ZMQ 클라이언트를 연결한다.

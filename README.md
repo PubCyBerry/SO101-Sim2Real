@@ -1,48 +1,76 @@
-# SO-ARM101 VLA Control System
+# SO-ARM101 Sim-to-Real
 
-SO-ARM101 6축 로봇 팔용 **LeRobot 파이프라인 + Isaac Lab Sim-to-Real 시뮬레이션** 통합 저장소.
+SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬레이션에서 VLA 정책(ACT · SmolVLA · GR00T-N1.7)을 학습·검증하고, 실기기 SO-101 에 배포한다.
 
-실기기 텔레오퍼레이션·데이터 수집·정책 학습·추론과 Isaac Sim 시뮬을 세 가지 실행 경로로 제공한다. 호스트 uv 경로(실기기 teleop·Isaac 시뮬)는 `pyproject.toml` 의존성 그룹(`teleop` / `isaac` / `dev`)으로 묶고, `policy-server` Docker 이미지는 LeRobot 0.5.1 을 `pyproject.toml` 과 **독립적으로** 핀한다(Dockerfile.policy 가 `uv pip install` 로 직접 명세 — Isaac override 와 numpy 충돌 회피). `pyproject.toml` 의 `policy` / `async` 그룹은 호스트 참조용. 실기기는 SmolVLA(기본) / GR00T 등 LeRobot 호환 정책을 모두 학습·추론할 수 있다.
+작업은 **2대의 머신**으로 나뉜다.
+
+- **Windows 워크스테이션** — 실기기 SO-101 직결. **native uv**(WSL·Docker 없음)로 teleop·record·calibrate·setup-motors·policy-client.
+- **Linux 서버** — 시뮬·학습·추론 서버. **전부 Docker**로 Isaac Sim 폐루프, VLA 학습, policy-server.
+
+스택: **Isaac Sim 5.1 · Isaac Lab 2.3.2 · LeRobot 0.5.1(policy-server)/0.4.4(실기기 CLI) · ROS 2 Jazzy**.
 
 ## 목차 <!-- omit in toc -->
 
+- [아키텍처 — 2-머신](#아키텍처--2-머신)
 - [실행 경로](#실행-경로)
 - [환경 요구사항](#환경-요구사항)
 - [사전 설치 확인](#사전-설치-확인)
 - [공통 준비](#공통-준비)
 - [경로별 가이드](#경로별-가이드)
+- [저장소 레이아웃](#저장소-레이아웃)
 - [관련 문서](#관련-문서)
 - [Reference](#reference)
 
 ---
 
-## 실행 경로 — VLA-only 아키텍처
+## 아키텍처 — 2-머신
 
-| 경로 | 진입점 | 용도 | 가이드 |
-|---|---|---|---|
-| **A. Docker 컨테이너** (실기기) | `docker compose ... run lerobot <mode>` | 실기기 텔레옵, 데이터 수집, policy-client (async VLA 추론) | [PATH_B_DOCKER](docs/PATH_B_DOCKER.md) |
-| **B. Docker + VLA 폐루프** (시뮬) | `docker compose up` (policy-server + isaac-sim + vla-ros) | Isaac Sim 5.1 위 `SimToReal-SO101-PickCube-v0` VLA closed-loop 추론 | [Path B 내 VLA 섹션](docs/PATH_B_DOCKER.md) |
-| **C. Host uv teleop** (시뮬 수동) | `uv run scripts/environments/teleoperation/teleop_se3_agent.py` | Isaac Lab 시뮬 로컬 teleop, 수동 데이터 수집 (VLA 학습용 데이터셋 미생성) | `AGENTS.md` 참조 |
-
-### 어떤 경로를 선택할까?
+| | Windows 워크스테이션 | Linux 서버 |
+|---|---|---|
+| **역할** | 실기기 SO-101 제어 | 시뮬·학습·추론 서버 |
+| **실행** | native uv + `pyproject.toml` (WSL·Docker 없음) | Docker (전부) |
+| **작업** | teleop · record · replay · calibrate · setup-motors · find-port · policy-client | Isaac Sim 폐루프 · VLA 학습 · policy-server · sim policy-client(vla-ros) |
+| **LeRobot** | 0.4.4 (pyproject `teleop`+`async`) | 0.5.1 (policy-server 독립 핀) |
+| **로봇 I/O** | COM 포트 직결 (usbipd/WSL 불필요) | 로봇 직결 없음 (sim/추론만) |
+| **GPU** | RTX A4000 16GB (실기기 CLI 는 GPU 불요) | RTX PRO 5000 Blackwell 48GB |
 
 ```mermaid
-flowchart TD
-    Q1{"작업 유형"}
-    Q1 -->|실기기 VLA 정책 평가| A["경로 A<br/>Docker 실기기 + policy-client"]
-    Q1 -->|시뮬 VLA 폐루프 평가| B["경로 B<br/>Docker VLA 폐루프"]
-    Q1 -->|시뮬 수동 teleop| C["경로 C<br/>Host uv teleop"]
+flowchart LR
+    subgraph WIN["Windows 워크스테이션 (native uv)"]
+        ROBOT["SO-101 실기기<br/>leader + follower"]
+        CLI["LeRobot CLI<br/>record · calibrate · policy-client"]
+        ROBOT --- CLI
+    end
+    subgraph LNX["Linux 서버 (Docker)"]
+        PS["policy-server<br/>async gRPC :8080"]
+        SIM["isaac-sim<br/>SimToReal-PickCube"]
+        VLA["vla-ros<br/>vla_policy_node"]
+        GR["gr00t<br/>N1.7 ZMQ"]
+        SIM <-->|ROS2| VLA
+        VLA <-->|gRPC| PS
+        PS <-->|ZMQ| GR
+    end
+    CLI -->|"gRPC (실기기 추론)"| PS
 
-    classDef path fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
-    class A,B,C path
+    classDef win fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+    classDef lnx fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
+    class WIN,ROBOT,CLI win
+    class LNX,PS,SIM,VLA,GR lnx
 ```
 
-| 상황 | 권장 경로 |
-|---|---|
-| SO-101 실기기에서 VLA 정책(ACT·SmolVLA·GR00T) 구동 | **A** |
-| 시뮬레이션에서 VLA closed-loop 폐루프 평가 | **B** |
-| 시뮬레이션에서 수동 teleop 테스트 | **C** |
-| 원격(서버↔로컬) 텔레옵 수집 | [REMOTE_TELEOP_RECORD](docs/REMOTE_TELEOP_RECORD.md) |
+---
+
+## 실행 경로
+
+| 경로 | 머신 | 진입점 | 용도 |
+|---|---|---|---|
+| **실기기 LeRobot** | Windows (native uv) | `uv run lerobot-<mode>` | teleop · record · calibrate · setup-motors · find-port |
+| **실기기 VLA 추론** | Windows (native uv) | `uv run python -m lerobot.async_inference.robot_client` | policy-client → Linux policy-server gRPC |
+| **sim VLA 폐루프** | Linux (Docker) | `docker compose up policy-server isaac-sim vla-ros` | `SimToReal-SO101-PickCube-v0` closed-loop 평가 |
+| **VLA 학습** | Linux (Docker) | policy-server `train` · gr00t `finetune` | SmolVLA/ACT · GR00T-N1.7 |
+| **sim 수동 teleop** (보조) | Linux (host uv) | `uv run scripts/.../teleop_se3_agent.py` | Isaac Lab 로컬 teleop · USD 씬 author |
+
+> **추론 백엔드는 1개**: `policy-server`(gRPC). 실기기 policy-client(Windows)와 sim vla-ros(Linux)가 같은 서버에 접속한다.
 
 ---
 
@@ -50,113 +78,182 @@ flowchart TD
 
 ### 소프트웨어
 
-| 항목 | 버전 | 비고 |
-|------|------|------|
-| Windows | 11 Pro | 본 가이드는 Windows 11 기준 |
-| NVIDIA Driver | 580 이상 | CUDA 12.8 컨테이너 / Isaac Sim 5.1 호환 |
-| CUDA Toolkit | 12.8 이상 | torch 2.7.0+cu128 매칭 |
-| uv | 최신 | Astral 공식 installer |
-| Docker Desktop | 최신 | (경로 B) WSL2 backend + GPU 가속 활성 |
-| usbipd-win | 5.0 이상 | (경로 B) USB → WSL2 포워딩 |
-| Isaac Sim | 5.1.0 | (경로 C) `isaac` 그룹이 자동 설치 |
-| Hugging Face 계정 | - | 데이터셋·모델 업로드/다운로드 |
-| W&B 계정 | - | 학습 로깅 (선택) |
+| 항목 | Windows (실기기) | Linux (시뮬·학습) |
+|---|---|---|
+| OS | Windows 11 Pro | Ubuntu 24.04 LTS |
+| uv | 최신 (Astral) | 최신 (host uv 보조 경로용) |
+| Docker | **불필요** | Docker + NVIDIA Container Toolkit |
+| NVIDIA Driver | (Isaac Sim 로컬 실행 시) 580+ | 580+ (CUDA 12.8 컨테이너) |
+| WSL2 / usbipd | **불필요 (제거됨)** | 해당 없음 |
+| Python | 3.11 (uv 가 관리) | 3.11 (컨테이너) |
 
 ### 하드웨어
 
 | 장치 | 수량 | 비고 |
-|------|------|------|
-| NVIDIA GPU (RT 코어 + 16 GB+) | 1 | 시뮬·학습·추론 공통. RTX A4000 / A5000 / A6000 / L40(S) / RTX 6000 Ada / RTX PRO 5000·6000 Blackwell / GeForce RTX 40·50 시리즈 등. **H100 / A100 은 RT 코어 부재로 Isaac Sim 미지원** |
-| SO-101 Leader Arm | 1 | Feetech STS3215 서보 × 6 |
-| SO-101 Follower Arm | 1 | Feetech STS3215 서보 × 6 |
-| USB-Serial 어댑터 | 2 | CH343 칩 (COM 포트) |
-| 카메라 | 1~3 | front (전면), wrist (손목), top (탑뷰). `ENABLED_CAMERAS` 로 부분집합 선택 가능 |
+|---|---|---|
+| SO-101 Leader / Follower Arm | 각 1 | Feetech STS3215 서보 × 6 |
+| USB-Serial 어댑터 | 2 | CH343 칩 (Windows COM 포트) |
+| 카메라 | 1~3 | top · wrist · front. `ENABLED_CAMERAS` 로 부분집합 선택 |
+| NVIDIA GPU (RT 코어 + 16GB+) | 1 (Linux 서버) | 시뮬·학습·추론. **H100/A100 은 RT 코어 부재로 Isaac Sim 미지원**. RTX A4000/A5000/A6000·L40(S)·RTX 6000 Ada·RTX PRO 5000/6000 Blackwell·GeForce RTX 40/50 등 |
 
 ### 핵심 의존성
 
-버전은 `pyproject.toml` 에 고정. ABI 호환성 핀이라 임의 `uv lock --upgrade` 금지.
+버전은 `pyproject.toml` 에 고정. **ABI 호환성 핀이라 임의 `uv lock --upgrade` 금지.**
 
-| 패키지 | 버전 | 그룹 |
+| 패키지 | 버전 | 위치 |
 |---|---|---|
 | Python | 3.11 | (필수) |
 | torch | 2.7.0+cu128 | (공용) |
-| lerobot | 0.4.4 | 실기기 `lerobot` 이미지 (`[feetech]`) |
-| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
-| grpcio | 1.73.1 | `async` |
-| isaacsim | 5.1.0 `[all,extscache]` | `isaac` |
-| isaaclab | 2.3.2 | `isaac` (leisaac extras) |
-| leisaac | 0.4.0 | `isaac` (git tag v0.4.0) |
-| usd-core | ≥26.5 | (공용) |
+| lerobot | 0.4.4 | 실기기 native uv (`teleop`+`async`) |
+| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 (Dockerfile.policy 독립 핀) |
+| isaacsim | 5.1.0 `[all,extscache]` | `isaac` 그룹 |
+| isaaclab | 2.3.2 `[all,isaacsim]` | `isaac` (직접 의존, 외부 래퍼 제거) |
+| ikpy | ≥3.4,<3.5 | `isaac` (PickCube SM IK 백엔드) |
 
-ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `packaging<26` / `setuptools<82`. 자세한 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.
+ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `torch==2.7.0+cu128` / `torchcodec<0.6` / `packaging<26` / `setuptools<82`. 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.
 
 ---
 
 ## 사전 설치 확인
 
-본 가이드는 **NVIDIA Driver · CUDA Toolkit · uv · Docker Desktop · usbipd-win 이 이미 설치되어 있다**고 가정한다. Git Bash 또는 PowerShell 에서 다음으로 빠르게 확인한다.
-
 ```bash
-nvidia-smi              # Driver 580+ / CUDA 12.8+
-uv --version            # 최신
-docker --version        # (경로 B)
-usbipd --version        # (경로 B)
+# Windows (Git Bash) — 실기기
+uv --version
+
+# Linux 서버 — 시뮬·학습
+docker --version
+nvidia-smi          # Driver 580+ / CUDA 12.8+
 ```
 
-설치되지 않은 항목이 있으면 각 공식 가이드 참고:
-
-- NVIDIA Driver / CUDA: [developer.nvidia.com](https://developer.nvidia.com/cuda-downloads)
-- uv: [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Docker Desktop: [docs.docker.com/desktop/windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend + Settings → Resources → GPU 활성)
-- usbipd-win: `winget install usbipd` (관리자 PowerShell)
+미설치 항목은 공식 가이드 참고: [uv](https://docs.astral.sh/uv/getting-started/installation/) · [Docker + NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ---
 
 ## 공통 준비
 
-세 경로 모두에서 공통으로 거치는 단계.
-
 ### Hub / W&B 인증
 
 ```bash
-uv run hf auth login         # 또는 토큰 직접 입력
-uv run wandb login           # 선택
+uv run hf auth login        # 또는 export HF_TOKEN=hf_xxx
+uv run wandb login          # 선택
 ```
 
-또는 세션 환경변수로 주입:
+### `.env` 작성
 
-```bash
-export HF_TOKEN="hf_xxx"
-export WANDB_API_KEY="xxx"
-```
-
-### `.env` 작성 (경로 B 필수, 경로 A·C 는 참고용)
+두 머신이 각자 `.env` 를 둔다. `.env.example` 를 복사해 채운다.
 
 ```bash
 cp .env.example .env
 ```
 
-| 이름 | 설명 |
-|-----|------|
-| HF_TOKEN | Hugging Face 토큰 ([설정](https://huggingface.co/settings/tokens)) |
-| HF_USER | HF 계정 이름 |
-| WANDB_API_KEY | W&B API 키 ([설정](https://wandb.ai/settings)) |
-| TELEOP_PORT / ROBOT_PORT | 리더/팔로워 직렬 포트 (Docker 는 `/dev/ttyACM*`, uv 는 `COMx`) |
-| `*_CAM_PORT` | 카메라 포트 (Docker 는 `/dev/video*`, uv 는 OpenCV index) |
-| `CAM_*` | 해상도/FPS/fourcc |
-| SINGLE_TASK / HF_DATASET_REPO_ID / NUM_EPISODES 등 | 데이터 수집·학습 파라미터 |
+| 블록 | 변수 (발췌) |
+|---|---|
+| §0 시크릿 | `HF_TOKEN` `HF_USER` `WANDB_API_KEY` |
+| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n17/act) — 활성 모델 1줄 선택 |
+| §2 하드웨어 | `TELEOP_PORT` `ROBOT_PORT` `ROBOT_ID` `TELEOP_ID` (Windows=COM, Docker=`/dev/ttyACM*`) |
+| §3 카메라 | `ENABLED_CAMERAS` `*_CAM_PORT` `CAM_WIDTH/HEIGHT/FPS` |
+| §4 데이터 | `SINGLE_TASK` `HF_DATASET_REPO_ID` `NUM_EPISODES` `RECORD_FPS` |
+| §5 학습 | `BATCH_SIZE` `TRAIN_STEPS` `OUTPUT_DIR` (Linux 서버) |
+| §6 추론 서버 | `POLICY_SERVER_HOST/PORT` `INFERENCE_LATENCY` `OBS_QUEUE_TIMEOUT` (Linux 서버) |
+| §7 추론 클라이언트 | `POLICY_SERVER_ADDRESS` `TASK` `ACTIONS_PER_CHUNK` (실기기) |
 
-`.env` 는 Docker compose 가 `--env-file` 로 컨테이너에 주입한다. uv 경로는 자동 로드되지 않으므로 [경로 A §복사해서 바꿔 쓰는 Bash 변수](docs/PATH_A_NATIVE.md#복사해서-바꿔-쓰는-bash-변수) 블록을 권장.
+- **Linux (Docker)**: compose 가 `--env-file .env` + `env/${POLICY_PROFILE}.env` 로 컨테이너에 주입.
+- **Windows (native uv)**: 자동 로드 안 됨 → 셸에서 직접 로드: `set -a; source .env; set +a`.
 
 ---
 
 ## 경로별 가이드
 
-**VLA-only 아키텍처**: 실기기 LeRobot + Docker 기반 VLA 추론 (ACT / SmolVLA / GR00T-N1.7).
+### Windows native uv — 실기기
 
-- **[경로 A — Docker 실기기 + VLA 추론](docs/PATH_B_DOCKER.md)** — usbipd → WSL2 → Docker. LeRobot CLI teleop/record/replay + policy-client (gRPC async VLA 추론). policy-server, gr00t 서비스로 ACT·SmolVLA·GR00T-N1.7 지원.
-- **[경로 B — Docker VLA 폐루프 (시뮬)](docs/PATH_B_DOCKER.md)** — 동일 컨테이너에서 `docker compose up`. isaac-sim (official 5.1.0 + ROS2 bridge) + policy-server + vla-ros 세 서비스. `SimToReal-SO101-PickCube-v0` closed-loop 평가.
-- **[경로 C — Host uv Teleop (시뮬 수동)](AGENTS.md)** — Host uv 환경에서 `teleop_se3_agent.py` 로컬 teleop. 데이터셋 생성 미지원 (수동 시뮬 점검용).
+WSL·Docker·usbipd 없이 Git Bash 에서 직접 실행한다.
+
+```bash
+# 1) 실기기 의존성 설치
+uv sync --group teleop --group async
+
+# 2) .env 로드 (Git Bash)
+set -a; source .env; set +a
+
+# 3) 포트 감지 · 모터 셋업 · 캘리브레이션
+uv run lerobot-find-port
+uv run lerobot-setup-motors --robot.type=so101_follower --robot.port=$ROBOT_PORT
+uv run lerobot-calibrate    --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID
+
+# 4) 데이터 수집 (record)
+uv run lerobot-record \
+  --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID \
+  --teleop.type=so101_leader  --teleop.port=$TELEOP_PORT --teleop.id=$TELEOP_ID \
+  --dataset.repo_id=$HF_DATASET_REPO_ID --dataset.single_task="$SINGLE_TASK" \
+  --dataset.num_episodes=$NUM_EPISODES --dataset.fps=$RECORD_FPS
+
+# 5) 실기기 VLA 추론 (policy-client → Linux policy-server)
+uv run python -m lerobot.async_inference.robot_client \
+  --server_address=$POLICY_SERVER_ADDRESS \
+  --policy_type=$POLICY_TYPE --task="$TASK" \
+  --actions_per_chunk=$ACTIONS_PER_CHUNK --chunk_size_threshold=$CHUNK_SIZE_THRESHOLD \
+  --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID
+```
+
+> 정확한 인자 전체는 `uv run lerobot-record --help` 등으로 확인. `--robot.type` 이 거부되면(huggingface/lerobot#3078) robot config 선(先)import 또는 lerobot 0.4.5+ 사용.
+
+### Linux Docker — sim VLA 폐루프
+
+```bash
+# 3-서비스 폐루프 (SmolVLA/ACT)
+docker compose --env-file .env -f docker/docker-compose.yaml up policy-server isaac-sim vla-ros
+# GR00T-N1.7 은 gr00t 서비스 추가
+```
+
+`scripts/inference/demo_vla.sh start <act|smolvla|groot>` 가 정책 서버·bridge·vla-ros 를 자동 배선한다(livestream :49100). `--eval` 모드로 closed-loop 평가. 세부는 `AGENTS.md` §시뮬레이션 환경.
+
+### Linux Docker — VLA 학습
+
+```bash
+# SmolVLA / ACT
+docker compose -f docker/docker-compose.yaml run --rm policy-server train
+# GR00T-N1.7 (convert → finetune)
+docker compose -f docker/docker-compose.yaml run --rm gr00t convert
+docker compose -f docker/docker-compose.yaml run --rm gr00t finetune
+```
+
+데이터셋·출력은 `.env` §5(`HF_DATASET_REPO_ID`/`OUTPUT_DIR`)에서 라우팅. RL(강화학습)은 제거됨 — VLA 지도학습만.
+
+### Linux Docker — policy-server
+
+```bash
+docker compose -f docker/docker-compose.yaml up -d policy-server      # 표준 async gRPC
+# GR00T-N1.7: policy-server-groot (gr00t 서비스 위임)
+```
+
+실기기(Windows)·sim(vla-ros) 양쪽 클라이언트의 공용 추론 백엔드.
+
+### Linux host uv — sim 수동 teleop (보조)
+
+Isaac Lab 로컬 작업(수동 teleop, USD 씬 author)용. Docker 가 아닌 host uv `isaac` 그룹.
+
+```bash
+uv sync --group isaac
+uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-SO101-PickCube-v0
+```
+
+---
+
+## 저장소 레이아웃
+
+| 경로 | 내용 |
+|---|---|
+| `docs/` | 문서 허브 (`pics/` 이미지, `videos/` 동영상) |
+| `datasets/` | LeRobot v3 데이터셋 |
+| `outputs/` | 모델 체크포인트·학습 산출물 |
+| `logs/` | 런타임 로그 (`.gitignore`) |
+| `scratch/` | **임시물 전용** (smoke test·debug dump — `.gitignore`, 커밋 안 함) |
+| `scripts/` | 진입 스크립트 (`<범주>/` 단위) |
+| `src/` | `sim_to_real` · `so101_contract` 패키지 |
+| `docker/` · `env/` | Docker 빌드·entrypoint · 모델 프로필 |
+| `ros2_ws/` | sim VLA 노드(`so101_vla_policy`) — Docker vla-ros 가 빌드 |
+
+> **Linux 서버**: `datasets`·`outputs` 는 용량 큰 HDD 로 symlink (예: `/DISK1/so101-sim2real/{datasets,lerobot_outputs}`).
 
 ---
 
@@ -164,22 +261,18 @@ cp .env.example .env
 
 | 문서 | 내용 |
 |---|---|
-| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 등 에러 사례 |
-| [`docs/REMOTE_TELEOP_RECORD.md`](docs/REMOTE_TELEOP_RECORD.md) | 원격(서버 ↔ 로컬 PC) 텔레옵 데이터 수집 파이프라인 |
-| [`docs/OpenUSD_Guide.md`](docs/OpenUSD_Guide.md) | USD 포맷 / 씬 author 참고 |
+| [`AGENTS.md`](AGENTS.md) | 내부 구조·규칙·자주 쓰는 명령 (개발자용) |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 |
 
 ---
 
 ## Reference
 
 - [Isaac Sim 5.1 + Isaac Lab 2.3 + LeIsaac on Windows](https://hackmd.io/@asierarranz/rkg1tvT93gx)
-- [Installation | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/teleoperation)
 - [Teleoperation | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/teleoperation)
 - [Policy Training & Inference | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/policy_support)
 - [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning)
 - [Train an SO-101 Robot From Sim-to-Real With NVIDIA Isaac](https://docs.nvidia.com/learning/physical-ai/sim-to-real-so-101/latest/index.html)
 - [isaac-sim/Sim-to-Real-SO-101-Workshop](https://github.com/isaac-sim/Sim-to-Real-SO-101-Workshop)
 - [LeRobot Installation](https://huggingface.co/docs/lerobot/main/installation)
-- [LeRobot Cameras](https://huggingface.co/docs/lerobot/main/en/cameras)
 - [uv Installation](https://docs.astral.sh/uv/getting-started/installation/)
-- [uv Python management](https://docs.astral.sh/uv/guides/install-python/)

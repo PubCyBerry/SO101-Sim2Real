@@ -1,46 +1,32 @@
-# ros2_ws — SO-101 ROS 2 Jazzy 워크스페이스 (follower MoveIt2)
+# ros2_ws — SO-101 sim VLA 추론 ROS 2 워크스페이스
 
-WSL2 Ubuntu 24.04 + ROS 2 Jazzy 에서 SO-101 **follower** 팔을 RViz 시각화 + MoveIt 2 모션 플래닝/제어하기 위한 워크스페이스.
+Isaac Sim 폐루프 VLA 추론을 위한 **단일 패키지** 워크스페이스. Linux 서버의 Docker `vla-ros` 서비스가 이 워크스페이스를 빌드·실행한다. 실기기 제어는 ROS 가 아니라 Windows native uv(LeRobot CLI)가 담당하므로, 옛 follower MoveIt2/실기기 ROS 패키지(`so101_description`·`so101_bringup`·`feetech_ros2_driver`)와 WSL 셋업 스크립트는 **제거됐다**.
 
-전체 셋업·실행 절차는 [`../docs/PATH_D_ROS2_WSL_MOVEIT.md`](../docs/PATH_D_ROS2_WSL_MOVEIT.md) 참조.
+## 패키지
 
-## 출처 (내재화)
+| 패키지 | 역할 |
+|---|---|
+| `so101_vla_policy` | VLA 추론 ROS 2 노드(`vla_policy_node`). `/isaac_joint_states`(isaac-sim PUB) 구독 → policy-server gRPC 추론 호출 → `/isaac_joint_commands` publish. |
 
-`src/` 의 ROS 2 패키지는 **[legalaspro/so101-ros-physical-ai](https://github.com/legalaspro/so101-ros-physical-ai)** (Apache-2.0) 에서 follower MoveIt2 범위로 내재화했다.
+구성:
+- `so101_vla_policy/vla_policy_node.py` — 추론 노드 본체.
+- `so101_vla_policy/units.py` — feature codec 단위 변환(어댑터; 정본은 `src/so101_contract/feature_codec.py`).
+- `config/vla_policy.yaml` — 노드 파라미터(토픽명, policy-server 주소 등; 기본값은 `.env`/`env/<profile>.env` 에서 주입).
+- `vendor/` — gRPC action 텐서 unpickle 용 mini-lerobot shim(컨테이너 torch CPU wheel).
 
-| 패키지 | 출처 | 비고 |
-|---|---|---|
-| `so101_description` | 위 레포 | URDF/Xacro + STL 메시 (onshape 원본 CAD 제외) |
-| `so101_moveit_config` | 위 레포 | SRDF/OMPL/kinematics/controllers/RViz |
-| `so101_bringup` | 위 레포 | follower 관련 launch·config 만 유지 (leader/teleop/recording 제거, 카메라 패키지 의존성 제거) |
-| `feetech_ros2_driver` | [legalaspro/feetech_ros2_driver](https://github.com/legalaspro/feetech_ros2_driver) (`feat/joint-config-and-calibration`) | git submodule |
+## 빌드·실행 (Docker `vla-ros`)
 
-원본 전체 스택(teleop/episode_recorder/inference/policy_server 등)은 `ref_repos/so101-ros-physical-ai/` 에 보존.
-
-## 디렉터리
-
-- `setup/` — ROS 2 Jazzy + MoveIt2 설치 스크립트 (`01_add_ros2_apt_source.sh`, `02_install_ros2_packages.sh`)
-- `src/` — 내재화 ROS 2 패키지 (git 관리)
-- `build/ install/ log/` — colcon 산출물 (`.gitignore`)
-
-## 빌드 (요약)
-
-빌드 성능을 위해 WSL ext4 워크스페이스(`~/so101_ros2_ws`)에서 `src` 를 이 레포로 심볼릭 링크해 빌드한다.
+호스트에서 직접 빌드하지 않는다. `docker/vla-ros-entrypoint.sh` 가 컨테이너 안에서:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd ~/so101_ros2_ws
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
+colcon build --symlink-install --packages-select so101_vla_policy
 source install/setup.bash
+# vla_policy_node 실행 (config/vla_policy.yaml + .env 주입)
 ```
 
-## 실행 (요약)
+전체 sim 폐루프(policy-server + isaac-sim + vla-ros) 기동은 `scripts/inference/demo_vla.sh` 또는 `docker compose up` 참조. 자세한 내용은 루트 `README.md`·`AGENTS.md`.
 
-```bash
-# mock (USB 불필요) — RViz + MoveIt 모션 플래닝 검증
-ros2 launch so101_bringup follower_moveit_demo.launch.py hardware_type:=mock
+## 산출물
 
-# 실기기 (usbipd attach + udev 선행)
-ros2 launch so101_bringup follower_moveit_demo.launch.py hardware_type:=real usb_port:=/dev/so101_follower
-```
+`build/ install/ log/` 은 `.gitignore` (`ros2_ws/*.jsonl` 포함).

@@ -25,7 +25,6 @@ setup(
     entry_points={
         "console_scripts": [
             "vla_policy_node = so101_vla_policy.vla_policy_node:main",
-            "joint_command_to_trajectory = so101_vla_policy.joint_command_to_trajectory:main",
         ],
     },
 )

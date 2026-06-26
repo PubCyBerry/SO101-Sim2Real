@@ -11,7 +11,7 @@ publish 한다.
   /camera/front/image_raw             sensor_msgs/Image
 발행:
   /isaac_joint_commands               sensor_msgs/JointState  (6관절 target, rad)
-    (sim: bridge ArticulationController 가 직접 적용. 실기기: joint_command_to_trajectory shim 경유)
+    (sim: bridge ArticulationController 가 직접 적용)
 
 정책 파라미터는 실기기 policy-client 와 동일한 `.env`+`env/<POLICY_PROFILE>.env` 에서
 읽고 ROS param 으로 override 한다. 전처리(rename/resize/normalize/추론)는 서버측이라

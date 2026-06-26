@@ -2,14 +2,13 @@
 # =============================================================================
 # policy-entrypoint.sh — `policy-server` 서비스 (Dockerfile.policy) 진입점
 #
-# Async inference 정책 서버 전용 진입점. 로봇 직결 워크플로(teleop / record /
-# replay / calibrate / train 등)는 `docker/lerobot-entrypoint.sh` 에 분리되어
-# 있으며 본 이미지에서는 호출되지 않는다 (`lerobot[feetech]` 미설치).
+# Async inference 정책 서버 + 학습 진입점. 로봇 직결 워크플로(teleop / record /
+# calibrate)는 Windows 워크스테이션의 native uv(lerobot CLI)에서 실행되며 본
+# 이미지에는 없다 (`lerobot[feetech]` 미설치). train / eval 은 본 서비스가 담당.
 #
 # ■ 실행 모드 (CMD 첫 번째 인자)
 #   prepare-model : hf download — 호스트 HF 캐시에 모델 받기
 #   policy-server : lerobot.async_inference.policy_server — gRPC 추론 서버
-#   policy-server-rtc   : RTC 통합 gRPC 서버 (scripts/policy_server_rtc.py)
 #   policy-server-groot : GR00T-N1.7 gRPC↔ZMQ bridge (scripts/policy_server_groot_bridge.py)
 #   train         : lerobot-train — Policy 학습 (인자 완전 위임, SmolVLA 등)
 #   eval          : lerobot-eval  — Policy 평가 (인자 완전 위임)
@@ -55,18 +54,6 @@ INFERENCE_LATENCY="${INFERENCE_LATENCY:-0.033}"
 OBS_QUEUE_TIMEOUT="${OBS_QUEUE_TIMEOUT:-2}"
 POLICY_SERVER_EXTRA_ARGS="${POLICY_SERVER_EXTRA_ARGS:-}"
 
-# ── policy-server-rtc 환경 변수 ──────────────────────────────────────────────
-# scripts/policy_server_rtc.py (RTCPolicyServer) 기동 시 사용.
-# 위 policy-server 변수(HOST/PORT/FPS/INFERENCE_LATENCY/OBS_QUEUE_TIMEOUT)를 공유하고
-# 아래 RTC 전용 값만 추가한다.
-#
-# execution_horizon : 이전 청크와 일관성 유지 스텝 수 (권장 8-12, 기본 10)
-# max_guidance_weight: 가이던스 강도 (10스텝 flow-matching 최적값 10.0)
-# prefix_attention_schedule: 겹침 구간 가중치 방식 EXP|LINEAR|ONES|ZEROS (기본 EXP)
-RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-10}"
-RTC_MAX_GUIDANCE_WEIGHT="${RTC_MAX_GUIDANCE_WEIGHT:-10.0}"
-RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
-
 # ── policy-server-groot 환경 변수 ────────────────────────────────────────────
 # scripts/policy_server_groot_bridge.py (GrootBridgeServer) 기동 시 사용.
 # 위 policy-server 변수(HOST/PORT/FPS/...)를 공유하고 GR00T ZMQ 백엔드 주소만 추가.
@@ -74,14 +61,6 @@ RTC_PREFIX_ATTENTION_SCHEDULE="${RTC_PREFIX_ATTENTION_SCHEDULE:-EXP}"
 GROOT_ZMQ_HOST="${GROOT_ZMQ_HOST:-127.0.0.1}"
 GROOT_ZMQ_PORT="${GROOT_ZMQ_PORT:-5555}"
 GROOT_ZMQ_TIMEOUT_MS="${GROOT_ZMQ_TIMEOUT_MS:-60000}"
-
-# ── policy-server-attn 환경 변수 (SmolVLA 전용) ──────────────────────────────
-# scripts/policy_server_attention_bridge.py (AttentionBridgeServer) 기동 시 사용.
-# 위 policy-server 변수(HOST/PORT/FPS/...)를 공유하고 cross-attention 히트맵 PUB 주소만 추가.
-# 브리지(run_cube_desk_ros_bridge.py --attention_overlay)가 이 포트로 SUB. gRPC 8080·
-# GR00T 5555 와 구분. SmolVLA 가 아니면 캡처를 스킵하므로 타 모델 무영향.
-ATTN_ZMQ_HOST="${ATTN_ZMQ_HOST:-0.0.0.0}"
-ATTN_ZMQ_PORT="${ATTN_ZMQ_PORT:-5556}"
 
 # ── train 환경 변수 ──────────────────────────────────────────────────────────
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
@@ -293,56 +272,6 @@ case "$CMD" in
     ;;
 
   # ────────────────────────────────────────────────────────────────────────────
-  # policy-server-rtc — RTC 통합 Async Inference gRPC 서버
-  #
-  # scripts/policy_server_rtc.py (RTCPolicyServer) 를 기동한다.
-  # 표준 policy-server 와 gRPC 프로토콜·클라이언트 인터페이스가 동일하므로
-  # 기존 policy-client 를 그대로 사용할 수 있다.
-  #
-  # RTC 는 _get_action_chunk 내부에서 투명하게 적용된다:
-  #   - 이전 청크 leftover → prev_chunk_left_over guidance
-  #   - 경과 시각 × fps → inference_delay
-  #   → flow-matching 디노이징 루프에 guidance term 주입
-  #
-  # [env var → CLI arg 매핑]
-  #   (policy-server 변수 전부 공유)
-  #   RTC_EXECUTION_HORIZON          → --rtc_execution_horizon  (기본 10)
-  #   RTC_MAX_GUIDANCE_WEIGHT        → --rtc_max_guidance_weight (기본 10.0)
-  #   RTC_PREFIX_ATTENTION_SCHEDULE  → --rtc_prefix_attention_schedule (기본 EXP)
-  #
-  # 예시:
-  #   # docker-compose.yaml command 를 policy-server-rtc 로 변경 후:
-  #   docker compose --env-file .env -f docker/docker-compose.yaml up -d policy-server
-  #
-  #   # 또는 직접 실행:
-  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     policy-server policy-server-rtc
-  # ────────────────────────────────────────────────────────────────────────────
-  policy-server-rtc)
-    info "── Policy Server + RTC 시작 (gRPC) ───────────────"
-    info "  Bind              → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
-    info "  FPS               → ${POLICY_FPS}"
-    info "  Inference Lat     → ${INFERENCE_LATENCY} s"
-    info "  Obs Queue TO      → ${OBS_QUEUE_TIMEOUT} s"
-    info "  RTC horizon       → ${RTC_EXECUTION_HORIZON} steps"
-    info "  RTC guidance_w    → ${RTC_MAX_GUIDANCE_WEIGHT}"
-    info "  RTC schedule      → ${RTC_PREFIX_ATTENTION_SCHEDULE}"
-    info "  ※ 모델·디바이스는 클라이언트 SendPolicyInstructions 로 주입"
-    shift || true
-    exec python /workspace/scripts/policy_server_rtc.py \
-      --host=${POLICY_SERVER_HOST} \
-      --port=${POLICY_SERVER_PORT} \
-      --fps=${POLICY_FPS} \
-      --inference_latency=${INFERENCE_LATENCY} \
-      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
-      --rtc_execution_horizon=${RTC_EXECUTION_HORIZON} \
-      --rtc_max_guidance_weight=${RTC_MAX_GUIDANCE_WEIGHT} \
-      --rtc_prefix_attention_schedule=${RTC_PREFIX_ATTENTION_SCHEDULE} \
-      ${POLICY_SERVER_EXTRA_ARGS} \
-      "$@"
-    ;;
-
-  # ────────────────────────────────────────────────────────────────────────────
   # policy-server-groot — GR00T-N1.7 gRPC↔ZMQ bridge 서버
   #
   # scripts/policy_server_groot_bridge.py (GrootBridgeServer) 를 기동한다.
@@ -379,45 +308,6 @@ case "$CMD" in
       --groot_zmq_host=${GROOT_ZMQ_HOST} \
       --groot_zmq_port=${GROOT_ZMQ_PORT} \
       --groot_zmq_timeout_ms=${GROOT_ZMQ_TIMEOUT_MS} \
-      ${POLICY_SERVER_EXTRA_ARGS} \
-      "$@"
-    ;;
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # policy-server-attn — SmolVLA cross-attention 시각화 브리지 (SmolVLA 전용)
-  #
-  # scripts/policy_server_attention_bridge.py (AttentionBridgeServer) 를 기동한다.
-  # 표준 policy-server 와 동일한 gRPC 추론(vla_policy_node 무수정)을 하면서, 매 추론마다
-  # SmolVLA expert cross-attention 을 캡처해 카메라별 히트맵을 ZMQ PUB(:5556) 한다.
-  # Isaac Sim 브리지(run_cube_desk_ros_bridge.py --attention_overlay)가 SUB 해 오버레이.
-  #   vla_policy_node ─gRPC:8080─▶ [이 서버] ─ZMQ:5556(히트맵)─▶ Isaac Sim bridge
-  #
-  # ⚠ SmolVLA 전용: 정책이 SmolVLA 가 아니면 캡처를 스킵하고 표준 추론으로 동작(타 모델 무영향).
-  #
-  # [env var → CLI arg 매핑]
-  #   POLICY_SERVER_HOST/PORT/FPS/INFERENCE_LATENCY/OBS_QUEUE_TIMEOUT (policy-server 공유)
-  #   ATTN_ZMQ_HOST → --attn_zmq_host (기본 0.0.0.0)
-  #   ATTN_ZMQ_PORT → --attn_zmq_port (기본 5556)
-  #
-  # 예시:
-  #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     -e POLICY_PROFILE=smolvla policy-server policy-server-attn
-  # ────────────────────────────────────────────────────────────────────────────
-  policy-server-attn)
-    info "── Policy Server (SmolVLA + Attention Bridge) 시작 (gRPC + ZMQ) ──"
-    info "  gRPC Bind     → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
-    info "  FPS           → ${POLICY_FPS}"
-    info "  Attention ZMQ → tcp://${ATTN_ZMQ_HOST}:${ATTN_ZMQ_PORT} (히트맵 PUB)"
-    info "  ※ 모델·디바이스는 클라이언트 SendPolicyInstructions 로 주입. SmolVLA 만 캡처."
-    shift || true
-    exec python /workspace/scripts/policy_server_attention_bridge.py \
-      --host=${POLICY_SERVER_HOST} \
-      --port=${POLICY_SERVER_PORT} \
-      --fps=${POLICY_FPS} \
-      --inference_latency=${INFERENCE_LATENCY} \
-      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
-      --attn_zmq_host=${ATTN_ZMQ_HOST} \
-      --attn_zmq_port=${ATTN_ZMQ_PORT} \
       ${POLICY_SERVER_EXTRA_ARGS} \
       "$@"
     ;;

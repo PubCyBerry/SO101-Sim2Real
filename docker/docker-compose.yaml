@@ -1,148 +1,6 @@
 name: VLA-pipeline
 
 services:
-  # ── LeRobot container ─────────────────────────────────────────────────
-  # ■ Windows 11 사전 작업 (USB 장치 포워딩)
-  # ─────────────────────────────────────────
-  #   1. usbipd-win 설치 (winget install usbipd)
-  #   2. PowerShell (관리자):
-  #        usbipd list                           # VID:PID 확인
-  #        usbipd bind   --busid <LEADER_BUS>
-  #        usbipd bind   --busid <FOLLOWER_BUS>
-  #        usbipd attach --wsl --busid <LEADER_BUS>
-  #        usbipd attach --wsl --busid <FOLLOWER_BUS>
-  #   3. WSL2 쪽에서 확인: ls /dev/ttyUSB*
-  #   4. .env 파일에 TELEOP_PORT / ROBOT_PORT 경로 기입
-  #
-  # ■ 실행 - working directory에서:
-  #   docker compose --env-file .env -f docker/docker-compose.yaml up lerobot
-  lerobot:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.lerobot
-      # Buildkit 병렬 레이어 빌드 활성화
-      args:
-        BUILDKT_INLINE_CACHE: "1"
-    image: lerobot-so101:0.4.4
-    container_name: so101_lerobot
-    restart: "no"
-    # ── 사용자 매핑 ────────────────────────────────────────────────────────
-    # 호스트 UID/GID 로 실행 → bind-mount 된 datasets/logs/outputs 의 파일이
-    # 호스트 유저 소유로 생성된다. PyAV 가 mp4 를 0600 으로 만드는 문제도
-    # ownership 측면에서 해결 (소유자가 곧 호스트 유저).
-    # UID 는 bash 가 자동 설정하지만 GID 는 export 되지 않으므로 1000 fallback.
-    user: "${UID:-1000}:${GID:-1000}"
-    # ── 그룹 추가 ──────────────────────────────────────────────────────────
-    # /dev/ttyACM* (dialout, GID 20), /dev/video* (video, GID 44) 접근 권한.
-    # privileged:true 는 CAP_DAC_OVERRIDE 를 주지만 non-root UID 에는 DAC
-    # 우회 효과가 없으므로 group_add 로 명시. Ubuntu/Debian 표준 GID 사용.
-    group_add:
-      - "20"   # dialout
-      - "44"   # video
-    # ── GPU ────────────────────────────────────────────────────────────────
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    # ── 디바이스 마운트 ────────────────────────────────────────────────────
-    #
-    # [Arm 직렬 포트]
-    #   ttyACM* : CH343 칩이 cdc_acm 드라이버로 잡힌 경로
-    #
-    # [카메라]
-    #   UVC 카메라는 캡처 노드(짝수)와 메타데이터 노드(홀수) 쌍으로 존재.
-    #   OpenCV 는 캡처 노드만 사용하지만, UVC 드라이버가 메타데이터 노드도
-    #   함께 열려 있어야 정상 스트리밍되는 경우가 있어 둘 다 마운트.
-    #
-    #   top   cam  → /dev/video* (캡처), /dev/video* (메타)  — 탑뷰 시점 (기본)
-    #   wrist cam  → /dev/video* (캡처), /dev/video* (메타)  — 손목 시점 (기본)
-    #   front cam  → /dev/video* (캡처), /dev/video* (메타)  — 전면부 시점 (선택)
-    #
-    #   실제 활성 카메라는 .env 의 ENABLED_CAMERAS 가 결정 (entrypoint 가 JSON 빌드).
-    #   사용하지 않는 카메라는 .env 에서 해당 *_CAM_PORT 를 비워두면 /dev/null 폴백
-    #   마운트 (privileged 컨테이너에서 무해).
-    #
-    devices:
-      # Arm 직렬 포트
-      - "${TELEOP_PORT}:${TELEOP_PORT}"                                              # /dev/ttyACM0
-      - "${ROBOT_PORT}:${ROBOT_PORT}"                                                # /dev/ttyACM1
-      # top cam (탑뷰 시점, 기본)
-      - "${TOP_CAM_PORT:-/dev/null}:${TOP_CAM_PORT:-/dev/null}"                      # /dev/video4
-      - "${TOP_CAM_META_PORT:-/dev/null}:${TOP_CAM_META_PORT:-/dev/null}"            # /dev/video5
-      # wrist cam (손목 시점, 기본)
-      - "${WRIST_CAM_PORT:-/dev/null}:${WRIST_CAM_PORT:-/dev/null}"                  # /dev/video2
-      - "${WRIST_CAM_META_PORT:-/dev/null}:${WRIST_CAM_META_PORT:-/dev/null}"        # /dev/video3
-      # front cam (전면부 시점, 선택 — .env 에서 FRONT_CAM_PORT 주석 해제 시 활성)
-      - "${FRONT_CAM_PORT:-/dev/null}:${FRONT_CAM_PORT:-/dev/null}"                  # /dev/video0
-      - "${FRONT_CAM_META_PORT:-/dev/null}:${FRONT_CAM_META_PORT:-/dev/null}"        # /dev/video1
-
-    # udev 접근 & USB 권한에 필요 (개발/테스트 용도)
-    privileged: true
-    # ── 볼륨 ───────────────────────────────────────────────────────────────
-    volumes:
-      # 녹화 데이터 & 로그를 호스트와 공유
-      - ../datasets:/workspace/datasets
-      - ../logs:/workspace/logs
-      - ../outputs:/workspace/outputs
-      # HuggingFace 캐시: 명명 볼륨 `lerobot_hf_cache` (호스트 측 디렉터리는 docker
-      # 가 관리). 컨테이너 재생성 후에도 캐시가 유지되고, 두 서비스가 동일 볼륨을
-      # 공유하므로 한 번 받은 모델을 양쪽이 모두 사용한다.
-      # 경로를 /root/.cache → /workspace/.cache 로 옮긴 이유: 컨테이너를 호스트
-      # UID 로 실행하면 non-root 가 /root 디렉터리에 들어갈 수 없기 때문.
-      - hf_cache:/workspace/.cache/huggingface
-      # X11 소켓 — pynput 키보드 리스너 (record/teleop 의 에피소드 제어).
-      # WSLg 는 호스트 측에 /tmp/.X11-unix/X0 (mode 0777) 을 노출하므로
-      # xhost 추가 설정 없이 그대로 마운트 가능. 네이티브 Linux 데스크탑에서는
-      # 사전에 `xhost +SI:localuser:root` 가 필요할 수 있음.
-      - /tmp/.X11-unix:/tmp/.X11-unix
-    # ── 환경 변수 ──────────────────────────────────────────────────────────
-    # `.env` 값은 env_file 로만 주입한다. 셸 환경의 동명 변수가 docker compose
-    # 의 ${VAR} 보간을 가로채는 일을 피하기 위해 `environment:` 에는 .env 와
-    # 무관한 compose-전용 키만 둔다. 모든 런타임 기본값은 teleop-entrypoint.sh
-    # 의 `${VAR:-default}` 블록(라인 37-95)에서 채워진다.
-    env_file:
-      # ../.env = 머신·수집·학습·서버·클라 공통값. 그 위에 모델 프로필을 겹쳐 주입한다.
-      # 활성 모델은 .env 의 POLICY_PROFILE 로 선택 (groot | smolvla | ...). 나중 파일이 override.
-      # 새 모델 추가 = env/<name>.env 작성 후 POLICY_PROFILE=<name>.
-      - ../.env
-      - ../env/${POLICY_PROFILE:-groot_n17}.env
-    environment:
-      NVIDIA_VISIBLE_DEVICES:     all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
-      # pynput 가 X 서버에 접속할 수 있도록 호스트 DISPLAY 전달.
-      # WSLg: 호스트 DISPLAY=:0, /tmp/.X11-unix/X0 소켓이 자동 노출됨.
-      DISPLAY: ${DISPLAY:-:0}
-      # ── Rerun publish 튜닝 ────────────────────────────────────────────
-      # lerobot.utils.visualization_utils.init_rerun 의 기본 flush 단위는
-      # 8 KB 라 카메라 frame (JPEG ~50 KB) 마다 6+ 회 flush → gRPC publish
-      # 빈도가 stutter 를 유발한다. 128 KB 로 키워 frame 1-2 장 단위로 묶어
-      # publish 함으로써 host.docker.internal 네트워크 round-trip 감소.
-      # 환경변수 미설정 시 lerobot 가 init_rerun 안에서 다시 8000 으로
-      # set 하므로 (line 39 fallback) 여기서 명시적으로 주입한다.
-      RERUN_FLUSH_NUM_BYTES: "131072"
-    # ── 네트워크 ───────────────────────────────────────────────────────────
-    network_mode: host   # 카메라 스트림·ROS 브릿지 등 외부 연결 시 편의
-
-    # ── 기본 명령 오버라이드 ───────────────────────────────────────────────
-    # ENTRYPOINT=entrypoint.sh + CMD=teleop 이 기본값;
-    # 아래 주석을 해제하면 직접 명령 실행 가능
-    # command: teleop
-
-    # ── 헬스체크 ───────────────────────────────────────────────────────────
-    # `import lerobot` 은 torch 포함 전체 임포트라 수 초 소요 → 빌드 시점에 생성한
-    # 버전 파일 존재 여부로 대체 (밀리초, Python 기동 없음).
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /opt/lerobot_version.txt"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    ipc: host
-    stdin_open: true
-    tty: true
 
   # ── LeRobot Async Inference Policy Server ──────────────────────────────
   # gRPC :8080 서버. 모델 weight 는 클라이언트가 SendPolicyInstructions RPC 로
@@ -150,11 +8,10 @@ services:
   # 으로 접속한다. 추후 Linux H100 서버에 띄우고 Windows 워크스테이션에서 원격
   # 추론하는 구조도 동일한 이미지로 지원할 예정.
   #
-  # ■ 이미지 분리 (Dockerfile.policy)
-  #   lerobot 서비스(Dockerfile.lerobot, teleop deps) 와 별도 이미지로 빌드한다.
-  #   smolvla / async dependency-groups + transformers + grpcio 를 설치하고,
-  #   USB / serial / speech 패키지는 제거. 향후 GR00T 의 flash-attn 같은
-  #   추론 의존성은 이 이미지에만 추가하므로 teleop 안정성이 격리된다.
+  # ■ 이미지 (Dockerfile.policy)
+  #   smolvla / async dependency-groups + transformers + grpcio 를 설치하는
+  #   추론·학습 전용 이미지. USB / serial / speech 패키지는 제거. 실기기 teleop·
+  #   record 는 Windows native uv(lerobot CLI)가 담당하므로 본 이미지와 분리돼 있다.
   #
   # ■ 빌드
   #   docker compose -f docker/docker-compose.yaml build policy-server
@@ -163,18 +20,11 @@ services:
   #   docker compose --env-file .env -f docker/docker-compose.yaml \
   #     up -d policy-server
   #
-  # ■ 클라이언트 예시 (같은 호스트의 lerobot 컨테이너 안에서)
-  #   docker compose --env-file .env -f docker/docker-compose.yaml \
-  #     run --rm lerobot bash -c "
-  #       python -m lerobot.async_inference.robot_client \
-  #         --server_address=127.0.0.1:8080 \
-  #         --policy_type=smolvla \
-  #         --pretrained_name_or_path=lerobot/smolvla_base \
-  #         --policy_device=cuda \
-  #         --robot.type=so101_follower --robot.port=\${ROBOT_PORT} \
-  #         --task='pick the pen' --actions_per_chunk=50 \
-  #         --chunk_size_threshold=0.5
-  #     "
+  # ■ 클라이언트 (이 서버로 접속)
+  #   · 실기기     : Windows 워크스테이션 native uv —
+  #                  uv run python -m lerobot.async_inference.robot_client
+  #                  (POLICY_SERVER_ADDRESS=<이 서버 IP>:8080, .env §7 참조)
+  #   · sim 폐루프 : vla-ros 서비스의 vla_policy_node 가 gRPC 클라이언트로 접속
   policy-server:
     build:
       context: ..
@@ -185,8 +35,7 @@ services:
     container_name: policy_server
     restart: "no"
     # ── 사용자 매핑 ────────────────────────────────────────────────────────
-    # lerobot 서비스와 동일하게 호스트 UID/GID 로 실행. train/eval 의 outputs/
-    # 도 호스트 유저 소유로 생성된다.
+    # 호스트 UID/GID 로 실행 → train/eval 의 outputs/ 가 호스트 유저 소유로 생성된다.
     user: "${UID:-1000}:${GID:-1000}"
     # ── GPU (SmolVLA 추론) ────────────────────────────────────────────────
     deploy:
@@ -198,17 +47,16 @@ services:
               capabilities: [gpu]
     # ── 볼륨 ─────────────────────────────────────────────────────────────
     # USB / 카메라 디바이스 마운트는 제외 (추론 전용, 로봇 직결 안 함).
-    # datasets 는 train 모드에서 SO-101 수집 데이터를 읽기 위해 lerobot 서비스와
-    # 동일 경로를 공유한다.
+    # datasets 는 train 모드에서 수집 데이터(실기기 native uv record / sim)를 읽는다.
     volumes:
       - ../datasets:/workspace/datasets
       - ../logs:/workspace/logs
       - ../outputs:/workspace/outputs
-      # scripts/ 바인드 마운트: policy_server_rtc.py 등 커스텀 서버 스크립트 실행 시 필요.
-      # policy-server-rtc 모드에서 /workspace/scripts/policy_server_rtc.py 를 참조한다.
+      # scripts/ 바인드 마운트: policy-server-groot 모드가
+      # /workspace/scripts/inference/policy_server_groot_bridge.py 를 참조한다.
       - ../scripts:/workspace/scripts
-      # HuggingFace 캐시: lerobot 서비스와 동일한 명명 볼륨 공유.
-      # prepare-model 모드로 받은 가중치를 양쪽 서비스가 그대로 읽어 들인다.
+      # HuggingFace 캐시: gr00t 서비스와 공유하는 명명 볼륨.
+      # prepare-model 모드로 받은 가중치를 공유 서비스가 그대로 읽어 들인다.
       - hf_cache:/workspace/.cache/huggingface
     # ── 환경 변수 ────────────────────────────────────────────────────────
     env_file:
@@ -227,20 +75,9 @@ services:
     network_mode: host
 
     # ── 기본 명령 ────────────────────────────────────────────────────────
-    # policy-server      : 표준 Async Inference gRPC 서버 (RTC 없음) — **기본**
-    # policy-server-rtc  : RTC 통합 서버 (scripts/policy_server_rtc.py 경유) — opt-in
-    # policy-server-attn : SmolVLA cross-attention 시각화 브리지 (히트맵 ZMQ PUB :5556) — opt-in
-    #   (scripts/policy_server_attention_bridge.py 경유, SmolVLA 전용 — 타 정책은 캡처 스킵)
-    #   예: run --rm -e POLICY_PROFILE=smolvla policy-server policy-server-attn
-    #
-    # 기본이 non-RTC 인 이유 (2026-06-15 정량 검증, sim VLA closed-loop):
-    #   서버측 RTC(policy_server_rtc.py)는 prev_chunk_left_over 를 wall-clock 으로 추정하는데,
-    #   공식 RTC(lerobot docs/rtc)는 ActionQueue 를 추론과 co-located 해 실제 leftover 를 쓴다.
-    #   우리 구조(서버측 RTC + 클라(vla_policy_node) 별도 큐)는 leftover 가 어긋나고, 특히
-    #   Isaac bridge 의 sim-time≠wall-clock(렌더 병목) 때문에 추정이 깨진다. 같은 recorded obs
-    #   open-loop 비교: non-RTC=3.9deg(=training 충실) vs RTC h8=15deg·h12=28deg(execution_horizon
-    #   ↑일수록 악화). RTC 는 co-located ActionQueue 로 재설계하기 전까지 비권장.
-    #   상세 = docs/PICKCUBE_CUROBO_PROJECT.md §13 · docs/TROUBLESHOOTING.md.
+    # policy-server       : 표준 Async Inference gRPC 서버 — **기본**
+    # policy-server-groot : GR00T-N1.7 gRPC↔ZMQ bridge (gr00t 서비스 위임)
+    # train / eval        : VLA 지도학습 / 평가
     command: ["policy-server"]
 
     # ── 헬스체크 ─────────────────────────────────────────────────────────
@@ -260,13 +97,10 @@ services:
   # ── VLA 추론 ROS 노드 (sim) ───────────────────────────────────────────
   # 상주 Isaac Sim bridge(호스트: scripts/inference/run_cube_desk_ros_bridge.sh)가 publish 하는
   # /isaac_joint_states + /camera/{top,wrist,front}/image_raw 를 받아 policy-server(gRPC)로
-  # VLA 추론하고 /isaac_joint_commands 를 publish 한다. cuMotion/MoveIt 미경유(joint 직접).
+  # VLA 추론하고 /isaac_joint_commands 를 publish 한다. motion planner 없이 joint target 직접.
   #
   # 전제: ① policy-server 기동, ② 호스트에서 bridge 상주.
   # 실행: docker compose --env-file .env -f docker/docker-compose.yaml up vla-ros
-  #   실기기 전환: command 로 launch arg override —
-  #   ["bash","/workspace/docker/vla-ros-entrypoint.sh","ros2","launch","so101_vla_policy",
-  #    "vla_policy.launch.py","use_shim:=true","joint_states_topic:=/follower/joint_states"]
   vla-ros:
     build:
       context: ..

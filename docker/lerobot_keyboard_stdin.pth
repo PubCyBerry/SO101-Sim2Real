@@ -1,1 +1,0 @@
-import lerobot_keyboard_stdin; lerobot_keyboard_stdin.install_hook()
