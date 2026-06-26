@@ -3,7 +3,7 @@
 recorder(`pick_cube_curobo_demo.py --record_dir` / `rollout_to_lerobot.py`) 산출 폴더를
 dataset repo 로 올린다. HF_TOKEN/HF_USER 는 환경변수 또는 레포 루트 `.env` 에서 읽는다.
 
-    uv run python scripts/sim/upload_to_huggingface.py \
+    uv run python scripts/data/upload_to_huggingface.py \
         --dataset_dir outputs/so101_sim_pick_cube \
         --repo_id taehunkim/so101_sim_pick_cube \
         --commit_message "10 cuRobo sim episodes"

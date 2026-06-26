@@ -1,4 +1,4 @@
-"""cube_desk 씬을 Isaac Sim + ROS 2 bridge 로 띄우는 standalone 실행기 (PATH E, cuMotion+ROS).
+"""cube_desk 씬을 Isaac Sim + ROS 2 bridge 로 띄우는 standalone 실행기 (VLA closed-loop 추론 bridge).
 
 NVIDIA Isaac ROS pick-and-place 튜토리얼과 같은 구조: Isaac Sim 이 로봇·물리·물체를
 시뮬하고 ROS 2 bridge 로 관절 상태/명령을 주고받는다. SO-101 5DOF grasp 의 좌표 정합
@@ -15,7 +15,7 @@ NVIDIA Isaac ROS pick-and-place 튜토리얼과 같은 구조: Isaac Sim 이 로
     으로 base_link frame 포즈를 그대로 MoveIt 목표로 쓴다.
 
 실행(Linux 서버, isaac 그룹) — 래퍼가 LD_LIBRARY_PATH(번들 ROS 2 lib)·DDS env 를 export 한다:
-    scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1
+    scripts/inference/run_cube_desk_ros_bridge.sh --num_cubes 1
   (직접 호출 시 isaacsim 번들 jazzy/lib 를 LD_LIBRARY_PATH 에 넣어야 ROS2 bridge 가 뜬다 —
    librmw_implementation.so 의 libament_index_cpp.so 의존성 해소. 래퍼 내용 참조.)
 
@@ -49,7 +49,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # 여기서 setdefault 해도 유효하다. UDPv4 강제는 host(브리지)↔container(ROS 스택)의 cross-UID
 # SHM 공유 실패를 우회한다(브리지=일반 유저, 컨테이너=root → /dev/shm fastrtps 세그먼트 lock 충돌).
 # ⚠ LD_LIBRARY_PATH(isaacsim 번들 jazzy/lib)는 동적 링커가 프로세스 시작 시 읽으므로 여기서
-#   설정 불가 — 반드시 launch 전 export 한다. 래퍼 scripts/sim/run_cube_desk_ros_bridge.sh 참조.
+#   설정 불가 — 반드시 launch 전 export 한다. 래퍼 scripts/inference/run_cube_desk_ros_bridge.sh 참조.
 os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
 os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4")
 

@@ -53,7 +53,7 @@ REPO=/home/konan147/Workspaces/SO101-Sim2Real
 cd "$REPO" || exit 1
 LOGDIR="$REPO/outputs/p5_logs"; mkdir -p "$LOGDIR"
 DC="docker compose --env-file .env -f docker/docker-compose.yaml"
-BRIDGE="scripts/sim/run_cube_desk_ros_bridge.sh"
+BRIDGE="scripts/inference/run_cube_desk_ros_bridge.sh"
 PIDFILE="$LOGDIR/demo_vla.pid"
 BRIDGE_LOG="$LOGDIR/demo_vla_bridge.log"
 # bridge↔node 공유 reset token (수동 R/N reset 시 stale queue 초기화 — eval 정합). 같은 물리 파일.

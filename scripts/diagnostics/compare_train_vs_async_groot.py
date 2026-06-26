@@ -26,7 +26,7 @@
   policy-server 이미지 컨테이너에서 실행(lerobot dataset + grpc + zmq + msgpack):
     docker compose --env-file .env -f docker/docker-compose.yaml run --rm --no-deps \
       --entrypoint bash policy-server -lc \
-      'python /workspace/scripts/sim/compare_train_vs_async_groot.py --episode -1 \
+      'python /workspace/scripts/diagnostics/compare_train_vs_async_groot.py --episode -1 \
          --dataset taehunkim/so101_sim_pick_cube_smooth'
 """
 

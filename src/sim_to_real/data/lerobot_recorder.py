@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from lerobot_units import (
+from sim_to_real.data.lerobot_units import (
     CAMERA_KEYS,
     FPS,
     IMAGE_CHANNELS,

@@ -15,7 +15,7 @@ ROS latency·sim-time desync 는 오프라인 재현 불가(라이브 전용) �
 policy-server(RTC) 가 :8080 에 떠 있어야 함. policy-server 이미지 컨테이너에서 실행:
   docker compose --env-file .env -f docker/docker-compose.yaml run --rm --no-deps \
     --entrypoint bash policy-server -lc \
-    'python /workspace/scripts/sim/compare_train_vs_rtc.py --episode 0'
+    'python /workspace/scripts/diagnostics/compare_train_vs_rtc.py --episode 0'
 """
 
 from __future__ import annotations

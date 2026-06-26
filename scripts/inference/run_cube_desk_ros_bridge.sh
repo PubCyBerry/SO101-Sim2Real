@@ -10,11 +10,11 @@
 #                      container(ROS 스택, root) 의 cross-UID /dev/shm fastrtps 세그먼트 공유
 #                      실패를 우회한다. (.py 도 setdefault 하지만 명시 export 로 단일 진실원 유지.)
 #
-# 사용: scripts/sim/run_cube_desk_ros_bridge.sh --num_cubes 1
+# 사용: scripts/inference/run_cube_desk_ros_bridge.sh --num_cubes 1
 #   인자는 그대로 run_cube_desk_ros_bridge.py 로 전달된다(--num_cubes / --dr / --seed 등).
 set -euo pipefail
 
-# 레포 루트(이 스크립트는 scripts/sim/ 아래) 와 isaac venv.
+# 레포 루트(이 스크립트는 scripts/inference/ 아래) 와 isaac venv.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VENV_SITE="${REPO_ROOT}/.venv/lib/python3.11/site-packages"
@@ -32,4 +32,4 @@ export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
 export OMNI_KIT_ACCEPT_EULA="${OMNI_KIT_ACCEPT_EULA:-YES}"
 
 cd "${REPO_ROOT}"
-exec uv run --group isaac python scripts/sim/run_cube_desk_ros_bridge.py "$@"
+exec uv run --group isaac python scripts/inference/run_cube_desk_ros_bridge.py "$@"

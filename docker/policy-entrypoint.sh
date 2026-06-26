@@ -370,7 +370,7 @@ case "$CMD" in
     info "  GR00T ZMQ   → tcp://${GROOT_ZMQ_HOST}:${GROOT_ZMQ_PORT}  (timeout ${GROOT_ZMQ_TIMEOUT_MS}ms)"
     info "  ※ 추론은 gr00t 컨테이너(Gr00tPolicy N1.7)에 위임. 먼저 'gr00t' 서비스 기동 필요."
     shift || true
-    exec python /workspace/scripts/policy_server_groot_bridge.py \
+    exec python /workspace/scripts/inference/policy_server_groot_bridge.py \
       --host=${POLICY_SERVER_HOST} \
       --port=${POLICY_SERVER_PORT} \
       --fps=${POLICY_FPS} \

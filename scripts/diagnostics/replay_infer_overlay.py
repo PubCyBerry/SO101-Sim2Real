@@ -15,7 +15,7 @@ chunk(예측 action 묶음)를 받고, 그 chunk 를 horizon 만큼 재생한다
 lerobot 0.5.1 컨테이너(policy-server 이미지)에서 실행. 모델·데이터셋 = HF repo(hf_cache 캐시):
   docker compose --env-file .env -f docker/docker-compose.yaml run --rm --no-deps \
     --entrypoint bash policy-server -lc \
-    'python /workspace/scripts/sim/replay_infer_overlay.py --episode 0'
+    'python /workspace/scripts/diagnostics/replay_infer_overlay.py --episode 0'
 """
 
 from __future__ import annotations
