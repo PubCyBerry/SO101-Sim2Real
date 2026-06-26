@@ -1,8 +1,7 @@
 """cube_desk 씬을 Isaac Sim + ROS 2 bridge 로 띄우는 standalone 실행기 (VLA closed-loop 추론 bridge).
 
 NVIDIA Isaac ROS pick-and-place 튜토리얼과 같은 구조: Isaac Sim 이 로봇·물리·물체를
-시뮬하고 ROS 2 bridge 로 관절 상태/명령을 주고받는다. SO-101 5DOF grasp 의 좌표 정합
-문제(Lula↔USD)는 cuMotion 이 articulation frame 에서 직접 계획해 해소한다.
+시뮬하고 ROS 2 bridge 로 관절 상태/명령을 주고받는다.
 
 토폴로지(짝: ros2_ws so101_cumotion_*):
   pub  /isaac_joint_states   (sensor_msgs/JointState, 6관절)   → TopicBasedSystem state

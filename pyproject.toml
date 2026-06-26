@@ -139,8 +139,7 @@ isaac = [
     "isaacsim[all,extscache]==5.1.0",
     # Isaac Lab 2.3.2 직접 의존 (외부 래퍼 제거)
     "isaaclab[all,isaacsim]==2.3.2",
-    # ikpy: PickCube state machine 경로 3(ikpy) IK 백엔드. 순수 Python
-    # (numpy/scipy/sympy). Lula(경로 2)는 isaacsim 번들 솔버를 쓴다.
+    # ikpy: PickCube state machine IK 백엔드 (순수 Python: numpy/scipy/sympy).
     "ikpy>=3.4,<3.5",
 ]
 
@@ -150,8 +149,6 @@ isaac = [
 dev = [
     "ipykernel>=7.2.0",
 ]
-
-validation = ["ovphysx"]   # pre-release: 동작 확인 후 정확 버전 핀
 
 # =============================================================================
 # ■ 패키지 소스 인덱스 (uv 전용)

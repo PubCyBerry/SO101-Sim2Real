@@ -195,7 +195,6 @@ USD 6개 (`scene.usd` + 객체 5개) 는 `author_pick_cube_scene.py` 로 일괄 
 | `policy` | lerobot[smolvla] + accelerate + num2words | (호스트 참조용; policy-server 는 Dockerfile.policy 가 독립 핀) |
 | `isaac` | isaacsim[all,extscache]==5.1.0 + isaaclab[all,isaacsim]==2.3.2 + ikpy | Linux host uv sim (teleop·author) |
 | `dev` | ipykernel | — |
-| `validation` | ovphysx (pre-release) | USD 물리 검증 |
 
 ### ABI 호환성 핀
 
@@ -270,8 +269,8 @@ ad-hoc 작업으로 코드가 산발하지 않도록:
 
 SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose 를 만족 못 한다. **position 우선·orientation best-effort**:
 
-- 새 IK 경로 추가 시 orientation 을 hard constraint 로 넣지 말 것 (Lula IK·RMPFlow 모두 `target_orientation=None`, position-only).
-- MoveIt·cuMotion·cuRobo·follow-target IK 테스트 스크립트 제거됨.
+- 새 IK 경로 추가 시 orientation 을 hard constraint 로 넣지 말 것 (position-only).
+- MoveIt·cuMotion·cuRobo·Lula·RMPFlow·follow-target IK 테스트 스크립트 제거됨.
 
 ### sim 진입 스크립트 AppLauncher 인자 필터
 
