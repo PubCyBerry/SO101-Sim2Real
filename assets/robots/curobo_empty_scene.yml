@@ -1,7 +1,0 @@
-# cuRobo planner 사이드카용 더미 scene — scene_collision_checker 를 생성시키기 위한 placeholder.
-# collision_cache 만으론 checker 가 안 생겨(scene_collision_cfg None), scene_model 이 필요.
-# 실제 장애물은 런타임에 set_world(update_world)로 주입. 더미는 10m 밖이라 무해.
-cuboid:
-  _placeholder:
-    dims: [0.01, 0.01, 0.01]
-    pose: [10.0, 10.0, -10.0, 1, 0, 0, 0]
