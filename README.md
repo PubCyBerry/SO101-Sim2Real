@@ -16,23 +16,22 @@ SO-ARM101 6축 로봇 팔용 **LeRobot 파이프라인 + Isaac Lab Sim-to-Real �
 
 ---
 
-## 실행 경로
+## 실행 경로 — VLA-only 아키텍처
 
 | 경로 | 진입점 | 용도 | 가이드 |
 |---|---|---|---|
-| **A. Windows native + uv** (실기기) | `uv run lerobot-*` CLI | 로컬 venv 에서 SO-101 직접 제어, 빠른 반복·디버깅 | [PATH_A_NATIVE](docs/PATH_A_NATIVE.md) |
-| **B. Docker 컨테이너** (실기기) | `docker compose ... run lerobot <mode>` | 격리 환경, Linux 학습 서버 배포, async inference policy server | [PATH_B_DOCKER](docs/PATH_B_DOCKER.md) |
-| **C. Host uv** (Isaac Lab 시뮬) | `uv run scripts/...` | Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0` 시뮬 teleop·오라클 정책·데이터 수집 | [PATH_C_ISAAC_SIM](docs/PATH_C_ISAAC_SIM.md) |
+| **A. Docker 컨테이너** (실기기) | `docker compose ... run lerobot <mode>` | 실기기 텔레옵, 데이터 수집, policy-client (async VLA 추론) | [PATH_B_DOCKER](docs/PATH_B_DOCKER.md) |
+| **B. Docker + VLA 폐루프** (시뮬) | `docker compose up` (policy-server + isaac-sim + vla-ros) | Isaac Sim 5.1 위 `SimToReal-SO101-PickCube-v0` VLA closed-loop 추론 | [Path B 내 VLA 섹션](docs/PATH_B_DOCKER.md) |
+| **C. Host uv teleop** (시뮬 수동) | `uv run scripts/environments/teleoperation/teleop_se3_agent.py` | Isaac Lab 시뮬 로컬 teleop, 수동 데이터 수집 (VLA 학습용 데이터셋 미생성) | `AGENTS.md` 참조 |
 
 ### 어떤 경로를 선택할까?
 
 ```mermaid
 flowchart TD
-    Q1{"실행 환경"}
-    Q1 -->|시뮬레이션| C["경로 C<br/>Isaac Lab 시뮬레이션"]
-    Q1 -->|실기기| Q2{"Docker 사용 여부"}
-    Q2 -->|"아니오 (빠른 디버깅)"| A["경로 A<br/>Windows native + uv"]
-    Q2 -->|"예 (재현성)"| B["경로 B<br/>Docker 컨테이너"]
+    Q1{"작업 유형"}
+    Q1 -->|실기기 VLA 정책 평가| A["경로 A<br/>Docker 실기기 + policy-client"]
+    Q1 -->|시뮬 VLA 폐루프 평가| B["경로 B<br/>Docker VLA 폐루프"]
+    Q1 -->|시뮬 수동 teleop| C["경로 C<br/>Host uv teleop"]
 
     classDef path fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
     class A,B,C path
@@ -40,9 +39,9 @@ flowchart TD
 
 | 상황 | 권장 경로 |
 |---|---|
-| SO-101 처음 세팅, CLI 동작 빠르게 확인 | **A** |
-| Linux 학습 서버에서 fine-tune / async 추론 서버 운영 | **B** |
-| 실기기 없이 데이터 수집·정책 검증 (RT 코어 GPU 보유) | **C** |
+| SO-101 실기기에서 VLA 정책(ACT·SmolVLA·GR00T) 구동 | **A** |
+| 시뮬레이션에서 VLA closed-loop 폐루프 평가 | **B** |
+| 시뮬레이션에서 수동 teleop 테스트 | **C** |
 | 원격(서버↔로컬) 텔레옵 수집 | [REMOTE_TELEOP_RECORD](docs/REMOTE_TELEOP_RECORD.md) |
 
 ---
@@ -85,7 +84,7 @@ flowchart TD
 | lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
 | grpcio | 1.73.1 | `async` |
 | isaacsim | 5.1.0 `[all,extscache]` | `isaac` |
-| isaaclab | 2.3.0 | `isaac` (leisaac extras) |
+| isaaclab | 2.3.2 | `isaac` (leisaac extras) |
 | leisaac | 0.4.0 | `isaac` (git tag v0.4.0) |
 | usd-core | ≥26.5 | (공용) |
 
@@ -153,11 +152,11 @@ cp .env.example .env
 
 ## 경로별 가이드
 
-각 경로의 아키텍처·준비·실행 명령은 전용 문서에 정리되어 있다.
+**VLA-only 아키텍처**: 실기기 LeRobot + Docker 기반 VLA 추론 (ACT / SmolVLA / GR00T-N1.7).
 
-- **[경로 A — Windows native + uv (실기기)](docs/PATH_A_NATIVE.md)** — 호스트 uv venv 에서 `lerobot-*` CLI 직접 호출. 빠른 반복·디버깅.
-- **[경로 B — Docker 컨테이너 (실기기)](docs/PATH_B_DOCKER.md)** — usbipd → WSL2 → Docker 격리 환경. Linux 서버 배포, async inference policy server.
-- **[경로 C — Host uv (Isaac Lab 시뮬)](docs/PATH_C_ISAAC_SIM.md)** — Isaac Sim 5.1 위 `SimToReal-SO101-PickPen-v0` 시뮬 teleop·데이터 수집.
+- **[경로 A — Docker 실기기 + VLA 추론](docs/PATH_B_DOCKER.md)** — usbipd → WSL2 → Docker. LeRobot CLI teleop/record/replay + policy-client (gRPC async VLA 추론). policy-server, gr00t 서비스로 ACT·SmolVLA·GR00T-N1.7 지원.
+- **[경로 B — Docker VLA 폐루프 (시뮬)](docs/PATH_B_DOCKER.md)** — 동일 컨테이너에서 `docker compose up`. isaac-sim (official 5.1.0 + ROS2 bridge) + policy-server + vla-ros 세 서비스. `SimToReal-SO101-PickCube-v0` closed-loop 평가.
+- **[경로 C — Host uv Teleop (시뮬 수동)](AGENTS.md)** — Host uv 환경에서 `teleop_se3_agent.py` 로컬 teleop. 데이터셋 생성 미지원 (수동 시뮬 점검용).
 
 ---
 

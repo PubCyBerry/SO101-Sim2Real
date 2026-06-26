@@ -7,32 +7,30 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 | 문서 | 내용 |
 |---|---|
 | `README.md` | 허브 |
-| `docs/PATH_A_NATIVE.md` | Windows 네이티브 실행 |
-| `docs/PATH_B_DOCKER.md` | Docker 실기기 경로 |
-| `docs/PATH_C_ISAAC_SIM.md` | Isaac Sim 시뮬 경로 |
-| `docs/PATH_D_ROS2_WSL_MOVEIT.md` | WSL2 ROS 2 Jazzy + SO-101 follower MoveIt 2 경로 |
-| `docs/REALDEVICE_GRASP_PIPELINE.md` | 실기기 SO-101 scripted-expert grasp 파이프라인 (feetech ride-through·5-DOF IK·rosbag2→LeRobot) |
-| `docs/PATH_E_CUMOTION_ROS.md` | cuMotion + ROS 2 로 cube_desk pick-and-place (Isaac Sim bridge + MoveIt cuMotion + SM 노드) |
+| `docs/PATH_B_DOCKER.md` | Docker 실기기 경로 (LeRobot CLI teleop·record·replay) |
 | `docs/PATH_GROOT_N17.md` | GR00T-N1.7 네이티브 정책 (별도 gr00t 이미지 finetune + ZMQ 서버 + gRPC↔ZMQ bridge → 기존 sim 폐루프) |
-| `docs/SIM_REAL_INFERENCE_PARITY.md` | sim·real 추론 데이터 변환(단위·offset·정규화·RELATIVE) 감사 + 제어 분기 인자(🟢 gripper offset=Option A 절대기록 해소·🟠 GR00T single_arm RELATIVE·min-max·카메라 intrinsic·🟠 gripper scale 캘리브) |
-| `docs/PICKCUBE_RL_REF_COMPARISON.md` | 성공 레퍼런스(`ref_repos/pick_and_place`, IsaacLab Lift-Cube-Place) 대비 분석 + reward/arch/gamma 정합(`--skill ref`) — 성공 8할=강한 그리퍼+평면 place, 우리 블로커=grasp 물리 재확인 |
+| `docs/SO101_POLICY_IO_CONTRACT.md` | SO-101 정책 입출력 규약 (feature codec 0-100·affine 그리퍼·절대 joint target) |
+| `docs/LEISAAC_VLA_INFERENCE_COMPARISON.md` | LeIsaac 식 in-process VLA 추론 vs ROS2 폐루프 비교·검증 (demo_vla_inproc.sh) |
+| `docs/NVIDIA_WORKSHOP_PICKCUBE_COMPARISON.md` | VLA 정책 비교·벤치마크 (ACT·SmolVLA·GR00T-N1.7) |
+| `docs/NVIDIA_SO101_SIM2REAL_INDEX.md` | 시뮬-리얼 파이프라인 인덱스 + 이미지 준비 가이드 |
 | `docs/TROUBLESHOOTING.md` | 트러블슈팅 |
-| `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (leisaac 비교·actuator 근거) |
-| `docs/LULA_GUI_TUNING.md` | Isaac Sim GUI(Lula Test Widget·Robot Description Editor)로 SO-101 RMPFlow·default_q 튜닝 |
-| `docs/PICKCUBE_CUROBO_PROJECT.md` | cuRobo PickCube 마스터(P0~P6) — 배치 충돌 플래닝 + **sim→train→sim VLA 전체 루프**(render-batch 데이터 → SmolVLA 학습 → ROS2 추론). §13=재현·함정 |
+| `docs/GRASP_PHYSICS.md` | SO-101 grasp 물리·충돌 튜닝 (큐브 collider convexHull, jaw/gripper SDF) |
 
-## 두 실행 경로
+## 실행 경로 — VLA 추론 중심
 
-| | 실기기 경로 | 시뮬 경로 |
+**VLA-only 아키텍처**: 3개 Docker 서비스로 분산된 추론 + 실기기 LeRobot CLI.
+
+| | 실기기 경로 | VLA 시뮬 폐루프 |
 |---|---|---|
-| **실행 방식** | Docker (`docker/docker-compose.yaml`) | Host uv (`uv run scripts/...`) |
-| **진입점** | `lerobot` / `policy-server` 두 서비스 | `SimToReal-SO101-PickPen-v0` Gym 환경 |
-| **담당** | 텔레옵·데이터 수집·학습·추론·시각화 | Isaac Lab `ManagerBasedRLEnv` |
-| **스택** | LeRobot 0.4.4 / 0.5.1 | Isaac Sim 5.1 / IsaacLab 2.3 / leisaac 0.4.0 (git tag) |
-| **기본 정책** | SmolVLA · **GR00T-N1.7**(별도 gr00t 이미지+bridge, `docs/PATH_GROOT_N17.md`) | — |
+| **실행 방식** | Docker (`docker/docker-compose.yaml run lerobot <mode>`) | Docker (`docker compose up` policy-server·isaac-sim·vla-ros) |
+| **진입점** | LeRobot CLI (teleop·record·replay·calibrate·policy-client) | Isaac Lab `SimToReal-SO101-PickCube-v0` Gym env (ROS2 bridge via isaac-sim) |
+| **정책 종류** | ACT · SmolVLA · **GR00T-N1.7** | 동일 (env=추론/데이터 substrate, RL 제거) |
+| **스택** | LeRobot 0.4.4 (lerobot) / 0.5.1 (policy-server) | Isaac Sim 5.1 / IsaacLab 2.3.2 / leisaac 0.4.0 (git tag v0.4.0) |
+| **서비스 3종** | `lerobot`(실기기 + 데이터) / `policy-server`(async gRPC) / `gr00t`(GR00T-N1.7 ZMQ) | `isaac-sim`(official nvcr 5.1, ROS2 bridge·WebRTC livestream) / `policy-server` / `vla-ros`(폐루프 노드) |
 
-- 시뮬 경로는 `src/sim_to_real/` 가 Gym 환경을 등록하고 `scripts/environments/teleoperation/teleop_se3_agent.py` 등이 진입한다. `isaac` 의존성 그룹으로 설치.
-- Docker 시뮬 이미지는 현재 미연결 (`Dockerfile.leisaac` 부활 시 별도 진입점 신설 예정).
+- 시뮬 env는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
+- 그리퍼 codec = **affine 전용** (feature [0,100] ↔ sim joint [-10°,100°]); offset 제거됨 (절대 joint target, `use_default_offset=False`). 단일 소스 = `src/so101_contract/feature_codec.py`.
+- 데이터 생성 = TBD (현재는 실기기 LeRobot record / sim teleop 수동; cuRobo 제거됨).
 
 ## 환경 사양
 
@@ -52,10 +50,11 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
-| `lerobot` | `lerobot-so101:0.4.4` / `Dockerfile.lerobot` | Python 3.11 + LeRobot 0.4.4 (teleop deps) | teleop / record / replay / train / eval / dataset-viz |
-| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async deps) | async inference gRPC 서버 (+ `policy-server-groot` bridge) |
-| `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 |
-| `gr00t` | `gr00t-n17:ea` / `ref_repos/Isaac-GR00T/docker/Dockerfile`(무수정) | Python 3.10 + transformers 4.57 + gr00t | GR00T-N1.7 convert / finetune / ZMQ 추론(:5555) |
+| `lerobot` | `lerobot-so101:0.4.4` / `Dockerfile.lerobot` | Python 3.11 + LeRobot 0.4.4 (teleop deps) | 실기기: teleop / record / replay / calibrate / policy-client (async inference) |
+| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async deps) | async inference gRPC 서버 (ACT·SmolVLA·GR00T-N1.7 전부; groot bridge 별도) |
+| `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-v0` 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
+| `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 (`/vla_policy_action` publish) |
+| `gr00t` | `gr00t-n17:ea` / `ref_repos/Isaac-GR00T/docker/Dockerfile`(무수정) | Python 3.10 + transformers 4.57 + gr00t | GR00T-N1.7 convert / finetune / ZMQ 추론 서버(:5555, policy-server-groot bridge 수신) |
 
 - 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
 - 의존성 격리 이유: GR00T-N1.7 은 transformers 4.57/py3.10 으로 policy-server(5.3/3.12)와 공존 불가 → `gr00t` 별도 이미지(NVIDIA 네이티브, bind-mount+entrypoint override). 추론은 `policy-server-groot` gRPC↔ZMQ bridge 가 잇는다(`docs/PATH_GROOT_N17.md`).
@@ -74,15 +73,22 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 **`lerobot-entrypoint.sh`** (lerobot 서비스):
 `teleop` · `record` · `replay` · `calibrate` · `setup-motors` · `find-port` · `find-cameras` · `find-joint-limits` · `dataset-viz` · `policy-client` · `edit-dataset` · `info` · `bash` · `python`
 
-- `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 구동. `async` 그룹(grpcio + protobuf)이 teleop 이미지에도 설치됨. 실제로는 `policy-client-shim.py` 경유 (아래 참조).
+- `policy-client` 는 `lerobot.async_inference.robot_client` 로 정책 서버에 gRPC 접속해 SO-101 follower 구동. `async` 그룹(grpcio + protobuf)이 teleop 이미지에도 설치됨. 실제로는 `docker/policy-client-shim.py` 경유 (아래 참조).
 
 **`policy-entrypoint.sh`** (policy-server 서비스, CMD 기본값 `policy-server`):
-`prepare-model` · `policy-server` · `policy-server-rtc` · `policy-server-groot` · `policy-server-attn` · `train` · `eval` · `info` · `bash` · `python`
+`policy-server` · `policy-server-rtc` · `policy-server-groot` · `policy-server-attn` · `info` · `bash` · `python`
+
+> **RL 학습 삭제됨**: train/eval 모드 제거 (SmolVLA/ACT 학습은 호스트 uv 경로에서 별도 진행, 현재 스코프 아님). ✍ Policy-server는 추론 서버만 담당.
 
 - `policy-server-rtc` 는 `policy_server_rtc.py` 로 서버 측 Real-Time Chunking(RTC) 가이던스를 주입한 async 서버 (gRPC 프로토콜·클라이언트 변경 없음, `RTC_*` env 튜닝).
-- `policy-server-attn` 은 `policy_server_attention_bridge.py` (`AttentionBridgeServer`, PolicyServer 서브클래스)로 **SmolVLA 전용** cross-attention 시각화 브리지. gRPC 추론은 표준과 동일(`vla_policy_node` 무수정)하면서 매 추론마다 SmolVLA expert cross-attention(마지막 cross 레이어, head·action-step 평균)을 instance-level monkey-patch(`eager_attention_forward`·`embed_prefix`·`embed_image`)로 캡처해 카메라별 히트맵을 ZMQ PUB(`ATTN_ZMQ_*`, 기본 :5556). Isaac Sim 브리지(`run_cube_desk_ros_bridge.py --attention_overlay`)가 SUB 해 top/wrist/front omni.ui 창에 오버레이(토글=표시만). SmolVLA 가 아니면 캡처 스킵 → groot/act 무영향. cam 매핑=입력순서(camera1=top/2=wrist/3=front).
-- `policy-server-groot` 는 `policy_server_groot_bridge.py` (`GrootBridgeServer`, PolicyServer 서브클래스)로 gRPC 컨트랙트를 유지한 채 추론만 `gr00t` 컨테이너의 ZMQ 서버(Gr00tPolicy N1.7)에 위임한다. `GROOT_ZMQ_*` env, `vla_policy_node` 무수정.
-- **train/eval 은 이쪽 서비스**: SmolVLA 학습이 쓰는 transformers / accelerate / num2words 가 `policy` 그룹에만 있고 lerobot 이미지엔 미설치. (GR00T-N1.7 학습은 lerobot-train 이 아니라 `gr00t` 서비스 `finetune` 모드.)
+- `policy-server-attn` 은 `policy_server_attention_bridge.py` (`AttentionBridgeServer`, PolicyServer 서브클래스)로 **SmolVLA 전용** cross-attention 시각화 브리지. gRPC 추론은 표준과 동일(`vla_policy_node` 무수정)하면서 매 추론마다 SmolVLA expert cross-attention(마지막 cross 레이어, head·action-step 평균)을 instance-level monkey-patch(`eager_attention_forward`·`embed_prefix`·`embed_image`)로 캡처해 카메라별 히트맵을 ZMQ PUB(`ATTN_ZMQ_*`, 기본 :5556). isaac-sim bridge(`scripts/inference/run_cube_desk_ros_bridge.py --attention_overlay`)가 SUB 해 top/wrist/front omni.ui 창에 오버레이(토글=표시만). SmolVLA 가 아니면 캡처 스킵 → groot/act 무영향. cam 매핑=입력순서(camera1=top/2=wrist/3=front).
+- `policy-server-groot` 는 `scripts/inference/policy_server_groot_bridge.py` (`GrootBridgeServer`, PolicyServer 서브클래스)로 gRPC 컨트랙트를 유지한 채 추론만 `gr00t` 컨테이너의 ZMQ 서버(Gr00tPolicy N1.7)에 위임한다. `GROOT_ZMQ_*` env, `vla_policy_node` 무수정.
+
+**`isaac-sim-entrypoint.sh`** (isaac-sim 서비스, CMD 기본값 `bridge`):
+`bridge`(run_cube_desk_ros_bridge.py 래퍼) · `bash` · `python`
+
+**`vla-ros-entrypoint.sh`** (vla-ros 서비스):
+VLA 추론 노드 (`vla_policy_node`) 직접 실행, ROS 서비스 호출 불가.
 
 **`gr00t-entrypoint.sh`** (gr00t 서비스, CMD 기본값 `zmq-server`):
 `convert`(v3→v2.1+modality.json) · `finetune`(examples/finetune.sh) · `zmq-server`(run_gr00t_server.py) · `bash` · `python`
@@ -105,9 +111,9 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
   - train 출발 모델 라우팅: `POLICY_BASE_MODEL_PATH` 단일 변수 + `TRAIN_POLICY_TYPE` 유무로 `--policy.path`(체크포인트) ↔ `--policy.type` + `--policy.base_model_path`(native 베이스).
   - **`groot_n17`(GR00T-N1.7)은 lerobot-train/policy-server 경로가 아니다**: `GROOT_*` 변수(`GROOT_BASE_MODEL`/`GROOT_CHECKPOINT`/`GROOT_MODALITY_CONFIG`/`GROOT_ZMQ_*`)로 `gr00t` 이미지(convert/finetune/zmq-server) + `policy-server-groot` bridge 를 구동한다. `RENAME_MAP` 비움(raw top/wrist/front). 상세 `docs/PATH_GROOT_N17.md`.
 
-## 시뮬레이션 구조 (Isaac Lab 경로)
+## 시뮬레이션 환경 — VLA 추론·데이터 기판
 
-호스트 uv 환경에서 직접 실행. Docker 미연결 — RT 코어 GPU 가 있는 Windows 워크스테이션에서 `uv sync --group isaac` 후 사용.
+`SimToReal-SO101-PickCube-v0` Gym 환경은 **추론·데이터 기판**이다 (RL 제거됨). 온호스트 uv 실행(`uv sync --group isaac`) 또는 Docker isaac-sim 서비스 내에서 실행되며, ROS2 bridge를 통해 VLA 정책·데이터 기록을 지원한다.
 
 ### Python 패키지 `sim_to_real` (`src/sim_to_real/`)
 
@@ -115,48 +121,53 @@ SO-ARM101 6축 로봇 팔용 **실기기 LeRobot 파이프라인 + Isaac Lab Sim
 
 | 경로 | 내용 |
 |---|---|
-| `assets/scenes/{pen_desk,cube_desk}.py` | `PEN_DESK_CFG` / `CUBE_DESK_CFG` (UsdFileCfg 래퍼) |
+| `assets/scenes/cube_desk.py` | `CUBE_DESK_CFG` (UsdFileCfg 래퍼, pen_desk 삭제됨) |
 | `tasks/__init__.py` | `isaaclab_tasks.utils.import_packages` 로 하위 task config 자동 등록 (블랙리스트: `utils`, `.mdp`) |
-| `tasks/pick_pen/` | `SimToReal-SO101-PickPen-v0` (entry point `pick_pen_env_cfg:PickPenEnvCfg`, env class `ManagerBasedRLEnv`), `mdp/{observations,terminations,rewards,events}.py` |
-| `tasks/pick_cube/` | `SimToReal-SO101-PickCube-v0` (entry point `pick_cube_env_cfg:PickCubeEnvCfg`). 펜과 4객체+1컨테이너 구조가 같아 **MDP 를 fork 하지 않고 `pick_pen.mdp` 를 import** 해 cube/bowl 이름만 명시 주입(reward/`rl_state` 기본값이 `PEN_NAMES` 라 기본값 의존 금지) |
-| `utils/{constant,domain_randomization}.py` | `PEN_NAMES`·`PEN_CUP_NAME`·`CUBE_NAMES`·`BOWL_NAME` 상수 + `randomize_object_in_ellipse` / `randomize_object_on_arc` 두 `EventTermCfg` wrapper (타원 면적 균등 / 호 1D sampling) |
+| `tasks/pick_cube/` | `SimToReal-SO101-PickCube-v0` (entry point `pick_cube_env_cfg:PickCubeEnvCfg`, env class `ManagerBasedRLEnv`). **RL 제거됨**: 커리큘럼 없음, 보상 없음 (PickCubeRewardsCfg=empty stub), obs/action/termination/events 만 유지. Action term = `SlewLimitedJointPositionActionCfg(use_default_offset=False)` 절대 joint target |
+| `tasks/common/` | `utils.py` (수학·카메라 헬퍼) + `mdp/` (공용 obs/termination 컴포넌트) — pen/cube 도메인 중립 |
+| `data/` | `lerobot_recorder.py` (LeRobot v3 writer 라이브러리) + `lerobot_units.py` (단위 변환, 단일 소스 = `src/so101_contract/feature_codec.py`) |
+| `utils/{constant,domain_randomization,cube_specs,gripper_effort}.py` | `CUBE_NAMES`·`BOWL_NAME` + `randomize_object_in_ellipse` / `randomize_object_on_arc` DR 헬퍼, 큐브 크기/질량 단일 소스 (`cube_specs.py`), 그리퍼 effort clamp (env.step() 적용) |
 
 ### USD 에셋 (`assets/`)
 
-- `scenes/pen_desk/scene.usd` + `objects/<Pen*,PenCup>/<Name>.usd` — kitchen_with_orange 패턴 (객체별 self-contained USD + `prepend payload` 참조)
-- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — 동일 패턴. 큐브 = **Cube1/2 40mm·Cube3/4 50mm**(2026-06-18 30/40→40/50 확대; 크기/질량 단일 진실 소스 = `src/sim_to_real/utils/cube_specs.py`, 변경은 거기 한 곳만) 회색 펠트(라운드 visual + grasp 물리 mass 35/55g, contactOffset 0.004, solverPos 32, friction 1.8/1.5), 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body
-- `robots/` — SO-101 follower USD + 편집용 URDF
-- **충돌 근사**: grasp 관여 mesh 를 형상별로 — 오목(jaw/gripper, bowl)은 SDF/convexDecomposition, **볼록(큐브)은 convexHull**. jaw/gripper collider = `/so101_new_calib/{jaw,gripper}/collisions`(convexDecomposition→sdf, `set_gripper_jaw_sdf_collision.py`). 팔 링크는 convexDecomposition 유지(grasp 무관·저비용). **⚠ 큐브 collider 정정(2026-06-22)**: 2026-06-18 에 큐브를 SDF 라운드 mesh 로 바꿨으나, 큐브는 **볼록**이라 SDF 가 불필요했고 평평한 책상 접촉에서 normal 이 매 step 뒤집혀 **제자리 회전 버즈(~2.9 rad/s 진동, "덜그럭")** + 그 불안정이 **grasp 도 망가뜨림**(고정 spawn SM 3/16=19%). **convexHull 로 교체**(같은 라운드 표면을 볼록 형상이라 정확 표현) → jitter 해소(0.056 rad/s 정지, 50배↓) + **grasp 복원(13/16=81%)**. SDF 는 오목 형상에만 쓴다(triangle/meshSimplification 은 동적서 convexHull fallback). 측정: `scripts/test/measure_cube_jitter.py`
-- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 큐브 collider 는 self-contained USD 에 `PhysicsCollisionAPI`+convexHull 직접 부여 (별도 proxy 미사용)
-- **영역 분리**: 조작 대상(펜/큐브) = 그린 타원 (`y ∈ [0.22, 0.26]`), 컨테이너(펜컵/그릇) = 주황 호 (`y ∈ [0.34, 0.40]`). y 마진 ≥ 0.08 m 라 조작 대상이 컨테이너 안에 spawn 불가.
+- `scenes/cube_desk/scene.usd` + `objects/<Cube1~4,Bowl>/<Name>.usd` — kitchen_with_orange 패턴 (객체별 self-contained USD + `prepend payload` 참조). 펜 씬 삭제됨.
+- 큐브 = **Cube1/2 40mm·Cube3/4 50mm** (단일 진실 소스 = `src/sim_to_real/utils/cube_specs.py`, 변경은 거기 한 곳만). 회색 펠트(라운드 visual + grasp 물리 mass 35/55g, contactOffset 0.004, solverPos 32, friction 1.8/1.5).
+- 그릇 = 반구 곡면 벽(8밴드×24 panel) 동적 rigid body.
+- `robots/` — SO-101 follower USD + 편집용 URDF.
+- **충돌 근사**: grasp 관여 mesh 를 형상별로 — 오목(jaw/gripper, bowl)은 SDF/convexDecomposition, **볼록(큐브)은 convexHull**. jaw/gripper collider = `/so101_new_calib/{jaw,gripper}/collisions`(convexDecomposition→sdf, `scripts/assets/set_gripper_jaw_sdf_collision.py`). 팔 링크는 convexDecomposition 유지(grasp 무관·저비용). **큐브 collider는 convexHull**(2026-06-22 정정): SDF로 인한 jitter(~2.9 rad/s 회전 버즈)를 50배 감소(0.056 rad/s), grasp 성공 13/16=81% 달성. SDF는 오목 형상(bowl)에만 쓴다.
+- **좌표 정합**: `SCENE_OFFSET` 상수로 top-level translate 일괄 시프트. 큐브 collider 는 self-contained USD 에 `PhysicsCollisionAPI`+convexHull 직접 부여 (별도 proxy 미사용).
+- **영역 분리**: 조작 대상(큐브) = 그린 타원 (`y ∈ [0.22, 0.26]`), 컨테이너(그릇) = 주황 호 (`y ∈ [0.34, 0.40]`). y 마진 ≥ 0.08 m.
 
 ### 진입 스크립트 (`scripts/`)
 
-| 스크립트 | 내용 |
-|---|---|
-| `environments/list_envs.py` | leisaac 등록 환경 일람 |
-| `environments/author_pick_pen_scene.py` · `author_pick_cube_scene.py` | 펜/큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. **펜**=pxr.Sdf 문자열 조립(isaac 불필요). **큐브**=공식 pxr/PhysxSchema 스키마 API. PhysxSchema 가 isaacsim 번들 플러그인이라 `isaaclab.app.AppLauncher` headless 부팅이 필요 → `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python scripts/environments/author_pick_cube_scene.py`. 큐브 조명은 scene.usd 가 직접 author(`/Scene/DomeLight`+`/Scene/KeyLight`), 그릇 충돌은 watertight mesh + SDF(`approximation="sdf"`, PhysxSDFMeshCollisionAPI) |
-| `assets/set_gripper_jaw_sdf_collision.py` · `assets/viz_collision_overlay.py` | (1) `so101_follower.usd` jaw/gripper collision 을 convexDecomposition→**SDF**(usd-core raw 스키마, isaac 불요, `.preSDF.bak` 백업) (2) visual vs collision(SDF source) vs convexHull 오버레이 PNG(`outputs/collision_overlay/`, matplotlib+trimesh). 둘 다 GPU 불요 |
-| `environments/teleoperation/teleop_se3_agent.py` | PickPen/PickCube 공용 로컬 GUI teleop (`--task` 로 분기). `keyboard` / `so101leader`, `--tune_cameras`(top/wrist/front 3단 수직 분할 docking viewport + 실시간 카메라 튜너 위젯), reset 시 초기 부감 뷰 |
-| `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
-| `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 으로 실제 SO-101 leader 상태를 원격 송출 (`SO101LeaderRemote` 카운터파트) |
-| `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
-| `sim/run_cube_desk_ros_bridge.py` | **PATH E** — cube_desk 를 Isaac Sim standalone + `isaacsim.ros2.bridge` 로 띄워 `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose`(base_link frame) publish. cuMotion+ROS 제어의 시뮬 쪽. **`--attention_overlay`** = `policy-server-attn`(SmolVLA) PUB 히트맵을 ZMQ SUB(`--attn_zmq_port`)해 top/wrist/front omni.ui 창에 JET 오버레이 + 토글(GUI/livestream 전용). |
-| `sim/gen_so101_xrdf.py` | **PATH E** — `assets/robots/so101.xrdf`(cuMotion collision sphere)↔URDF 정합·FK/IK 검증(curobo, 서버) |
-| `planning/curobo_planner_server.py` · `sim/pick_cube_curobo_{demo,batch}.py` | **cuRobo 트랙** — ZMQ planner 사이드카 + single-env 데모 / multi-env lock-step 배치. `--record_dir` 지정 시 **LeRobot v3 기록 모드**(demo=single-env, batch=success-only render-batch N-env 카메라). 상세 `docs/PICKCUBE_CUROBO_PROJECT.md` |
-| `sim/lerobot_recorder.py` | LeRobot v3 writer 공유 모듈(`LeRobotV3DatasetWriter`) — rollout_to_lerobot 와 demo/batch recorder 가 공유. so_follower v3.0·6-dim·3cam h264. pyarrow/imageio 지연 import(ABI) |
-| `sim/upload_to_huggingface.py` | LeRobot v3 데이터셋 HF 업로드(Isaac 무의존) + **codebase_version 태그 자동 생성·이동**(없으면 train RevisionNotFound). `.env` HF_TOKEN/HF_USER |
-| `sim/rollout_to_lerobot.py` · `sim/lerobot_units.py` | RL expert rollout → LeRobot v3 기록 / 단위(rad↔deg·gripper[0,100])·카메라 변환 공용 헬퍼. **그리퍼 기록 규약 = 절대 joint target**(2026-06-18 Option A, post-offset/real native; 옛 pre-offset −0.20 폐기 → sim·real 추론 둘 다 `GRIPPER_CMD_OFFSET=0`, 발산 0). curobo demo/batch·rollout 동일 적용. 상세 `docs/SIM_REAL_INFERENCE_PARITY.md §5.1` |
-| `run_4cube_1024_pipeline.sh` | **무중단 학습 파이프라인**(메인 리포 실행) — 4-cube 1024 gen → HF push → ACT/SmolVLA/GR00T-N1.7 **등량 640k samples** 학습(b32×20k / b32×20k / b8×80k) → 모델 push. 직렬·VRAM 게이트·Stage1 skip-if-complete·`POLICY_PROFILE` 셸 프리픽스·hf `--token`. 로그 `outputs/p5_logs/4cube1024_*.log` |
-| `run_4cube_1024_eval.sh` | 3모델 **closed-loop sim eval**(bridge `--eval` + policy-server + vla-ros) 직렬 자동 — 동일 N·num_cubes 공정 비교, per-모델 `outputs/vla_eval_*_4cube_1024.json`. 임시 `env/*_4ceval.env` 프로필(모델 repoint)로 vla node `_load_env` override 회피 |
-| `demo_vla.sh` | **VLA 라이브 데모 런처**(eval 아님, 연속 추론) — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. ACT·SmolVLA(policy-server) / GR00T(zmq+bridge) 자동 배선, 임시 `env/*_demo.env` 생성·정리, livestream(WebRTC :49100) 관전 |
-| `sim/compare_train_vs_rtc.py` · `sim/compare_train_vs_async_groot.py` · `sim/replay_infer_overlay.py` | VLA 추론 진단 — recorded ep 를 학습방식 vs 배포(async/RTC·gRPC bridge) 통과시켜 정책출력 오버레이+입력 timestamp 마커+per-joint MAE. `_rtc`=SmolVLA(RTC), `_groot`=GR00T-N1.7(ZMQ teacher-forced vs gRPC bridge). policy-server 컨테이너서 실행, 서버 기동 필요 |
-
-> **PATH E (cuMotion+ROS)**: ROS 쪽은 `ros2_ws/src/so101_cumotion_moveit_config`(MoveIt cuMotion plugin) + `so101_cumotion_pick_place`(MoveItPy SM 노드, `pick_place.launch.py`). 하드웨어는 `so101_ros2_control.xacro` 의 `hardware_type:=isaac`(TopicBasedSystem). 상세는 `docs/PATH_E_CUMOTION_ROS.md`.
+| 카테고리 | 스크립트 | 내용 |
+|---|---|---|
+| **환경 관리** | `environments/list_envs.py` | leisaac 등록 환경 일람 |
+| | `environments/author_pick_cube_scene.py` | **큐브** 씬 USD 6쌍(scene + 객체 5개) 일괄 author. 공식 pxr/PhysxSchema 스키마 API 사용. `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python ...` 필요. 큐브 조명, 그릇 충돌(watertight + SDF) 직접 author. 펜 씬 삭제됨. |
+| **에셋·충돌** | `assets/set_gripper_jaw_sdf_collision.py` | so101_follower.usd jaw/gripper collision을 convexDecomposition→**SDF** (usd-core raw, isaac 불요, backup 유지). GPU 불요. |
+| | `assets/viz_collision_overlay.py` | visual vs collision(SDF/convexHull) 오버레이 PNG (matplotlib+trimesh, GPU 불요) |
+| **teleop·데이터** | `environments/teleoperation/teleop_se3_agent.py` | PickCube 로컬 GUI teleop. `--task SimToReal-SO101-PickCube-v0`, `keyboard`/`so101leader`, `--tune_cameras` docking viewport, reset 시 부감 뷰. |
+| | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
+| | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB로 실제 SO-101 leader 상태 원격 송출 |
+| | `environments/utils/{inspect_robot_materials,patch_robot_colors}.py` | USD 머티리얼 진단/패치 |
+| **VLA 추론** | `inference/run_cube_desk_ros_bridge.py` (+ `.sh` wrapper) | Isaac Sim standalone + `isaacsim.ros2_bridge`로 cube_desk 실행. `/isaac_joint_states`, `/isaac_joint_commands`, `/clock`, `/cube_poses`, `/bowl_pose`(base_link) publish. **`--eval`** 모드 = closed-loop 평가. **`--attention_overlay`** = SmolVLA cross-attn 히트맵 ZMQ SUB → top/wrist/front omni.ui JET 오버레이. |
+| | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+bridge+vla-ros 자동 배선, 임시 env 생성·정리, livestream :49100. |
+| | `inference/policy_server_groot_bridge.py` | `GrootBridgeServer` (PolicyServer 서브클래스). gRPC 컨트랙트 유지, 추론만 gr00t ZMQ에 위임. |
+| **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]). |
+| | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
+| | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |
+| **진단** | `diagnostics/compare_train_vs_rtc.py` | recorded ep를 학습·배포(RTC) 통과, SmolVLA 비교 |
+| | `diagnostics/compare_train_vs_async_groot.py` | recorded ep를 학습·배포(gRPC bridge) 통과, GR00T-N1.7 비교 |
+| | `diagnostics/replay_infer_overlay.py` | 추론 진단: 정책출력 오버레이+timestamp+per-joint MAE. policy-server 컨테이너서 실행. |
+| | `diagnostics/plot_vla_pipeline_comparison.py` | VLA 파이프라인 비교 plot 생성 |
+| **데이터** | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER. |
+| **기타** | `environments/follow_target_so101.py` | SO-101 position-only Lula IK 테스트 (5-DOF 선형 reaching) |
+| | `environments/inspect_so101_gripper_frame.py` | gripper frame 진단 |
+| | `ece_4560/` | 과정 프로젝트 (보유) |
 
 ### 씬 재생성
 
-USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성 (펜=`author_pick_pen_scene.py`, 큐브=`author_pick_cube_scene.py`). 좌표 변경 시 import 경로는 무관(`pyproject.toml` 의 `[tool.setuptools]` 가 `src/` 기준 패키지 탐색)하나, `PEN_CUP_CENTER_XY`·`BOWL_CENTER_XY` 같은 world-frame 상수는 각 task 의 `*_env_cfg.py` (및 오라클 state machine, 존재 시) 와 같이 갱신해야 한다.
+USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성 (`author_pick_cube_scene.py`, 펜 삭제됨). 좌표 변경 시 `SCENE_OFFSET` 상수를 `assets/scenes/cube_desk.py`에서 갱신하고 스크립트 재실행하면 된다. `BOWL_CENTER_XY` 같은 world-frame 상수는 `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py` 와 동기화해야 한다.
 
 ## Python 패키지 / 의존성
 
@@ -202,7 +213,7 @@ USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성
 - HF/W&B 토큰은 `.env` 에서 읽음 (`.env.example` 템플릿).
 - 표준 실행 패턴:
   - 실기기: `docker compose --env-file .env -f docker/docker-compose.yaml run --rm lerobot <mode>`
-  - 시뮬: `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-SO101-PickPen-v0 ...`
+  - 시뮬 teleop: `uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-SO101-PickCube-v0 ...`
 
 ## 운영 규칙
 
@@ -215,20 +226,21 @@ USD 6개 (`scene.usd` + 객체 5개) 는 author 스크립트로 일괄 재생성
 - 필요 시 §핵심 의존성 표·§주의 로그 리스트도 함께 갱신
 - 수정 실패한 경우도 README 에는 올리지 않음
 
-### USD 씬 좌표·물리 상수 동기화
+### 단위 및 그리퍼 codec 규약
 
-`assets/scenes/pen_desk/` USD 의 좌표·치수를 변경하면 다음도 같이 갱신:
+**VLA 추론·데이터에서 통일된 계약**:
 
-- `src/sim_to_real/tasks/pick_pen/pick_pen_env_cfg.py::PEN_CUP_CENTER_XY` — `mdp.pen_in_cup` 종료 조건의 컵 기준점 (world frame)
-- `SCENE_OFFSET` 일괄 시프트로 해결 가능하면 author 스크립트 1회 재실행으로 USD 6개 모두 갱신
+- **그리퍼 codec = affine only**: feature [0, 100] (정책 출력) ↔ sim joint [-10°, 100°] (환경). 공식: `deg = feature / 100 * 110 - 10`. 단일 소스 = `src/so101_contract/feature_codec.py`.
+- **그리퍼 offset 제거**: `use_default_offset=False` (action term 설정). 모든 action = 절대 joint target (post-offset 스타일, 31.75 배수 제거됨). sim·real·bridge 공통 규약.
+- 데이터 기록/재생: `src/sim_to_real/data/lerobot_units.py` 가 codec 참조, LeRobot v3 [0,100] ↔ sim [-10°,100°] 변환.
 
-### 5-DOF IK 공통 원칙 (sim·실기기)
+### 5-DOF IK 공통 원칙 (sim)
 
-SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose(위치+방향 동시)를 만족 못 한다. **position 우선·orientation best-effort** 가 sim·실기기 공통 규약:
+SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose(위치+방향 동시)를 만족 못 한다. **position 우선·orientation best-effort** 가 sim 규약:
 
-- 실기기 MoveIt `kinematics.yaml`: `rotation_scale=0.02`, `orientation_threshold≈π`, `approximate: false` (도달 불가 타겟은 실패로, 근사해 반환 금지). 근거·시행착오는 `docs/REALDEVICE_GRASP_PIPELINE.md` §3.2.
 - sim `follow_target_so101.py`: Lula IK·RMPFlow 모두 `target_orientation=None`(position-only). 새 IK 경로를 추가할 때도 orientation 을 hard constraint 로 넣지 말 것.
+- MoveIt·cuMotion 제거됨 (PATH E 삭제).
 
 ### sim 진입 스크립트 AppLauncher 인자 필터
 
-GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `pick_cube_franka_state_machine.py`, `follow_target_so101.py`, `run_cube_desk_ros_bridge.py`. ⚠ Linux 에선 access violation 대신 **livestream viewport docking 이 조용히 실패**(커스텀 인자가 UI 초기화 방해)하는 형태로도 나타난다 — bridge livestream 3-cam 레이아웃 미적용 버그가 이 케이스(2026-06-15 수정).
+GUI 부팅하는 진입 스크립트는 `view_eye`/`view_lookat` 같은 **커스텀 인자**를 통째(`AppLauncher(vars(args))`)로 넘기면 Windows 에서 `_prepare_ui` access violation 이 난다. AppLauncher 가 실제 쓰는 키만 화이트리스트(`_LAUNCHER_KEYS`)로 필터해 전달하고, C-레벨 크래시 추적용 `faulthandler.enable(file=outputs/*.txt)` 을 부팅 전에 켠다. 적용 예: `follow_target_so101.py`, `run_cube_desk_ros_bridge.py`. ⚠ Linux 에선 access violation 대신 **livestream viewport docking 이 조용히 실패**(커스텀 인자가 UI 초기화 방해)하는 형태로도 나타난다 — 3-cam 레이아웃 미적용(2026-06-15 수정).

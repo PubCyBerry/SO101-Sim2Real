@@ -2,6 +2,8 @@
      ║  NORTH STAR — 매 세션/compaction 직후 먼저 읽는다. 변경 금지(상수).      ║
      ╚═══════════════════════════════════════════════════════════════════════╝ -->
 
+> ⚠️ **이 파일은 VLA-only 리팩토링(2026-06-26, tag v0.1 이후) 이전의 작업 로그다.** cuRobo·RL·cuMotion·MoveIt·inproc·pen·smoke·perf 등 제거된 스택 언급은 역사적 기록이다. 현행 구조는 `AGENTS.md` 를 참조한다.
+
 ## 🧭 North Star (불변 — 매 사이클·compaction 후 재확인)
 
 - **마스터플랜**: [`docs/SIM2REAL_MASTERPLAN.md`](docs/SIM2REAL_MASTERPLAN.md) · **현황**: [`TASKS.md`](TASKS.md)
@@ -228,7 +230,7 @@
 - **smoke(8-ep) 실검증 통과**: arm max Δ **≤9.549°·>cap 0.00%**, gripper 28.6→5.3, all-4 16/16(오라클 무손상).
 - **🔵 진행중**: **256-ep regen**(`outputs/so101_sim_pick_cube_smooth`, log `outputs/p5_logs/regen256.log`) — 실측 **~1.9 ep/min → ~2시간**(render 병목, ~18:00 완료 예상). 그 후 → HF `taehunkim/so101_sim_pick_cube_smooth` → SmolVLA 20k(`_smooth` JOB, baseline 12.5% 대비 단일 변수 A/B) → bridge `--eval 10`.
 - **실행 중 프로세스**: cuRobo planner PID **2750460**(`:5599`, ping OK) + regen detached(setsid). ⚠ **regen 끝나면 finalize 후 Isaac python child 가 좀비 가능**(smoke 가 그랬음 → SIGKILL 했음) — 직접 kill. 학습 전 **planner shutdown**(VRAM 확보, GPU 1장 공유).
-- **속도·품질 조사 결정(웹)**: 생성 느림 정정(render-batch 도 256=2h, 병목=3캠 raytrace). **속도 레버=프레임워크 교체 말고 우리 코드 내 res 480→256·N 16→48**(다음 대량부터; 현 regen 은 A/B 정합 위해 480·N16 유지). **SkillGen(SkillMimicGen) 미채택**: Isaac Sim 6.0 필요(우리 5.1)·state-only(RGB 별도 렌더)·핵심(cuRobo transit+skill)을 이미 구현. **품질=RoboEngine 픽셀증강(공짜)+recovery 궤적+VLA-RFT(closed-loop drift 직격)**.
+- **속도·품질 조사 결정(웹)**: 생성 느림 정정(render-batch 도 256=2h, 병목=3캠 raytrace). **속도 레버=프레임워크 교체 말고 우리 코드 내 res 480→256·N 16→48**(다음 대량부터; 현 regen 은 A/B 정합 위해 480·N16 유지). **품질=RoboEngine 픽셀증강(공짜)+recovery 궤적+VLA-RFT(closed-loop drift 직격)**.
 - **커밋**: 이번 jerky fix(2 script + doc §13) 커밋. profiling/.gitignore 잔여는 별도 커밋.
 - **memory**: `vla-data-jerky-slew-record-fix` 신설.
 
@@ -244,25 +246,6 @@
 - ⚠ **운영 사고**: 초반 single-env 80-ep 중단 시 `pgrep -f "pick_cube_curobo_demo.py"` 광범위 매칭으로 세션 이전부터 돌던 동명 leftover 프로세스 동반 종료. 이후 kill 은 numeric PID 로. 사용자 `policy_server`(Up 3d) 컨테이너는 보존.
 
 ---
-
-## 작업 인계 (2026-06-15 - Isaac Sim 6 / Isaac Lab 3 + 제어 생태계 + digital twin 종합 검토 / 조사 완료)
-
-- 목표: Isaac Sim 5.1.0에서 6.0, Isaac Lab 2.3.2에서 3.0으로 이전할 때의 장단점, Breaking Changes, 공개 이슈, SO-101 5-DOF 제어, Isaac ROS/cuRobo/cuMotion/PINK 연계, Sim-to-Real digital twin 구축 관점을 종합 검토.
-- 완료: `docs/ISAAC_SIM_6_LAB_3_MIGRATION_REVIEW.md` 신규 작성(1,494줄). 코드와 의존성은 변경하지 않음.
-- 핵심 판단:
-  - Isaac Sim 5.1은 공식 지원 종료, Isaac Sim 6.0은 2026-06-04 GA이므로 장기 이전은 필요.
-  - Isaac Lab 3은 2026-06-15 현재 `v3.0.0-beta`이며 공식 3.0 wheel이 없어 즉시 전면 교체는 비권장.
-  - camera/SDG, ROS 2, multi-tick rendering, cuMotion/PINK는 기대 이점이 크지만 일반 scene/physics 성능은 공식 benchmark에서 회귀 사례가 있음.
-  - 현재 cuRobo `v0.8.0-35-gec2bfa9`에는 `ToolPoseCriteria` partial-pose API가 있음. SO-101 GPU probe에서 동일 reachable position의 임의 orientation full-pose IK는 실패했지만 position-only IK는 성공했고 FK 위치 오차는 `0.42-0.58 mm`.
-  - position-only만 쓰면 wrist roll이 임의로 갈 수 있으므로 transit/hover에는 적합하지만 grasp에는 필요한 orientation 1-2축 또는 posture seed가 필요.
-  - policy/action은 arm 5 + gripper 1의 6-dim이지만 planner c-space는 arm 5개여야 함. 현재 `so101_curobo.yml`의 gripper 포함 c-space를 planner용 5-joint config로 분리하는 것이 우선.
-  - Sim 6 내장 cuMotion graph planner는 공식 translation-only target, PINK는 orientation cost 0을 지원. 반면 Isaac ROS cuMotion 4.4 MoveIt pose-goal은 position+orientation을 모두 요구하고 direct action의 partial-pose hold도 미지원이라 ROS 경로는 5-joint goal + C-space planning 유지 권장.
-  - digital twin 최우선 gap은 real 3-camera calibration. 현재 camera YAML 다수의 `camera_info_url`이 비어 있어 intrinsic/distortion이 contract에 미포함. AprilTag/checkerboard calibration을 먼저 하고 depth camera 도입 후 nvblox/FoundationPose를 검토.
-  - 저장소 정적 검색: `.data.*` 217건, 구형 write API 38건, WXYZ 관련 텍스트 69건, AppLauncher 파일 37개.
-  - 주요 전환: WXYZ에서 XYZW, ProxyArray `.torch`/`.warp`, write `_index`/`_mask`, Core/Lula/ROS/camera deprecated API, Python 3.12/NumPy 2/PyTorch 2.10.
-  - 권장 전략은 기존 5.1/2.3.2 기준선을 보존하고 Linux 별도 환경에서 Sim 6.0.0.1 + Lab beta2 고정 SHA + PhysX pilot을 수행하는 것.
-- 검증: 문서의 외부 URL 65개 응답 정상, 문서 `git diff --check` 통과. cuRobo probe는 현재 GPU/uv 환경에서 실행.
-- 다음 작업 우선순위: ① 현재 cuRobo partial-pose production probe ② planner 5-joint config 분리 ③ 3-camera intrinsic/extrinsic bundle ④ Sim 6 PINK/translation-only pilot ⑤ dependency migration.
 
 ## 작업 인계 (2026-06-14 — PickCube cuRobo P2 🟢 DONE: IPC 사이드카 + 4-큐브 pick-place ~18-20s 4/4 / 다음=multi-env 논의)
 
