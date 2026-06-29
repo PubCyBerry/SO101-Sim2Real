@@ -1030,6 +1030,24 @@ def _disable_episode_termination(env_cfg) -> None:
         env_cfg.terminations.success = None
 
 
+def _disable_domain_randomization(env_cfg) -> None:
+    """카메라 튜닝(--tune_cameras) 시 reset DR 끄기 — 정적 씬 유지.
+
+    큐브/그릇 무작위 재배치·조명·focal·물리(material/mass) 무작위화 EventTerm 을 전부
+    None 으로 비활성화한다(EventManager 가 None term 은 스킵). ``reset_scene_to_default``
+    는 남겨 큐브를 고정 init 위치(_CUBE_INIT_STATES)로 복원하고, 로봇 reset jitter 도
+    0 으로 만들어 R/N 눌러도 씬이 항상 동일하게 유지된다.
+    학습/데이터 수집 경로는 --tune_cameras 가 없어 DR 이 그대로 작동한다.
+    """
+    events = env_cfg.events
+    for attr in list(vars(events).keys()):
+        if attr.startswith("randomize_"):
+            setattr(events, attr, None)
+    rrj = getattr(events, "reset_robot_joints", None)
+    if rrj is not None:
+        rrj.params["position_range"] = (0.0, 0.0)
+
+
 def main() -> None:  # noqa: C901
     output_dir = os.path.dirname(args_cli.dataset_file)
     if output_dir:
@@ -1038,6 +1056,9 @@ def main() -> None:  # noqa: C901
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = args_cli.seed if args_cli.seed is not None else int(time.time())
     _disable_episode_termination(env_cfg)
+    if args_cli.tune_cameras:
+        # 카메라 튜닝 모드 = 정적 씬. DR 끄면 R/N reset 해도 큐브·그릇·조명 고정.
+        _disable_domain_randomization(env_cfg)
     if args_cli.quality:
         env_cfg.sim.render.antialiasing_mode = "FXAA"
         env_cfg.sim.render.rendering_mode = "quality"
