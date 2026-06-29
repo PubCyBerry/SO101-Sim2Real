@@ -122,14 +122,6 @@ parser.add_argument(
     help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
          "episode 경계에서 stale action queue/timestep을 초기화한다.",
 )
-# ── SmolVLA cross-attention 오버레이 (SmolVLA 전용) ──────────────────────────
-parser.add_argument("--attention_overlay", action="store_true",
-                    help="policy-server-attn(SmolVLA)이 PUB 하는 cross-attention 히트맵을 SUB 해 "
-                         "top/wrist/front 뷰에 omni.ui 오버레이 창으로 표시. GUI(not headless) 전용.")
-parser.add_argument("--attn_zmq_host", default="127.0.0.1",
-                    help="attention 히트맵 ZMQ PUB 호스트(policy-server). network_mode host → loopback.")
-parser.add_argument("--attn_zmq_port", type=int, default=5556,
-                    help="attention 히트맵 ZMQ 포트(서버 --attn_zmq_port 와 일치).")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -252,188 +244,6 @@ GRIPPER_EFFORT_LIMIT = 0.5
 ARM_MAX_JOINT_VEL = 5.0
 GRIPPER_MAX_JOINT_VEL = 2.5
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SmolVLA cross-attention 오버레이 (policy-server-attn ZMQ SUB → omni.ui 블렌딩)
-#
-# policy_server_attention_bridge.py(AttentionBridgeServer)가 추론마다 카메라별 히트맵을
-# ZMQ PUB(:5556). 여기서 SUB 해 라이브 렌더 프레임(rgb annotator)에 JET 히트맵을 블렌딩,
-# omni.ui ByteImageProvider 창 3개(top/wrist/front)로 표시한다. 토글 체크박스는 **표시만**
-# on/off(서버는 attn 모드면 항상 계산·PUB). GUI(not headless)에서만 동작.
-# ─────────────────────────────────────────────────────────────────────────────
-_ATTN_ENABLED = True                # 토글 상태(표시만 토글)
-_ATTN_SUB = None                    # zmq SUB socket (None=오버레이 비활성)
-_ATTN_HEATMAPS: dict = {}           # {cam: HxW float32 [0,1]} 최신 수신
-_ATTN_LOCK: threading.Lock | None = None
-_ATTN_WINDOWS: dict = {}            # {cam: (omni.ui.Window, ByteImageProvider)}
-_ATTN_ANNOTS: dict = {}             # {cam: replicator rgb annotator (live 프레임)}
-_ATTN_CTRL_WIN = None               # 토글 컨트롤 창 핸들 유지(GC 방지)
-_ATTN_BLEND_ALPHA = 0.4             # 히트맵 가중(Stanley: 0.6 img + 0.4 heat)
-_ATTN_RECV_ERR_LOGGED = False       # 수신 에러 1회만 보고용 플래그
-
-
-def _attn_cam_from_topic(topic: str) -> str:
-    """'/camera/<cam>/image_raw' → '<cam>'."""
-    parts = [p for p in topic.split("/") if p]
-    return parts[1] if len(parts) >= 2 and parts[0] == "camera" else (parts[0] if parts else topic)
-
-
-def _init_attention_zmq(host: str, port: int) -> None:
-    """히트맵 SUB 소켓 초기화(CONFLATE=최신만, non-block)."""
-    global _ATTN_SUB, _ATTN_LOCK
-    try:
-        import zmq  # noqa: PLC0415
-        _ATTN_LOCK = threading.Lock()
-        ctx = zmq.Context.instance()
-        sock = ctx.socket(zmq.SUB)
-        sock.setsockopt_string(zmq.SUBSCRIBE, "")
-        sock.setsockopt(zmq.CONFLATE, 1)   # 최신 1개만 보관(stale 누적 방지)
-        sock.connect(f"tcp://{host}:{port}")
-        _ATTN_SUB = sock
-        print(f"[bridge] attention ZMQ SUB → tcp://{host}:{port}", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[bridge] attention ZMQ init 실패: {exc}", flush=True)
-        _ATTN_SUB = None
-
-
-def _poll_attention() -> None:
-    """non-blocking 으로 최신 히트맵 수신 → 캐시."""
-    global _ATTN_HEATMAPS
-    if _ATTN_SUB is None:
-        return
-    try:
-        import zmq  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
-        return
-    global _ATTN_RECV_ERR_LOGGED
-    got = None
-    for _ in range(4):  # CONFLATE 라 1개지만 안전 여유
-        try:
-            got = _ATTN_SUB.recv_pyobj(zmq.NOBLOCK)
-        except zmq.Again:
-            break
-        except Exception as exc:  # noqa: BLE001  수신·역직렬화 에러는 첫 1회만 보고(조용히 삼키지 않음)
-            if not _ATTN_RECV_ERR_LOGGED:
-                print(f"[bridge] attention recv 에러(1회만 보고): {exc!r}", flush=True)
-                _ATTN_RECV_ERR_LOGGED = True
-            break
-    if isinstance(got, dict):
-        hm = got.get("heatmaps") or {}
-        with _ATTN_LOCK:
-            _ATTN_HEATMAPS = hm
-
-
-def _setup_attention_annotators(camera_specs) -> None:
-    """카메라 render product 마다 rgb annotator attach (live 오버레이 베이스 프레임)."""
-    try:
-        import omni.replicator.core as rep  # noqa: PLC0415
-    except Exception as exc:  # noqa: BLE001
-        print(f"[bridge] attention annotator 모듈 불가: {exc}", flush=True)
-        return
-    for rp_path, topic, _fid in camera_specs:
-        cam = _attn_cam_from_topic(topic)
-        try:
-            a = rep.AnnotatorRegistry.get_annotator("rgb")
-            a.attach(rp_path)
-            _ATTN_ANNOTS[cam] = a
-        except Exception as exc:  # noqa: BLE001
-            print(f"[bridge] attention annotator {cam} 실패: {exc}", flush=True)
-
-
-def _attn_live_frame(cam: str):
-    """rgb annotator 에서 HxWx3 uint8 RGB 추출(없으면 None)."""
-    a = _ATTN_ANNOTS.get(cam)
-    if a is None:
-        return None
-    try:
-        arr = np.asarray(a.get_data())
-        if arr.size == 0:
-            return None
-        if arr.ndim == 3 and arr.shape[-1] == 4:
-            arr = arr[..., :3]
-        return np.ascontiguousarray(arr.astype(np.uint8))
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _set_attention_enabled(value: bool) -> None:
-    global _ATTN_ENABLED
-    _ATTN_ENABLED = bool(value)
-    for win, _ in _ATTN_WINDOWS.values():
-        try:
-            win.visible = bool(value)
-        except Exception:  # noqa: BLE001
-            pass
-    print(f"[bridge] attention overlay: {'ON' if value else 'OFF'}", flush=True)
-
-
-def _create_attention_ui(camera_specs) -> None:
-    """토글 체크박스 창 + 카메라별 ByteImageProvider 오버레이 창 생성."""
-    global _ATTN_CTRL_WIN
-    try:
-        import omni.ui as ui  # noqa: PLC0415
-    except Exception as exc:  # noqa: BLE001
-        print(f"[bridge] attention UI 모듈 불가: {exc}", flush=True)
-        return
-    cams = [_attn_cam_from_topic(t) for _, t, _ in camera_specs]
-
-    ctrl = ui.Window("Attention Overlay", width=240, height=84)
-    with ctrl.frame:
-        with ui.HStack(height=28):
-            ui.Label("Show attention", width=150)
-            cb = ui.CheckBox(width=24)
-            cb.model.set_value(True)
-            cb.model.add_value_changed_fn(lambda m: _set_attention_enabled(m.get_value_as_bool()))
-    _ATTN_CTRL_WIN = ctrl
-
-    for cam in cams:
-        provider = ui.ByteImageProvider()
-        win = ui.Window(f"Attention {cam.capitalize()}", width=_CAM_W // 2, height=_CAM_H // 2)
-        with win.frame:
-            ui.ImageWithProvider(provider)
-        _ATTN_WINDOWS[cam] = (win, provider)
-        print(f"[bridge] attention overlay 창: {cam}", flush=True)
-
-
-def _update_attention_overlay() -> None:
-    """카메라별 live 프레임 ⊕ JET(heat) 블렌딩 → ByteImageProvider 갱신."""
-    try:
-        import cv2  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
-        return
-    for cam, (win, provider) in _ATTN_WINDOWS.items():
-        try:
-            if not win.visible:
-                continue
-        except Exception:  # noqa: BLE001
-            pass
-        frame = _attn_live_frame(cam)
-        if frame is None:
-            continue
-        h, w = frame.shape[:2]
-        with _ATTN_LOCK:
-            heat = _ATTN_HEATMAPS.get(cam)
-        if heat is None:
-            rgb = frame
-        else:
-            hr = cv2.resize(np.asarray(heat, dtype=np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
-            jet = cv2.applyColorMap((np.clip(hr, 0.0, 1.0) * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            jet = cv2.cvtColor(jet, cv2.COLOR_BGR2RGB)
-            rgb = cv2.addWeighted(frame, 1.0 - _ATTN_BLEND_ALPHA, jet, _ATTN_BLEND_ALPHA, 0.0)
-        rgba = np.dstack([rgb, np.full((h, w), 255, dtype=np.uint8)])
-        try:
-            provider.set_bytes_data(rgba.tobytes(), [w, h])
-        except Exception:  # noqa: BLE001  일부 빌드는 list 만 허용
-            provider.set_bytes_data(rgba.reshape(-1).tolist(), [w, h])
-
-
-def _attention_tick() -> None:
-    """매 step 호출: 히트맵 poll + (토글 ON 시) 오버레이 갱신. SUB 없으면 no-op."""
-    if _ATTN_SUB is None:
-        return
-    _poll_attention()
-    if _ATTN_ENABLED:
-        _update_attention_overlay()
 
 
 def _set_local_pose(prim, pos: tuple[float, float, float], quat_wxyz: tuple[float, float, float, float]) -> None:
@@ -1008,14 +818,6 @@ def main() -> None:
             print(f"[bridge] Perspective view 설정 실패: {exc}", flush=True)
         if not args.no_cameras:
             dock_camera_viewports()
-        # SmolVLA attention 오버레이 — ZMQ SUB + rgb annotator + omni.ui 창(토글). GUI 전용.
-        if args.attention_overlay and not args.no_cameras and camera_specs:
-            _init_attention_zmq(args.attn_zmq_host, args.attn_zmq_port)
-            _setup_attention_annotators(camera_specs)
-            _create_attention_ui(camera_specs)
-            print("[bridge] attention overlay 활성 (policy-server-attn PUB 대기)", flush=True)
-    elif args.attention_overlay:
-        print("[bridge] --attention_overlay 는 GUI(not headless) 전용 → 스킵", flush=True)
 
     print(f"[bridge] ready. cubes={active_cubes}  dof={n_dof}", flush=True)
     cam_topics = " / ".join(t for _, t, _ in camera_specs) if camera_specs else "(none)"
@@ -1127,7 +929,6 @@ def main() -> None:
                 if not simulation_app.is_running():
                     break
                 world.step(render=True)
-                _attention_tick()   # SmolVLA attention 오버레이 갱신(활성 시)
                 bowl_now = np.asarray(bowl_handle.get_world_pose()[0], dtype=np.float64)
                 bowl_max_xy_m = max(
                     bowl_max_xy_m,
@@ -1263,7 +1064,6 @@ def main() -> None:
         _ts = time.perf_counter()
         world.step(render=True)
         _step_ms.append((time.perf_counter() - _ts) * 1e3)
-        _attention_tick()   # SmolVLA attention 오버레이 갱신(활성 시, step 타이밍 외부)
         if len(_step_ms) >= _STEP_REPORT_EVERY:
             n = len(_step_ms)
             mean = sum(_step_ms) / n
