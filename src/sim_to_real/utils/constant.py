@@ -18,5 +18,6 @@ from .cube_specs import (  # noqa: F401
     CubeSpec,
 )
 
-CUBE_NAMES: list[str] = ["Cube1", "Cube2", "Cube3", "Cube4"]
+# 단일 큐브 씬(2026-06-26): 40mm Cube1 1개만. 매트 제거 + 1-cube 구성.
+CUBE_NAMES: list[str] = ["Cube1"]
 BOWL_NAME: str = "Bowl"

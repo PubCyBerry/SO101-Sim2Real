@@ -14,9 +14,9 @@ isaacsim 을 headless 부팅한 뒤에만 import 된다. 따라서 ``main()`` �
 
 생성물 (kitchen_with_orange 패턴):
   assets/scenes/cube_desk/
-  ├── scene.usd + .usda                 # 책상/조명 + 객체 5개 payload 참조
+  ├── scene.usd + .usda                 # 책상/조명 + 객체 2개(Cube1·Bowl) payload 참조
   └── objects/
-      ├── Cube1..4/Cube{N}.usd + .usda  # 시각 라운드 mesh + invisible SDF 충돌 mesh
+      ├── Cube1/Cube1.usd + .usda       # 시각 라운드 mesh + invisible convexHull 충돌 mesh
       └── Bowl/Bowl.usd + .usda         # 시각 회전체 Mesh + watertight SDF 충돌 Mesh
 
 좌표는 SO-101 follower init_state 와 맞춘 SCENE_OFFSET 으로 시프트한다.
@@ -63,24 +63,21 @@ SCENE_OFFSET: tuple[float, float, float] = (0.36, 0.045, 0.705)
 # (diffuseColor, roughness, metallic)
 MATERIALS = {
     "DeskWood": ((0.72, 0.64, 0.54), 0.72, 0.0),  # 밝은 자작 합판(다리·상판 측면). 윗면은 DeskTopTex 텍스처.
-    "DeskMat": ((0.025, 0.026, 0.032), 0.93, 0.0),
-    "BowlBlue": ((0.65, 0.83, 0.96), 0.28, 0.0),
+    "BowlBlue": ((0.16, 0.34, 0.78), 0.28, 0.0),  # 진한 푸른색에서 살짝 연하게(2026-06-26)
     "Ceiling": ((0.88, 0.86, 0.82), 0.95, 0.0),
 }
 
 # 큐브 4개 scene-local 평면 배치 (이름 → x, y, yaw°). 매트 앞쪽에 흩뿌림.
 # z 와 scale·mass 는 cube_specs(단일 진실 소스)에서 파생 — 크기 변경은 cube_specs 만.
+# 단일 큐브 씬(2026-06-26): 40mm Cube1 1개만. 매트 제거.
 _CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {
     "Cube1": (-0.50, 0.08, 20.0),
-    "Cube2": (-0.22, 0.06, -35.0),
-    "Cube3": (-0.46, 0.17, 50.0),
-    "Cube4": (-0.27, 0.14, -20.0),
 }
-_MAT_TOP_LOCAL: float = 0.004   # 매트 윗면 scene-local z
+_DESK_TOP_LOCAL: float = 0.0    # 책상 상판 윗면 scene-local z (매트 제거됨)
 _CUBE_Z_SLACK: float = 0.001    # spawn 침투 방지 여유
-# z 중심 = 매트 윗면 + 큐브 반높이 + slack (40mm→0.025, 50mm→0.030).
+# z 중심 = 책상 상판 + 큐브 반높이 + slack (40mm→0.021).
 CUBES = tuple(
-    (name, (x, y, _MAT_TOP_LOCAL + _CUBE_SPECS[name].half_extent + _CUBE_Z_SLACK), yaw)
+    (name, (x, y, _DESK_TOP_LOCAL + _CUBE_SPECS[name].half_extent + _CUBE_Z_SLACK), yaw)
     for name, (x, y, yaw) in _CUBE_LAYOUT.items()
 )
 
@@ -861,7 +858,7 @@ def author_scene() -> "Usd.Stage":
     looks = "/Scene/Looks"
     UsdGeom.Scope.Define(stage, looks)
     mats: dict[str, str] = {}
-    for mat_name in ("DeskWood", "DeskMat"):   # Ceiling 제거
+    for mat_name in ("DeskWood",):   # Ceiling·DeskMat 제거
         color, roughness, metallic = MATERIALS[mat_name]
         mats[mat_name] = _visual_material(stage, looks, mat_name, color, roughness, metallic)
     desk_friction = _physics_material(stage, looks, "DeskFriction", FRICTION_DESK)
@@ -904,22 +901,7 @@ def author_scene() -> "Usd.Stage":
             translate=_shift(pos), scale=(0.025, 0.025, 0.68),
             visual_mat=mats["DeskWood"],
         )
-    # 매트: 860×400×4mm. Cube 본체 = 충돌 + 어두운 측면.
-    _static_cube(
-        stage, "/Scene/DeskMat",
-        translate=_shift((-0.27, 0.20, 0.002)), scale=(0.86, 0.40, 0.004),
-        visual_mat=mats["DeskMat"], collision=True, physics_mat=desk_friction,
-    )
-    # 매트 윗면 텍스처 (Unity 데스크 매트 실사). Cube 는 UV 가 없어 텍스처 매핑 불가
-    #   → 윗면(scene-local z=0.004) 위 0.4mm 에 UV quad 를 얹는다. 충돌은 Cube 가 담당.
-    desk_mat_tex = _textured_material(
-        stage, looks, "DeskMatTex", "./textures/desk_mat.png", roughness=0.6
-    )
-    _textured_quad(
-        stage, "/Scene/DeskMatTop",
-        translate=_shift((-0.27, 0.20, 0.0044)), scale=(0.86, 0.40, 1.0),
-        mat_path=desk_mat_tex,
-    )
+    # 매트 제거(2026-06-26 사용자) — 큐브는 책상 상판 위에 직접 안착(DeskTop 충돌 담당).
 
     # 객체 payload 참조.
     _add_payload_ref(stage, "Bowl", "./objects/Bowl/Bowl.usd", translate=_shift(BOWL_LOCAL))

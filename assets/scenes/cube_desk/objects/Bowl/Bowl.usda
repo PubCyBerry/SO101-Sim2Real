@@ -31,7 +31,7 @@ def Xform "Bowl" (
             def Shader "Preview"
             {
                 uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor = (0.65, 0.83, 0.96)
+                color3f inputs:diffuseColor = (0.16, 0.34, 0.78)
                 float inputs:metallic = 0
                 float inputs:roughness = 0.28
                 token outputs:surface
