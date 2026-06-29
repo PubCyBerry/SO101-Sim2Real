@@ -124,11 +124,6 @@ parser.add_argument(
     help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
          "episode 경계에서 stale action queue/timestep을 초기화한다.",
 )
-# ── arm actuator override (replay 충실도용) ────────────────────────────────
-# 기본값 = VLA 학습 parity(soft PD 17.8). 실기기 녹화 궤적을 충실히 재생하려면 soft PD 가
-# 너무 물러 motion lag + 굽힌 elbow 중력 droop 으로 under-shoot 한다. 이 값을 올리면 arm 이
-# target 을 단단히 추종한다. **gripper 는 grasp gentle(0.5Nm) 유지** — arm 만 적용.
-# 미지정 시 기본값이라 VLA closed-loop 경로 동작 불변.
 parser.add_argument("--no_self_collisions", action="store_true",
                     help="articulation self-collision off. elbow 고굴곡서 팔/캠홀더 자기충돌로 "
                          "실기기보다 일찍 막히는지 확인·회피용(replay 충실도).")
@@ -635,8 +630,6 @@ def main() -> None:
         gi = n_dof - 1  # fallback: gripper 가 마지막 dof (/isaac_joint_states 순서 확인됨)
     ctrl = robot.get_articulation_controller()
     ctrl.set_gains(kps=kps, kds=kds)
-    # dof_names 순서 = /isaac_joint_states publish 순서 = recorder joint_pos[:6] 순서.
-    # 학습 state(joint_pos[:6])↔추론 state(vla node name-reorder→SO101_JOINT_ORDER) 정합 확인용.
     try:
         print(f"[bridge] dof_names order: {list(robot.dof_names)}", flush=True)
     except Exception:

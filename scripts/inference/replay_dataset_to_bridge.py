@@ -186,7 +186,7 @@ def _publish(args) -> None:
     if args.probe_tracking:
         node.get_logger().info(f"추종 probe ON: {args.joint_states_topic}(achieved) vs target 기록")
 
-    # record: 3 카메라 구독 + sim observation(state·images)·action 을 LeRobot 단위로 디스크 기록.
+    # record: 3 카메라 구독 + sim observation(state·images)·action 을 LeRobot 단위로 프레임당 기록.
     images: dict = {}
     if record:
         import cv2  # noqa: PLC0415
