@@ -402,8 +402,9 @@ class KeyboardJointController(WallClockLimiterMixin):
         pass
 
     def advance(self) -> torch.Tensor | None:
-        if not self.keyboard.started:
-            return None
+        # B(started) 전에도 초기 자세를 능동 유지한다. 키 입력은 _on_key 가 started 로
+        # 게이트하므로 B 전 desired_targets 는 불변(=초기 지정 자세) → 로봇이 그 자세를
+        # 잡고 대기한다. (이전엔 None 반환 → step 미실행 → 렌더가 USD-default 0 표시)
         self.targets = _slew_limited_targets(
             self.targets,
             self.desired_targets,
@@ -482,8 +483,10 @@ class SO101LeaderJointController(WallClockLimiterMixin):
         return torch.maximum(torch.minimum(targets, self.limits[:, 1]), self.limits[:, 0])
 
     def advance(self) -> torch.Tensor | None:
+        # B 전: 초기 자세를 유지(leader 추종은 started 후). 정적 target 반환으로
+        # 로봇이 지정 자세를 잡고 대기한다.
         if not self.keyboard.started:
-            return None
+            return self.targets.unsqueeze(0)
         leader_targets = self._read_leader_targets()
         smoothing = min(max(float(args_cli.leader_smoothing), 0.0), 0.99)
         if smoothing > 0.0:
@@ -810,9 +813,14 @@ def create_camera_viewports() -> list[object]:
 def create_camera_tuner(env) -> object | None:
     """omni.ui 패널로 top/wrist 카메라의 위치·회전(deg)·focal 을 실시간 조정.
 
-    슬라이더를 움직이면 해당 카메라 USD prim 의 local transform(translate/orient)과
-    focalLength 가 즉시 갱신되어 viewport 에 바로 반영된다. wrist 는 부모
-    링크(gripper) 기준 local, top 은 env(거의 world) 기준.
+    슬라이더를 움직이면 해당 카메라 USD prim 의 local transform(translate/orient)이
+    즉시 갱신된다. wrist 는 부모 링크(gripper) 기준 local, top 은 env(거의 world) 기준.
+
+    ⚠ focal 은 USD focalLength attr 를 만져도 TiledCamera 렌더(센서/데이터)에 전혀
+    반영되지 않는다(측정 검증 2026-06-27: USD focal ×1.6 → 렌더 불변). 렌더 focal 은
+    오직 센서 intrinsic 이 결정하므로, focal 슬라이더는 ``Camera.set_intrinsic_matrices``
+    로 센서 intrinsic 을 갱신한다(데이터+Kit viewport 둘 다 반영). reset 시 intrinsic 이
+    재계산되므로 ``reapply_focals`` 로 매 reset 후 다시 적용한다.
 
     'Print cfg values' 버튼은 현재 값을 pick_cube_env_cfg.py 의
     _TOP_*/_WRIST_CAM_* 형식(pos + world-convention wxyz quat + focal)
@@ -820,14 +828,14 @@ def create_camera_tuner(env) -> object | None:
     변환해 출력하므로 그대로 cfg 상수에 붙여넣을 수 있다.
     """
     if args_cli.headless or not args_cli.enable_cameras:
-        return None
+        return None, None
     try:
         import omni.ui as ui
         import omni.usd
         from pxr import Gf, Usd, UsdGeom
     except Exception as exc:
         print(f"[tuner] camera tuner unavailable: {exc}")
-        return None
+        return None, None
 
     # prim(opengl) → Isaac Lab world convention quaternion 변환 (가능하면).
     try:
@@ -876,6 +884,29 @@ def create_camera_tuner(env) -> object | None:
         except Exception:
             pass
 
+    def _set_focal(scene_name: str, focal: float) -> None:
+        """focal 슬라이더 → TiledCamera 센서 intrinsic 갱신(데이터+viewport 둘 다 반영).
+
+        USD focalLength attr 만 만지면 TiledCamera 렌더에 0 영향이므로(측정 검증),
+        set_intrinsic_matrices 로 센서 intrinsic 을 직접 갱신해야 실제 focal 이 바뀐다.
+        K = [[fx,0,cx],[0,fx,cy],[0,0,1]], fx = width·focal/horizontal_aperture.
+        """
+        try:
+            import torch
+            cam = env.scene[scene_name]
+            W = int(cam.cfg.width)
+            H = int(cam.cfg.height)
+            ha = float(cam.cfg.spawn.horizontal_aperture)
+            fx = W * float(focal) / ha
+            n = int(cam.data.intrinsic_matrices.shape[0])
+            K = torch.tensor(
+                [[fx, 0.0, W / 2.0], [0.0, fx, H / 2.0], [0.0, 0.0, 1.0]],
+                dtype=torch.float32, device=cam.device,
+            ).unsqueeze(0).repeat(n, 1, 1)
+            cam.set_intrinsic_matrices(K, focal_length=float(focal))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tuner] focal apply failed for {scene_name}: {exc}")
+
     _front_frame_label = "shoulder-local" if "shoulder" in CAMERA_PRIM_PATHS["front_camera"] else "world"
     specs = [
         ("Top Camera", "top_camera", CAMERA_PRIM_PATHS["top_camera"], "world"),
@@ -893,6 +924,12 @@ def create_camera_tuner(env) -> object | None:
             _apply(s["prim"], pos, euler, s["fc"].get_value_as_float())
         return _fn
 
+    def _make_focal_fn(key: str):
+        # focal 전용 핸들러 — 센서 intrinsic 갱신은 무거우니 focal 슬라이더에만 건다.
+        def _fn(*_a) -> None:
+            _set_focal(key, state[key]["fc"].get_value_as_float())
+        return _fn
+
     with window.frame:
         with ui.ScrollingFrame():
             with ui.VStack(spacing=6, height=0):
@@ -902,6 +939,11 @@ def create_camera_tuner(env) -> object | None:
                         ui.Label(f"{title}: prim not found ({prim_path})")
                         continue
                     pos0, eul0, focal0 = read
+                    # focal 초기값은 USD attr(=불안정 artifact)이 아니라 센서 cfg focal 을 쓴다.
+                    try:
+                        focal0 = float(env.scene[scene_name].cfg.spawn.focal_length)
+                    except Exception:
+                        pass
                     px = ui.SimpleFloatModel(pos0[0])
                     py = ui.SimpleFloatModel(pos0[1])
                     pz = ui.SimpleFloatModel(pos0[2])
@@ -914,8 +956,9 @@ def create_camera_tuner(env) -> object | None:
                         "px": px, "py": py, "pz": pz, "rx": rx, "ry": ry, "rz": rz, "fc": fc,
                     }
                     change = _make_change_fn(scene_name)
-                    for mdl in (px, py, pz, rx, ry, rz, fc):
+                    for mdl in (px, py, pz, rx, ry, rz):
                         mdl.add_value_changed_fn(change)
+                    fc.add_value_changed_fn(_make_focal_fn(scene_name))
                     with ui.CollapsableFrame(f"{title}  [{frame_label}]"):
                         with ui.VStack(spacing=3, height=0):
                             for lbl, mdl, lo, hi, st in (
@@ -949,8 +992,18 @@ def create_camera_tuner(env) -> object | None:
 
                 ui.Button("Print cfg values to console", height=30, clicked_fn=_print_cfg)
 
-    print("[tuner] camera tuner panel opened — adjust sliders for live update, then 'Print cfg values'")
-    return window
+    def reapply_focals() -> None:
+        """현재 슬라이더 focal 을 모든 카메라 센서 intrinsic 에 다시 적용.
+
+        env.reset() 은 intrinsic 을 USD focalLength(=clobber)로 재계산하므로,
+        reset 직후 호출해 슬라이더 focal 을 복원한다. 초기 1회도 호출해 cfg focal 로
+        센서·viewport 를 정렬한다."""
+        for sname, s in state.items():
+            _set_focal(sname, s["fc"].get_value_as_float())
+
+    reapply_focals()  # 초기 적용 (cfg focal → 센서 intrinsic + USD focal 정렬)
+    print("[tuner] camera tuner panel opened — focal 슬라이더는 센서 intrinsic 을 갱신(데이터 반영)")
+    return window, reapply_focals
 
 
 def _set_initial_view() -> None:
@@ -1042,11 +1095,12 @@ def main() -> None:  # noqa: C901
         env.sim.render()
         _set_initial_view()
         camera_tuner = None  # keep ref alive (GC 방지)
+        reapply_focals = None  # reset 후 슬라이더 focal 재적용 콜백(튜너 모드 한정)
         if args_cli.enable_cameras and args_cli.tune_cameras:
             # 카메라 보정 모드에서만 3단 수직 분할 docking viewport + 실시간 튜너 위젯을 띄운다.
             # (평상시엔 메인 viewport 만 렌더해 실시간 제어 성능을 확보)
             camera_viewports = create_camera_viewports()
-            camera_tuner = create_camera_tuner(env)  # noqa: F841
+            camera_tuner, reapply_focals = create_camera_tuner(env)  # noqa: F841
         limits = _joint_limits(env.device)
         keyboard = GuiKeyboard()
         keyboard.add_callback("R", lambda: request_reset(False))
@@ -1084,6 +1138,9 @@ def main() -> None:  # noqa: C901
                             print(f"[record] all {args_cli.num_demos} successful demonstrations recorded")
                             break
                     env.reset()
+                    # reset 은 intrinsic 을 USD focal(clobber)로 재계산 → 슬라이더 focal 복원.
+                    if reapply_focals is not None:
+                        reapply_focals()
                     if controller is not None:
                         controller.reset()
                     keyboard.started = False
@@ -1101,7 +1158,8 @@ def main() -> None:  # noqa: C901
                             min_effort=args_cli.min_gripper_effort,
                         )
                     env.step(action)
-                    if recorder is not None:
+                    # B 전에도 step 으로 초기 자세를 유지하되, 녹화는 started 후에만.
+                    if recorder is not None and keyboard.started:
                         recorder.record_step(env, action)
                 rate_limiter.sleep(env)
                 loop_count += 1

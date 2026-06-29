@@ -64,18 +64,16 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
 # xy/yaw 는 평면 배치, z 는 cube_specs 파생(반높이) — author CUBES 와 동일 규약.
-#   z중심 = 매트 윗면(0.709) + 큐브 반높이 + slack(0.001). 40mm→0.730, 50mm→0.735.
-_MAT_TOP_WORLD_Z: float = 0.709
+#   z중심 = 책상 상판(0.705, 매트 제거됨) + 큐브 반높이 + slack(0.001). 40mm→0.726.
+# 단일 큐브 씬(2026-06-26): 40mm Cube1 1개만.
+_DESK_TOP_WORLD_Z: float = 0.705
 _CUBE_Z_SLACK: float = 0.001
 _CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {  # name -> (x, y, yaw°)
     "Cube1": (-0.14, 0.135, 20.0),
-    "Cube2": (0.14, 0.115, -35.0),
-    "Cube3": (-0.10, 0.225, 50.0),
-    "Cube4": (0.09, 0.195, -20.0),
 }
 _CUBE_INIT_STATES = {
     name: (
-        (x, y, _MAT_TOP_WORLD_Z + CUBE_HALF_EXTENTS[name] + _CUBE_Z_SLACK),
+        (x, y, _DESK_TOP_WORLD_Z + CUBE_HALF_EXTENTS[name] + _CUBE_Z_SLACK),
         _yaw_quat(yaw),
     )
     for name, (x, y, yaw) in _CUBE_LAYOUT.items()
@@ -107,13 +105,6 @@ _CUBE_SIZES_M: dict[str, float] = dict(CUBE_SIZES)
 # 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(50mm) face 대각 절반 ((s/2)·√2).
 _CUBE_VOLUME_INSET: float = MAX_CUBE_FOOTPRINT_RADIUS  # ≈ 0.0354
 
-# 4개 기본 위치의 중심 — apply_curriculum 에서 scale=0 시 workspace 를 이 점으로 수렴시켜
-# fallback(default 위치) 동작을 유도하는 데 사용한다.
-_CUBE_SCATTER_CENTER: tuple[float, float] = (
-    sum(v[0][0] for v in _CUBE_INIT_STATES.values()) / 4,  # ≈ 1.8375
-    sum(v[0][1] for v in _CUBE_INIT_STATES.values()) / 4,  # ≈ -0.4075
-)
-
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist,front}
 #   · 모두 640×480 (W×H) RGB, update_period=1/30
@@ -124,27 +115,28 @@ _CUBE_SCATTER_CENTER: tuple[float, float] = (
 
 # 값은 GUI 카메라 튜너(teleop_se3_agent.py)로 보정한 결과. rot 은 모두
 # wxyz, Isaac Lab world-convention(forward +X, up +Z).
-# top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique.
-_TOP_CAMERA_POS = (0.03, -0.005, 1.72)            # +y 0.01 (책상 따라 이동, top 뷰 유지)
+# top: 로봇 뒤(-y)·높은 곳에서 내려보는 급경사 oblique. (2026-06-26 튜너 재보정)
+_TOP_CAMERA_POS = (-0.17, 0.77, 1.05)
 # _TOP_CAMERA_ROT 가 None 이 아니면 이 quat 을 직접 쓰고, None 이면 _TOP_CAMERA_TARGET
-# 으로 look_at 을 계산한다(하위호환).
-_TOP_CAMERA_ROT = (0.5716, -0.4238, 0.4466, 0.5424)
-_TOP_CAMERA_TARGET = (0.30, 0.425, 0.76)          # +y 0.01
-_TOP_CAMERA_FOCAL = 18.0
+# 으로 look_at 을 계산한다(하위호환). 값은 GUI 튜너 rot_xyz_deg=(63.5, 0, -168.5) → world wxyz.
+_TOP_CAMERA_ROT = (0.7538, 0.145, 0.1775, -0.6159)
+_TOP_CAMERA_TARGET = (0.30, 0.425, 0.76)          # (미사용 — _TOP_CAMERA_ROT 직접 지정)
+_TOP_CAMERA_FOCAL = 19.0
 
-# wrist: gripper 위/옆에 강결합된 카메라.
+# wrist: gripper 위/옆에 강결합된 카메라. (2026-06-26 튜너 재보정)
+# rot 은 GUI 튜너 rot_xyz_deg=(-29.5, 0, 0) → gripper-local world wxyz.
 _WRIST_CAM_LOCAL_POS = (0.0, 0.045, -0.04)
-_WRIST_CAM_LOCAL_ROT = (-0.3642, 0.6061, -0.6061, -0.3642)
-_WRIST_CAMERA_FOCAL = 18.0
+_WRIST_CAM_LOCAL_ROT = (0.3562, -0.6108, 0.6108, 0.3562)
+_WRIST_CAMERA_FOCAL = 19.0
 
 # front: shoulder 링크에 장착 — shoulder_pan 회전을 따라간다.
 # (USD 컨벤션: URDF `shoulder_link` → USD `shoulder`, `_link` 접미사 제거)
-# pos/rot 은 --tune_cameras GUI 튜너로 실측한 shoulder local frame 값.
+# pos/rot 은 --tune_cameras GUI 튜너로 실측한 shoulder local frame 값. (2026-06-26 재보정)
 #   rot_xyz_deg=(-90, 0, -90), rot_quat=(0, 0, 1, 0) wxyz
 _FRONT_CAMERA_POS = (-0.03, -0.005, 0.75)     # world ref (shoulder_pan=0, 기록용)
-_FRONT_CAM_LOCAL_POS = (-0.040, 0.0, 0.025)      # shoulder local frame (GUI 튜너 실측)
+_FRONT_CAM_LOCAL_POS = (-0.045, 0.0, 0.025)      # shoulder local frame (GUI 튜너 실측)
 _FRONT_CAM_LOCAL_ROT = (0.0, 0.0, 1.0, 0.0)      # wxyz shoulder local frame (fwd=local -x=world -Y)
-_FRONT_CAMERA_FOCAL = 18.0
+_FRONT_CAMERA_FOCAL = 19.0
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +150,7 @@ _CUBE_CONTACT_FILTER: list[str] = [f"{{ENV_REGEX_NS}}/Scene/{n}" for n in CUBE_N
 
 @configclass
 class PickCubeSceneCfg(InteractiveSceneCfg):
-    """Scene: cube desk + SO-101 follower + 4 cubes + bowl."""
+    """Scene: cube desk + SO-101 follower + 1 cube (40mm) + bowl."""
 
     # shared world assets (not per-env)
     ground_plane = AssetBaseCfg(
@@ -183,7 +175,7 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # cube desk USD (contains desk, lighting, mat, and all rigid objects)
+    # cube desk USD (contains desk, lighting, and all rigid objects; mat removed)
     # +y 0.01 shift: 책상/매트 등 정적 지오메트리를 로봇 기준 1cm 뒤로. 큐브/그릇 rigid body 는
     # 각 init_state(env-frame)로 동일 shift 반영(독립) — Scene translate 와 이중이동 없음.
     scene: AssetBaseCfg = CUBE_DESK_CFG.replace(
@@ -216,7 +208,16 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
             #  - offset 0.20: do-nothing target 0.20(닫힘쪽, open 판정<0.6) → 잡은 큐브 유지.
             #    open 은 1.20 까지(30mm 큐브 grasp 충분), close 는 -0.174 full 도달.
             # pregrasp 공짜획득 우려는 pregrasp 보상 재설계(weight 0.5, diff 0.045)로 해소됨.
-            joint_pos={**{j: 0.0 for j in SO101_JOINT_ORDER}, "gripper": 0.20},
+            # 초기 자세(2026-06-26 사용자 지정, 단위=deg→rad). gripper=0 rad(중립).
+            # elbow_flex 요청값 +100° 는 USD joint 상한(+90°) 초과 → 90° 로 캡(실기 한계).
+            joint_pos={
+                "shoulder_pan": math.radians(0.0),
+                "shoulder_lift": math.radians(-100.0),
+                "elbow_flex": math.radians(90.0),    # 요청 +100°, USD 상한 90° 로 캡
+                "wrist_flex": math.radians(70.0),
+                "wrist_roll": math.radians(-100.0),
+                "gripper": 0.0,
+            },
         ),
         actuators={
             # leisaac SO101_FOLLOWER_CFG 검증값 이식 (ref_repos/leisaac 의
@@ -250,30 +251,6 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=_CUBE_INIT_STATES["Cube1"][0],
             rot=_CUBE_INIT_STATES["Cube1"][1],
-        ),
-    )
-    Cube2: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Scene/Cube2",
-        spawn=None,
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=_CUBE_INIT_STATES["Cube2"][0],
-            rot=_CUBE_INIT_STATES["Cube2"][1],
-        ),
-    )
-    Cube3: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Scene/Cube3",
-        spawn=None,
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=_CUBE_INIT_STATES["Cube3"][0],
-            rot=_CUBE_INIT_STATES["Cube3"][1],
-        ),
-    )
-    Cube4: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Scene/Cube4",
-        spawn=None,
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=_CUBE_INIT_STATES["Cube4"][0],
-            rot=_CUBE_INIT_STATES["Cube4"][1],
         ),
     )
     Bowl: RigidObjectCfg = RigidObjectCfg(
@@ -495,33 +472,6 @@ class PickCubeObservationsCfg:
                 "height_range": BOWL_HEIGHT_RANGE,
             },
         )
-        place_cube2 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube2"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-        place_cube3 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube3"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
-        place_cube4 = ObsTerm(
-            func=task_mdp.object_in_container,
-            params={
-                "object_cfg": SceneEntityCfg("Cube4"),
-                "container_center_xy": BOWL_CENTER_XY,
-                "radius": BOWL_SUCCESS_RADIUS,
-                "height_range": BOWL_HEIGHT_RANGE,
-            },
-        )
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
@@ -643,7 +593,7 @@ class PickCubeEventCfg:
         },
     )
 
-    # 큐브 4개를 매트 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
+    # 큐브(현재 1개)를 책상 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
     #   · 볼륨이 사각형 안: volume_inset(최대 50mm cube face 대각 절반)
     #   · 볼륨 비겹침: cube_sizes 로 per-pair 이격 동적 계산 (r_i+r_j+margin). 50mm쌍 ≈0.071,
     #                  40mm쌍 ≈0.061. min_cube_sep=0.060 은 cube_sizes 미지정 시 fallback.
