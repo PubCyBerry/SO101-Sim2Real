@@ -38,8 +38,8 @@ NVIDIA Isaac ROS pick-and-place 튜토리얼과 같은 구조: Isaac Sim 이 로
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import threading
 import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -59,7 +59,9 @@ parser.add_argument("--num_cubes", type=int, default=4, choices=[1, 2, 3, 4])
 parser.add_argument("--cube_name", default="",
                     help="단일 활성 큐브 직접 지정(크기별 eval: Cube1/2=40mm·Cube3/4=50mm). "
                          "빈값=CUBE_NAMES[:num_cubes]. 비활성 큐브는 z=-1 park(카메라 밖).")
-parser.add_argument("--dr", action="store_true", help="큐브 위치를 scatter 범위로 무작위화")
+parser.add_argument("--dr", action="store_true",
+                    help="지정 시에만 큐브·그릇 위치를 무작위화(학습 DR 정합: scatter+arc). 미지정 시 "
+                         "env_cfg 고정 기본 위치(_CUBE_INIT_STATES/_BOWL_INIT_STATE)에 배치.")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument(
     "--no_cameras",
@@ -122,6 +124,17 @@ parser.add_argument(
     help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
          "episode 경계에서 stale action queue/timestep을 초기화한다.",
 )
+# ── arm actuator override (replay 충실도용) ────────────────────────────────
+# 기본값 = VLA 학습 parity(soft PD 17.8). 실기기 녹화 궤적을 충실히 재생하려면 soft PD 가
+# 너무 물러 motion lag + 굽힌 elbow 중력 droop 으로 under-shoot 한다. 이 값을 올리면 arm 이
+# target 을 단단히 추종한다. **gripper 는 grasp gentle(0.5Nm) 유지** — arm 만 적용.
+# 미지정 시 기본값이라 VLA closed-loop 경로 동작 불변.
+parser.add_argument("--no_self_collisions", action="store_true",
+                    help="articulation self-collision off. elbow 고굴곡서 팔/캠홀더 자기충돌로 "
+                         "실기기보다 일찍 막히는지 확인·회피용(replay 충실도).")
+parser.add_argument("--reach_probe", action="store_true",
+                    help="매 step gripper EE world pos vs 활성 큐브 world pos 출력(descent 깊이·"
+                         "sim/real 정합 진단). 최소 거리 추적.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -162,7 +175,7 @@ if not args.no_cameras:
 
 import omni.graph.core as og  # noqa: E402
 import torch  # noqa: E402  (world→opengl quat 변환용)
-from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics  # noqa: E402
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
 from isaaclab.utils.math import convert_camera_frame_orientation_convention  # noqa: E402
 
@@ -173,10 +186,13 @@ from isaacsim.core.api import World  # noqa: E402
 from isaacsim.core.prims import SingleArticulation, SingleRigidPrim  # noqa: E402
 from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
 
+from so101_contract.leader_calibration import SO101_FOLLOWER_USD_JOINT_LIMITS  # noqa: E402
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_USD_PATH, ROBOT_USD_PATH  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     BOWL_HEIGHT_RANGE,
     BOWL_SUCCESS_RADIUS,
+    _BOWL_INIT_STATE,
+    _CUBE_INIT_STATES,
     _CUBE_SCATTER_X_RANGE,
     _CUBE_SCATTER_Y_RANGE,
     _FRONT_CAM_LOCAL_POS,
@@ -271,6 +287,47 @@ def _set_local_pose(prim, pos: tuple[float, float, float], quat_wxyz: tuple[floa
         orient_op.Set(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
 
 
+def _zero_velocity(handle) -> None:
+    """rigid prim 의 선/각속도를 0 으로 (텔레포트 직후 잔류 속도 제거). 핸들이 미지원이면 무시."""
+    try:
+        handle.set_linear_velocity(np.zeros(3, dtype=np.float32))
+        handle.set_angular_velocity(np.zeros(3, dtype=np.float32))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _repo_path(rel: str) -> str:
+    """REPO_ROOT 상대경로를 절대경로로 변환(이미 절대경로면 그대로)."""
+    return rel if os.path.isabs(rel) else os.path.join(REPO_ROOT, rel)
+
+
+def _apply_joint_limits(stage, root_path: str) -> None:
+    """root_path 하위 RevoluteJoint 들의 physics:lower/upperLimit 를 leader_calibration
+    단일 소스(SO101_FOLLOWER_USD_JOINT_LIMITS)로 **live stage 에 직접 set**한다.
+
+    USD 파일 값이 stale 캐시·참조 해석으로 articulation parse 에 반영 안 되는 경우가 있어
+    (관측: elbow 가 파일은 100° 인데 sim 은 90° 로 clamp), reset 전 in-memory prim 에
+    직접 써 PhysX 가 파싱하는 값을 보장한다. name→limit 매핑이라 prim 경로 무관."""
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        print(f"[bridge] joint limit: root prim 없음 {root_path}", flush=True)
+        return
+    applied = 0
+    for prim in Usd.PrimRange(root):
+        if not prim.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        lim = SO101_FOLLOWER_USD_JOINT_LIMITS.get(prim.GetName())
+        if lim is None:
+            continue
+        lo, hi = lim
+        UsdPhysics.RevoluteJoint(prim).CreateLowerLimitAttr().Set(float(lo))
+        UsdPhysics.RevoluteJoint(prim).CreateUpperLimitAttr().Set(float(hi))
+        applied += 1
+    print(f"[bridge] joint limit: {applied} joint 을 leader_calibration 테이블로 set "
+          f"(elbow={SO101_FOLLOWER_USD_JOINT_LIMITS['elbow_flex']}, "
+          f"wrist_flex={SO101_FOLLOWER_USD_JOINT_LIMITS['wrist_flex']})", flush=True)
+
+
 def _create_camera_prim(stage, prim_path, pos, rot_world_wxyz, focal):
     """USD Camera prim 생성 + 포즈(world→opengl 변환)·focal·aperture 설정.
 
@@ -359,11 +416,9 @@ def dock_camera_viewports() -> None:
     for _ in range(3):
         app.update()
 
-    layout_path = (os.path.join(REPO_ROOT, args.layout)
-                   if not os.path.isabs(args.layout) else args.layout)
+    layout_path = _repo_path(args.layout)
     if os.path.isfile(layout_path):
         try:
-            import json
             with open(layout_path) as fh:
                 dump = json.load(fh)
             ui.Workspace.restore_workspace(dump)
@@ -527,6 +582,8 @@ def main() -> None:
     # 로봇을 데스크 앞에 배치(PATH C 와 동일 pose). fixed joint 가 이 pose 에서 anchor 되도록
     # base 고정 전에 먼저 적용한다.
     _set_local_pose(robot_prim, _ROBOT_POS, _ROBOT_ROT)
+    # joint limit 을 live stage 에 직접 set(USD 파일값이 캐시로 parse 에 반영 안 되는 케이스 보장).
+    _apply_joint_limits(world.stage, ROBOT_PRIM)
 
     # base 고정. find/create fixed joint(world→base) + ArticulationRootAPI 를 부모(ROBOT_PRIM)로
     # 이동(PhysX parser 한계 회피). 이후 articulation root = ROBOT_PRIM.
@@ -534,11 +591,15 @@ def main() -> None:
         f"{ROBOT_PRIM}/base",
         ArticulationRootPropertiesCfg(
             fix_root_link=True,
-            enabled_self_collisions=True,
+            # self-collision: elbow 고굴곡(>~90°)에서 forearm+wrist 캠홀더 convex 충돌형상이
+            # 서로 닿아 실기기(99°)보다 일찍 막히는 의심 → replay 충실도 테스트용 토글.
+            enabled_self_collisions=not args.no_self_collisions,
             solver_position_iteration_count=4,
             solver_velocity_iteration_count=4,
         ),
     )
+    if args.no_self_collisions:
+        print("[bridge] self-collision DISABLED (replay 충실도 테스트)", flush=True)
 
     # TF parent frame "base_link" 용 Xform — base 링크 자식, identity local 이라 base 와 정확히
     # 일치(USD base 링크명은 base_link 가 아니라 base 라 동명 Xform 을 새로 만든다).
@@ -583,6 +644,18 @@ def main() -> None:
     print(f"[bridge] actuator parity: stiffness={DRIVE_STIFFNESS} damping={DRIVE_DAMPING} "
           f"(arm·gripper 공통), gripper dof[{gi}]", flush=True)
 
+    # 실제 articulation joint position limit 확인(USD/캐시 vs 적용값). _apply_joint_limits 가
+    # 먹었으면 elbow=±100·wrist_flex/-95~105·lift±105 로 나와야. 90°로 나오면 limit 미적용.
+    try:
+        lims = np.asarray(robot._articulation_view.get_dof_limits()).reshape(-1, 2)
+        names = list(robot.dof_names)
+        deg = 180.0 / np.pi
+        pairs = ", ".join(f"{names[i]}[{lims[i, 0] * deg:.0f},{lims[i, 1] * deg:.0f}]"
+                          for i in range(min(len(names), lims.shape[0])))
+        print(f"[bridge] 실제 dof pos limit(deg): {pairs}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] dof limit 조회 실패: {exc}", flush=True)
+
     # effort 상한 (PickCubeEnvCfg parity): arm 10Nm, gripper gentle 0.5Nm(leisaac dynamic 동치).
     efforts = np.full(n_dof, ARM_EFFORT_LIMIT, dtype=np.float32)
     efforts[gi] = GRIPPER_EFFORT_LIMIT
@@ -620,19 +693,16 @@ def main() -> None:
         bowl_handle.initialize()
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] bowl handle init 실패: {exc}", flush=True)
-    # 초기/리셋 팔 자세 = 학습 데이터(cuRobo recorder) frame-0 state 정합.
-    # recorder 는 episode 를 READY([0,-1.3,1.2,-20°,-90°]) settle + gripper open 에서 시작 → 녹화 첫
-    # frame state(1024ep 평균, rad)가 정책이 학습한 시작 obs. 기존 home_q=zeros 는 완전 OOD 시작이라
-    # 정책 첫 obs 불일치 → 즉시 drift. name→rad 매핑이라 dof 순서 무관.
+    # 초기/리셋 팔 자세 = teleop_se3_agent 시작 자세(PickCubeEnvCfg robot.init_state.joint_pos).
+    # 사용자 지정(2026-06-26, deg→rad): pan 0·lift -100·elbow 90(요청 +100°, USD 상한 90° 캡)·
+    # wrist_flex 70·wrist_roll -100·gripper 0. name→rad 매핑이라 dof 순서 무관.
     _START_POSE_RAD = {
-        "shoulder_pan": 0.0, "shoulder_lift": -1.235, "elbow_flex": 1.2623,
-        "wrist_flex": -0.3814, "wrist_roll": -1.2342, "gripper": 0.8483,
+        "shoulder_pan": np.radians(0.0), "shoulder_lift": np.radians(-100.0),
+        "elbow_flex": np.radians(90.0), "wrist_flex": np.radians(70.0),
+        "wrist_roll": np.radians(-100.0), "gripper": 0.0,
     }
-    try:
-        home_q = np.array([_START_POSE_RAD.get(n, 0.0) for n in robot.dof_names], dtype=np.float32)
-    except Exception:  # noqa: BLE001  dof_names 접근 실패 시 dof 순서 가정(SO101_JOINT_ORDER)
-        home_q = np.array([0.0, -1.235, 1.2623, -0.3814, -1.2342, 0.8483], dtype=np.float32)[:n_dof]
-    print(f"[bridge] 초기 팔 자세(학습 frame-0 정합): {[round(float(x), 3) for x in home_q]}", flush=True)
+    home_q = np.array([_START_POSE_RAD.get(n, 0.0) for n in robot.dof_names], dtype=np.float32)
+    print(f"[bridge] 초기 팔 자세(teleop init_state 정합): {[round(float(x), 3) for x in home_q]}", flush=True)
 
     # 비활성 큐브(active 아님)를 z=-1 로 park — 단일-큐브 학습 데이터 정합(카메라 밖).
     # 기존 bridge 는 active 만 핸들링해 비활성 큐브가 authored default 위치에 노출됐다(버그).
@@ -651,10 +721,9 @@ def main() -> None:
         for h in inactive_handles.values():
             try:
                 h.set_world_pose(position=np.array([0.0, 0.0, -1.0], dtype=np.float32))
-                h.set_linear_velocity(np.zeros(3, dtype=np.float32))
-                h.set_angular_velocity(np.zeros(3, dtype=np.float32))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+            _zero_velocity(h)
 
     # ── DR (학습 randomize_cubes_scattered / randomize_object_on_arc 정합) ──
     _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
@@ -712,11 +781,7 @@ def main() -> None:
             placed.append((fx, fy))
             pos = np.array([fx, fy, cube_default_z[name]], dtype=np.float32)
             h.set_world_pose(position=pos, orientation=_face_quat(rng))
-            try:
-                h.set_linear_velocity(np.zeros(3, dtype=np.float32))
-                h.set_angular_velocity(np.zeros(3, dtype=np.float32))
-            except Exception:
-                pass
+            _zero_velocity(h)
 
     def randomize_bowl(rng) -> None:
         """학습 _randomize_object_on_arc_fn 정합: 전방 호(radius 0.44, angle[-4,8]°) 위 xy 재배치.
@@ -728,18 +793,36 @@ def main() -> None:
                         cy + _BOWL_ARC_RADIUS * np.cos(ang), bowl_default_z], dtype=np.float32)
         bowl_handle.set_world_pose(position=pos, orientation=bowl_default_quat)
         if not args.eval_bowl_kinematic:
-            try:
-                bowl_handle.set_linear_velocity(np.zeros(3, dtype=np.float32))
-                bowl_handle.set_angular_velocity(np.zeros(3, dtype=np.float32))
-            except Exception:
-                pass
+            _zero_velocity(bowl_handle)
+
+    def place_defaults() -> None:
+        """DR off: 큐브·그릇을 env_cfg 고정 기본 위치에 둔다(teleop reset_scene_to_default 와
+        동일 단일 소스 = pick_cube_env_cfg._CUBE_INIT_STATES/_BOWL_INIT_STATE).
+        _CUBE_INIT_STATES 에 없는 큐브(다중-큐브 씬)는 authored 위치를 유지한다."""
+        for name, h in cube_handles.items():
+            init = _CUBE_INIT_STATES.get(name)
+            if init is None:
+                continue
+            pos, rot = init
+            h.set_world_pose(position=np.asarray(pos, dtype=np.float32),
+                             orientation=np.asarray(rot, dtype=np.float32))
+            _zero_velocity(h)
+        bpos, brot = _BOWL_INIT_STATE
+        bowl_handle.set_world_pose(position=np.asarray(bpos, dtype=np.float32),
+                                   orientation=np.asarray(brot, dtype=np.float32))
+        if not args.eval_bowl_kinematic:
+            _zero_velocity(bowl_handle)
 
     def reset_scene(seed: int) -> None:
-        """seed 로 DR 재현(큐브 scatter+6D face → 그릇 arc, 학습 순서) + 팔 home.
-        동일 seed = 동일 spawn 레이아웃(post-settle 은 PhysX 미세변동). np 전역 무관(default_rng)."""
-        rng = np.random.default_rng(int(seed))
-        randomize_cubes(rng)   # 학습 순서: 큐브(vs bowl_default) → 그릇 arc
-        randomize_bowl(rng)
+        """씬 리셋 + 팔 home. --dr 지정 시에만 무작위화(학습 DR 정합: 큐브 scatter+6D face →
+        그릇 arc), 미지정 시 env_cfg 고정 기본 위치. 동일 seed = 동일 spawn 레이아웃
+        (post-settle 은 PhysX 미세변동). np 전역 무관(default_rng)."""
+        if args.dr:
+            rng = np.random.default_rng(int(seed))
+            randomize_cubes(rng)   # 학습 순서: 큐브(vs bowl_default) → 그릇 arc
+            randomize_bowl(rng)
+        else:
+            place_defaults()
         park_inactive()        # 비활성 큐브 카메라 밖 유지(단일-큐브 정합)
         try:
             robot.set_joint_positions(home_q)
@@ -766,7 +849,6 @@ def main() -> None:
         # 덤프(gated LAYOUT_DUMP). num_envs=1 SM 은 env_origin=0 이라 world==env-local.
         _ld = os.getenv("LAYOUT_DUMP", "").strip()
         if _ld:
-            import json as _json
             _lay = {"active_objects": int(args.num_cubes), "seed": int(seed),
                     "envs": [{"env": 0, "placed": 0, "clean": False, "cubes": {}, "bowl": None}]}
             for _nm, _h in cube_handles.items():
@@ -775,11 +857,12 @@ def main() -> None:
             _bp2, _bq2 = bowl_handle.get_world_pose()
             _lay["envs"][0]["bowl"] = [float(v) for v in (*_bp2[:3], *_bq2[:4])]
             with open(_ld, "w") as _f:
-                _json.dump(_lay, _f, indent=2)
+                json.dump(_lay, _f, indent=2)
             print(f"[bridge] LAYOUT DUMP → {_ld} (seed={seed})", flush=True)
-        print(f"[bridge] scene reset + DR (seed={seed})", flush=True)
+        mode = f"DR (seed={seed})" if args.dr else "고정 기본 위치(DR off)"
+        print(f"[bridge] scene reset · {mode}", flush=True)
 
-    # 시작 시 DR 1회(학습 reset=DR 정합). 이후 R/N 으로 재리셋.
+    # 시작 시 1회 배치(--dr 시 무작위, 미지정 시 고정 기본). 이후 R/N 으로 재리셋.
     current_seed = {"v": int(args.seed)}
     reset_generation = {"value": 0}
     reset_scene(current_seed["v"])
@@ -840,7 +923,6 @@ def main() -> None:
         return (in_xy and in_z), dxy, z
 
     if args.eval > 0:
-        import json
         control_hz = 30
         ep_steps = max(1, int(args.eval_seconds * control_hz))
         settle_steps = max(0, int(args.eval_settle * control_hz))
@@ -853,8 +935,7 @@ def main() -> None:
         # 진단 dump: bridge 렌더 3캠 annotator(render_product 직결 = 정책이 받는 이미지와 동일).
         _dump_annots = []
         if args.dump_obs:
-            import os as _os
-            _os.makedirs(args.dump_obs, exist_ok=True)
+            os.makedirs(args.dump_obs, exist_ok=True)
             try:
                 import omni.replicator.core as _rep
                 for rp_path, topic, _fid in camera_specs:
@@ -1037,7 +1118,7 @@ def main() -> None:
                 ],
                 "episodes": episodes,
             }
-            out_path = os.path.join(REPO_ROOT, args.eval_out) if not os.path.isabs(args.eval_out) else args.eval_out
+            out_path = _repo_path(args.eval_out)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with open(out_path, "w") as fh:
                 json.dump(summary, fh, indent=2)
@@ -1050,10 +1131,24 @@ def main() -> None:
         return
 
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
+    # ── reach probe: gripper EE prim ↔ 활성 큐브 world pos 거리. descent 깊이·sim/real 정합 진단.
+    _ee_prim_path = None
+    if args.reach_probe:
+        for _p in Usd.PrimRange(world.stage.GetPrimAtPath(ROBOT_PRIM)):
+            if _p.GetName() == "gripper_frame_link":
+                _ee_prim_path = _p.GetPath(); break
+        if _ee_prim_path is None:
+            _ee_prim_path = f"{ROBOT_PRIM}/gripper"  # fallback: gripper body
+        _probe_cube = cube_handles[active_cubes[0]]
+        _xc = UsdGeom.XformCache()
+        _min_gap = {"v": 1e9}
+        print(f"[reach] probe EE prim = {_ee_prim_path}", flush=True)
+
     # ── step 프로파일: world.step wall-time 누적, N step 마다 min/mean/max + 유효 step/s 출력.
     #    reset step 은 scene 재구성이라 skew → 타이밍에서 제외(reset 직후 윈도 초기화).
     _step_ms: list[float] = []
     _STEP_REPORT_EVERY = 120  # ~4s @ render_dt 30fps
+    _reach_i = 0
     while simulation_app.is_running():
         if reset_req["mode"] is not None:
             if reset_req["mode"] == "random":
@@ -1064,6 +1159,27 @@ def main() -> None:
         _ts = time.perf_counter()
         world.step(render=True)
         _step_ms.append((time.perf_counter() - _ts) * 1e3)
+
+        if args.reach_probe:
+            _reach_i += 1
+            if _reach_i % 5 == 0:
+                _xc.Clear()
+                _m = _xc.GetLocalToWorldTransform(world.stage.GetPrimAtPath(_ee_prim_path))
+                _tcp = _m.Transform(Gf.Vec3d(-0.0079, -0.000218121, -0.0981274))  # gripper_frame TCP
+                _jm = _xc.GetLocalToWorldTransform(world.stage.GetPrimAtPath(f"{ROBOT_PRIM}/jaw"))
+                _jaw = _jm.ExtractTranslation()  # 움직이는 jaw 링크
+                _cp, _ = _probe_cube.get_world_pose()
+                _cp = np.asarray(_cp, dtype=np.float64)
+                _desk_z = float(_cp[2]) - 0.020          # 책상면 = 큐브중심 - 40mm 반높이
+                _h_tcp = (float(_tcp[2]) - _desk_z) * 100.0
+                _h_jaw = (float(_jaw[2]) - _desk_z) * 100.0
+                _xy = float(np.hypot(float(_tcp[0]) - _cp[0], float(_tcp[1]) - _cp[1])) * 100.0
+                # grasp 구간만(큐브 위 xy<5cm) 최저 TCP 높이 추적(home 자동 제외)
+                if _xy < 5.0:
+                    _min_gap["v"] = min(_min_gap["v"], _h_tcp)
+                print(f"[reach] t={_reach_i / 30.0:.1f}s xy={_xy:.1f}cm | "
+                      f"TCP높이={_h_tcp:+.1f} jaw높이={_h_jaw:+.1f}cm (real≈+2) | "
+                      f"큐브위(xy<5) 최저TCP={_min_gap['v'] if _min_gap['v']<1e8 else 0:+.1f}cm", flush=True)
         if len(_step_ms) >= _STEP_REPORT_EVERY:
             n = len(_step_ms)
             mean = sum(_step_ms) / n

@@ -47,9 +47,10 @@ from sim_to_real.utils.domain_randomization import (
 from sim_to_real.tasks.pick_cube import mdp as task_mdp
 
 
-# World-frame (x, y) of the bowl at scene authoring time.
-# BOWL_LOCAL=(-0.58, 0.26) + SCENE_OFFSET=(0.36, 0.045) = (-0.22, 0.305), +y 0.01 shift → 0.315.
-BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.315)
+# World-frame (x, y) of the bowl = success/obs 컨테이너 중심. _BOWL_INIT_STATE 와 반드시 동기화
+# (object_in_container 가 이 중심 기준 success radius 판정). 2026-06-29 사용자 DR-off 위치 변경에
+# 맞춰 y 0.315→0.265 (책상 앞 모서리 env y=-0.035 에서 +30cm).
+BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.265)
 BOWL_SUCCESS_RADIUS: float = 0.06
 BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
 
@@ -69,7 +70,9 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 _DESK_TOP_WORLD_Z: float = 0.705
 _CUBE_Z_SLACK: float = 0.001
 _CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {  # name -> (x, y, yaw°)
-    "Cube1": (-0.14, 0.135, 20.0),
+    # DR-off 기본 위치(2026-06-29 사용자): 큐브 중심 = 책상 앞 모서리(env y=-0.035)에서 +30cm,
+    # 책상 왼쪽 모서리(env x=-0.44)에서 +42cm → env (-0.02, 0.265). yaw 20° 유지.
+    "Cube1": (-0.02, 0.265, 20.0),
 }
 _CUBE_INIT_STATES = {
     name: (
@@ -78,8 +81,9 @@ _CUBE_INIT_STATES = {
     )
     for name, (x, y, yaw) in _CUBE_LAYOUT.items()
 }
-# BOWL_LOCAL(-0.58, 0.26, 0.010) + SCENE_OFFSET(0.36, 0.045, 0.705) = (-0.22, 0.305, 0.715), +y 0.01 → 0.315.
-_BOWL_INIT_STATE = ((-0.22, 0.315, 0.715), _yaw_quat(0.0))
+# DR-off 기본 위치(2026-06-29 사용자): 그릇 중심 = 책상 앞 모서리(env y=-0.035)에서 +30cm,
+# 책상 왼쪽 모서리(env x=-0.44)에서 +22cm → env (-0.22, 0.265). z=0.715 유지. BOWL_CENTER_XY 와 동기.
+_BOWL_INIT_STATE = ((-0.22, 0.265, 0.715), _yaw_quat(0.0))
 
 # ---------------------------------------------------------------------------
 # 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준

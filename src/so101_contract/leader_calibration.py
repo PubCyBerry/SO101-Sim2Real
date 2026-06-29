@@ -30,9 +30,9 @@ from .feature_codec import SO101_JOINT_ORDER
 # joint limit written in USD (degree). 관절별 비대칭 범위.
 SO101_FOLLOWER_USD_JOINT_LIMITS: dict[str, tuple[float, float]] = {
     "shoulder_pan": (-110.0, 110.0),
-    "shoulder_lift": (-100.0, 100.0),
-    "elbow_flex": (-100.0, 90.0),
-    "wrist_flex": (-95.0, 95.0),
+    "shoulder_lift": (-105.0, 105.0),  # ±100→±105 (replay 가동범위 정합, 2026-06-29)
+    "elbow_flex": (-100.0, 100.0),   # 90→100 (실 calibration·replay 가동범위 정합, 2026-06-29)
+    "wrist_flex": (-95.0, 105.0),    # 95→100→105 (동상)
     "wrist_roll": (-160.0, 160.0),
     "gripper": (-10.0, 100.0),
 }

@@ -33,6 +33,11 @@ RUN pip install --break-system-packages --no-cache-dir \
 RUN pip install --break-system-packages --no-cache-dir \
         grpcio "protobuf>=6.31,<7" python-dotenv "numpy<2"
 
+# replay_dataset_to_bridge.py --dataset 경로: HF LeRobot v3 parquet 직접 로드(pyarrow).
+# pyarrow<19 = numpy 1.x C-API ABI(프로젝트 핀과 동일). pandas 불요(pyarrow.compute 로 필터/정렬).
+RUN pip install --break-system-packages --no-cache-dir \
+        huggingface_hub "pyarrow<19"
+
 # 셸 진입 시 ROS + 워크스페이스 overlay source.
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc \
     && echo '[ -f /workspace/ros2_ws/install/setup.bash ] && source /workspace/ros2_ws/install/setup.bash' >> /etc/bash.bashrc

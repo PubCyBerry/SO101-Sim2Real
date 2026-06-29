@@ -208,7 +208,7 @@ services:
       # 예: PUBLIC_IP=100.79.237.116 (Tailscale)
       PUBLIC_IP:                    "${PUBLIC_IP:-}"
       # 시뮬 설정
-      NUM_CUBES:                    "${NUM_CUBES:-4}"
+      NUM_CUBES:                    "${NUM_CUBES:-1}"
       # 추가 bridge 인자 (--eval, --headless 등)
       BRIDGE_EXTRA_ARGS:            "${BRIDGE_EXTRA_ARGS:-}"
     # ── 네트워크 ─────────────────────────────────────────────────────────
