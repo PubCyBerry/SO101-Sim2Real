@@ -2856,19 +2856,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ovphysx"
-version = "0.4.13"
-source = { registry = "https://pypi.nvidia.com/" }
-dependencies = [
-    { name = "packaging" },
-]
-wheels = [
-    { url = "https://pypi.nvidia.com/ovphysx/ovphysx-0.4.13-py3-none-manylinux_2_35_aarch64.whl", hash = "sha256:b65be30c0bb535b830a3215bc89367b2abd0bfa78b45a3acd82270ea57b39d1e" },
-    { url = "https://pypi.nvidia.com/ovphysx/ovphysx-0.4.13-py3-none-manylinux_2_35_x86_64.whl", hash = "sha256:4bc5bd9976529f86248826916a12243813833607131ed17149f976262f04dec6" },
-    { url = "https://pypi.nvidia.com/ovphysx/ovphysx-0.4.13-py3-none-win_amd64.whl", hash = "sha256:43be701bf37dfd7f71c540fb3696bab5d9a24cedec1576f7d268f809acffb5ef" },
-]
-
-[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3918,9 +3905,6 @@ teleop = [
     { name = "ffmpeg" },
     { name = "packaging" },
 ]
-validation = [
-    { name = "ovphysx" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -3962,7 +3946,6 @@ teleop = [
     { name = "ffmpeg", specifier = ">=1.4" },
     { name = "packaging", specifier = ">=25.0" },
 ]
-validation = [{ name = "ovphysx" }]
 
 [[package]]
 name = "six"
