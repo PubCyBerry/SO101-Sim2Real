@@ -654,6 +654,8 @@ ss -ltnp | grep ':8080'
 
 ## GR00T 학습 env override가 로그에만 보이고 실제 명령에는 미적용
 
+> ⚠ **폐기(2026-06-29)**: GR00T-N1.7 ZMQ/finetune 경로 제거됨 (N1.5 = lerobot 네이티브 `groot`, policy-server `train`). `gr00t-entrypoint.sh`·`gr00t-finetune.sh`·`policy_server_groot_bridge.py` 는 더 이상 없다. 아래는 N1.7 시절 기록(historical).
+
 **현상**
 
 `LEARNING_RATE=3e-5`, `COLOR_JITTER_ENABLE=false`를 지정하고 stage-2 학습을 시작했는데 entrypoint의 요약 로그만 새 값을 표시하고, 실제 `launch_finetune.py`는 기본 LR과 color jitter로 실행된다.
@@ -4210,7 +4212,7 @@ uv run --no-sync --group isaac python -c "import websockets.asyncio; print('ok')
 `docker compose run -e POLICY_PROFILE=act ... policy-server train` 했는데 ACT 가 아니라 SmolVLA 로 학습/추론됨(`--policy.path=lerobot/smolvla_base`, camera rename map 적용). 4cube 1024 학습 중 ACT 가 smolvla 로 오학습된 사고.
 
 ### 원인
-compose 의 `env_file: ../env/${POLICY_PROFILE:-groot_n17}.env` 보간은 **parse-time** 에 `.env`(혹은 셸 환경)의 `POLICY_PROFILE` 로 치환된다. `.env` 에 `POLICY_PROFILE=smolvla` 가 있으면 `-e POLICY_PROFILE=act`(컨테이너 런타임 var)는 보간에 영향을 못 줘 전 서비스가 `env/smolvla.env` 를 로드한다. docker-compose.yaml 주석(서비스 env_file 위)도 "셸 환경 동명 변수가 보간에 쓰인다" 라고 명시.
+compose 의 `env_file: ../env/${POLICY_PROFILE:-groot_n15}.env` 보간은 **parse-time** 에 `.env`(혹은 셸 환경)의 `POLICY_PROFILE` 로 치환된다. `.env` 에 `POLICY_PROFILE=smolvla` 가 있으면 `-e POLICY_PROFILE=act`(컨테이너 런타임 var)는 보간에 영향을 못 줘 전 서비스가 `env/smolvla.env` 를 로드한다. docker-compose.yaml 주석(서비스 env_file 위)도 "셸 환경 동명 변수가 보간에 쓰인다" 라고 명시.
 
 ### 해결 방법
 `POLICY_PROFILE` 을 **셸 환경 변수 프리픽스**로 준다 (셸 env 가 `.env` 보다 보간 우선):

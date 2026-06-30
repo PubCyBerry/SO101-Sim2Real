@@ -18,9 +18,9 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | Windows 워크스테이션 | Linux 서버 |
 |---|---|---|
 | **실행 방식** | native uv + `pyproject.toml` (WSL·Docker 없음) | Docker (`docker compose ...`) |
-| **진입점** | LeRobot CLI (`uv run lerobot-<mode>` · `robot_client`) | policy-server · isaac-sim · vla-ros · gr00t |
+| **진입점** | LeRobot CLI (`uv run lerobot-<mode>` · `robot_client`) | policy-server · isaac-sim · vla-ros |
 | **작업** | teleop · record · replay · calibrate · setup-motors · find-port · **실기기 policy-client** | sim VLA 폐루프 · VLA 학습 · 추론 서버 · sim policy-client(vla-ros) |
-| **정책** | ACT · SmolVLA · GR00T-N1.7 (서버에서 추론, gRPC) | 동일 (env=추론/데이터 기판, RL 제거) |
+| **정책** | ACT · SmolVLA · GR00T-N1.5 (서버에서 추론, gRPC) | 동일 (env=추론/데이터 기판, RL 제거) |
 | **스택** | LeRobot 0.4.4 (pyproject `teleop`+`async`) | Isaac Sim 5.1 / IsaacLab 2.3.2 (직접 의존) / LeRobot 0.5.1 |
 
 - 시뮬 env 는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
@@ -64,36 +64,35 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 ## Docker 컨테이너 구조 (Linux 서버)
 
-### 서비스 (4종)
+### 서비스 (3종)
 
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
-| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async) | async inference gRPC 서버 + VLA 학습(train/eval). ACT·SmolVLA·GR00T-N1.7(bridge) |
+| `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async) | async inference gRPC 서버 + VLA 학습(train/eval). ACT·SmolVLA·GR00T-N1.5 (모두 lerobot 네이티브 `groot`) |
 | `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-v0` 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
 | `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 (`vla_policy_node`, gRPC 클라이언트) |
-| `gr00t` | `gr00t-n17:ea` / `ref_repos/Isaac-GR00T/docker/Dockerfile`(무수정) | Python 3.10 + transformers 4.57 + gr00t | GR00T-N1.7 convert / finetune / ZMQ 추론 서버(:5555, policy-server-groot bridge 수신) |
 
 - 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
-- 의존성 격리 이유: GR00T-N1.7 은 transformers 4.57/py3.10 으로 policy-server(5.3/3.12)와 공존 불가 → `gr00t` 별도 이미지(NVIDIA 네이티브, bind-mount+entrypoint override). 추론은 `policy-server-groot` gRPC↔ZMQ bridge 가 잇는다.
+- GR00T-N1.5 는 LeRobot 0.5.1 내장 `groot` policy(Eagle-2.5 backbone)라 policy-server 안에서 직접 추론·학습한다(ACT/SmolVLA 와 동일, 별도 이미지·ZMQ 불필요). N1.7 은 Cosmos-Reason2 backbone + transformers 4.57 이라 policy-server(5.3)와 공존 불가 → lerobot 0.5.1 네이티브 미지원이므로 제거됨(재도입은 git history).
 
 ### compose 설정
 
-- **디바이스 마운트 없음**: 실기기 직렬/카메라 디바이스 마운트는 `lerobot` 서비스 삭제와 함께 제거됨. 남은 4개 서비스는 로봇 직결이 없다(isaac-sim 은 카메라를 sim 내부 렌더, 실기기 카메라는 Windows native uv OpenCV index).
+- **디바이스 마운트 없음**: 실기기 직렬/카메라 디바이스 마운트는 `lerobot` 서비스 삭제와 함께 제거됨. 남은 3개 서비스는 로봇 직결이 없다(isaac-sim 은 카메라를 sim 내부 렌더, 실기기 카메라는 Windows native uv OpenCV index).
 - **권한·네트워크**: `network_mode: host` (ROS 브릿지·gRPC·WebRTC), `ipc: host`. GPU 1장 예약.
 - **호스트 볼륨**:
   - `./datasets`, `./logs`, `./outputs` → `/workspace/*`
-  - `./scripts` → `/workspace/scripts` (policy-server — `policy-server-groot` 모드가 `scripts/inference/policy_server_groot_bridge.py` 참조)
-  - 명명 볼륨 `lerobot_hf_cache` (compose key `hf_cache`) → `/workspace/.cache/huggingface` (HF_HOME). **policy-server·gr00t 공유**. non-root UID 실행 때문에 `/root` 가 아닌 `/workspace` 하위. 머신 이전 시 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
+  - `./scripts` → `/workspace/scripts` (policy-server·isaac-sim — demo·inference 스크립트 참조)
+  - 명명 볼륨 `lerobot_hf_cache` (compose key `hf_cache`) → `/workspace/.cache/huggingface` (HF_HOME). **policy-server 전용**. non-root UID 실행 때문에 `/root` 가 아닌 `/workspace` 하위. 머신 이전 시 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
   - `isaac_lab_cache_*` (kit/ov/pip/gl/compute/logs/data) → isaac-sim 전용.
 
 ### 진입점 모드
 
 **`policy-entrypoint.sh`** (policy-server, CMD 기본값 `policy-server`):
-`prepare-model` · `policy-server` · `policy-server-groot` · `train` · `eval` · `info` · `bash` · `python`
+`prepare-model` · `policy-server` · `train` · `eval` · `info` · `bash` · `python`
 
 > **RL(PPO/강화학습) 제거됨**. `train`/`eval` 은 VLA 지도학습(SmolVLA/ACT) 용으로 유지 — policy-server 가 추론+학습 담당.
 
-- `policy-server-groot` 는 `scripts/inference/policy_server_groot_bridge.py` (`GrootBridgeServer`, PolicyServer 서브클래스)로 gRPC 컨트랙트를 유지한 채 추론만 `gr00t` 컨테이너의 ZMQ 서버(Gr00tPolicy N1.7)에 위임한다. `GROOT_ZMQ_*` env, `vla_policy_node` 무수정.
+- GR00T-N1.5 추론은 표준 `policy-server` 모드 그대로다 — `vla_policy_node` 가 `policy_type=groot` 로 SendPolicyInstructions 하면 policy-server 가 lerobot 네이티브 `GrootPolicy` 를 로드한다(별도 모드·ZMQ 불필요).
 - `policy-server-rtc`(서버 측 Real-Time Chunking) · `policy-server-attn`(SmolVLA cross-attention 히트맵 PUB)는 백엔드 스크립트(`policy_server_rtc.py` · `policy_server_attention_bridge.py`)가 이 branch 에 없어 **entrypoint 에서 제거됨**. 두 기능 재도입 시 스크립트 + entrypoint 모드 + bridge `--attention_overlay` SUB(`run_cube_desk_ros_bridge.py`)를 함께 복원.
 
 **`isaac-sim-entrypoint.sh`** (isaac-sim, CMD 기본값 `bridge`):
@@ -102,24 +101,21 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 **`vla-ros-entrypoint.sh`** (vla-ros):
 컨테이너 안에서 `colcon build --packages-select so101_vla_policy` 후 `vla_policy_node` 직접 실행 (호스트 빌드 아님; `..:/workspace` bind-mount).
 
-**`gr00t-entrypoint.sh`** (gr00t, CMD 기본값 `zmq-server`):
-`convert`(v3→v2.1+modality.json) · `finetune`(examples/finetune.sh) · `zmq-server`(run_gr00t_server.py) · `bash` · `python`
-
 모드별 env var 매핑은 각 스크립트 상단 `${VAR:-default}` 블록과 case 분기 주석에 정리됨.
 
 ### 빌드·런타임 보조 스크립트
 
 | 파일 | 용도 |
 |---|---|
-| `docker/groot_compat_patch.py` | `Dockerfile.policy` 빌드 시 `lerobot[smolvla,async]==0.5.1` 설치 직후 1회 실행. transformers 5.3 + torch 2.10 에서 LeRobot 0.5.1 GR00T wrapper 가 깨지는 4지점을 site-packages 에서 멱등 패치. 형태가 다르면 `RuntimeError` 로 빌드 중단(버전 트립와이어) — lerobot/transformers 업그레이드 시 이 패치부터 점검. |
+| `docker/groot_compat_patch.py` | `Dockerfile.policy` 빌드 시 `lerobot[smolvla,async]==0.5.1` 설치 직후 1회 실행. transformers 5.3 + torch 2.10 에서 LeRobot 0.5.1 GR00T-N1.5 네이티브 wrapper(`policies/groot`)가 깨지는 4지점을 site-packages 에서 멱등 패치. **N1.5 추론·학습 필수 — 이름이 GR00T 라도 N1.7 자산 아님, 삭제 금지.** 형태가 다르면 `RuntimeError` 로 빌드 중단(버전 트립와이어) — lerobot/transformers 업그레이드 시 이 패치부터 점검. |
 
 ### `.env` / 모델 프로필
 
 - **주입 경로(Docker)**: 서비스 `env_file: [../.env, ../env/${POLICY_PROFILE}.env]` 가 컨테이너에 주입(나중 파일이 override). `entrypoint.sh` 가 기본값을 채워 CLI 인자로 매핑. (native uv 에선 `source .env` 로 직접 로드.)
-- **모델 프로필**: 모델 간 값이 다른 변수는 `env/<name>.env` 로 분리하고, `.env` 의 `POLICY_PROFILE` 한 줄로 활성 모델 선택. 새 모델 = 프로필 파일 추가. 현재: `smolvla` · `groot_n17` · `act`.
+- **모델 프로필**: 모델 간 값이 다른 변수는 `env/<name>.env` 로 분리하고, `.env` 의 `POLICY_PROFILE` 한 줄로 활성 모델 선택. 새 모델 = 프로필 파일 추가. 현재: `smolvla` · `groot_n15` · `act`.
   - 분리 변수: `POLICY_TYPE` / `TRAIN_POLICY_TYPE` / `POLICY_BASE_MODEL_PATH` / tokenizer·embodiment·chunk·n_action_steps / `ACTIONS_PER_CHUNK` / `POLICY_REPO_ID` / `JOB_NAME`
   - train 출발 모델 라우팅: `POLICY_BASE_MODEL_PATH` 단일 변수 + `TRAIN_POLICY_TYPE` 유무로 `--policy.path`(체크포인트) ↔ `--policy.type` + `--policy.base_model_path`(native 베이스).
-  - **`groot_n17`(GR00T-N1.7)은 policy-server train 경로가 아니다**: `GROOT_*` 변수(`GROOT_BASE_MODEL`/`GROOT_CHECKPOINT`/`GROOT_MODALITY_CONFIG`/`GROOT_ZMQ_*`)로 `gr00t` 이미지(convert/finetune/zmq-server) + `policy-server-groot` bridge 를 구동한다. `RENAME_MAP` 비움(raw top/wrist/front).
+  - **`groot_n15`(GR00T-N1.5)은 policy-server train/추론 경로 그대로**: `TRAIN_POLICY_TYPE=groot` + `POLICY_BASE_MODEL_PATH=nvidia/GR00T-N1.5-3B` 로 `--policy.type=groot` 학습, 추론은 표준 `policy-server`(vla_policy_node 가 `policy_type=groot` 주입). `POLICY_CHUNK_SIZE`/`POLICY_N_ACTION_STEPS`=16, `RENAME_MAP` 비움(raw top/wrist/front).
 
 ## 시뮬레이션 환경 — VLA 추론·데이터 기판
 
@@ -167,8 +163,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 로 실제 SO-101 leader 상태 원격 송출 |
 | | `environments/utils/patch_robot_colors.py` | USD 머티리얼 패치 |
 | **VLA 추론** | `inference/run_cube_desk_ros_bridge.py` (+ `.sh` wrapper) | Isaac Sim standalone + `isaacsim.ros2_bridge`로 cube_desk 실행. `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose` publish. **`--eval`** = closed-loop 평가. **`--attention_overlay`** = SmolVLA cross-attn ZMQ SUB → omni.ui JET 오버레이 |
-| | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+bridge+vla-ros 자동 배선, livestream :49100 |
-| | `inference/policy_server_groot_bridge.py` | `GrootBridgeServer` (PolicyServer 서브클래스). gRPC 컨트랙트 유지, 추론만 gr00t ZMQ 에 위임 |
+| | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+vla-ros 자동 배선, livestream :49100 |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
 | | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |

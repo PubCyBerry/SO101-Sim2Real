@@ -150,7 +150,7 @@ cp .env.example .env
 | 블록 | 변수 (발췌) |
 |---|---|
 | §0 시크릿 | `HF_TOKEN` `HF_USER` `WANDB_API_KEY` |
-| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n17/act) — 활성 모델 1줄 선택 |
+| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n15/act) — 활성 모델 1줄 선택 |
 | §2 하드웨어 | `TELEOP_PORT` `ROBOT_PORT` `ROBOT_ID` `TELEOP_ID` (Windows=COM, Docker=`/dev/ttyACM*`) |
 | §3 카메라 | `ENABLED_CAMERAS` `*_CAM_PORT` `CAM_WIDTH/HEIGHT/FPS` |
 | §4 데이터 | `SINGLE_TASK` `HF_DATASET_REPO_ID` `NUM_EPISODES` `RECORD_FPS` |
@@ -211,11 +211,9 @@ docker compose --env-file .env -f docker/docker-compose.yaml up policy-server is
 ### Linux Docker — VLA 학습
 
 ```bash
-# SmolVLA / ACT
+# SmolVLA / ACT / GR00T-N1.5 — 모두 lerobot 네이티브 policy-server train
+# (모델 선택 = .env 의 POLICY_PROFILE: smolvla | act | groot_n15)
 docker compose -f docker/docker-compose.yaml run --rm policy-server train
-# GR00T-N1.7 (convert → finetune)
-docker compose -f docker/docker-compose.yaml run --rm gr00t convert
-docker compose -f docker/docker-compose.yaml run --rm gr00t finetune
 ```
 
 데이터셋·출력은 `.env` §5(`HF_DATASET_REPO_ID`/`OUTPUT_DIR`)에서 라우팅. RL(강화학습)은 제거됨 — VLA 지도학습만.
@@ -223,8 +221,7 @@ docker compose -f docker/docker-compose.yaml run --rm gr00t finetune
 ### Linux Docker — policy-server
 
 ```bash
-docker compose -f docker/docker-compose.yaml up -d policy-server      # 표준 async gRPC
-# GR00T-N1.7: policy-server-groot (gr00t 서비스 위임)
+docker compose -f docker/docker-compose.yaml up -d policy-server      # 표준 async gRPC (ACT/SmolVLA/GR00T-N1.5)
 ```
 
 실기기(Windows)·sim(vla-ros) 양쪽 클라이언트의 공용 추론 백엔드.

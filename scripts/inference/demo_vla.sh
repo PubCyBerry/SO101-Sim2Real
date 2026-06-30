@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # VLA closed-loop 데모 런처 — Isaac Sim bridge + vla-ros + policy-server 를 띄워
-#   ACT / SmolVLA / GR00T-N1.7 추론을 라이브로 관전(livestream/GUI).  eval 아님(연속 1씬).
+#   ACT / SmolVLA / GR00T-N1.5 추론을 라이브로 관전(livestream/GUI).  eval 아님(연속 1씬).
 #
 # 모델·추론 파라미터는 Docker compose 와 동일하게 `.env` + `env/<POLICY_PROFILE>.env`
 # 에서 읽는다. 더 이상 스크립트 안에 모델 경로를 하드코딩하지 않는다.
 #   - 활성 프로필 = `.env` 의 POLICY_PROFILE (positional 인자로 override 가능)
-#   - 모델 타입   = 프로필의 POLICY_TYPE (act|smolvla|groot_n17) → 서비스 라우팅
-#   - 모델 경로   = 프로필의 POLICY_REPO_ID(act/smolvla) 또는 GROOT_CHECKPOINT(groot)
+#   - 모델 타입   = 프로필의 POLICY_TYPE (act|smolvla|groot) → 서비스 라우팅
+#   - 모델 경로   = 프로필의 POLICY_REPO_ID (학습 산출 lerobot 체크포인트)
 #
 # 사용:
 #   scripts/demo_vla.sh start [profile] [옵션]
@@ -15,13 +15,12 @@
 #   scripts/demo_vla.sh status
 #
 # start 인자:
-#   profile       env/<profile>.env 이름 (예: smolvla, smolvla_nearest256, groot_n17, act).
-#                 생략 시 `.env` 의 POLICY_PROFILE 사용. `groot` 는 `groot_n17` 별칭.
+#   profile       env/<profile>.env 이름 (예: smolvla, smolvla_nearest256, groot_n15, act).
+#                 생략 시 `.env` 의 POLICY_PROFILE 사용. `groot` 는 `groot_n15` 별칭.
 #
 # start 옵션:
-#   --ckpt PATH   모델 경로 override (기본 = 프로필의 POLICY_REPO_ID / GROOT_CHECKPOINT)
-#                 act/smolvla = 컨테이너경로 /workspace/... 또는 HF repo
-#                 groot       = 컨테이너경로 /host/outputs/.../checkpoint-XXXXX
+#   --ckpt PATH   모델 경로 override (기본 = 프로필의 POLICY_REPO_ID)
+#                 컨테이너경로 /workspace/outputs/.../pretrained_model 또는 HF repo
 #   --cubes N     큐브 수 1~4 (기본 4)
 #   --ip ADDR     원격 WebRTC 관전 IP (tailscale/LAN). 주면 livestream mode 2 + PUBLIC_IP.
 #                 안 주면 mode 1(로컬 LAN IP 광고).
@@ -63,8 +62,8 @@ VLA_PARAMS=/workspace/ros2_ws/src/so101_vla_policy/config/vla_policy.yaml
 # --ckpt override 시에만 쓰는 임시 프로필 (cleanup 대상). 평소엔 실 프로필을 그대로 쓴다.
 OVERRIDE_PROFILE=demo_override
 # 정리 대상 임시 프로필 파일 (옛 *_demo.env 도 호환 정리)
-PROF_FILES=(env/"$OVERRIDE_PROFILE".env env/act_demo.env env/smolvla_demo.env env/groot_n17_demo.env)
-NAMES=(vla_demo_ps vla_demo_node vla_demo_gr vla_demo_pg)
+PROF_FILES=(env/"$OVERRIDE_PROFILE".env env/act_demo.env env/smolvla_demo.env env/groot_n15_demo.env)
+NAMES=(vla_demo_ps vla_demo_node)
 
 ts(){ date '+%H:%M:%S'; }
 log(){ echo "[$(ts)] $*"; }
@@ -73,12 +72,12 @@ log(){ echo "[$(ts)] $*"; }
 env_get(){  grep -E "^$1=" .env 2>/dev/null         | tail -1 | cut -d= -f2-; }
 prof_get(){ grep -E "^$2=" "env/$1.env" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
-# 활성 프로필 결정: 인자 없으면 .env POLICY_PROFILE, `groot` 는 groot_n17 별칭
+# 활성 프로필 결정: 인자 없으면 .env POLICY_PROFILE, `groot` 는 groot_n15 별칭
 resolve_profile(){  # $1=arg(빈문자 가능) -> stdout=profile name
   local a="$1"
   [ -z "$a" ] && a=$(env_get POLICY_PROFILE)
-  [ -z "$a" ] && a=groot_n17   # compose 기본값과 정합
-  [ "$a" = groot ] && a=groot_n17
+  [ -z "$a" ] && a=groot_n15   # compose 기본값과 정합
+  [ "$a" = groot ] && a=groot_n15
   echo "$a"
 }
 
@@ -131,13 +130,9 @@ wait_log(){
 }
 
 # 임시 override 프로필 생성: 활성 프로필 복사 + 모델 경로만 교체 (vla node _load_env override 회피)
-make_profile(){  # $1=src_profile $2=dst_name $3=model_path $4=ptype
+make_profile(){  # $1=src_profile $2=dst_name $3=model_path $4=ptype(unused)
   cp "env/$1.env" "env/$2.env"
-  if [ "$4" = groot_n17 ]; then
-    sed -i "s#^GROOT_CHECKPOINT=.*#GROOT_CHECKPOINT=$3#" "env/$2.env"
-  else
-    sed -i "s#^POLICY_REPO_ID=.*#POLICY_REPO_ID=$3#" "env/$2.env"
-  fi
+  sed -i "s#^POLICY_REPO_ID=.*#POLICY_REPO_ID=$3#" "env/$2.env"
 }
 
 start(){
@@ -185,11 +180,7 @@ start(){
   # ── 활성 프로필 결정: --ckpt override 시 임시 복사, 아니면 실 프로필 직접 사용 ──
   local active=$profile
   local model_path
-  if [ "$ptype" = groot_n17 ]; then
-    model_path=$(prof_get "$profile" GROOT_CHECKPOINT)
-  else
-    model_path=$(prof_get "$profile" POLICY_REPO_ID)
-  fi
+  model_path=$(prof_get "$profile" POLICY_REPO_ID)
   if [ -n "$ckpt" ]; then
     active=$OVERRIDE_PROFILE
     make_profile "$profile" "$active" "$ckpt" "$ptype"
@@ -205,27 +196,15 @@ start(){
 
   # ── 모델 타입별 서비스 기동 ──
   case "$ptype" in
-    act|smolvla)
-      log "  policy-server 기동"
+    act|smolvla|groot)
+      log "  policy-server 기동 (groot=N1.5 Eagle 3B 로드는 첫 instruction 시점)"
       POLICY_PROFILE=$active $DC run -d --name vla_demo_ps policy-server policy-server \
         > "$LOGDIR/demo_vla_ps.log" 2>&1
       sleep 8
       log "  vla-ros 기동 (APC=$g_apc thr=$g_thr slew=$g_slew)"
       run_vla_node
       ;;
-    groot_n17)
-      log "  gr00t zmq-server 기동 (3B 로드 ~30-60s, ckpt=$model_path)"
-      POLICY_PROFILE=$active $DC run -d --name vla_demo_gr -e GROOT_CHECKPOINT="$model_path" \
-        gr00t zmq-server > "$LOGDIR/demo_vla_gr.log" 2>&1
-      wait_log vla_demo_gr "ready|listening|5555|Server|dit\.py" 240
-      log "  policy-server-groot bridge 기동"
-      POLICY_PROFILE=$active $DC run -d --name vla_demo_pg policy-server policy-server-groot \
-        > "$LOGDIR/demo_vla_pg.log" 2>&1
-      wait_log vla_demo_pg "listening|ready|GrootBridge|8080" 90
-      log "  vla-ros 기동 (APC=$g_apc thr=$g_thr slew=$g_slew)"
-      run_vla_node
-      ;;
-    *) log "POLICY_TYPE 은 act|smolvla|groot_n17 중 하나여야 함: $ptype"; exit 1;;
+    *) log "POLICY_TYPE 은 act|smolvla|groot 중 하나여야 함: $ptype"; exit 1;;
   esac
 
   # ── Isaac bridge (연속 추론, eval 아님) — detached ──
