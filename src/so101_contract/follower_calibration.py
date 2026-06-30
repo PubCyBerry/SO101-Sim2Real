@@ -28,7 +28,11 @@ import math
 
 import numpy as np
 
-from .feature_codec import SO101_JOINT_ORDER
+from .feature_codec import (
+    SO101_JOINT_ORDER,
+    policy_feature_to_sim_joint_radians,
+    sim_joint_radians_to_policy_feature,
+)
 
 _DEG_TO_RAD = math.pi / 180.0
 _RAD_TO_DEG = 180.0 / math.pi
@@ -91,6 +95,25 @@ def sim_radians_to_real_follower(values_rad) -> np.ndarray:
     return ((sim_deg - FOLLOWER_AFFINE_B) / FOLLOWER_AFFINE_A).astype(np.float32)
 
 
+# ── cross-frame composite: 실 follower ↔ policy-feature(sim 학습공간) ─────────
+# 추론 어댑터(AffineAdapterServer)·co-train ingest 용. follower(real↔sim radian) 와
+# feature_codec(sim radian↔policy-feature) 합성. 6축(arm+gripper).
+def real_follower_to_policy_feature(values) -> np.ndarray:
+    """실 follower 관절값 → policy-feature(sim 학습공간). follower(fwd) ∘ feature_codec.
+
+    sim-trained 정책에 **real 입력**을 먹일 때(sim-to-real obs).
+    """
+    return sim_joint_radians_to_policy_feature(real_follower_to_sim_radians(values))
+
+
+def policy_feature_to_real_follower(values) -> np.ndarray:
+    """policy-feature(sim 학습공간) → 실 follower 관절값. feature_codec ∘ follower(inv).
+
+    sim-trained 정책 **출력을 real** 로 보낼 때(sim-to-real action). 위의 역.
+    """
+    return sim_radians_to_real_follower(policy_feature_to_sim_joint_radians(values))
+
+
 def fit_follower_affine(real, sim_deg):
     """매칭 포즈에서 per-joint affine (a, b) 적합 + 잔차 리포트.
 
@@ -122,8 +145,6 @@ def fit_follower_affine(real, sim_deg):
 
 
 def _self_check() -> None:
-    from .feature_codec import policy_feature_to_sim_joint_radians
-
     global FOLLOWER_AFFINE_A, FOLLOWER_AFFINE_B
     rng = np.random.default_rng(0)
     x = np.concatenate([rng.uniform(-90, 90, 5), [rng.uniform(0, 100)]]).astype(np.float32)
@@ -151,6 +172,11 @@ def _self_check() -> None:
     A_true, B_true = rng.uniform(0.8, 1.2, 6), rng.uniform(-15, 15, 6)
     A_fit, B_fit = fit_follower_affine(real, real * A_true + B_true)
     assert np.allclose(A_fit, A_true, atol=1e-6) and np.allclose(B_fit, B_true, atol=1e-4), "fit 복원 실패"
+
+    # 4) cross-frame composite round-trip 항등 (real-follower → policy-feature → real-follower).
+    assert np.allclose(
+        policy_feature_to_real_follower(real_follower_to_policy_feature(x)), x, atol=1e-4
+    ), "real-follower↔policy-feature round-trip 불일치"
 
     print("[follower_calibration] self-check OK")
 

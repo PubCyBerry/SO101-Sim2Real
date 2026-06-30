@@ -82,15 +82,18 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 - **호스트 볼륨**:
   - `./datasets`, `./logs`, `./outputs` → `/workspace/*`
   - `./scripts` → `/workspace/scripts` (policy-server·isaac-sim — demo·inference 스크립트 참조)
+  - `./src` → `/workspace/src:ro` (policy-server — `policy-server-affine` 모드의 `so101_contract` import용, read-only)
   - 명명 볼륨 `lerobot_hf_cache` (compose key `hf_cache`) → `/workspace/.cache/huggingface` (HF_HOME). **policy-server 전용**. non-root UID 실행 때문에 `/root` 가 아닌 `/workspace` 하위. 머신 이전 시 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
   - `isaac_lab_cache_*` (kit/ov/pip/gl/compute/logs/data) → isaac-sim 전용.
 
 ### 진입점 모드
 
 **`policy-entrypoint.sh`** (policy-server, CMD 기본값 `policy-server`):
-`prepare-model` · `policy-server` · `train` · `eval` · `info` · `bash` · `python`
+`prepare-model` · `policy-server` · `policy-server-affine` · `train` · `eval` · `info` · `bash` · `python`
 
 > **RL(PPO/강화학습) 제거됨**. `train`/`eval` 은 VLA 지도학습(SmolVLA/ACT) 용으로 유지 — policy-server 가 추론+학습 담당.
+
+- **`policy-server-affine`** = stock policy-server + **real↔sim joint frame affine 어댑터**(`scripts/inference/policy_server_affine.py`, `AffineAdapterServer(PolicyServer)`). `JOINT_FRAME_MODE` ∈ `{sim-to-sim, real-to-real, sim-to-real, real-to-sim}`(학습데이터 도메인→추론 플랫폼)에 따라 `observation.state`(수신)·`action`(반환)을 변환(같은 도메인=passthrough, **이미지 무변환**). 정책 normalize 바깥 래핑 → 정규화 통계 불변, **양쪽 client(vla_policy_node·robot_client) 무변경**. cross-domain zero-shot 추론용. `so101_contract`(../src) 마운트 필요. 상세=`docs/SIM_REAL_REPLAY_CALIBRATION.md` §10.
 
 - GR00T-N1.5 추론은 표준 `policy-server` 모드 그대로다 — `vla_policy_node` 가 `policy_type=groot` 로 SendPolicyInstructions 하면 policy-server 가 lerobot 네이티브 `GrootPolicy` 를 로드한다(별도 모드·ZMQ 불필요).
 - `policy-server-rtc`(서버 측 Real-Time Chunking)는 백엔드 스크립트(`policy_server_rtc.py`)가 이 branch 에 없어 **entrypoint 에서 제거됨**. 재도입 시 스크립트 + entrypoint 모드를 함께 복원.
@@ -165,6 +168,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | `environments/utils/patch_robot_colors.py` | USD 머티리얼 패치 |
 | **VLA 추론** | `inference/run_cube_desk_ros_bridge.py` (+ `.sh` wrapper) | Isaac Sim standalone + `isaacsim.ros2_bridge`로 cube_desk 실행. `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose` publish. **`--eval`** = closed-loop 평가. |
 | | `inference/replay_dataset_to_bridge.py` | LeRobot 데이터셋·npz·시퀀스JSON 1 에피소드를 bridge 로 replay(`/isaac_joint_commands`). `--arm_mapping {codec,calibration,follower}`(follower=실기기 녹화 replay) · `--sequence`(so101_gui 시퀀스 재현·move보간+hold) · `--ramp_in`(현재자세→첫frame, teleport 방지) · `--probe_tracking`. vla-ros 에서 실행 |
+| | `inference/policy_server_affine.py` | `AffineAdapterServer(PolicyServer)` — `JOINT_FRAME_MODE`(4-case) 별 정책 I/O(state·action) real↔sim affine 변환, 이미지 무변환. `policy-server-affine` 모드가 실행. cross-domain zero-shot 추론 |
 | | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+vla-ros 자동 배선, livestream :49100 |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |

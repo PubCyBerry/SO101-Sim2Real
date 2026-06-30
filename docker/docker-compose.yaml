@@ -54,6 +54,9 @@ services:
       - ../outputs:/workspace/outputs
       # scripts/ 바인드 마운트: demo·inference 스크립트 참조용.
       - ../scripts:/workspace/scripts
+      # src/ (so101_contract): policy-server-affine 모드의 AffineAdapterServer 가
+      # follower_calibration import. read-only.
+      - ../src:/workspace/src:ro
       # HuggingFace 캐시: 명명 볼륨 (prepare-model 가중치 공유).
       - hf_cache:/workspace/.cache/huggingface
     # ── 환경 변수 ────────────────────────────────────────────────────────

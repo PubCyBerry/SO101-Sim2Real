@@ -9,6 +9,7 @@
 # ■ 실행 모드 (CMD 첫 번째 인자)
 #   prepare-model : hf download — 호스트 HF 캐시에 모델 받기
 #   policy-server : lerobot.async_inference.policy_server — gRPC 추론 서버
+#   policy-server-affine : policy-server + real↔sim joint frame 어댑터(JOINT_FRAME_MODE)
 #   train         : lerobot-train — Policy 학습 (인자 완전 위임, SmolVLA 등)
 #   eval          : lerobot-eval  — Policy 평가 (인자 완전 위임)
 #   info          : lerobot-info — LeRobot / Python / 시스템 정보 출력
@@ -253,6 +254,32 @@ case "$CMD" in
     info "  ※ 모델·디바이스는 클라이언트 SendPolicyInstructions 로 주입"
     shift || true
     exec python -m lerobot.async_inference.policy_server \
+      --host=${POLICY_SERVER_HOST} \
+      --port=${POLICY_SERVER_PORT} \
+      --fps=${POLICY_FPS} \
+      --inference_latency=${INFERENCE_LATENCY} \
+      --obs_queue_timeout=${OBS_QUEUE_TIMEOUT} \
+      ${POLICY_SERVER_EXTRA_ARGS} \
+      "$@"
+    ;;
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # policy-server-affine — Policy Server + real↔sim joint frame affine 어댑터
+  #
+  # stock policy-server 와 동일하나, JOINT_FRAME_MODE 에 따라 정책 I/O 를 변환한다:
+  #   observation.state (수신, client frame → policy frame)
+  #   action            (반환, policy frame → client frame)  ※ 이미지 무변환
+  # JOINT_FRAME_MODE ∈ {sim-to-sim, real-to-real, sim-to-real, real-to-sim}
+  #   (학습데이터 도메인 → 추론 플랫폼). 같은 도메인 = passthrough.
+  # so101_contract(../src) 마운트 필요(compose 에 추가됨). 양쪽 client 무변경.
+  # ────────────────────────────────────────────────────────────────────────────
+  policy-server-affine)
+    info "── Policy Server + Affine Adapter (gRPC) ─────────"
+    info "  JOINT_FRAME_MODE → ${JOINT_FRAME_MODE:-sim-to-sim}"
+    info "  Bind             → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
+    info "  ※ real↔sim joint frame 변환(state·action), 이미지 무변환"
+    shift || true
+    exec python /workspace/scripts/inference/policy_server_affine.py \
       --host=${POLICY_SERVER_HOST} \
       --port=${POLICY_SERVER_PORT} \
       --fps=${POLICY_FPS} \

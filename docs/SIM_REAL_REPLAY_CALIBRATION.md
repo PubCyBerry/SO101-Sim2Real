@@ -163,3 +163,27 @@ phase별 achieved 직접 비교.
 **도구**: replay `--sequence JSON`(so101_gui 시퀀스 sim 재현·move보간+hold·per-phase achieved) ·
 `--ramp_in`(현재자세→첫frame 보간 teleport 방지, 전 모드) · `record_real_sequence.py`(시퀀스 sim 실행→
 LeRobot v3 기록, action=실 follower 단위 → 실기기 `lerobot-replay` 호환).
+
+## 10. Cross-domain 추론 어댑터 — VLA zero-shot (sim↔real)
+
+VLA 정책은 **한 joint frame**(학습데이터 frame)으로 학습·추론한다. affine 은 **sim↔real 경계 넘을 때만**
+적용. `AffineAdapterServer`(`scripts/inference/policy_server_affine.py`, `PolicyServer` 서브클래스)가
+이 변환을 **policy-server 한 곳**에서 처리 → 양쪽 client(`vla_policy_node`·실기기 `robot_client`) 무변경.
+
+frame: **sim = policy-feature**(feature_codec, sim 학습공간) · **real = real-follower 단위**.
+
+| `JOINT_FRAME_MODE`(학습→추론) | obs(client→policy) | action(policy→client) |
+|---|---|---|
+| `sim-to-sim` / `real-to-real` | passthrough | passthrough |
+| `sim-to-real` (정책 sim, 플랫폼 real) | `real_follower_to_policy_feature` | `policy_feature_to_real_follower` |
+| `real-to-sim` (정책 real, 플랫폼 sim) | `policy_feature_to_real_follower` | `real_follower_to_policy_feature` |
+
+- 변환 = `follower_calibration` composite(follower(±) ∘ feature_codec). **정책 normalize 바깥** 래핑 →
+  정규화 통계 불변. **이미지 무변환**.
+- override 지점: `_enqueue_observation`(observation.state) · `_predict_action_chunk`(action). `super()` wrap.
+- 실행: `docker compose ... run --rm policy-server policy-server-affine` + `JOINT_FRAME_MODE` env.
+  compose 가 `../src:/workspace/src:ro` 마운트(so101_contract import). 자체 self-check 는
+  `python -m so101_contract.follower_calibration`(composite round-trip 포함).
+- **⚠ affine 은 joint 인터페이스만 동일화**. 진짜 zero-shot 동일 성능엔 추가로: 시각(DR 텍스처·조명 +
+  카메라 extrinsic/intrinsic sim↔real 정합)·물리(physics DR) gap 도 잡아야(§9 잔차=soft PD dynamics).
+- 미검증: gRPC 폐루프 런타임(host 에서 lerobot async 불가). lerobot 0.5.2 ref 기준 API, 컨테이너 0.5.1 런타임 확인 필요.
