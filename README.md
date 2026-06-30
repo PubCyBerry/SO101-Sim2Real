@@ -107,7 +107,6 @@ flowchart LR
 | lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 (Dockerfile.policy 독립 핀) |
 | isaacsim | 5.1.0 `[all,extscache]` | `isaac` 그룹 |
 | isaaclab | 2.3.2 `[all,isaacsim]` | `isaac` (직접 의존, 외부 래퍼 제거) |
-| ikpy | ≥3.4,<3.5 | `isaac` (PickCube SM IK 백엔드) |
 
 ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `torch==2.7.0+cu128` / `torchcodec<0.6` / `packaging<26` / `setuptools<82`. 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.
 

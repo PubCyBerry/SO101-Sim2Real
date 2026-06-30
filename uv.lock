@@ -1291,20 +1291,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/46/03/07c4894aae38b0de52b52586b24bf189bb83e4ddabfe2e2c8f2419eec6f4/idna-ssl-1.1.0.tar.gz", hash = "sha256:a933e3bb13da54383f9e8f35dc4f9cb9eb9b3b78c6b36f311254d6d0d92c6c7c", size = 3377, upload-time = "2018-07-05T09:15:37.206Z" }
 
 [[package]]
-name = "ikpy"
-version = "3.4.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "scipy" },
-    { name = "sympy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0a/3a/9bf290c81a49fc7215e8083b18d097f2f830cdfe155190bf34f5d62fe27c/ikpy-3.4.2.tar.gz", hash = "sha256:f7cc9c54055735deaf89a79ce676e6f5acabc72954e769d1043febfdbfb57840", size = 24771, upload-time = "2024-08-12T11:18:24.812Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/c8/1f611b05c89004c399d5cc8a6d33550316d35fe1d7802243e404c43e3324/ikpy-3.4.2-py3-none-any.whl", hash = "sha256:9ead7b2085f057822e563786a70b52a4f5d0db03de9d562f1488df38ccef36af", size = 24302, upload-time = "2024-08-12T11:18:23.679Z" },
-]
-
-[[package]]
 name = "imageio"
 version = "2.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3882,7 +3868,6 @@ dev = [
     { name = "ipykernel" },
 ]
 isaac = [
-    { name = "ikpy" },
     { name = "isaaclab", extra = ["all", "isaacsim"] },
     { name = "isaacsim", extra = ["all", "extscache"] },
 ]
@@ -3924,7 +3909,6 @@ async = [
 ]
 dev = [{ name = "ipykernel", specifier = ">=7.2.0" }]
 isaac = [
-    { name = "ikpy", specifier = ">=3.4,<3.5" },
     { name = "isaaclab", extras = ["all", "isaacsim"], specifier = "==2.3.2", index = "https://pypi.nvidia.com/" },
     { name = "isaacsim", extras = ["all", "extscache"], specifier = "==5.1.0", index = "https://pypi.nvidia.com/" },
 ]

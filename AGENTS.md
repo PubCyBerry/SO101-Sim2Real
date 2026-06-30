@@ -188,14 +188,14 @@ USD 6개 (`scene.usd` + 객체 5개) 는 `author_pick_cube_scene.py` 로 일괄 
 
 - **패키지 이름** `sim_to_real` (`pyproject.toml`). `[build-system] requires=["setuptools<82"]`, `[tool.setuptools.packages.find] where=["src"]` 로 `src/sim_to_real/` editable 설치.
 - **공용 deps**: `h5py<3.16`, `hf-xet>=1.4.3`, `pyzmq>=27.1.0`, `lerobot[feetech]>=0.4.4`, `torch>=2.7`, `torchvision>=0.22`, `usd-core>=26.5` (순수 Python USD 작성·검증 공용. 단 `author_pick_cube_scene.py` 는 PhysxSchema 정식 API 라 isaac 그룹 필요).
-- **isaaclab** 은 직접 의존(`isaaclab[all,isaacsim]==2.3.2`, 외부 래퍼/leisaac 제거됨). PickCube SM IK 백엔드용 `ikpy>=3.4,<3.5` 포함. **leisaac 은 런타임 의존성이 아니다** — 유용한 코드(`devices`·`datagen`·`assets/robots`·`utils`)는 `src/sim_to_real/` 와 `src/so101_contract/leader_calibration.py` 로 vendor, leisaac 내부 import 0(IsaacLab/lerobot/sim_to_real 로 대체).
+- **isaaclab** 은 직접 의존(`isaaclab[all,isaacsim]==2.3.2`, 외부 래퍼/leisaac 제거됨). PickCube SM IK 백엔드 = IsaacLab 내장 DLS(`DifferentialInverseKinematicsActionCfg`, `ik_method="dls"`). **leisaac 은 런타임 의존성이 아니다** — 유용한 코드(`devices`·`datagen`·`assets/robots`·`utils`)는 `src/sim_to_real/` 와 `src/so101_contract/leader_calibration.py` 로 vendor, leisaac 내부 import 0(IsaacLab/lerobot/sim_to_real 로 대체).
 
 | 의존성 그룹 | 내용 | 사용처 |
 |---|---|---|
 | `teleop` | ffmpeg + evdev[linux] + packaging | 실기기 native uv (Windows) |
 | `async` | grpcio + protobuf | 실기기 policy-client (Windows) |
 | `policy` | lerobot[smolvla] + accelerate + num2words | (호스트 참조용; policy-server 는 Dockerfile.policy 가 독립 핀) |
-| `isaac` | isaacsim[all,extscache]==5.1.0 + isaaclab[all,isaacsim]==2.3.2 + ikpy | Linux host uv sim (teleop·author) |
+| `isaac` | isaacsim[all,extscache]==5.1.0 + isaaclab[all,isaacsim]==2.3.2 | Linux host uv sim (teleop·author) |
 | `dev` | ipykernel | — |
 
 ### ABI 호환성 핀
