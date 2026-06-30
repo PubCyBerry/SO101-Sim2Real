@@ -164,12 +164,14 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 로 실제 SO-101 leader 상태 원격 송출 |
 | | `environments/utils/patch_robot_colors.py` | USD 머티리얼 패치 |
 | **VLA 추론** | `inference/run_cube_desk_ros_bridge.py` (+ `.sh` wrapper) | Isaac Sim standalone + `isaacsim.ros2_bridge`로 cube_desk 실행. `/isaac_joint_states`·`/isaac_joint_commands`·`/clock`·`/cube_poses`·`/bowl_pose` publish. **`--eval`** = closed-loop 평가. |
+| | `inference/replay_dataset_to_bridge.py` | LeRobot 데이터셋·npz·시퀀스JSON 1 에피소드를 bridge 로 replay(`/isaac_joint_commands`). `--arm_mapping {codec,calibration,follower}`(follower=실기기 녹화 replay) · `--sequence`(so101_gui 시퀀스 재현·move보간+hold) · `--ramp_in`(현재자세→첫frame, teleport 방지) · `--probe_tracking`. vla-ros 에서 실행 |
 | | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+vla-ros 자동 배선, livestream :49100 |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
 | | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |
 | **데이터 생성** | `datagen/record_state_machine.py` | SM 데이터 생성 드라이버. SM action → env step → LeRobot v3 writer 기록. isaac-sim `datagen` 모드가 실행 (`--task`·`--num_demos`·`--dataset_dir`) |
 | | `datagen/replay_state_machine.py` | 기록된 SM 데모 재생 |
+| | `datagen/record_real_sequence.py` | 실 follower joint 시퀀스(JSON)를 Gym env 에서 재생→LeRobot v3 기록. follower calibration 변환, action=실 follower 단위(실기기 `lerobot-replay` 호환). `--sequence`·`--self_check` |
 | | `convert/isaaclab2lerobotv3.py` (+`_lerobot_features.py`) | Isaac Lab HDF5 → LeRobot v3 변환 (**host-only fallback**; in-container recorder 우선, end-to-end 미검증) |
 | **데이터** | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER |
 | **기타** | `ece_4560/` | 과정 프로젝트 (보유) |
@@ -260,6 +262,7 @@ ad-hoc 작업으로 코드가 산발하지 않도록:
 - **그리퍼 offset 제거**: `use_default_offset=False`. 모든 action = 절대 joint target (31.75 배수 제거). sim·real·bridge 공통.
 - 데이터 기록/재생: `src/sim_to_real/data/lerobot_units.py` 가 codec 참조, LeRobot v3 [0,100] ↔ sim [-10°,100°] 변환.
 - **실 leader ↔ sim 은 별도 계약**: `src/so101_contract/leader_calibration.py`. feature_codec 이 policy-feature ↔ sim radian 이라면, 이건 **실 leader 모터 정규화값 ↔ sim radian** 양방향. arm 은 leader [-100,100] → USD joint(관절별 비대칭) per-joint scale+offset remap(codec 의 arm 1:1 degree 로는 재현 불가), gripper affine 은 feature_codec 과 수식 동일. teleop·datagen 에서 사용.
+- **실 follower ↔ sim 은 또 다른 계약**: `src/so101_contract/follower_calibration.py`. 실기기 녹화 데이터 replay 용 — 실 follower 영점/스케일이 sim URDF 영점과 어긋나(grasp 시 EE ~2.4cm 뜸) 생긴 **6축 per-joint affine** `sim_deg = A·real + B`. forward(`real_follower_to_sim_radians`)+inverse(`sim_radians_to_real_follower`) 양방향(affine 1개 역산), `fit_follower_affine`+self-check. `FOLLOWER_AFFINE_A/B` = device-specific 단일 소스(재캘리브레이션 시 이 둘만 갱신). replay `--arm_mapping follower`·`record_real_sequence.py` 사용. 상세=`docs/SIM_REAL_REPLAY_CALIBRATION.md`.
 
 ### 5-DOF IK 공통 원칙 (sim)
 

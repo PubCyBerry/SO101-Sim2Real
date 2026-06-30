@@ -124,12 +124,6 @@ parser.add_argument(
     help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
          "episode 경계에서 stale action queue/timestep을 초기화한다.",
 )
-parser.add_argument("--no_self_collisions", action="store_true",
-                    help="articulation self-collision off. elbow 고굴곡서 팔/캠홀더 자기충돌로 "
-                         "실기기보다 일찍 막히는지 확인·회피용(replay 충실도).")
-parser.add_argument("--reach_probe", action="store_true",
-                    help="매 step gripper EE world pos vs 활성 큐브 world pos 출력(descent 깊이·"
-                         "sim/real 정합 진단). 최소 거리 추적.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -586,15 +580,14 @@ def main() -> None:
         f"{ROBOT_PRIM}/base",
         ArticulationRootPropertiesCfg(
             fix_root_link=True,
-            # self-collision: elbow 고굴곡(>~90°)에서 forearm+wrist 캠홀더 convex 충돌형상이
-            # 서로 닿아 실기기(99°)보다 일찍 막히는 의심 → replay 충실도 테스트용 토글.
-            enabled_self_collisions=not args.no_self_collisions,
+            # self-collision on(기본). 과거 codec replay 에선 elbow 고굴곡(~99°)서 forearm+wrist
+            # 캠홀더 convex 가 일찍 막았으나, follower calibration 이 elbow target 을 낮춰
+            # plain bridge(self-collision ON)에서 grasp 정상 확인됨(2026-06-30).
+            enabled_self_collisions=True,
             solver_position_iteration_count=4,
             solver_velocity_iteration_count=4,
         ),
     )
-    if args.no_self_collisions:
-        print("[bridge] self-collision DISABLED (replay 충실도 테스트)", flush=True)
 
     # TF parent frame "base_link" 용 Xform — base 링크 자식, identity local 이라 base 와 정확히
     # 일치(USD base 링크명은 base_link 가 아니라 base 라 동명 Xform 을 새로 만든다).
@@ -1124,24 +1117,10 @@ def main() -> None:
         return
 
     # 메인 루프: World.step 이 물리 step + 렌더 + OmniGraph(OnPlaybackTick) 평가를 한다.
-    # ── reach probe: gripper EE prim ↔ 활성 큐브 world pos 거리. descent 깊이·sim/real 정합 진단.
-    _ee_prim_path = None
-    if args.reach_probe:
-        for _p in Usd.PrimRange(world.stage.GetPrimAtPath(ROBOT_PRIM)):
-            if _p.GetName() == "gripper_frame_link":
-                _ee_prim_path = _p.GetPath(); break
-        if _ee_prim_path is None:
-            _ee_prim_path = f"{ROBOT_PRIM}/gripper"  # fallback: gripper body
-        _probe_cube = cube_handles[active_cubes[0]]
-        _xc = UsdGeom.XformCache()
-        _min_gap = {"v": 1e9}
-        print(f"[reach] probe EE prim = {_ee_prim_path}", flush=True)
-
     # ── step 프로파일: world.step wall-time 누적, N step 마다 min/mean/max + 유효 step/s 출력.
     #    reset step 은 scene 재구성이라 skew → 타이밍에서 제외(reset 직후 윈도 초기화).
     _step_ms: list[float] = []
     _STEP_REPORT_EVERY = 120  # ~4s @ render_dt 30fps
-    _reach_i = 0
     while simulation_app.is_running():
         if reset_req["mode"] is not None:
             if reset_req["mode"] == "random":
@@ -1153,26 +1132,6 @@ def main() -> None:
         world.step(render=True)
         _step_ms.append((time.perf_counter() - _ts) * 1e3)
 
-        if args.reach_probe:
-            _reach_i += 1
-            if _reach_i % 5 == 0:
-                _xc.Clear()
-                _m = _xc.GetLocalToWorldTransform(world.stage.GetPrimAtPath(_ee_prim_path))
-                _tcp = _m.Transform(Gf.Vec3d(-0.0079, -0.000218121, -0.0981274))  # gripper_frame TCP
-                _jm = _xc.GetLocalToWorldTransform(world.stage.GetPrimAtPath(f"{ROBOT_PRIM}/jaw"))
-                _jaw = _jm.ExtractTranslation()  # 움직이는 jaw 링크
-                _cp, _ = _probe_cube.get_world_pose()
-                _cp = np.asarray(_cp, dtype=np.float64)
-                _desk_z = float(_cp[2]) - 0.020          # 책상면 = 큐브중심 - 40mm 반높이
-                _h_tcp = (float(_tcp[2]) - _desk_z) * 100.0
-                _h_jaw = (float(_jaw[2]) - _desk_z) * 100.0
-                _xy = float(np.hypot(float(_tcp[0]) - _cp[0], float(_tcp[1]) - _cp[1])) * 100.0
-                # grasp 구간만(큐브 위 xy<5cm) 최저 TCP 높이 추적(home 자동 제외)
-                if _xy < 5.0:
-                    _min_gap["v"] = min(_min_gap["v"], _h_tcp)
-                print(f"[reach] t={_reach_i / 30.0:.1f}s xy={_xy:.1f}cm | "
-                      f"TCP높이={_h_tcp:+.1f} jaw높이={_h_jaw:+.1f}cm (real≈+2) | "
-                      f"큐브위(xy<5) 최저TCP={_min_gap['v'] if _min_gap['v']<1e8 else 0:+.1f}cm", flush=True)
         if len(_step_ms) >= _STEP_REPORT_EVERY:
             n = len(_step_ms)
             mean = sum(_step_ms) / n

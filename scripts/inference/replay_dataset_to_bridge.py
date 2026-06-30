@@ -46,6 +46,10 @@ from so101_contract.leader_calibration import (  # noqa: E402
     SO101_FOLLOWER_USD_JOINT_LIMITS,
     real_leader_to_sim_radians,
 )
+from so101_contract.follower_calibration import (  # noqa: E402
+    real_follower_to_sim_radians,
+    sim_radians_to_real_follower,
+)
 
 JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"
 _RAD_TO_DEG = 180.0 / np.pi
@@ -138,29 +142,73 @@ def _load_npz(path: str):
     return actions, fps
 
 
+def _load_sequence(path: str, fps: int):
+    """so101_gui 시퀀스 JSON(phases)을 publish fps 로 펼친 (T,6) real-unit action 으로 확장.
+
+    각 phase = move_time 동안 prev→target 선형보간 + hold_time 동안 target 유지
+    (so101_gui._step_phase 와 동일 의미). arm=degree·gripper[0,100]. 이후 --arm_mapping follower
+    가 real→sim 변환. **현재자세 → phase0 ramp 는 publish 의 --ramp_in 이 라이브로 처리**(여기선
+    phase0 부터 시작; sim-home 가정 안 함 → 직전 run 자세에서 teleport 방지).
+
+    Returns:
+        (actions(T,6), fps, marks) — marks = [(phase_idx, settle_frame_idx, target_realunit), ...]
+        (settle = 각 phase 마지막 frame = 정지자세, per-phase achieved 비교용).
+    """
+    import json  # noqa: PLC0415
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    phases = data["phases"] if isinstance(data, dict) else data
+    if not phases:
+        raise SystemExit("--sequence: phase 가 비었습니다")
+    cur = np.asarray([float(phases[0][j]) for j in SO101_JOINT_ORDER], dtype=np.float32)
+    rows: list[np.ndarray] = []
+    marks: list = []
+    for pi, ph in enumerate(phases):
+        target = np.asarray([float(ph[j]) for j in SO101_JOINT_ORDER], dtype=np.float32)
+        n_move = max(int(round(float(ph.get("move_time", 2.0)) * fps)), 1)
+        for k in range(1, n_move + 1):
+            a = k / n_move
+            rows.append((1.0 - a) * cur + a * target)
+        for _ in range(int(round(float(ph.get("hold_time", 0.0)) * fps))):
+            rows.append(target.copy())
+        marks.append((pi, len(rows) - 1, target))
+        cur = target
+    actions = np.stack(rows).astype(np.float32)
+    print(f"[replay] sequence {path}: {len(phases)} phase → {len(actions)} frames @ {fps}fps", flush=True)
+    return actions, fps, marks
+
+
 def _publish(args) -> None:
+    marks = None
     if args.npz:
         actions, fps = _load_npz(args.npz)
     elif args.dataset:
         actions, fps = _load_actions(args.dataset, args.episode, args.source)
+    elif args.sequence:
+        actions, fps, marks = _load_sequence(args.sequence, args.fps or 30)
     else:
-        raise SystemExit("publish: --npz 또는 --dataset 필요")
+        raise SystemExit("publish: --npz · --dataset · --sequence 중 하나 필요")
     if args.fps:
         fps = args.fps
 
-    # action → sim joint rad 변환. 두 계약:
+    # action → sim joint rad 변환. 세 계약:
     #  codec       = feature_codec(arm deg×π/180 1:1, gripper affine) — 정책 출력용(sim 학습공간).
     #  calibration = leader_calibration(실기기 정규화 [-100,100]→USD-degree per-joint scale+offset
-    #                + gripper affine) — 실기기 녹화 데이터 replay 용. arm 범위차(pan 1.1·wrist_roll
-    #                1.6 등) 보정 → "real 보다 덜 움직임" 해소.
-    _convert = (real_leader_to_sim_radians if args.arm_mapping == "calibration"
-                else policy_feature_to_sim_joint_radians)
+    #                + gripper affine) — 실 leader 정규화 데이터 replay 용. arm 범위차(pan 1.1·
+    #                wrist_roll 1.6 등) 보정 → "real 보다 덜 움직임" 해소.
+    #  follower    = follower_calibration(실 follower 영점/스케일 측정 affine 6축) — 실기기 녹화
+    #                데이터 replay 용. real↔sim URDF 영점 불일치(grasp 시 EE ~2.4cm 뜸) 보정.
+    _convert = {
+        "codec": policy_feature_to_sim_joint_radians,
+        "calibration": real_leader_to_sim_radians,
+        "follower": real_follower_to_sim_radians,
+    }[args.arm_mapping]
     targets_rad = np.stack([
         clamp_sim_joint_radians(_convert(row)) for row in actions
     ]).astype(np.float32)
-    print(f"[replay] arm_mapping={args.arm_mapping} "
-          f"({'실기기 정규화→sim remap' if args.arm_mapping == 'calibration' else 'feature_codec 1:1 deg'})",
-          flush=True)
+    _label = {"codec": "feature_codec 1:1 deg", "calibration": "실 leader 정규화→sim remap",
+              "follower": "실 follower 측정 affine 6축"}[args.arm_mapping]
+    print(f"[replay] arm_mapping={args.arm_mapping} ({_label})", flush=True)
 
     import rclpy
     from rclpy.node import Node
@@ -172,9 +220,9 @@ def _publish(args) -> None:
     names = list(SO101_JOINT_ORDER)
     record = bool(args.record_dir)
 
-    # probe·record 둘 다 achieved state(/isaac_joint_states) 구독.
+    # probe·record·ramp-in 모두 achieved state(/isaac_joint_states) 구독.
     achieved = {"rad": None}
-    if args.probe_tracking or record:
+    if args.probe_tracking or record or args.ramp_in > 0:
         def _state_cb(m: JointState) -> None:
             idx = {n: i for i, n in enumerate(m.name)}
             try:
@@ -230,10 +278,40 @@ def _publish(args) -> None:
         time.sleep(args.start_delay)
 
     period = 1.0 / max(fps, 1)
+
+    # ramp-in: 현재 sim 자세(라이브 /isaac_joint_states) → 첫 target 으로 ramp_in 초 보간 publish.
+    # 직전 run 자세/홈 어디에 있든 teleport 없이 부드럽게 진입(전 모드 공통). achieved 없으면 생략.
+    if args.ramp_in > 0:
+        _t0 = time.monotonic()
+        while rclpy.ok() and achieved["rad"] is None and time.monotonic() - _t0 < 3.0:
+            rclpy.spin_once(node, timeout_sec=0.05)
+        if achieved["rad"] is not None:
+            start_rad = achieved["rad"].copy()
+            n_ramp = max(int(round(args.ramp_in * fps)), 1)
+            node.get_logger().info(f"ramp-in: 현재자세 → 첫 frame, {args.ramp_in:.1f}s ({n_ramp} frames)")
+            _next = time.monotonic()
+            for k in range(1, n_ramp + 1):
+                if not rclpy.ok():
+                    break
+                a = k / n_ramp
+                q = (1.0 - a) * start_rad + a * targets_rad[0]
+                msg = JointState()
+                msg.header.stamp = node.get_clock().now().to_msg()
+                msg.name = names
+                msg.position = [float(v) for v in q]
+                pub.publish(msg)
+                _next += period
+                _sl = _next - time.monotonic()
+                if _sl > 0:
+                    time.sleep(_sl)
+        else:
+            node.get_logger().warn("ramp-in: achieved state 없음 — 생략(teleport 가능)")
+
     node.get_logger().info(
         f"replay 시작: {targets_rad.shape[0]} frames @ {fps}fps → {args.topic} "
         f"(≈{targets_rad.shape[0] / fps:.1f}s){' [loop]' if args.loop else ''}"
     )
+    _mark_frames = {f: (p, t) for p, f, t in marks} if marks else {}  # settle frame → (phase, target)
     probe_log: list[tuple[np.ndarray, np.ndarray]] = []  # (target_rad, achieved_rad)
     try:
         while rclpy.ok():
@@ -250,6 +328,13 @@ def _publish(args) -> None:
                     rclpy.spin_once(node, timeout_sec=0.0)
                 if args.probe_tracking and achieved["rad"] is not None:
                     probe_log.append((q.copy(), achieved["rad"].copy()))
+                    if i in _mark_frames:  # sequence settle frame: cmd vs sim achieved(real-unit)
+                        _pi, _tgt = _mark_frames[i]
+                        _ach = sim_radians_to_real_follower(achieved["rad"])
+                        node.get_logger().info(
+                            f"[seq] phase {_pi}: cmd={np.round(_tgt, 1)} "
+                            f"achieved={np.round(_ach, 1)} Δ={np.round(_ach - _tgt, 1)} (real-unit)"
+                        )
                 if record and achieved["rad"] is not None and all(c in images for c in CAMERA_KEYS):
                     rec_actions.append(np.asarray(actions[i], dtype=np.float32))           # 원본 action(LeRobot)
                     rec_states.append(sim_joint_radians_to_policy_feature(achieved["rad"]))  # sim state→LeRobot
@@ -306,19 +391,26 @@ def main() -> None:
                     help="replay 할 컬럼: action(명령, 기본) 또는 state(observation.state)")
     ap.add_argument("--export", metavar="PATH", help="dataset → npz 저장(로드 환경에서 실행, rclpy 불요)")
     ap.add_argument("--npz", metavar="PATH", help="publish 할 npz(--export 산출물)")
+    ap.add_argument("--sequence", metavar="JSON",
+                    help="so101_gui 시퀀스 JSON(phases: joint6+move_time+hold_time)을 sim 에서 실행 "
+                         "(real 과 동일 phase 보간·hold). --arm_mapping follower 권장. 비교/affine 정밀화용.")
     ap.add_argument("--topic", default=JOINT_COMMANDS_TOPIC)
     ap.add_argument("--fps", type=int, default=0, help="페이싱 fps override(0=dataset fps)")
     ap.add_argument("--loop", action="store_true", help="에피소드 반복 재생")
     ap.add_argument("--wait_for_subscriber", action="store_true",
                     help="bridge 가 토픽 구독할 때까지 대기 후 시작")
     ap.add_argument("--start_delay", type=float, default=0.0, help="시작 전 지연(초)")
+    ap.add_argument("--ramp_in", type=float, default=1.5,
+                    help="현재 sim 자세 → 첫 frame 으로 부드럽게 진입하는 시간(초, 기본 1.5). "
+                         "0=즉시(teleport). teleport 방지·전 모드 공통. achieved state 구독 필요.")
     ap.add_argument("--probe_tracking", action="store_true",
                     help="명령 vs 실제(/isaac_joint_states) 추종 오차 측정 — 변환/스케일 vs PD 추종 판별")
     ap.add_argument("--joint_states_topic", default="/isaac_joint_states",
                     help="probe 가 구독할 achieved joint state 토픽")
-    ap.add_argument("--arm_mapping", choices=["codec", "calibration"], default="codec",
-                    help="action→sim 변환: codec(feature_codec 1:1 deg, 기본) 또는 "
-                         "calibration(leader_calibration 정규화→sim remap, 실기기 녹화 replay 용)")
+    ap.add_argument("--arm_mapping", choices=["codec", "calibration", "follower"], default="codec",
+                    help="action→sim 변환: codec(feature_codec 1:1 deg, 기본) · "
+                         "calibration(leader_calibration 정규화→sim remap) · "
+                         "follower(follower_calibration 실 follower 측정 affine, 실기기 녹화 replay 권장)")
     ap.add_argument("--record_dir", metavar="DIR",
                     help="replay 중 sim observation(state·3cam)+action 을 LeRobot 단위로 DIR 에 기록 "
                          "(frames.npz + {top,wrist,front}/*.png). append_sim_episode.py 가 dataset 에 추가.")

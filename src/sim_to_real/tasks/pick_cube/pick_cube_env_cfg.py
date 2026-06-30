@@ -70,11 +70,11 @@ _ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 _DESK_TOP_WORLD_Z: float = 0.705
 _CUBE_Z_SLACK: float = 0.001
 _CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {  # name -> (x, y, yaw°)
-    # DR-off 기본 위치(2026-06-29 사용자): 큐브 중심 = 책상 앞 모서리(env y=-0.035)에서 +30cm,
-    # 책상 왼쪽 모서리(env x=-0.44)에서 +42cm → env (-0.02, 0.265).
+    # DR-off 기본 위치(2026-06-30 사용자 실측): 큐브 중심 = 책상 앞 모서리(env y=-0.035)에서 +29cm,
+    # 책상 왼쪽 모서리(env x=-0.44)에서 +42.5cm → env (-0.015, 0.255). (실기기 실측 정합: 42.5cm·29cm)
     # yaw=0: 책상 앞 모서리(x축)와 평행한 큐브 한 면이 -y(로봇)를 향함 → face가 로봇 정면,
     #        그 면 법선이 모서리와 수직(=-y).
-    "Cube1": (-0.02, 0.265, 0.0),
+    "Cube1": (-0.015, 0.255, 0.0),
 }
 _CUBE_INIT_STATES = {
     name: (
