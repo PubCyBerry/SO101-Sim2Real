@@ -189,6 +189,8 @@ class RobotWorker(threading.Thread):
         self._phase_sub = "move"
         self._phase_t0 = 0.0
         self._phase_start: dict = {}
+        self._present: dict = {}          # 최신 실측 Present_Position
+        self.phase_achieved: list = []    # phase 종료 시점 실측각 (target vs achieved)
 
         # recording
         self.cameras: dict[str, CameraThread] = {}
@@ -229,6 +231,7 @@ class RobotWorker(threading.Thread):
                 self._drain_commands()
 
                 present = self.bus.sync_read("Present_Position")
+                self._present = present
                 try:
                     ee = kin.ee_pose_from_joints(present)
                 except Exception:
@@ -323,6 +326,7 @@ class RobotWorker(threading.Thread):
         self._phase_sub = "move"
         self._phase_t0 = time.monotonic()
         self._phase_start = dict(self._cmd)
+        self.phase_achieved = []
         self._mode = "PHASE"
         self._set_status(f"phase 1/{len(self._phase_plan)}")
 
@@ -343,6 +347,12 @@ class RobotWorker(threading.Thread):
             for j in JOINT_ORDER:
                 self._cmd[j] = float(target[j])
             if elapsed >= float(ph.get("hold_time", 0.0)):
+                # phase 종료 시점 실측각 기록 (target vs achieved)
+                self.phase_achieved.append({
+                    "phase": self._phase_idx,
+                    "target": {j: float(target[j]) for j in JOINT_ORDER},
+                    "achieved": {j: float(self._present.get(j, float("nan"))) for j in JOINT_ORDER},
+                })
                 self._phase_idx += 1
                 if self._phase_idx >= len(self._phase_plan):
                     self._mode = "JOG"
@@ -611,6 +621,7 @@ class App:
         ttk.Button(bf, text="■ Abort", command=self.abort_phases).grid(row=0, column=5, padx=2)
         ttk.Button(bf, text="시퀀스 저장…", command=self.save_sequence).grid(row=1, column=0, padx=2, pady=2)
         ttk.Button(bf, text="시퀀스 불러오기…", command=self.load_sequence).grid(row=1, column=1, padx=2, pady=2)
+        ttk.Button(bf, text="achieved 저장…", command=self.save_achieved).grid(row=1, column=2, padx=2, pady=2)
 
     def _build_record_panel(self, parent):
         self.rec_entries = {}
@@ -759,6 +770,20 @@ class App:
             return
         self._refresh_tree()
         self.status_var.set(f"시퀀스 불러옴 ({len(self.phases)} phase): {path}")
+
+    def save_achieved(self):
+        # 마지막 시퀀스 실행의 phase별 실측각(target vs achieved) 저장 + 콘솔 출력
+        ach = list(self.worker.phase_achieved)
+        if not ach:
+            messagebox.showinfo("achieved 없음", "시퀀스를 먼저 실행하세요 (▶ 시퀀스 실행).")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json", filetypes=[("JSON", "*.json")], initialfile="achieved.json"
+        )
+        if not path:
+            return
+        _report_phase_achieved(ach, path)
+        self.status_var.set(f"achieved 저장 ({len(ach)} phase): {path}")
 
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
@@ -982,9 +1007,35 @@ def run_sequence_headless(args, phases):
             elif seen_phase and mode == "JOG":
                 break
         time.sleep(0.1)
+    achieved = list(worker.phase_achieved)
     print("[run-sequence] 완료 → 토크 해제")
     worker.send("quit")
     worker.join(timeout=8.0)
+    _report_phase_achieved(achieved, getattr(args, "achieved_out", None))
+
+
+def _report_phase_achieved(achieved, out_path=None):
+    """phase별 target vs achieved(실측) 출력 + (옵션) JSON 저장."""
+    if not achieved:
+        print("[achieved] 기록 없음 (phase 미실행)")
+        return
+    short = ["pan", "lift", "elbow", "wflex", "wroll", "grip"]
+    print("\n=== phase achieved degree (실측) ===")
+    hdr = "phase " + "".join(f"{s:>9}" for s in short)
+    print(hdr)
+    print("-" * len(hdr))
+    for rec in achieved:
+        ac = rec["achieved"]
+        print(f"{rec['phase']:>5} " + "".join(f"{ac[j]:>9.2f}" for j in JOINT_ORDER))
+    print("\n=== error (achieved - target) ===")
+    print(hdr)
+    print("-" * len(hdr))
+    for rec in achieved:
+        ac, tg = rec["achieved"], rec["target"]
+        print(f"{rec['phase']:>5} " + "".join(f"{ac[j]-tg[j]:>9.2f}" for j in JOINT_ORDER))
+    if out_path:
+        Path(out_path).write_text(json.dumps(achieved, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"\n[achieved] 저장: {out_path}")
 
 
 def main():
@@ -998,6 +1049,7 @@ def main():
     p.add_argument("--dataset-dir", default=str(Path.cwd() / "datasets" / "so101_gui_record"))
     p.add_argument("--cameras", default="top:0,wrist:1,front:2", help="name:index 콤마 구분")
     p.add_argument("--run-sequence", default=None, help="JSON 시퀀스 파일을 GUI 없이 1회 실행 후 종료")
+    p.add_argument("--achieved-out", default=None, help="phase별 실측각(target vs achieved) JSON 저장 경로")
     args = p.parse_args()
 
     if args.run_sequence:
