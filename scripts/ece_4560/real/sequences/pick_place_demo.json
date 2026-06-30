@@ -1,0 +1,11 @@
+{
+  "name": "pick_place_demo",
+  "phases": [
+    {"shoulder_pan": -11.2, "shoulder_lift": 27.2, "elbow_flex": -13.3, "wrist_flex": 82.7, "wrist_roll": -104.8, "gripper": 50, "move_time": 2.0, "hold_time": 1.0},
+    {"shoulder_pan": -10.9, "shoulder_lift": 27.0, "elbow_flex": -11.0, "wrist_flex": 82.7, "wrist_roll": -104.3, "gripper": 11, "move_time": 2.0, "hold_time": 1.0},
+    {"shoulder_pan": -10.9, "shoulder_lift": -56.4, "elbow_flex": 46.5, "wrist_flex": 80.8, "wrist_roll": -104.3, "gripper": 11, "move_time": 2.0, "hold_time": 1.0},
+    {"shoulder_pan": -53.8, "shoulder_lift": -9.6, "elbow_flex": 12.3, "wrist_flex": 37.0, "wrist_roll": -99.4, "gripper": 11, "move_time": 2.0, "hold_time": 1.0},
+    {"shoulder_pan": -53.8, "shoulder_lift": -9.6, "elbow_flex": 12.3, "wrist_flex": 37.0, "wrist_roll": -99.4, "gripper": 44, "move_time": 2.0, "hold_time": 1.0},
+    {"shoulder_pan": -2.4, "shoulder_lift": -96.2, "elbow_flex": 98.0, "wrist_flex": 72.6, "wrist_roll": -85.6, "gripper": 10, "move_time": 2.0, "hold_time": 1.0}
+  ]
+}
