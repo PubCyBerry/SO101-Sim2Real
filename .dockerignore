@@ -5,11 +5,9 @@
 # 빌드 컨텍스트가 작을수록 `docker build` 속도가 빠르고,
 # 불필요한 파일이 이미지 레이어 캐시를 무효화하지 않음.
 #
-# ■ Dockerfile.lerobot / Dockerfile.smolvla 이 실제로 COPY 하는 파일 (제외 금지)
-#     pyproject.toml
-#     docker/lerobot-entrypoint.sh, docker/policy-entrypoint.sh
-#     docker/99-feetech.rules, docker/lerobot_keyboard_stdin.*
-#     docker/policy-client-shim.py, docker/sample_calibrations/
+# ■ Dockerfile.policy / .isaac_sim 이 실제로 COPY 하는 파일 (제외 금지)
+#     docker/policy-entrypoint.sh, docker/isaac-sim-entrypoint.sh
+#     docker/groot_compat_patch.py, docker/sample_calibrations/
 # =============================================================================
 
 

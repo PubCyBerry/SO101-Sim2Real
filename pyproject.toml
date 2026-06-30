@@ -18,8 +18,8 @@
 #   공용+teleop: uv sync --group teleop
 #   공용+dev   : uv sync --group dev
 #
-# ■ Docker 사용
-#   docker/Dockerfile.lerobot (lerobot 이미지): uv sync --group teleop --group async
+# ■ 실기기 native uv (Windows): uv sync --group teleop --group async
+# ■ Docker
 #   docker/Dockerfile.policy  (policy-server 이미지): pyproject.toml 과 독립.
 #     lerobot 0.5.1 (numpy>=2.0) 이 아래 override (numpy==1.26.0 등, Isaac 호환핀) 과
 #     충돌하므로 uv sync 대신 `uv pip install "lerobot[smolvla,async]==0.5.1"` 로 직접
@@ -75,7 +75,7 @@ dependencies = [
 # ── teleop: 실물 Arm Teleoperation ──────────────────────────────────────────
 # SO-101 Leader/Follower Arm을 직렬 포트로 연결해 원격 조작하는 환경.
 # Feetech STS3215 서보 통신을 위해 lerobot[feetech] extra 사용.
-# Docker 이미지(docker/Dockerfile.lerobot)는 async 와 함께 설치: --group teleop --group async
+# 실기기 native uv (Windows)는 async 와 함께 설치: --group teleop --group async
 teleop = [
     "ffmpeg>=1.4",
     # evdev: Linux 전용 입력 장치 라이브러리 (gamepad / joystick 텔레op 지원)

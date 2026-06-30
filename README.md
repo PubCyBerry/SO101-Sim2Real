@@ -1,6 +1,6 @@
 # SO-ARM101 Sim-to-Real
 
-SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬레이션에서 VLA 정책(ACT · SmolVLA · GR00T-N1.7)을 학습·검증하고, 실기기 SO-101 에 배포한다.
+SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬레이션에서 VLA 정책(ACT · SmolVLA · GR00T-N1.5)을 학습·검증하고, 실기기 SO-101 에 배포한다.
 
 작업은 **2대의 머신**으로 나뉜다.
 
@@ -45,17 +45,15 @@ flowchart LR
         PS["policy-server<br/>async gRPC :8080"]
         SIM["isaac-sim<br/>SimToReal-PickCube"]
         VLA["vla-ros<br/>vla_policy_node"]
-        GR["gr00t<br/>N1.7 ZMQ"]
         SIM <-->|ROS2| VLA
         VLA <-->|gRPC| PS
-        PS <-->|ZMQ| GR
     end
     CLI -->|"gRPC (실기기 추론)"| PS
 
     classDef win fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
     classDef lnx fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
     class WIN,ROBOT,CLI win
-    class LNX,PS,SIM,VLA,GR lnx
+    class LNX,PS,SIM,VLA lnx
 ```
 
 ---
@@ -68,7 +66,7 @@ flowchart LR
 | **실기기 VLA 추론** | Windows (native uv) | `uv run python -m lerobot.async_inference.robot_client` | policy-client → Linux policy-server gRPC |
 | **sim VLA 폐루프** | Linux (Docker) | `docker compose up policy-server isaac-sim vla-ros` | `SimToReal-SO101-PickCube-v0` closed-loop 평가 |
 | **sim SM 데이터 생성** | Linux (Docker) | isaac-sim `datagen` 모드 (`record_state_machine.py`) | State Machine 데모 → LeRobot v3 (GPU 런타임 검증 진행 중) |
-| **VLA 학습** | Linux (Docker) | policy-server `train` · gr00t `finetune` | SmolVLA/ACT · GR00T-N1.7 |
+| **VLA 학습** | Linux (Docker) | policy-server `train` | SmolVLA · ACT · GR00T-N1.5 (모두 네이티브) |
 | **sim 수동 teleop** (보조) | Linux (host uv) | `uv run scripts/.../teleop_se3_agent.py` | Isaac Lab 로컬 teleop · USD 씬 author |
 
 > **추론 백엔드는 1개**: `policy-server`(gRPC). 실기기 policy-client(Windows)와 sim vla-ros(Linux)가 같은 서버에 접속한다.
@@ -201,9 +199,8 @@ uv run python -m lerobot.async_inference.robot_client \
 ### Linux Docker — sim VLA 폐루프
 
 ```bash
-# 3-서비스 폐루프 (SmolVLA/ACT)
+# 3-서비스 폐루프 (SmolVLA · ACT · GR00T-N1.5 — 모두 policy-server 네이티브)
 docker compose --env-file .env -f docker/docker-compose.yaml up policy-server isaac-sim vla-ros
-# GR00T-N1.7 은 gr00t 서비스 추가
 ```
 
 `scripts/inference/demo_vla.sh start <act|smolvla|groot>` 가 정책 서버·bridge·vla-ros 를 자동 배선한다(livestream :49100). `--eval` 모드로 closed-loop 평가. 세부는 `AGENTS.md` §시뮬레이션 환경.

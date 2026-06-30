@@ -100,6 +100,9 @@ case "$MODE" in
       --dataset.single_task="${SINGLE_TASK}" \
       --dataset.num_episodes="${NUM_EPISODES}" \
       --dataset.fps="${RECORD_FPS}" \
+      --dataset.episode_time_s="${EPISODE_TIME_S}" \
+      --dataset.reset_time_s="${RESET_TIME_S}" \
+      --dataset.push_to_hub="${PUSH_TO_HUB}" \
       ${RECORD_EXTRA_ARGS:-} "$@"
     ;;
 
@@ -120,6 +123,8 @@ case "$MODE" in
       --task="${TASK}" \
       --actions_per_chunk="${ACTIONS_PER_CHUNK}" \
       --chunk_size_threshold="${CHUNK_SIZE_THRESHOLD}" \
+      --aggregate_fn_name="${AGGREGATE_FN_NAME}" \
+      --client_device="${CLIENT_DEVICE}" \
       "${ROBOT_COMMON[@]}" \
       ${POLICY_CLIENT_EXTRA_ARGS:-} "$@"
     ;;

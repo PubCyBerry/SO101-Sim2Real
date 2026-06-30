@@ -15,7 +15,6 @@
 # ■ 의존성 전략 — docker 자체 관리(uv/pyproject 와 독립)
 #   - isaaclab·isaacsim·torch·numpy·cv2 = 베이스 이미지 보유 → 설치/re-pin 안 함
 #     (torch 2.7+cu128 덮어쓰면 GPU 깨짐, 베이스 신뢰)
-#   - 추가 설치: pyzmq (attention overlay `--attention_overlay` ZMQ SUB 용)
 #   - 우리 패키지(sim_to_real·so101_contract) = PYTHONPATH(/workspace/src), 런타임 bind-mount
 #
 # ■ 빌드/실행 검증 게이트(GPU 필요)
@@ -25,11 +24,6 @@
 FROM nvcr.io/nvidia/isaac-lab:2.3.2
 
 ENV DEBIAN_FRONTEND=noninteractive
-
-# ── 추가 의존성 (베이스에 없는 것만) ──────────────────────────────────────────
-# pyzmq: SmolVLA cross-attention overlay ZMQ SUB. isaaclab·cv2·torch 는 베이스 보유.
-# /isaac-sim/python.sh = isaaclab.sh -p 가 쓰는 번들 isaacsim python(동일 site-packages).
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir "pyzmq>=27.1.0"
 
 # LeRobot v3 레코더 의존성 (state-machine datagen 스크립트용)
 #   - pyarrow<19: numpy 1.26 ABI 호환(19+ 는 numpy 2.x ABI 전용 — AGENTS.md pin 참조)

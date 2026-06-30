@@ -153,19 +153,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
            "decord>=0.6.0,<1.0.0" \
            "ninja>=1.11.1,<2.0.0"
 
-# ── pyzmq / msgpack (구 GR00T-N1.7 ZMQ bridge 잔재) ──────────────────────────
-# N1.7 ZMQ bridge(policy_server_groot_bridge.py)는 제거됐다 — GR00T-N1.5 는 lerobot
-# 네이티브 `groot` policy 로 이 이미지 안에서 직접 추론한다(별도 컨테이너·ZMQ 불필요).
-# 두 패키지는 더 이상 추론에 쓰이지 않으나, 지우면 flash-attn 소스 재컴파일(~30-45분)을
-# 유발하므로 그대로 둔다(tiny·ABI 무영향). 다음 from-scratch 빌드 때 이 RUN 을 제거하면 된다.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    ulimit -Sn 65536 \
-    && UV_HTTP_TIMEOUT=600 \
-       UV_CONCURRENT_DOWNLOADS=2 \
-       uv pip install \
-           "pyzmq>=27.1.0" \
-           "msgpack>=1.0.0"
-
 # ── flash-attn 소스 빌드 ─────────────────────────────────────────────────────
 # torch 가 이미 venv 에 설치된 상태에서 --no-build-isolation 으로 빌드.
 # flash-attn 2.x 의 공식 sm_120 화이트리스트 미포함 →
