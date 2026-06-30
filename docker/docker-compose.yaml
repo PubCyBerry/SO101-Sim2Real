@@ -186,6 +186,8 @@ services:
       - ../scripts:/workspace/scripts
       - ../assets:/workspace/assets
       - ../outputs:/workspace/outputs
+      # datasets: datagen·teleop 모드의 LeRobot v3 출력 영속 (호스트 ./datasets)
+      - ../datasets:/workspace/datasets
     # ── 환경 변수 ──────────────────────────────────────────────────────────
     env_file:
       # ../.env = 머신·통합 설정 (PUBLIC_IP, LIVESTREAM, NUM_CUBES 등)
@@ -208,6 +210,14 @@ services:
       NUM_CUBES:                    "${NUM_CUBES:-1}"
       # 추가 bridge 인자 (--eval, --headless 등)
       BRIDGE_EXTRA_ARGS:            "${BRIDGE_EXTRA_ARGS:-}"
+      # teleop 모드 (cross-machine teleop + LeRobot v3 record)
+      #   LEADER_ENDPOINT 만 Windows leader IP 로 바꾸면 됨. 예: tcp://192.168.0.10:5556
+      LEADER_ENDPOINT:              "${LEADER_ENDPOINT:-tcp://localhost:5556}"
+      TELEOP_DEVICE:                "${TELEOP_DEVICE:-so101leader_remote}"
+      DATASET_DIR:                  "${DATASET_DIR:-/workspace/datasets/so101_teleop_sim}"
+      TASK_DESCRIPTION:             "${TASK_DESCRIPTION:-pick up the cube and place it in the bowl}"
+      NUM_DEMOS:                    "${NUM_DEMOS:-50}"
+      SIM_TELEOP_EXTRA_ARGS:        "${SIM_TELEOP_EXTRA_ARGS:-}"
     # ── 네트워크 ─────────────────────────────────────────────────────────
     # host 모드: ROS 2 DDS(fastrtps) + WebRTC(:49100) 를 호스트 인터페이스로 노출
     network_mode: host

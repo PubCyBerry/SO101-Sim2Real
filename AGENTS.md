@@ -25,7 +25,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 - 시뮬 env 는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
 - 그리퍼 codec = **affine 전용** (feature [0,100] ↔ sim joint [-10°,100°]); offset 제거됨 (절대 joint target, `use_default_offset=False`). 단일 소스 = `src/so101_contract/feature_codec.py`.
-- **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim 수동 teleop(`teleop_se3_agent.py`). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). cuRobo batch 생성기는 제거됨.
+- **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim teleop(`teleop_se3_agent.py`, `--record_format lerobot_v3`; cross-machine = `so101leader_remote` 로 Windows leader→ZMQ→Linux sim). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). cuRobo batch 생성기는 제거됨.
 
 ## 환경 사양
 
@@ -96,7 +96,8 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 - `policy-server-rtc`(서버 측 Real-Time Chunking)는 백엔드 스크립트(`policy_server_rtc.py`)가 이 branch 에 없어 **entrypoint 에서 제거됨**. 재도입 시 스크립트 + entrypoint 모드를 함께 복원.
 
 **`isaac-sim-entrypoint.sh`** (isaac-sim, CMD 기본값 `bridge`):
-`bridge`(run_cube_desk_ros_bridge.py 래퍼) · `datagen`(record_state_machine.py — SM 데이터 생성, `DATAGEN_TASK`/`NUM_DEMOS`/`DATAGEN_EXTRA_ARGS`) · `bash` · `python`
+`bridge`(run_cube_desk_ros_bridge.py 래퍼) · `datagen`(record_state_machine.py — SM 데이터 생성, `DATAGEN_TASK`/`NUM_DEMOS`/`DATAGEN_EXTRA_ARGS`) · `teleop`(teleop_se3_agent.py — **cross-machine teleop + LeRobot v3 record**, `LEADER_ENDPOINT`(Windows leader ZMQ)/`DATASET_DIR`/`TASK_DESCRIPTION`/`NUM_DEMOS`/`SIM_TELEOP_EXTRA_ARGS`, livestream 관전+키보드 제어) · `bash` · `python`
+- teleop 모드 deps: `Dockerfile.isaac_sim` 이 `pyzmq` 추가 설치(원격 leader SUB). `datasets` 볼륨(`../datasets:/workspace/datasets`)에 v3 출력 영속(datagen 도 공유).
 
 **`vla-ros-entrypoint.sh`** (vla-ros):
 컨테이너 안에서 `colcon build --packages-select so101_vla_policy` 후 `vla_policy_node` 직접 실행 (호스트 빌드 아님; `..:/workspace` bind-mount).
@@ -158,7 +159,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | **환경 관리** | `environments/list_envs.py` | 등록 Gym 환경 일람 |
 | | `environments/author_pick_cube_scene.py` | 큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. 공식 pxr/PhysxSchema API. `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python ...` 필요 |
 | **에셋·충돌** | `assets/set_gripper_jaw_sdf_collision.py` | so101_follower.usd jaw/gripper collision → **SDF** (usd-core raw, isaac 불요, backup 유지) |
-| **teleop·데이터** | `environments/teleoperation/teleop_se3_agent.py` | PickCube 로컬 GUI teleop. `--task SimToReal-SO101-PickCube-v0`, `keyboard`/`so101leader`, `--tune_cameras` docking viewport, reset 시 부감 뷰 |
+| **teleop·데이터** | `environments/teleoperation/teleop_se3_agent.py` | PickCube GUI teleop + 데이터 기록. device=`keyboard`/`so101leader`/**`so101leader_remote`**(Windows leader→ZMQ `:5556`→Linux sim, `--leader_endpoint`), `--tune_cameras` docking viewport. **`--record --record_format lerobot_v3 --dataset_dir`** = LeRobot v3 기록(`record_state_machine` 와 동일 계약·기존 데이터셋 호환, `--enable_cameras` 필요. B=시작·N=성공저장·R=폐기). `hdf5` = 경량 action/state(카메라無). cross-machine 관전=`--public_ip` WebRTC livestream |
 | | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 로 실제 SO-101 leader 상태 원격 송출 |
 | | `environments/utils/patch_robot_colors.py` | USD 머티리얼 패치 |

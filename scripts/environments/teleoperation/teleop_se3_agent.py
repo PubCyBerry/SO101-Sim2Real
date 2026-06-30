@@ -100,6 +100,7 @@ parser.add_argument(
         "keyboard",
         "gamepad",
         "so101leader",
+        "so101leader_remote",
         "bi-so101leader",
         "lekiwi-keyboard",
         "lekiwi-gamepad",
@@ -108,6 +109,13 @@ parser.add_argument(
     help="Device for interacting with environment",
 )
 parser.add_argument("--port", type=str, default="/dev/ttyACM0", help="Port for so101leader")
+parser.add_argument(
+    "--leader_endpoint",
+    type=str,
+    default="tcp://localhost:5556",
+    help="ZMQ endpoint for so101leader_remote (so101_joint_state_server.py PUB). "
+    "예: tcp://<windows-ip>:5556",
+)
 parser.add_argument("--remote_endpoint", type=str, default=None, help="Reserved for old remote so101leader path")
 parser.add_argument("--left_arm_port", type=str, default="/dev/ttyACM0")
 parser.add_argument("--right_arm_port", type=str, default="/dev/ttyACM1")
@@ -115,8 +123,28 @@ parser.add_argument("--task", type=str, default="SimToReal-SO101-PickCube-v0", h
 parser.add_argument("--seed", type=int, default=None, help="Seed for the environment.")
 parser.add_argument("--sensitivity", type=float, default=1.0, help="Keyboard sensitivity factor.")
 parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
-parser.add_argument("--record", action="store_true", help="Enable lightweight HDF5 action/state recording")
-parser.add_argument("--dataset_file", type=str, default="./datasets/dataset.hdf5", help="HDF5 recording path")
+parser.add_argument("--record", action="store_true", help="Enable recording (see --record_format)")
+parser.add_argument(
+    "--record_format",
+    type=str,
+    default="lerobot_v3",
+    choices=["lerobot_v3", "hdf5"],
+    help="lerobot_v3: LeRobot v3 dataset(parquet+h264, 카메라 포함, --enable_cameras 필요)·"
+    "기존 데이터셋 호환. hdf5: 경량 action/state 만(카메라 없음).",
+)
+parser.add_argument("--dataset_file", type=str, default="./datasets/dataset.hdf5", help="HDF5 recording path (--record_format hdf5)")
+parser.add_argument(
+    "--dataset_dir",
+    type=str,
+    default="./datasets/so101_teleop_sim",
+    help="LeRobot v3 출력 디렉터리 (--record_format lerobot_v3)",
+)
+parser.add_argument(
+    "--task_description",
+    type=str,
+    default="pick up the cube and place it in the bowl",
+    help="LeRobot v3 dataset 의 language task 문자열(에피소드 instruction).",
+)
 parser.add_argument("--resume", action="store_true", help="Append to an existing dataset file")
 parser.add_argument("--num_demos", type=int, default=0, help="Number of demonstrations to record. 0 = infinite.")
 parser.add_argument("--max_steps", type=int, default=0, help="Maximum GUI loop iterations. 0 = infinite.")
@@ -215,13 +243,18 @@ if args_cli.public_ip:
 
 if args_cli.num_envs != 1:
     raise ValueError("This local GUI teleop script currently supports --num_envs=1 only.")
-if args_cli.teleop_device not in {"keyboard", "so101leader"}:
+if args_cli.teleop_device not in {"keyboard", "so101leader", "so101leader_remote"}:
     raise NotImplementedError(
         f"{args_cli.teleop_device!r} was a leisaac device path and has not been ported yet. "
-        "Use --teleop_device=so101leader or keyboard for the registered task."
+        "Use --teleop_device=so101leader, so101leader_remote, or keyboard for the registered task."
     )
 if args_cli.remote_endpoint:
     raise NotImplementedError("--remote_endpoint is not available in the pure Isaac Lab local teleop path.")
+# LeRobot v3 는 observation.images.{top,wrist,front} 가 필수라 카메라 없이는 schema 불완전.
+if args_cli.record and args_cli.record_format == "lerobot_v3" and not args_cli.enable_cameras:
+    raise ValueError(
+        "--record_format lerobot_v3 requires --enable_cameras (v3 dataset 은 카메라 이미지가 필수)."
+    )
 # Windows Isaac Sim 5.1 의 full-GUI experience(isaaclab.python.kit)는 메뉴/hotkey 확장
 # (isaacsim.gui.menu · omni.kit.window.toolbar · viewport menubar 등)을 로드하다 "app ready"
 # 직후 omni.kit.hotkeys.core/key_combination.py:as_string 에서 access violation(exit 139)으로
@@ -254,6 +287,13 @@ import torch  # noqa: E402
 import sim_to_real  # noqa: E402,F401  # registers the gym env
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from so101_contract import SO101_JOINT_ORDER  # noqa: E402
+from so101_contract.leader_calibration import real_leader_to_sim_radians  # noqa: E402
+from sim_to_real.data.lerobot_recorder import LeRobotV3DatasetWriter  # noqa: E402
+from sim_to_real.data.lerobot_units import (  # noqa: E402
+    CAMERA_SCENE_NAMES,
+    read_camera_rgb_u8,
+    to_lerobot_units,
+)
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import add_pick_cube_cameras  # noqa: E402
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
 
@@ -502,6 +542,76 @@ class SO101LeaderJointController(WallClockLimiterMixin):
         return self.targets.unsqueeze(0)
 
 
+class SO101LeaderRemoteJointController(SO101LeaderJointController):
+    """SO101LeaderJointController 의 ZMQ 원격 변형 (cross-machine teleop).
+
+    로컬 serial 대신, leader arm 이 물리적으로 연결된 머신(Windows)에서 도는
+    ``so101_joint_state_server.py`` 가 ZMQ PUB 한 **정규화** leader 상태([-100,100] arm,
+    [0,100] gripper)를 SUB 해 ``real_leader_to_sim_radians`` 로 sim radian 으로 변환한다.
+    수신 패턴은 ``devices/lerobot/so101_leader_remote.py`` 와 동일(CONFLATE·<6f·daemon thread).
+    slew/limit/smoothing 및 advance()/reset() 은 부모 그대로 재사용한다.
+    """
+
+    def __init__(self, env, keyboard: GuiKeyboard, limits: torch.Tensor, endpoint: str) -> None:
+        import struct
+        import threading
+
+        import zmq
+
+        # 부모 __init__(serial connect)은 호출하지 않고 비-serial 셋업만 복제한다.
+        self.env = env
+        self.keyboard = keyboard
+        self.limits = limits
+        self.signs = torch.tensor(args_cli.leader_joint_signs, dtype=torch.float32, device=env.device)
+        self.offsets = torch.tensor(args_cli.leader_joint_offsets, dtype=torch.float32, device=env.device)
+        self.targets = env.scene["robot"].data.joint_pos[0, :6].clone().to(env.device)
+        self.filtered_targets = self.targets.clone()
+        self._init_wall_clock()
+
+        self._struct = struct
+        self._endpoint = endpoint
+        self._lock = threading.Lock()
+        self._cached = dict.fromkeys(SO101_JOINT_ORDER, 0.0)
+        self._ctx = zmq.Context()
+        self._sub = self._ctx.socket(zmq.SUB)
+        self._sub.setsockopt(zmq.CONFLATE, 1)
+        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+        self._sub.connect(endpoint)
+        self._connected = True
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+        print(f"[leader] ZMQ remote leader connected to {endpoint}")
+
+    def _recv_loop(self) -> None:
+        while self._connected:
+            try:
+                msg = self._sub.recv(flags=0)  # blocks; no lock held
+                state = dict(zip(SO101_JOINT_ORDER, self._struct.unpack("<6f", msg)))
+                with self._lock:
+                    self._cached = state
+            except Exception:  # noqa: BLE001
+                break
+
+    def _read_leader_targets(self) -> torch.Tensor:
+        with self._lock:
+            state = dict(self._cached)
+        # 정규화 leader → sim radian (leader_calibration 단일 소스 = calibration 노브).
+        sim_rad = real_leader_to_sim_radians(state)
+        targets = torch.tensor(sim_rad, dtype=torch.float32, device=self.env.device)
+        targets = targets * self.signs + self.offsets
+        return torch.maximum(torch.minimum(targets, self.limits[:, 1]), self.limits[:, 0])
+
+    def close(self) -> None:
+        self._connected = False
+        if getattr(self, "_recv_thread", None) is not None:
+            self._recv_thread.join(timeout=2)
+        if getattr(self, "_sub", None) is not None:
+            self._sub.close()
+        if getattr(self, "_ctx", None) is not None:
+            self._ctx.term()
+        print("[leader] ZMQ remote leader disconnected")
+
+
 @dataclass
 class FrameRecord:
     action: np.ndarray
@@ -576,6 +686,61 @@ class Hdf5TeleopRecorder:
 
     def close(self) -> None:
         self.finalize_episode(success=False)
+
+
+class LeRobotV3TeleopRecorder:
+    """LeRobot v3 recorder — ``Hdf5TeleopRecorder`` 와 동일 duck-typed 인터페이스
+
+    (``record_step``·``finalize_episode``·``close``·``exported_successful_episode_count``)
+    라 메인 루프는 무변경. state=관측 joint_pos, action=명령 joint_pos_target(slew 적용 후),
+    3 카메라(top/wrist/front)를 매 프레임 기록한다 — ``record_state_machine.py`` 와 동일 계약이라
+    기존 v3 데이터셋과 byte 호환. v3 writer 는 성공 에피소드만 flush 하므로 R=폐기·N=저장.
+    """
+
+    def __init__(self, dataset_dir: Path, *, task: str) -> None:
+        self.dataset_dir = dataset_dir
+        self.task = task
+        self.exported_successful_episode_count = 0
+        self.writer = LeRobotV3DatasetWriter(
+            dataset_dir, overwrite=True, enable_videos=True, robot_type="so_follower"
+        )
+
+    def record_step(self, env, action: torch.Tensor) -> None:  # noqa: ARG002  action arg 미사용(아래 참고)
+        robot = env.scene["robot"]
+        # state = 현재 관측 joint_pos. action = env action term(slew) 적용 후 joint_pos_target.
+        # action 인자(controller 출력)가 아니라 joint_pos_target 을 쓰는 이유: 추론도 slew action
+        # 이라 train/deploy 정합 + record_state_machine 와 동일 계약(메모리 vla-data-jerky-slew-record).
+        state = to_lerobot_units(robot.data.joint_pos[0].detach().cpu().numpy())
+        action_rec = to_lerobot_units(robot.data.joint_pos_target[0].detach().cpu().numpy())
+        images: dict[str, np.ndarray] = {}
+        for cam_key, scene_name in CAMERA_SCENE_NAMES.items():
+            try:
+                images[cam_key] = read_camera_rgb_u8(env, scene_name)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[record] camera {cam_key} capture failed: {exc}")
+        self.writer.add_frame(action_rec, state, images)
+
+    def finalize_episode(self, success: bool) -> None:
+        committed = self.writer.commit_episode(success=success, task_name=self.task)
+        if committed:
+            self.exported_successful_episode_count += 1
+            print(
+                f"[record] committed episode {self.exported_successful_episode_count} "
+                f"(success={success}) → {self.dataset_dir}"
+            )
+        elif success:
+            print("[record] episode marked success but empty — nothing committed")
+        else:
+            print("[record] episode discarded (success=False)")
+
+    def close(self) -> None:
+        # 진행 중 버퍼는 폐기(commit_episode(False) 가 비움), 그 후 메타·비디오 flush.
+        self.writer.commit_episode(success=False, task_name=self.task)
+        summary = self.writer.finalize(task_name=self.task)
+        print(
+            f"[record] dataset saved: {summary['output_dir']} "
+            f"episodes={summary['total_episodes']} frames={summary['total_frames']}"
+        )
 
 
 def _rgb_to_u8(rgb: torch.Tensor) -> np.ndarray:
@@ -1087,7 +1252,7 @@ def main() -> None:  # noqa: C901
     camera_viewports: list[object] = []
     keyboard: GuiKeyboard | None = None
     controller: KeyboardJointController | SO101LeaderJointController | None = None
-    recorder: Hdf5TeleopRecorder | None = None
+    recorder: Hdf5TeleopRecorder | LeRobotV3TeleopRecorder | None = None
     rate_limiter = RateLimiter(args_cli.step_hz)
     should_reset = False
     should_capture = bool(args_cli.capture_on_start)
@@ -1137,11 +1302,16 @@ def main() -> None:  # noqa: C901
 
         if args_cli.teleop_device == "keyboard":
             controller = KeyboardJointController(env, keyboard, limits)
+        elif args_cli.teleop_device == "so101leader_remote":
+            controller = SO101LeaderRemoteJointController(env, keyboard, limits, args_cli.leader_endpoint)
         else:
             controller = SO101LeaderJointController(env, keyboard, limits)
 
         if args_cli.record:
-            recorder = Hdf5TeleopRecorder(Path(args_cli.dataset_file), fps=args_cli.lerobot_dataset_fps)
+            if args_cli.record_format == "lerobot_v3":
+                recorder = LeRobotV3TeleopRecorder(Path(args_cli.dataset_dir), task=args_cli.task_description)
+            else:
+                recorder = Hdf5TeleopRecorder(Path(args_cli.dataset_file), fps=args_cli.lerobot_dataset_fps)
 
         while simulation_app.is_running() and not interrupted:
             with torch.inference_mode():
