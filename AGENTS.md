@@ -23,7 +23,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | **정책** | ACT · SmolVLA · GR00T-N1.5 (서버에서 추론, gRPC) | 동일 (env=추론/데이터 기판, RL 제거) |
 | **스택** | LeRobot 0.4.4 (pyproject `teleop`+`async`) | Isaac Sim 5.1 / IsaacLab 2.3.2 (직접 의존) / LeRobot 0.5.1 |
 
-- 시뮬 env 는 `src/sim_to_real/tasks/pick_cube/` 에서 `SimToReal-SO101-PickCube-v0` 만 등록 (RL 커리큘럼·보상기 제거, inference/teleop/데이터만 남음).
+- 시뮬 env 는 **2층 상속 사다리**(leisaac Workshop 이식): base `so101_base_env_cfg.py`(`SO101TeleopEnvCfg` — 로봇+cube_desk USD+조명+slew 액션+6D joint obs+sim/physx+teleop-device 배선, 태스크 중립 substrate) → leaf `tasks/pick_cube/`(`PickCubeEnvCfg(SO101TeleopEnvCfg)` — 큐브/그릇/contact 센서/subtask obs/종료/DR). 등록 env 5개: `SimToReal-SO101-Teleop-v0`(base substrate) + `SimToReal-SO101-PickCube-{v0,DR-v0,Eval-v0,DR-Eval-v0}`. **DR-off 가 기본**(v0=고정 실측배치·순간 성공; `-DR`=큐브 scatter+arc+물리·시각 DR; `-Eval`=디바운스 성공 종료). datagen 은 `-DR`, closed-loop eval 은 `-Eval` 사용. RL 커리큘럼·보상기 제거(inference/teleop/데이터만).
 - 그리퍼 codec = **affine 전용** (feature [0,100] ↔ sim joint [-10°,100°]); offset 제거됨 (절대 joint target, `use_default_offset=False`). 단일 소스 = `src/so101_contract/feature_codec.py`.
 - **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim teleop(`teleop_se3_agent.py`, `--record_format lerobot_v3`; cross-machine = `so101leader_remote` 로 Windows leader→ZMQ→Linux sim). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). cuRobo batch 생성기는 제거됨.
 
@@ -69,7 +69,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
 | `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async) | async inference gRPC 서버 + VLA 학습(train/eval). ACT·SmolVLA·GR00T-N1.5 (모두 lerobot 네이티브 `groot`) |
-| `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-v0` 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
+| `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-*`(eval=`-Eval-v0`) 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
 | `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 (`vla_policy_node`, gRPC 클라이언트) |
 | `pink-ik` | `so101-pink-ik:jazzy` / `Dockerfile.pink` | ROS 2 Jazzy + pin-pink(Pinocchio)·quadprog (CPU only) | **결정적 pick-place SM**(VLA 비경유). pink 미분 IK 로 큐브집기 궤적 생성 → bridge 직접 구동. `/isaac_joint_states`+`/tf` SUB → `/isaac_joint_commands` PUB. 상세=`docs/PINK_IK_PICKPLACE.md` |
 
@@ -124,7 +124,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 ## 시뮬레이션 환경 — VLA 추론·데이터 기판
 
-`SimToReal-SO101-PickCube-v0` Gym 환경은 **추론·데이터 기판**이다 (RL 제거됨). Docker isaac-sim 서비스(폐루프) 또는 온호스트 uv 실행(`uv sync --group isaac`, 수동 teleop·씬 author)에서 쓰이며, ROS2 bridge 를 통해 VLA 정책·데이터 기록을 지원한다.
+`SimToReal-SO101-PickCube-*` Gym 환경은 **추론·데이터 기판**이다 (RL 제거됨). Docker isaac-sim 서비스(폐루프) 또는 온호스트 uv 실행(`uv sync --group isaac`, 수동 teleop·씬 author)에서 쓰이며, ROS2 bridge 를 통해 VLA 정책·데이터 기록을 지원한다. base substrate(`SimToReal-SO101-Teleop-v0`, 태스크 오브젝트/성공 없음)를 leaf 가 상속하는 2층 사다리(위 §실행 경로 참조).
 
 ### Python 패키지 `sim_to_real` (`src/sim_to_real/`)
 
@@ -134,7 +134,9 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 |---|---|
 | `assets/scenes/cube_desk.py` | `CUBE_DESK_CFG` (UsdFileCfg 래퍼) |
 | `tasks/__init__.py` | `isaaclab_tasks.utils.import_packages` 로 하위 task config 자동 등록 (블랙리스트: `utils`, `.mdp`) |
-| `tasks/pick_cube/` | `SimToReal-SO101-PickCube-v0` (entry point `pick_cube_env_cfg:PickCubeEnvCfg`, env class `ManagerBasedRLEnv`). **RL 제거됨**: 커리큘럼 없음, 보상 없음 (PickCubeRewardsCfg=empty stub), obs/action/termination/events 만 유지. Action term = `SlewLimitedJointPositionActionCfg(use_default_offset=False)` 절대 joint target |
+| `tasks/so101_base_env_cfg.py` | **base 층**(leisaac Workshop 이식). `SO101BaseSceneCfg`(로봇+cube_desk USD+조명, contact 리포트 on)·`SO101ActionsCfg`(slew joint)·`SO101PolicyObservationsCfg`(6D joint)·`SO101BaseEventCfg`(씬 리셋+포즈 jitter)·`SO101TeleopEnvCfg`(무종료 substrate + teleop-device 배선 `use_teleop_device`/`preprocess_device_action`). 신규 태스크는 이걸 상속 |
+| `tasks/pick_cube/` | **leaf 층**. `PickCubeEnvCfg(SO101TeleopEnvCfg)` + 변형 3종(`PickCubeDREnvCfg`·`PickCubeEvalEnvCfg`·`PickCubeEvalDREnvCfg`). env class = `PickCubeEnv`(ManagerBasedRLEnv + 동적 gripper effort). base 씬에 큐브/그릇/contact 센서(`contact_jaw`+`contact_gripper`), subtask obs(`any_cube_grasped`+`object_in_container`), 종료(`task_done`/Eval=`task_done_confirmed`/`cube_lost`), DR 이벤트 추가. **RL 제거됨**(PickCubeRewardsCfg=empty stub). Action = `SlewLimitedJointPositionActionCfg(use_default_offset=False)` 절대 joint target |
+| `tasks/pick_cube/mdp/` | pick_cube 전용 MDP term. `observations.py:any_cube_grasped`(contact-sensor 양 손가락 envelope grasp 신호, env-state hysteresis, leisaac `any_vial_grasped` 이식) + `terminations.py:task_done_confirmed`(N-step 디바운스 성공)·`cube_lost` |
 | `tasks/common/` | `utils.py` (수학·카메라 헬퍼) + `mdp/` (공용 obs/termination 컴포넌트) — 도메인 중립 |
 | `data/` | `lerobot_recorder.py` (LeRobot v3 writer 라이브러리) + `lerobot_units.py` (단위 변환, 단일 소스 = `src/so101_contract/feature_codec.py`) |
 | `utils/{constant,domain_randomization,cube_specs,gripper_effort,env_utils,general_assets,math_utils,monkey_patch}.py` | `CUBE_NAMES`·`BOWL_NAME` + DR 헬퍼, 큐브 크기/질량 단일 소스 (`cube_specs.py`), 그리퍼 effort clamp + vendored leisaac 유틸(`env_utils`·`general_assets`·`math_utils`·`monkey_patch`=IsaacLab 2.3.2 TerminationManager 버그 게이트 패치) |
