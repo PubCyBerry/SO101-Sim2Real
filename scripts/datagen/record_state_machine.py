@@ -75,8 +75,16 @@ from sim_to_real.data.lerobot_units import read_camera_rgb_u8, to_lerobot_units,
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim
 
 # Maps gym task id → (StateMachineClass, device_type)
+# PickCube 변형 전부 동일 SM 사용(DR/Eval 은 씬·이벤트·종료만 다름). 데이터 생성은
+# 보통 DR-on(-DR)을 쓴다 — 기본 v0 는 DR-off 고정배치라 다양성 없음.
 TASK_REGISTRY = {
-    "SimToReal-SO101-PickCube-v0": (PickCubeStateMachine, "so101_state_machine"),
+    task_id: (PickCubeStateMachine, "so101_state_machine")
+    for task_id in (
+        "SimToReal-SO101-PickCube-v0",
+        "SimToReal-SO101-PickCube-DR-v0",
+        "SimToReal-SO101-PickCube-Eval-v0",
+        "SimToReal-SO101-PickCube-DR-Eval-v0",
+    )
 }
 
 

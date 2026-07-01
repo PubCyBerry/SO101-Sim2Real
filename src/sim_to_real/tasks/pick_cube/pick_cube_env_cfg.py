@@ -1,24 +1,25 @@
-"""Cube Pick-and-Place task configuration — pure Isaac Lab 2.3.2."""
+"""Cube Pick-and-Place task configuration — pure Isaac Lab 2.3.2.
+
+leisaac Workshop 3층 사다리 이식의 **leaf 층**. base(``so101_base_env_cfg.SO101TeleopEnvCfg``,
+로봇+책상+조명+액션+joint 관측+sim 설정)를 상속해 태스크 고유분만 얹는다:
+씬 오브젝트(큐브/그릇) · contact 센서 · subtask 관측(contact grasp + 그릇 안 배치) ·
+성공/실패 종료 · DR 이벤트. env 변형 4종(default/Fixed/Eval/EvalFixed)은 Workshop 의
+base/DR/Eval/DR-Eval 매트릭스 대응(우리는 DR-on 이 기본이라 축을 Fixed=DR-off 로 뒤집음).
+"""
 
 from __future__ import annotations
 
-import math
-
 import isaaclab.envs.mdp as mdp
-import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.assets import RigidObjectCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCameraCfg, ContactSensorCfg
 from isaaclab.utils import configclass
 
-from sim_to_real.assets.robots.lerobot import SO101_FOLLOWER_CFG
-from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH
+from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_USD_PATH  # noqa: F401 (일부 스크립트 참조 대비 re-export)
 from so101_contract import SO101_JOINT_ORDER
 from sim_to_real.tasks.common.utils import (
     SO101_JOINT_TARGET_MAX_VELOCITY,
@@ -43,6 +44,14 @@ from sim_to_real.utils.domain_randomization import (
 )
 
 from sim_to_real.tasks.pick_cube import mdp as task_mdp
+from sim_to_real.tasks.so101_base_env_cfg import (
+    SO101BaseEventCfg,
+    SO101BaseSceneCfg,
+    SO101PolicyObservationsCfg,
+    SO101TeleopEnvCfg,
+    _ROBOT_POS,  # noqa: F401  (bridge/스크립트가 pick_cube_env_cfg 에서 import → re-export)
+    _ROBOT_ROT,  # noqa: F401
+)
 
 
 # World-frame (x, y) of the bowl = success/obs 컨테이너 중심. _BOWL_INIT_STATE 와 반드시 동기화
@@ -51,14 +60,6 @@ from sim_to_real.tasks.pick_cube import mdp as task_mdp
 BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.265)
 BOWL_SUCCESS_RADIUS: float = 0.06
 BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
-
-# Robot base position — recenter 로 world 원점(XY)에 배치.
-# x: 0.0 (desk_left_edge=-0.44 + 440mm 장착)
-# y: 0.0 (책상 앞 모서리 world y=-0.045 기준 약간 뒤)
-# z: desk_top(0.705) - base_min_z(0.0301) = 0.6749 (z 불변)
-_ROBOT_POS = (0.0, 0.0, 0.6749)
-# Identity rotation; articulation USD already faces the desk objects.
-_ROBOT_ROT = (0.0, 0.0, 0.0, 1.0)  # (w, x, y, z)
 
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
@@ -89,20 +90,20 @@ _BOWL_INIT_STATE = ((-0.22, 0.265, 0.715), _yaw_quat(0.0))
 # 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준
 # ---------------------------------------------------------------------------
 
-# 로봇 SO-101 도달(reach) 범위 안쪽으로 제한. reach 매핑 sweep(1큐브 full-scatter 12 ep,
-# robot base=(0,0))으로 가장자리 실패 편향을 측정해 보수화 (recenter delta=(-1.84,+0.565)):
-#   · x 극단(≤-0.23, ≥0.22)에서 grasp 실패 편향 → x_range 를 [-0.18, 0.20] 로 (±0.20 안쪽).
-#   · y 매트 뒤 가장자리(≤0.10, base 에 너무 가까워 arm 이 접혀 top-down 자세 불리) 실패 →
-#     y_lo 를 0.105 로. y 상한 0.22 는 그릇(y=0.305)과 이격(min_bowl_sep 추가 보장).
-# (가장자리 외 실패는 reach 가 아니라 joint_fk random-FK 의 marginal grasp 분산임 — CONTEXT 참고.)
-# 큐브 스폰 사각형 = 데스크 매트 위 사용자 지정 영역 (매트-local cm, 좌하단=(0,0)).
-#   매트(860×400mm) env-local center=(0.09,0.245) → 좌하단 = (-0.34, 0.045).
-#   매핑: env_x = -0.34 + Xcm/100, env_y = 0.045 + Ycm/100.
-#   사용자 지정: X∈[16,56]cm, Y∈[11,25]cm → 아래 env-local m 범위.
-#   이 범위는 **큐브 볼륨**의 사각형 경계 → DR 은 volume_inset 만큼 중심을 안쪽으로.
-_MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (_MAT_BL_ENV[0] + 0.16, _MAT_BL_ENV[0] + 0.56)  # (-0.18, 0.22)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1] + 0.11, _MAT_BL_ENV[1] + 0.25)  # (0.155, 0.295)
+# 로봇 SO-101 이 **top-down 으로 grasp 가능한 범위**로 제한. pink IK top-down sweep 으로 측정
+# (2026-07-01, scripts/datagen/pink_ik_bridge_node.py --sweep, 2cm grid, robot base=(0,0)):
+#   각 큐브 중심에서 hover+grasp waypoint 를 azimuth 정렬 top-down 방향으로 IK 풀어
+#   ①위치 도달(err<2cm) ②achieved TCP z축이 수직에서 <25° 를 만족하면 graspable.
+#   측정 결과: 도달 가능=거의 곧 top-down(5-DOF 팔, 닿는 곳이면 아래로 향함) → binding=reachability.
+#   graspable envelope = 초승달(x∈[-0.25,0.25], y∈[0.06,0.28], 외곽 반원 r≤0.284).
+#   그 안에 맞는 **100%-graspable 최대 사각형(큐브 중심)** = x[-0.17,0.17]×y[0.08,0.22] 를 채택
+#   (사용자 선택 "최대 확장"; y=0.08 은 arm-fold 경계 근처). 아래 볼륨 rect = center rect ± volume_inset.
+#   base 발치(r<min_base_sep)·그릇 근접은 randomize_cubes 의 min_base_sep/min_bowl_sep 가 rejection.
+# 데스크 매트(860×400mm, env-local center=(0.09,0.245)) 안: 매트 x∈[-0.34,0.44] y∈[0.045,0.445].
+#   아래 범위는 매트 내부 + graspable — y_lo 는 매트 앞모서리(0.045)와 일치.
+_MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)  # 매트 좌하단 env-local (참고용)
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.205, 0.205)          # center inset 후 x∈[-0.17,0.17]
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1], _MAT_BL_ENV[1] + 0.21)  # (0.045,0.255) → center y∈[0.08,0.22]
 # 큐브 한 변 (cube_specs 단일 진실 소스): Cube1/2=40mm, Cube3/4=50mm.
 # DR 의 큐브간·그릇 이격이 footprint 반경(s·√2/2)에 맞춰 큐브별로 커지게 하는 기준.
 _CUBE_SIZES_M: dict[str, float] = dict(CUBE_SIZES)
@@ -144,7 +145,7 @@ _FRONT_CAMERA_FOCAL = 19.0
 
 
 # ---------------------------------------------------------------------------
-# Scene
+# Scene — base(SO101BaseSceneCfg) 상속 + 태스크 오브젝트(큐브/그릇/contact 센서)
 # ---------------------------------------------------------------------------
 
 
@@ -153,67 +154,8 @@ _CUBE_CONTACT_FILTER: list[str] = [f"{{ENV_REGEX_NS}}/Scene/{n}" for n in CUBE_N
 
 
 @configclass
-class PickCubeSceneCfg(InteractiveSceneCfg):
-    """Scene: cube desk + SO-101 follower + 1 cube (40mm) + bowl."""
-
-    # shared world assets (not per-env)
-    ground_plane = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        spawn=sim_utils.GroundPlaneCfg(),
-    )
-    # 조명: /World 계층(env 밖) 단일 배치 → InteractiveScene 이 복제하지 않음.
-    # USD 광원은 scope 격리가 없어 {ENV_REGEX_NS}/Scene 안에 두면 env 수만큼 복제돼
-    # N배 과노출(IsaacLab #4340/#1729). 그래서 scene.usd 에서 광원을 빼고 여기서
-    # /World/Light(dome)·/World/KeyLight(distant) 1개씩만 author 한다. env=1·N-env
-    # 모두 동일 노출(스케일링 불필요). 강도/색은 기존 scene.usd 값(2000/1800) 이식.
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
-    )
-    key_light = AssetBaseCfg(
-        prim_path="/World/KeyLight",
-        spawn=sim_utils.DistantLightCfg(intensity=1800.0, color=(1.0, 0.98, 0.95), angle=1.0),
-        # RotateXYZ(-50,0,-35)° 등가 quat(wxyz) — 위에서 비스듬히 내리쬐어 입체감.
-        init_state=AssetBaseCfg.InitialStateCfg(
-            rot=(0.8644, -0.4031, -0.1271, -0.2725)
-        ),
-    )
-
-    # cube desk USD (contains desk, lighting, and all rigid objects; mat removed)
-    # +y 0.01 shift: 책상/매트 등 정적 지오메트리를 로봇 기준 1cm 뒤로. 큐브/그릇 rigid body 는
-    # 각 init_state(env-frame)로 동일 shift 반영(독립) — Scene translate 와 이중이동 없음.
-    scene: AssetBaseCfg = CUBE_DESK_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Scene",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.01, 0.0)),
-    )
-
-    # SO-101 follower articulation — 단일소스 SO101_FOLLOWER_CFG(assets/robots/lerobot.py,
-    # leisaac 이식)에서 검증된 actuator/solver/rigid_props 값을 가져오고, 씬 특화 필드만 덮어쓴다.
-    #  - prim_path: per-env 네임스페이스
-    #  - spawn: contact sensor 활성(jaw/gripper ↔ 큐브 접촉 리포트) — base spawn 의 usd_path·
-    #    rigid_props·articulation_props 는 그대로 유지하고 activate_contact_sensors 만 토글.
-    #  - init_state: 우리 base pose + gripper 0.20.
-    #    gripper offset(=init 값). action target = raw*scale(1.0)+offset, clip 1.0 → 도달범위
-    #    [offset-1, offset+1]. offset 0.20(닫힘쪽) → do-nothing target 이 잡은 큐브 유지,
-    #    open 1.20 까지(30mm grasp 충분)·close -0.174 full 도달.
-    robot: ArticulationCfg = SO101_FOLLOWER_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=SO101_FOLLOWER_CFG.spawn.replace(activate_contact_sensors=True),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=_ROBOT_POS,
-            rot=_ROBOT_ROT,
-            # 초기 자세(2026-06-26 사용자 지정, 단위=deg→rad). gripper=0 rad(중립).
-            # elbow_flex 요청값 +100° 는 USD joint 상한(+90°) 초과 → 90° 로 캡(실기 한계).
-            joint_pos={
-                "shoulder_pan": math.radians(0.0),
-                "shoulder_lift": math.radians(-100.0),
-                "elbow_flex": math.radians(90.0),    # 요청 +100°, USD 상한 90° 로 캡
-                "wrist_flex": math.radians(70.0),
-                "wrist_roll": math.radians(-100.0),
-                "gripper": 0.0,
-            },
-        ),
-    )
+class PickCubeSceneCfg(SO101BaseSceneCfg):
+    """base 씬(책상+로봇+조명) + 1 cube(40mm) + bowl + 양 손가락 contact 센서."""
 
     # Rigid objects inside the scene USD (spawn=None → wrap existing prims)
     Cube1: RigidObjectCfg = RigidObjectCfg(
@@ -234,9 +176,9 @@ class PickCubeSceneCfg(InteractiveSceneCfg):
     )
 
     # 두 손가락(jaw=가동, gripper=고정) ↔ 큐브 접촉 센서. force_matrix_w 로 큐브별 접촉력.
-    # 양 손가락이 같은 큐브에 접촉 = 실제 envelop grasp 신호(기하 proxy 보다 직접적).
+    # 양 손가락이 같은 큐브에 접촉 = 실제 envelop grasp 신호(any_cube_grasped 가 소비).
     # 필터 목록은 모듈 상수(_CUBE_CONTACT_FILTER) — 클래스 속성이면 InteractiveScene 이
-    # asset 으로 오인하므로 클래스 밖에 둔다.
+    # asset 으로 오인하므로 클래스 밖에 둔다. (robot 의 activate_contact_sensors=True 는 base 에서.)
     contact_jaw: ContactSensorCfg = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/jaw",
         update_period=0.0,
@@ -363,7 +305,7 @@ def add_pick_cube_cameras(
 
 
 # ---------------------------------------------------------------------------
-# Actions  (6-dim joint position, North Star order)
+# Actions  (6-dim joint position, North Star order) — base 액션에 gripper cap override
 # ---------------------------------------------------------------------------
 
 
@@ -382,7 +324,7 @@ _PICKCUBE_JOINT_MAX_VELOCITY: dict[str, float] = {
 
 @configclass
 class PickCubeActionsCfg:
-    """6-dim joint position action matching North Star joint order."""
+    """6-dim joint position action matching North Star joint order (gripper cap 2.5)."""
 
     arm: task_mdp.SlewLimitedJointPositionActionCfg = task_mdp.SlewLimitedJointPositionActionCfg(
         asset_name="robot",
@@ -396,40 +338,31 @@ class PickCubeActionsCfg:
 
 
 # ---------------------------------------------------------------------------
-# Observations
+# Observations — base policy(6-dim joint) 상속 + subtask(grasp + 그릇 배치)
 # ---------------------------------------------------------------------------
 
 
 @configclass
-class PickCubeObservationsCfg:
-    """Observations: policy (6-dim joint pos) + subtask signals.
-
-    Groups:
-      policy      — 6-dim joint pos (North Star contract, immutable).
-      subtask_terms — per-cube placement signals.
-    """
-
-    @configclass
-    class PolicyCfg(ObsGroup):
-        """6-dim joint position in North Star order."""
-
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    joint_names=SO101_JOINT_ORDER,
-                )
-            },
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = True
+class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
+    """policy(6-dim joint, base 상속) + subtask 신호(contact grasp + cube-in-bowl)."""
 
     @configclass
     class SubtaskCfg(ObsGroup):
-        """Per-cube placement signals (cube-in-bowl, gripper open check)."""
+        """서브태스크 신호: contact-sensor grasp + 그릇 안 배치."""
+
+        # contact-sensor grasp 신호(leisaac any_vial_grasped 이식, 양 손가락 envelope).
+        cube_grasped = ObsTerm(
+            func=task_mdp.any_cube_grasped,
+            params={
+                "jaw_sensor_cfg": SceneEntityCfg("contact_jaw"),
+                "gripper_sensor_cfg": SceneEntityCfg("contact_gripper"),
+                "cubes": CUBE_NAMES,
+                "desk_top_z": _DESK_TOP_WORLD_Z,
+                "min_lift": 0.03,
+                "warmup_steps": 15,
+                "force_threshold": 0.5,
+            },
+        )
 
         place_cube1 = ObsTerm(
             func=task_mdp.object_in_container,
@@ -445,12 +378,11 @@ class PickCubeObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = False
 
-    policy: PolicyCfg = PolicyCfg()
     subtask_terms: SubtaskCfg = SubtaskCfg()
 
 
 # ---------------------------------------------------------------------------
-# Rewards — Phase B 단계형 보상
+# Rewards
 # ---------------------------------------------------------------------------
 
 
@@ -459,60 +391,64 @@ class PickCubeRewardsCfg:
     """추론/데이터 substrate — RL 보상 제거(VLA-only 리팩토링). 빈 보상 그룹."""
 
     pass
+
+
 # ---------------------------------------------------------------------------
-# Terminations
+# Terminations — 기본(순간 성공) + Eval(디바운스 성공)
 # ---------------------------------------------------------------------------
+
+
+# success termination 공용 파라미터(순간/확정 둘이 공유)
+_SUCCESS_PARAMS: dict = {
+    "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
+    "container_center_xy": BOWL_CENTER_XY,
+    "container_cfg": SceneEntityCfg(BOWL_NAME),
+    "radius": BOWL_SUCCESS_RADIUS,
+    "height_range": BOWL_HEIGHT_RANGE,
+    "require_rest_pose": False,  # rest-pose check is TA.1 territory
+}
+# 큐브 추락 실패 컷 파라미터
+_CUBE_LOST_PARAMS: dict = {
+    "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
+    "fall_z": 0.10,
+}
 
 
 @configclass
 class PickCubeTerminationsCfg:
-    """Episode ends on timeout or when all cubes are in the bowl."""
+    """Episode ends on timeout or when all cubes are in the bowl (순간 판정)."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    success = DoneTerm(func=task_mdp.task_done, params=dict(_SUCCESS_PARAMS))
+    # 큐브 추락 = 회복 불가 → 실패 종료(time_out=False, success 아님). 잘못된 grasp 로
+    # 큐브를 책상 밖/아래로 쳐낸 에피소드를 빠르게 컷(낭비 방지) + 안 쳐내도록 압력.
+    cube_lost = DoneTerm(func=task_mdp.cube_lost, time_out=False, params=dict(_CUBE_LOST_PARAMS))
+
+
+@configclass
+class PickCubeEvalTerminationsCfg:
+    """Eval 용 — 성공을 ``task_done_confirmed`` 로 디바운스(N step 연속 성립 시에만).
+
+    한 프레임 떨림으로 큐브가 그릇 반경에 순간 들어왔다 나가는 가짜 성공을 걸러
+    eval 성공률을 안정화(leisaac vial_placed_on_rack_termination confirm-counter 이식).
+    """
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     success = DoneTerm(
-        func=task_mdp.task_done,
-        params={
-            "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
-            "container_center_xy": BOWL_CENTER_XY,
-            "container_cfg": SceneEntityCfg(BOWL_NAME),
-            "radius": BOWL_SUCCESS_RADIUS,
-            "height_range": BOWL_HEIGHT_RANGE,
-            "require_rest_pose": False,  # rest-pose check is TA.1 territory
-        },
+        func=task_mdp.task_done_confirmed,
+        params={**_SUCCESS_PARAMS, "confirm_steps": 15},
     )
-    # 큐브 추락 = 회복 불가 → 실패 종료(time_out=False, success 아님). 잘못된 grasp 로
-    # 큐브를 책상 밖/아래로 쳐낸 에피소드를 빠르게 컷(낭비 방지) + 안 쳐내도록 압력.
-    cube_lost = DoneTerm(
-        func=task_mdp.cube_lost,
-        time_out=False,
-        params={
-            "objects_cfg": [SceneEntityCfg(name) for name in CUBE_NAMES],
-            "fall_z": 0.10,
-        },
-    )
+    cube_lost = DoneTerm(func=task_mdp.cube_lost, time_out=False, params=dict(_CUBE_LOST_PARAMS))
 
 
 # ---------------------------------------------------------------------------
-# Events (domain randomisation)
+# Events — base(리셋)만 = DR-off 기본. DR 변형이 큐브/그릇/시각/물리 DR 를 얹음.
 # ---------------------------------------------------------------------------
 
 
 @configclass
-class PickCubeEventCfg:
-    """Reset and randomisation events."""
-
-    reset_scene = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
-
-    # 시작 포즈 jitter (DR): ±0.05 rad(~3°) — 실기 reset 편차 모사. velocity 0 유지.
-    reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "position_range": (-0.05, 0.05),
-            "velocity_range": (0.0, 0.0),
-        },
-    )
+class PickCubeDREventCfg(SO101BaseEventCfg):
+    """base 리셋(씬/포즈 jitter) + 큐브/그릇 무작위 배치 + 물리 DR + 시각 DR (DR-on 변형)."""
 
     # 큐브(현재 1개)를 책상 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
     #   · 볼륨이 사각형 안: volume_inset(최대 50mm cube face 대각 절반)
@@ -563,64 +499,30 @@ class PickCubeEventCfg:
 
 
 # ---------------------------------------------------------------------------
-# Environment config
+# Environment configs — Workshop base/DR/Eval/DR-Eval 대응(우리는 DR-on 기본)
 # ---------------------------------------------------------------------------
 
 
 @configclass
-class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
-    """Cube Pick-and-Place environment — pure Isaac Lab 2.3.2 ManagerBased."""
+class PickCubeEnvCfg(SO101TeleopEnvCfg):
+    """Cube Pick-and-Place environment — base teleop substrate + 태스크(**DR-off 기본**).
+
+    기본 등록 env(``SimToReal-SO101-PickCube-v0``). Workshop base 처럼 DR 없음:
+    큐브/그릇 고정 실측 배치(``_CUBE_INIT_STATES``/``_BOWL_INIT_STATE``, base 리셋만) ·
+    순간 성공 종료. DR 이 필요하면 ``PickCubeDREnvCfg``(-DR) 를 쓴다.
+    """
 
     scene: PickCubeSceneCfg = PickCubeSceneCfg(num_envs=1, env_spacing=2.5)
     observations: PickCubeObservationsCfg = PickCubeObservationsCfg()
     actions: PickCubeActionsCfg = PickCubeActionsCfg()
     rewards: PickCubeRewardsCfg = PickCubeRewardsCfg()
     terminations: PickCubeTerminationsCfg = PickCubeTerminationsCfg()
-    events: PickCubeEventCfg = PickCubeEventCfg()
-    dynamic_reset_gripper_effort_limit: bool = True
-    # 활성 teleop/datagen device 타입 (use_teleop_device 가 설정). 기본=실 leader.
-    task_type: str = "so101leader"
-
-    def use_teleop_device(self, teleop_device: str) -> None:
-        """teleop/datagen device 선택. leisaac task 템플릿 등가.
-
-        task_type 저장 + 직접 joint 제어(키보드/게임패드/state-machine) 시 중력 off
-        (떨림 없는 결정적 제어). action term 구성(init_action_cfg)은 teleop/SM 드라이버가
-        필요 시 별도 호출한다(우리 기본 action = VLA용 slew joint target).
-        """
-        self.task_type = teleop_device
-        if teleop_device in ["keyboard", "gamepad", "so101_state_machine"]:
-            self.scene.robot.spawn.rigid_props.disable_gravity = True
-
-    def preprocess_device_action(self, action: dict, teleop_device) -> "object":
-        """device 출력 → action tensor. vendored devices.action_process 에 위임.
-
-        ``Device.advance()`` 가 호출한다. devices 는 isaac-sim 런타임서만 import 되므로
-        지연 import(serial/lerobot 미설치 컨테이너서 패키지 import 안전 — Docker 정합 규칙1).
-        """
-        from sim_to_real.devices.action_process import preprocess_device_action
-
-        return preprocess_device_action(action, teleop_device)
+    events: SO101BaseEventCfg = SO101BaseEventCfg()  # DR-off: 씬 리셋 + 소폭 포즈 jitter만
+    # teleop-device 배선(use_teleop_device·preprocess_device_action·dynamic_reset_gripper_effort_limit·
+    # task_type)은 base SO101TeleopEnvCfg 로 승격됨 — 여기서 상속.
 
     def __post_init__(self) -> None:
-        super().__post_init__()
-        # Physics: 120 Hz simulation, 30 Hz policy (decimation=4)
-        self.sim.dt = 1.0 / 120.0
-        self.decimation = 4
-        self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0
-        # GPU pipeline
-        self.sim.physx.enable_external_forces_every_iteration = True
-        self.sim.physx.bounce_threshold_velocity = 0.01
-        self.sim.physx.friction_correlation_distance = 0.00625
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        # aggregate pair: 134k/4096 → ~268k/8192 → ~536k/16384. 16384 env 대비 1M 로 상향.
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 1024 * 1024
-        # contact patch 버퍼. ~41 patch/env: 8192≈336k, 16384≈672k(>10·2^16 overflow).
-        # 16384 env 대비 16·2^16=1048576 로 상향(VRAM 예산 32GB).
-        self.sim.physx.gpu_max_rigid_patch_count = 16 * 2**16
-        # contact stack 도 대규모 env 대비 상향.
-        self.sim.physx.gpu_collision_stack_size = 2**29
+        super().__post_init__()  # base: sim dt/decimation/physx/episode_length
         # 비디오/뷰포트 카메라(RecordVideo 가 이 viewer 를 씀) — 작업공간 정면·약간
         # 낮은 각도로 두어 머리 위 KeyLight 평면에 가리지 않게 한다. world 좌표(env0).
         # robot base (0,0,0.6749), 큐브/그릇 작업공간 x~-0.24~0.26, y~0.07~0.37.
@@ -628,3 +530,23 @@ class PickCubeEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (0.01, 0.245, 0.76)
         self.viewer.resolution = (1280, 720)
 
+
+@configclass
+class PickCubeDREnvCfg(PickCubeEnvCfg):
+    """DR-on 변형 — 큐브/그릇 scatter+arc + 물리 DR + 시각 DR(sim2real·데이터 다양성)."""
+
+    events: PickCubeDREventCfg = PickCubeDREventCfg()
+
+
+@configclass
+class PickCubeEvalEnvCfg(PickCubeEnvCfg):
+    """Eval 변형 — DR-off 고정 layout + 디바운스 성공 종료(가장 재현성 높은 평가)."""
+
+    terminations: PickCubeEvalTerminationsCfg = PickCubeEvalTerminationsCfg()
+
+
+@configclass
+class PickCubeEvalDREnvCfg(PickCubeDREnvCfg):
+    """Eval + DR — 무작위 layout + 디바운스 성공 종료(DR 하 성공률 평가)."""
+
+    terminations: PickCubeEvalTerminationsCfg = PickCubeEvalTerminationsCfg()
