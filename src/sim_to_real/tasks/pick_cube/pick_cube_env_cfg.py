@@ -41,6 +41,7 @@ from sim_to_real.utils.domain_randomization import (
     randomize_object_mass,
     randomize_object_material,
     randomize_object_on_arc,
+    randomize_robot_color,
 )
 
 from sim_to_real.tasks.pick_cube import mdp as task_mdp
@@ -484,10 +485,12 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
     #   → 안전 여유 포함 오른쪽 한계 +8°
     randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
 
-    # 시각 DR(reset, sim2real): 라이트 밝기·색온도 + 카메라 focal. 카메라 리그 없으면 focal 은 no-op.
+    # 시각 DR(reset, sim2real): 라이트 밝기·색온도 + 카메라 focal + 로봇 plastic 색.
+    # 카메라 리그 없으면 focal 은 no-op. shader 없으면 robot color 도 no-op.
     # cuRobo oracle 은 큐브 world pose 만 쓰므로 grasp 성공률에 무영향(obs 시각만 변화).
     randomize_lights = randomize_lights()
     randomize_camera_focal = randomize_camera_focal()
+    randomize_robot_color = randomize_robot_color()  # leisaac resets.py 이식(plastic 바디만)
 
     def __post_init__(self) -> None:
         # 물리 DR(startup): 큐브별 마찰/질량을 무작위화해 env 간 물리 다양성 확보.

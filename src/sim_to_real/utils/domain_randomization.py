@@ -594,3 +594,101 @@ def randomize_camera_focal(
         mode="reset",
         params={"camera_prim_globs": camera_prim_globs, "focal_range": focal_range},
     )
+
+
+# ---------------------------------------------------------------------------
+# 로봇 외형 색 DR (sim2real) — NVIDIA Workshop resets.py:randomize_robot_color 이식.
+#
+# Workshop 은 단일 material(`/Looks/material_a_3d_printed/Shader`) 만 바꿨지만 우리
+# so101_follower.usd 는 **다중 material**(plastic 바디 · servo · metal 나사)이라
+# `scripts/environments/utils/patch_robot_colors.py` 의 분류/속성-fallback 규약을 재사용해
+# **plastic(3D-print 바디) shader 만** 재색칠하고 servo(검정)/metal(실버)은 고정한다.
+# 팔레트는 실 SO-101 offerings(WowRobo·Seeed) 색 + 우리 기본 보라. reset 당 1 샘플(전 env 공통).
+# UsdPreviewSurface(inputs:diffuseColor)·MDL/OmniPBR fallback 모두 IsValid 가드(무크래시).
+# ---------------------------------------------------------------------------
+
+
+# 실 SO-101 3D-print 바디 색 팔레트 (Workshop ROBOT_COLORS + 우리 기본 보라).
+ROBOT_PLASTIC_COLORS: dict[str, tuple[float, float, float]] = {
+    "purple": (0.40, 0.03, 0.75),   # 우리 기본 (patch_robot_colors PLASTIC_PURPLE)
+    "orange": (0.876, 0.317, 0.132),
+    "teal": (0.0, 0.8, 0.502),
+    "white": (0.95, 0.95, 0.95),
+    "black": (0.08, 0.08, 0.08),
+}
+# servo/metal 은 색 고정(재색칠 제외) — patch_robot_colors 키워드 규약과 동일 단일 규칙.
+_SERVO_KEYWORDS = ("servo", "motor", "sts", "actuator", "driver", "controller")
+_METAL_KEYWORDS = (
+    "screw", "bolt", "nut", "bearing", "shaft", "axle",
+    "steel", "metal", "aluminum", "aluminium", "bracket_metal",
+)
+# diffuse color 속성 후보 (UsdPreviewSurface 우선 → MDL/OmniPBR fallback).
+_ROBOT_COLOR_ATTRS = (
+    "inputs:diffuseColor",
+    "inputs:diffuse_color_constant",
+    "inputs:albedo_add",
+    "inputs:base_color",
+)
+
+
+def _shader_is_recolorable(path_lower: str) -> bool:
+    """shader prim 경로가 plastic(재색칠 대상)이면 True. servo/metal 키워드면 False."""
+    if any(k in path_lower for k in _SERVO_KEYWORDS):
+        return False
+    if any(k in path_lower for k in _METAL_KEYWORDS):
+        return False
+    return True
+
+
+def _randomize_robot_color_fn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    robot_prim_glob: str,
+    color_names: list[str] | None,
+) -> None:
+    """로봇 plastic shader 를 팔레트에서 뽑은 색으로 재색칠. shader 없으면 no-op."""
+    from isaaclab.sim import get_current_stage  # noqa: F401 (stage 확보용, 아래 traverse 는 prim 직접)
+    import isaaclab.sim as sim_utils
+    from pxr import Gf, Sdf, Usd
+
+    if env_ids is None or len(env_ids) == 0:
+        return
+
+    names = list(color_names) if color_names else list(ROBOT_PLASTIC_COLORS.keys())
+    idx = int(torch.randint(0, len(names), (1,), device="cpu").item())
+    rgb = ROBOT_PLASTIC_COLORS[names[idx]]
+    col = Gf.Vec3f(float(rgb[0]), float(rgb[1]), float(rgb[2]))
+
+    roots = sim_utils.find_matching_prims(robot_prim_glob)  # per-env Robot 루트들
+    with Sdf.ChangeBlock():
+        for root in roots:
+            if not root.IsValid():
+                continue
+            for prim in Usd.PrimRange(root):
+                if prim.GetTypeName() != "Shader":
+                    continue
+                if not _shader_is_recolorable(str(prim.GetPath()).lower()):
+                    continue
+                for attr_name in _ROBOT_COLOR_ATTRS:
+                    attr = prim.GetAttribute(attr_name)
+                    if attr.IsValid() and attr.Get() is not None:
+                        attr.Set(col)
+                        break
+
+
+def randomize_robot_color(
+    robot_prim_glob: str = "/World/envs/env_.*/Robot",
+    *,
+    color_names: list[str] | None = None,
+) -> EventTerm:
+    """로봇 plastic 바디 색 무작위화 EventTerm(reset). sim2real 외형 다양성.
+
+    Args:
+        robot_prim_glob: per-env Robot 루트 prim glob (하위 shader 트리를 순회).
+        color_names: 사용할 ``ROBOT_PLASTIC_COLORS`` 키 목록. None 이면 전체 팔레트.
+    """
+    return EventTerm(
+        func=_randomize_robot_color_fn,
+        mode="reset",
+        params={"robot_prim_glob": robot_prim_glob, "color_names": color_names},
+    )
