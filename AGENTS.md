@@ -64,13 +64,14 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 ## Docker 컨테이너 구조 (Linux 서버)
 
-### 서비스 (3종)
+### 서비스 (4종)
 
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
 | `policy-server` | `policy-server:0.5.1` / `Dockerfile.policy` | Python 3.12 + LeRobot 0.5.1 (policy+async) | async inference gRPC 서버 + VLA 학습(train/eval). ACT·SmolVLA·GR00T-N1.5 (모두 lerobot 네이티브 `groot`) |
 | `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-v0` 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
 | `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 (`vla_policy_node`, gRPC 클라이언트) |
+| `pink-ik` | `so101-pink-ik:jazzy` / `Dockerfile.pink` | ROS 2 Jazzy + pin-pink(Pinocchio)·quadprog (CPU only) | **결정적 pick-place SM**(VLA 비경유). pink 미분 IK 로 큐브집기 궤적 생성 → bridge 직접 구동. `/isaac_joint_states`+`/tf` SUB → `/isaac_joint_commands` PUB. 상세=`docs/PINK_IK_PICKPLACE.md` |
 
 - 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
 - GR00T-N1.5 는 LeRobot 0.5.1 내장 `groot` policy(Eagle-2.5 backbone)라 policy-server 안에서 직접 추론·학습한다(ACT/SmolVLA 와 동일, 별도 이미지·ZMQ 불필요).
@@ -170,6 +171,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | `inference/replay_dataset_to_bridge.py` | LeRobot 데이터셋·npz·시퀀스JSON 1 에피소드를 bridge 로 replay(`/isaac_joint_commands`). `--arm_mapping {codec,calibration,follower}`(follower=실기기 녹화 replay) · `--sequence`(so101_gui 시퀀스 재현·move보간+hold) · `--ramp_in`(현재자세→첫frame, teleport 방지) · `--probe_tracking`. vla-ros 에서 실행 |
 | | `inference/policy_server_affine.py` | `AffineAdapterServer(PolicyServer)` — `JOINT_FRAME_MODE`(4-case) 별 정책 I/O(state·action) real↔sim affine 변환, 이미지 무변환. `policy-server-affine` 모드가 실행. cross-domain zero-shot 추론 |
 | | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+vla-ros 자동 배선, livestream :49100 |
+| **pink IK SM** | `inference/pink_ik_bridge_node.py` | **결정적 pick-place SM**(pink 미분 IK, VLA 비경유). `/isaac_joint_states`(seed q_start)+`/tf`(cube/bowl) SUB → waypoint(hover→descend→grasp→lift→over_bowl→release→retreat→home) 각 1회 IK → smoothstep joint-space 보간 → `/isaac_joint_commands` PUB. **핵심**: URDF↔USD base z 90° 어긋남 `--base-yaw-deg 90` 보정 + grasp 방향/깊이/그리퍼는 실 trajectory(`ece_4560/.../pick_place_demo.json`) 역산. `pink-ik` 서비스가 실행. `--self-check`(offline). 상세=`docs/PINK_IK_PICKPLACE.md` |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
 | | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |

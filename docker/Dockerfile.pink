@@ -1,0 +1,35 @@
+# SO-101 pick-place state machine — pink(Pinocchio) IK 백엔드 → Isaac Sim ROS bridge.
+#
+# Isaac Sim bridge(run_cube_desk_ros_bridge.py)가 publish 하는 /isaac_joint_states +
+# /tf(base_link→Cube1/Bowl)를 받아 pink 미분 IK 로 EE waypoint 를 풀고
+# /isaac_joint_commands(radian)를 publish 하는 pink_ik_bridge_node 를 띄운다.
+# IK 만 → CPU·경량(vla-ros 보다 가볍다, torch·gRPC 불요).
+#
+# 빌드:  docker compose -f docker/docker-compose.yaml build pink-ik
+# 실행:  docker compose -f docker/docker-compose.yaml up isaac-sim pink-ik
+# 검증:  docker compose run --rm pink-ik python3 \
+#          /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=jazzy
+SHELL ["/bin/bash", "-c"]
+
+# fastrtps(bridge 와 동일 RMW) + tf2 python(라이브 cube/bowl 추적).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-rmw-fastrtps-cpp \
+        ros-jazzy-tf2-ros-py \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# pin-pink → pinocchio(pin)·qpsolvers·loop-rate-limiters 동반. quadprog = QP 백엔드.
+# --break-system-packages: Ubuntu 24.04 PEP668 우회(컨테이너 내부라 안전).
+# "numpy<2": debian 번들 numpy 1.26.4 가 이미 충족 → pip 가 재설치(=debian uninstall
+# 실패) 안 하고 그대로 둠. 빼면 pin-pink 가 numpy 2.x 끌어와 "Cannot uninstall numpy
+# 1.26.4, RECORD file not found" 로 빌드 실패. pin/scipy wheel 은 numpy 1.26 호환.
+RUN pip install --break-system-packages --no-cache-dir \
+        pin-pink quadprog typing-extensions "numpy<2"
+
+RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc
+
+WORKDIR /workspace

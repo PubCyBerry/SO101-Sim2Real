@@ -387,6 +387,91 @@ docker compose -f docker/docker-compose.yaml run --rm policy-server python \
 
 ---
 
+## `ros:jazzy` 이미지에 pip 로 numpy 의존 패키지 설치 시 빌드 실패 (`Cannot uninstall numpy ... RECORD file not found`)
+
+**현상**
+
+`Dockerfile.pink`(또는 ros:jazzy 베이스 이미지)에 `pip install pin-pink` 등 numpy 를 끌어오는 패키지를 설치하면 빌드가 numpy 단계에서 멈춘다.
+
+```
+Installing collected packages: numpy, ... pin-pink
+  Attempting uninstall: numpy
+    Found existing installation: numpy 1.26.4
+ERROR: Cannot uninstall numpy 1.26.4, RECORD file not found. Hint: The package was installed by debian.
+```
+
+### 원인
+
+ros:jazzy(Ubuntu 24.04)는 numpy 1.26.4 를 **apt(debian) 패키지**로 깐다(`python3-numpy`). debian 설치본은 pip 의 `RECORD` 메타데이터가 없어 pip 가 제거하지 못한다. `pin-pink`/`scipy` 의 transitive 의존이 버전 상한 없이 numpy 를 요청하면 pip 가 최신 numpy(2.x)를 설치하려 하고, 그 과정에서 debian numpy 제거를 시도 → 실패.
+
+추가로 `pin-pink` 의 직접 의존 `typing-extensions` 가 debian 환경에서 누락돼 런타임 `ModuleNotFoundError: No module named 'typing_extensions'` 도 난다.
+
+### 해결 방법
+
+설치 목록에 **`"numpy<2"` 를 명시**한다. debian numpy 1.26.4 가 `<2` 를 이미 충족하므로 pip 가 재설치(=제거)를 시도하지 않고 그대로 둔다(`--ignore-installed` 같은 우회 불요). `typing-extensions` 도 명시.
+
+```dockerfile
+# Dockerfile.pink — vla-ros 와 동일 패턴
+RUN pip install --break-system-packages --no-cache-dir \
+        pin-pink quadprog typing-extensions "numpy<2"
+```
+
+pin/scipy wheel 은 numpy 1.26 ABI 호환이라 런타임 정상. (numpy 2.x 를 강제하면 ros rclpy 가 기대하는 1.x ABI 와 어긋날 수도 있어 `<2` 가 안전.)
+
+### 확인 방법
+
+```bash
+# 빌드 — 실제 종료코드 확인(파이프 | tail 는 docker exit 를 가린다)
+docker compose -f docker/docker-compose.yaml build pink-ik > /tmp/b.log 2>&1; echo "exit=$?"
+# 컨테이너 안 import + IK 자가검증
+docker compose -f docker/docker-compose.yaml run --rm --no-deps pink-ik \
+  python3 /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+# → "[self-check] PASS" 면 pinocchio/pink import·IK 정상.
+```
+
+> **함정**: `docker ... build ... | tail` 처럼 파이프를 거치면 종료코드가 `tail`(0) 로 바뀌어 실패한 빌드를 성공으로 오인한다. exit code 는 별도로 확인.
+
+---
+
+## pinocchio(URDF) IK 로 sim(USD) 로봇 구동 시 팔이 90° 빗나감 (base_link 프레임 불일치)
+
+**현상**
+
+`pink_ik_bridge_node.py` 처럼 URDF(`so_arm101.urdf`)를 pinocchio 로 로드해 IK 를 풀고 그 관절각을 Isaac Sim(USD `so101_follower.usd`)에 publish 하면, cube tf 를 정확히 타겟했는데도 팔이 **큐브 방향에서 ~90° 옆으로** 감. bridge `/tf` 의 cube 좌표와 IK 목표가 같은데도 결과가 어긋난다.
+
+### 원인
+
+**URDF base_link 의 로컬 프레임이 USD base_link 와 z축으로 ~90° 어긋나 있다.** pinocchio 는 URDF 기준으로 FK/IK 를 계산하고(pan=0 → 팔이 base +x), sim(USD)은 pan=0 에서 팔이 다른 방향(작업공간 정면)을 향한다. 같은 joint 값이 두 프레임에서 다른 방향을 가리켜, cube tf(USD base_link 좌표)를 pinocchio 목표로 그대로 쓰면 shoulder_pan 이 sim 기대값(정면≈0°) 대신 ~97° 로 풀린다.
+
+진단 단서: **"sim 에서 큐브 집으려면 shoulder_pan 이 0° 근처여야 하는데 IK 는 97° 를 준다"**. 즉 base 프레임 방향 차이(≠ 단순 joint 부호/영점).
+
+### 해결 방법
+
+**IK 목표(EE xyz)를 z축으로 `base_yaw`(≈90°) 회전한 뒤 IK 를 푼다.** 순수 base 회전은 관절각을 바꾸지 않으므로(회전은 kinematic chain 바깥), 회전된 목표로 얻은 관절각을 그대로 sim 에 publish 하면 sim 이 큐브에 도달한다.
+
+```python
+def rotz(p, deg):
+    a = math.radians(deg); c, s = math.cos(a), math.sin(a)
+    return np.array([c*p[0] - s*p[1], s*p[0] + c*p[1], p[2]])
+
+q, err = ik.solve(rotz(cube_tf_xyz, 90.0), ...)   # 목표 90° 회전 후 IK
+# q(관절각) 그대로 /isaac_joint_commands 로 publish
+```
+
+정확한 각도는 `--base-yaw-deg` 로 튠(cube IK 의 shoulder_pan 이 sim 정면≈0° 되게). SO-101 은 90°.
+
+### 확인 방법
+
+```bash
+# base_yaw=90 이면 cube IK pan 이 0 근처(전엔 97)
+python3 scripts/inference/pink_ik_bridge_node.py --self-check
+# → "pan= -1.9°" 처럼 sim 정렬. 라이브: 팔이 큐브 정면으로 감.
+```
+
+> 별개 확인: bridge `/tf` cube 좌표 ↔ world 좌표는 `base_link = world 180°z 회전`(robot world (0,0,0.6749))으로 정합. tf 자체는 정상 — 문제는 URDF↔USD 프레임 차이.
+
+---
+
 ## lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)
 
 **현상**

@@ -125,6 +125,43 @@ services:
     stdin_open: true
     tty: true
 
+  # ── pink IK pick-place State Machine (sim 폐루프, VLA 비경유) ──────────────
+  # SO-101 pick-place SM 을 pink(Pinocchio) 미분 IK 로 풀어 Isaac Sim bridge 를
+  # 직접 구동한다. policy-server·vla-ros 불필요(정책 추론 아님, 결정적 IK SM).
+  #
+  # ■ 토폴로지
+  #   isaac-sim(bridge) ─/isaac_joint_states + /tf(base_link→Cube1/Bowl)→ pink-ik
+  #         ▲                                                                 │
+  #         └──────────────────/isaac_joint_commands(radian)─────────────────┘
+  #
+  # ■ 빌드·실행
+  #   빌드:  docker compose -f docker/docker-compose.yaml build pink-ik
+  #   검증:  docker compose run --rm pink-ik python3 \
+  #            /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+  #   폐루프: docker compose -f docker/docker-compose.yaml up isaac-sim pink-ik
+  #   플래그: PINK_ARGS="--loop --hover 0.12" docker compose ... up pink-ik
+  pink-ik:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pink
+    image: so101-pink-ik:jazzy
+    container_name: so101_pink_ik
+    restart: "no"
+    # host↔container DDS: bridge 와 동일 fastrtps + UDPv4 (cross-UID SHM 회피).
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION:         rmw_fastrtps_cpp
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      # 노드 플래그 주입(예: "--loop"). 미설정 시 1회 pick-place 후 자세 유지.
+      PINK_ARGS:                  "${PINK_ARGS:-}"
+    # repo 마운트(/workspace): URDF·src(so101_contract)·노드 스크립트.
+    volumes:
+      - ..:/workspace
+    entrypoint: ["bash", "/workspace/docker/pink-ik-entrypoint.sh"]
+    stdin_open: true
+    tty: true
+
   # ── Isaac Sim 5.1 + ROS 2 Bridge (시뮬레이션 & VLA 추론 토폴로지) ──────────
   # cube_desk 씬 + SO-101 로봇 물리 시뮬 + ROS 2 토픽(joint_states/joint_commands) publish/subscribe
   #
