@@ -161,6 +161,20 @@ def randomize_object_in_ellipse(
     )
 
 
+def _bell_halfwidth(y: torch.Tensor, ys: torch.Tensor, ws: torch.Tensor) -> torch.Tensor:
+    """종 모양 x 반너비 |x|<=w(y) 의 piecewise-linear 보간.
+
+    y<=ys[0] → ws[0], y>=ys[-1] → ws[-1], 그 사이는 선형. ys 는 오름차순.
+    """
+    w = torch.full_like(y, float(ws[-1]))
+    w = torch.where(y <= ys[0], ws[0], w)
+    for i in range(len(ys) - 1):
+        m = (y > ys[i]) & (y <= ys[i + 1])
+        frac = (y - ys[i]) / (ys[i + 1] - ys[i])
+        w = torch.where(m, ws[i] + frac * (ws[i + 1] - ws[i]), w)
+    return w
+
+
 def _randomize_cubes_scattered_fn(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -180,6 +194,8 @@ def _randomize_cubes_scattered_fn(
     volume_inset: float = 0.0,
     cube_sizes: list[float] | None = None,
     cube_sep_margin: float = 0.005,
+    x_halfwidth_by_y: list[tuple[float, float]] | None = None,
+    x_exclude_box: tuple[float, float, float, float] | None = None,
 ) -> None:
     """큐브들을 workspace 내에서 무작위로 배치한다.
 
@@ -209,6 +225,13 @@ def _randomize_cubes_scattered_fn(
     y_lo, y_hi = y_range[0] + volume_inset, y_range[1] - volume_inset
     yaw_lo = yaw_range_deg[0] * math.pi / 180.0
     yaw_hi = yaw_range_deg[1] * math.pi / 180.0
+
+    # 종 모양(bell) x 반너비 프로파일 — |x|<=w(y). grasp 가능범위(좌우대칭)를 사각형 대신 종으로.
+    bell_ys = bell_ws = None
+    if x_halfwidth_by_y:
+        bp = sorted(x_halfwidth_by_y)
+        bell_ys = torch.tensor([p[0] for p in bp], device=device, dtype=torch.float32)
+        bell_ws = torch.tensor([p[1] for p in bp], device=device, dtype=torch.float32)
 
     bowl_asset: RigidObject = env.scene[bowl_cfg.name]
     bowl_default_xy = bowl_asset.data.default_root_state[env_ids, :2]  # (n, 2) env-local
@@ -271,9 +294,21 @@ def _randomize_cubes_scattered_fn(
             cand_x = torch.rand(len(idx), device=device) * (x_hi - x_lo) + x_lo
             cand_y = torch.rand(len(idx), device=device) * (y_hi - y_lo) + y_lo
 
+            # 종 모양 x 반너비 제한: |x| <= w(y) (grasp 가능범위, 좌우대칭 종모양)
+            if bell_ys is not None:
+                ok0 = cand_x.abs() <= _bell_halfwidth(cand_y, bell_ys, bell_ws)
+            else:
+                ok0 = torch.ones(len(idx), dtype=torch.bool, device=device)
+
+            # 로봇암 주변 제외 박스(사각형) — 이 박스 안 후보 배제.
+            if x_exclude_box is not None:
+                ex0, ex1, ey0, ey1 = x_exclude_box
+                in_box = (cand_x >= ex0) & (cand_x <= ex1) & (cand_y >= ey0) & (cand_y <= ey1)
+                ok0 = ok0 & ~in_box
+
             # 그릇 최소 거리 확인 (큐브 크기 대응 이격)
             bxy = bowl_default_xy[idx]
-            ok = (cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq
+            ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq)
 
             # robot base 최소 거리 확인 (inner-reach spawn 금지)
             if base_xy is not None:
@@ -375,8 +410,14 @@ def randomize_cubes_scattered(
     volume_inset: float = 0.0,
     cube_sizes: list[float] | None = None,
     cube_sep_margin: float = 0.005,
+    x_halfwidth_by_y: list[tuple[float, float]] | None = None,
+    x_exclude_box: tuple[float, float, float, float] | None = None,
 ) -> EventTerm:
     """큐브 N개를 workspace 내에서 완전 무작위로 배치하는 reset event.
+
+    ``x_halfwidth_by_y`` 지정 시 x_range 사각형 대신 **좌우대칭 종 모양**(|x|<=w(y),
+    (y,halfwidth) breakpoint 선형보간)으로 스폰 영역을 제한한다 — grasp 가능범위 정합.
+    ``x_exclude_box=(x0,x1,y0,y1)`` 지정 시 그 사각형(로봇암 주변) 안은 배제한다.
 
     num_active 지정 시 앞 num_active 개만 workspace 에 배치하고, 나머지는 지면 아래로
     치워 비활성화한다(커리큘럼의 active_objects 와 연동).
@@ -417,6 +458,13 @@ def randomize_cubes_scattered(
             "volume_inset": float(volume_inset),
             "cube_sizes": ([float(s) for s in cube_sizes] if cube_sizes is not None else None),
             "cube_sep_margin": float(cube_sep_margin),
+            "x_halfwidth_by_y": (
+                [(float(a), float(b)) for a, b in x_halfwidth_by_y]
+                if x_halfwidth_by_y is not None else None
+            ),
+            "x_exclude_box": (
+                tuple(float(v) for v in x_exclude_box) if x_exclude_box is not None else None
+            ),
         },
     )
 

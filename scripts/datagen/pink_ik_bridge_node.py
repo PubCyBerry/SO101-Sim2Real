@@ -226,6 +226,200 @@ def self_check(urdf_path):
     return 0
 
 
+# ── grasp-sweep 궤적 생성용 상수 (bridge world 프레임에서 replay·physics 검증) ──
+# home = bridge reset 자세(_START_POSE_RAD = pick_cube_env_cfg robot.init_state.joint_pos) 동일.
+_SWEEP_HOME_DEG = {"shoulder_pan": 0.0, "shoulder_lift": -100.0, "elbow_flex": 90.0,
+                   "wrist_flex": 70.0, "wrist_roll": -100.0}  # gripper=0 rad
+HOME_Q6 = [math.radians(_SWEEP_HOME_DEG[n]) for n in SO101_JOINT_ORDER[:5]] + [0.0]
+DESK_TOP_Z = 0.705           # world 책상 상판 (bridge CUBE_DESK_TOP_Z 정합)
+CUBE_WORLD_Z_40MM = 0.726    # 40mm 큐브 중심 world z (desk+half+slack, _CUBE_INIT_STATES 정합)
+# bowl world = pick_cube_env_cfg._BOWL_INIT_STATE (bridge place_defaults 와 동일).
+BOWL_WORLD = [-0.22, 0.265, 0.715]
+
+
+def sweep(args):
+    """큐브 (x,y) grid 를 훑으며 SO-101 이 top-down 으로 grasp 가능한 범위 측정.
+
+    각 셀에서 grasp waypoint 를 top-down 방향 + 위치로 IK 풀어(폐루프 아님, 순수 kinematic)
+    ①위치 도달 err<pos_tol ②achieved TCP z축이 수직에서 tilt_tol 이내 → graspable.
+
+    프레임: grid 는 **env-local**(DR 범위와 동일, robot base 원점). base_link = 180° z 회전
+    (xb=-xa, yb=-ya). 그 뒤 bridge 와 동일하게 rotz(base_yaw) 로 URDF-solver 프레임 진입.
+    GRASP_ORIENT 는 nominal(고정 큐브)용이라, 큐브 azimuth 변화(Δφ)만큼 solver-z 로 회전시켜
+    top-down 을 유지한 채 grasp yaw 를 팔 방위에 맞춘다(shoulder_pan 이 하는 일과 동형).
+    """
+    ik = PinkIK(args.urdf, args.wrist_roll_deg)
+    print(f"[sweep] solver={ik.solver} URDF={args.urdf}")
+
+    gx, gy, gz = args.grasp_dx, args.grasp_dy, args.grasp_z
+    cz = args.cube_z
+    byaw = args.base_yaw_deg
+
+    xs = np.arange(args.xmin, args.xmax + 1e-9, args.step)
+    ys = np.arange(args.ymin, args.ymax + 1e-9, args.step)
+    tol = args.tilt_tol
+    # 로봇암 주변 제외 박스(env-local) — 사용자: 책상 왼쪽끝서 X[35,48]cm·Y[0,20]cm.
+    #   desk_left=env x -0.44, desk_front=env y -0.045 → base(0,0) straddle.
+    ex_x0, ex_x1, ex_y0, ex_y1 = args.ex_x0, args.ex_x1, args.ex_y0, args.ex_y1
+
+    def solve_topdown(gb, seed):
+        """grasp point(base_link) → (q, err, tilt°). **고정 GRASP_ORIENT** = gripper finger
+        axis 를 world 축(=identity 큐브 face)에 정렬한 top-down (사용자 요청: 큐브 face 정렬 grasp).
+        큐브가 이동해도 방향 고정 → shoulder_pan 은 reach, wrist_roll 이 face 정렬 유지."""
+        target = rotz(gb, byaw)
+        q, err = ik.solve(target, orient_R=GRASP_ORIENT, ori_cost=args.ori_cost, q_seed=seed, iters=args.iters)
+        tcp_z = np.asarray(ik.fk(q).rotation)[:, 2]
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, -tcp_z[2]))))  # 수직(-z)에서 각
+        return q, err, tilt
+
+    def q6(qvec, grip_feat):
+        """pink q(nq) + gripper feature → 6-vec(SO101_JOINT_ORDER, rad)."""
+        return [float(qvec[ik.qidx[n]]) for n in SO101_JOINT_ORDER[:5]] + [feat_to_rad(grip_feat)]
+
+    N = max(1, int(round(args.traj_leg_sec * args.hz)))  # 세그먼트당 dense step
+    cells = []   # gen-traj: graspable 셀의 world 좌표 + dense pick→lift 궤적
+
+    grid = {}   # (ix,iy) -> (tilt_deg, err_m). tilt=None → 로봇암 제외 박스
+    for xa in xs:
+        for ya in ys:
+            key = (round(xa, 4), round(ya, 4))
+            # 로봇암 주변 제외(사용자 지정) — 이 박스 안 큐브는 sweep 대상 아님.
+            if ex_x0 <= xa <= ex_x1 and ex_y0 <= ya <= ex_y1:
+                grid[key] = (None, None)
+                continue
+            # env-local → base_link(180° z). grasp point + 그 위 hover(수직 접근 corridor 검증).
+            base_xy = np.array([-xa + gx, -ya + gy])
+            grasp_p = np.array([base_xy[0], base_xy[1], cz + gz])
+            hover_p = grasp_p + np.array([0.0, 0.0, args.hover])
+            # hover 먼저(q_post seed) → grasp(hover q seed) — 실 접근 순서.
+            qh, eh, th = solve_topdown(hover_p, ik.q_post)
+            qg, eg, tg = solve_topdown(grasp_p, qh)
+            # 셀 판정값 = hover·grasp 중 나쁜 쪽(둘 다 top-down 도달해야 수직 grasp 성립).
+            graspable = max(eh, eg) <= args.pos_tol and max(th, tg) < tol
+            grid[key] = (max(th, tg), max(eh, eg))
+
+            # ── gen-traj: graspable 셀의 dense 궤적(home→approach→hover→descend→grasp→lift + hold) ──
+            #   bridge 가 world 프레임서 큐브를 (xa,ya) 로 teleport 후 이 궤적을 replay,
+            #   물리로 잡히는지(cube 상승) 검증. 고정 GRASP_ORIENT = 큐브 face 정렬 grasp.
+            if args.gen_traj and graspable:
+                # 큐브 위 높은 pre-approach → hover → 수직 하강. hover 는 큐브 top 위여야
+                # descend 가 윗면을 찌르지 않는다(hover TCP z = grasp_z + traj_hover > cube_top).
+                # gate 의 args.hover(0.04, deployed 공유)와 별개로 gen-traj 전용 높이 사용.
+                appr_p = grasp_p + np.array([0.0, 0.0, args.approach])
+                hov_p = grasp_p + np.array([0.0, 0.0, args.traj_hover])
+                q_appr, _, _ = solve_topdown(appr_p, ik.q_post)
+                q_hov, _, _ = solve_topdown(hov_p, q_appr)
+                lift_p = grasp_p + np.array([0.0, args.lift_back, args.lift])
+                q_lift, _ = ik.solve(rotz(lift_p, byaw), orient_R=None, q_seed=qg, iters=args.iters)
+                wp = [HOME_Q6,
+                      q6(q_appr, args.grip_open),  # pre-approach: 큐브 위 안전고도(찌름 방지)
+                      q6(q_hov, args.grip_open),   # hover: 큐브 top 위
+                      q6(qg, args.grip_open),      # descend: grasp 점까지 수직(open)
+                      q6(qg, args.grip_close),     # close in place
+                      q6(q_lift, args.grip_close)]  # lift (close)
+                dense = [list(wp[0])]
+                for a6, b6 in zip(wp[:-1], wp[1:]):
+                    for k in range(1, N + 1):
+                        f = smoothstep(k / N)
+                        dense.append([a6[j] + f * (b6[j] - a6[j]) for j in range(6)])
+                # 캡처 = **gripper 닫는 순간**(seg4=grasp_open→grasp_close 끝, index 4N). 큐브는
+                # 아직 책상 위·손가락이 막 감쌈. (lift 끝 아님 — 사용자 요청.) 궤적은 lift 까지
+                # 계속 돌아 성공(cube 상승) 판정은 그대로. 6 waypoint→5 seg: seg4 끝 = 4·N.
+                capture_idx = 4 * N
+                dense += [list(wp[-1])] * args.traj_hold
+                cells.append({
+                    "cube_world": [round(float(xa), 4), round(float(ya), 4), CUBE_WORLD_Z_40MM],
+                    "capture_idx": capture_idx,
+                    "traj": [[round(v, 5) for v in q] for q in dense],
+                })
+
+    # ── ASCII map (행=y forward↑, 열=x) ──────────────────────────────────
+    def cell(xa, ya):
+        tilt, err = grid[(round(xa, 4), round(ya, 4))]
+        if tilt is None:
+            return "A"          # 로봇암 주변 제외
+        if err > args.pos_tol:
+            return "x"          # 위치 도달 실패(unreachable)
+        if tilt < 15.0:
+            return "#"          # 완전 top-down
+        if tilt < tol:
+            return "+"          # top-down 허용범위 내
+        if tilt < 40.0:
+            return "."          # 기울지만 근접
+        return ":"              # 위치는 되나 top-down 불가
+
+    print(f"\n[sweep] top-down grasp map  (env-local, step={args.step}m, "
+          f"pos_tol={args.pos_tol}m, tilt_tol={tol}°, ori_cost={args.ori_cost})")
+    print("  '#'<15° top-down  '+'<%g° ok  '.'<40° tilt  ':'flat  'x'unreachable  'A'로봇암제외" % tol)
+    print("  ★=robot base(0,0)  ◎=bowl  ●=nominal cube\n")
+    hdr = "      " + "".join(f"{x*100:+03.0f}"[:1] if False else "" for x in xs)
+    print("        x(cm) →  " + " ".join(f"{x*100:+3.0f}" for x in xs))
+    for ya in reversed(ys):
+        row = []
+        for xa in xs:
+            c = cell(xa, ya)
+            # landmark overlay
+            if abs(xa) < args.step / 2 and abs(ya) < args.step / 2:
+                c = "★"
+            elif abs(xa - (-0.22)) < args.step / 2 and abs(ya - 0.265) < args.step / 2:
+                c = "◎"
+            elif abs(xa - (-0.015)) < args.step / 2 and abs(ya - 0.255) < args.step / 2:
+                c = "●"
+            row.append(f" {c} ")
+        print(f"  y={ya*100:+5.1f}cm " + "".join(row))
+
+    # ── 통계: graspable(#/+) 셀 bbox + inner radius ──────────────────────
+    good = [(xa, ya) for (xa, ya), (t, e) in grid.items()
+            if t is not None and e <= args.pos_tol and t < tol]
+    if not good:
+        print("\n[sweep] graspable 셀 없음 — tilt_tol/pos_tol 완화 필요")
+        return 0
+    gx_arr = np.array([g[0] for g in good])
+    gy_arr = np.array([g[1] for g in good])
+    radii = np.sqrt(gx_arr ** 2 + gy_arr ** 2)
+    print(f"\n[sweep] graspable(top-down, tilt<{tol}°) 셀 {len(good)}개")
+    print(f"  x 범위: [{gx_arr.min():+.3f}, {gx_arr.max():+.3f}] m")
+    print(f"  y 범위: [{gy_arr.min():+.3f}, {gy_arr.max():+.3f}] m")
+    print(f"  base 거리 r: [{radii.min():.3f}, {radii.max():.3f}] m  (min_base_sep 후보={radii.min():.3f})")
+    # 여러 tilt_tol 에서의 bbox (판단용)
+    for tt in (15.0, 20.0, 25.0, 30.0):
+        gg = [(xa, ya) for (xa, ya), (t, e) in grid.items() if t is not None and e <= args.pos_tol and t < tt]
+        if gg:
+            ax = np.array([g[0] for g in gg]); ay = np.array([g[1] for g in gg])
+            print(f"  tilt<{tt:>2.0f}°: n={len(gg):3d}  x[{ax.min():+.3f},{ax.max():+.3f}] "
+                  f"y[{ay.min():+.3f},{ay.max():+.3f}]")
+
+    if args.csv:
+        import csv
+        with open(args.csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["x_env", "y_env", "tilt_deg", "err_m", "graspable"])
+            for (xa, ya), (t, e) in sorted(grid.items()):
+                if t is None:
+                    w.writerow([xa, ya, "arm", "arm", 0])  # 로봇암 제외
+                    continue
+                w.writerow([xa, ya, round(t, 2), round(e, 4),
+                            int(e <= args.pos_tol and t < tol)])
+        print(f"\n[sweep] CSV → {args.csv}")
+
+    if args.gen_traj:
+        import json
+        out = {
+            "hz": args.hz,
+            "joint_order": list(SO101_JOINT_ORDER),
+            "desk_top_z": DESK_TOP_Z,
+            "lift_delta": args.lift_success,   # 성공 판정: cube z 가 spawn+lift_delta 초과
+            "bowl_world": BOWL_WORLD,
+            "cells": cells,
+        }
+        with open(args.gen_traj, "w") as f:
+            json.dump(out, f)
+        nframes = sum(len(c["traj"]) for c in cells)
+        print(f"[sweep] gen-traj → {args.gen_traj}  ({len(cells)} graspable 셀, {nframes} frames, "
+              f"leg={args.traj_leg_sec}s×{args.hz}Hz)")
+    return 0
+
+
 def run_ros(args):
     import rclpy
     from rclpy.node import Node
@@ -418,6 +612,41 @@ def run_ros(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-check", action="store_true")
+    # ── sweep: 큐브 위치 grid 를 훑어 top-down grasp 가능 범위 측정(오프라인 kinematic) ──
+    ap.add_argument("--sweep", action="store_true",
+                    help="큐브 (x,y) grid top-down grasp reachability 측정 → ASCII map+CSV")
+    ap.add_argument("--xmin", type=float, default=-0.35, help="sweep env-local x 최소[m]")
+    ap.add_argument("--xmax", type=float, default=0.35, help="sweep env-local x 최대[m]")
+    ap.add_argument("--ymin", type=float, default=0.06, help="sweep env-local y 최소[m]")
+    ap.add_argument("--ymax", type=float, default=0.46, help="sweep env-local y 최대[m]")
+    ap.add_argument("--step", type=float, default=0.02, help="sweep grid 간격[m]")
+    ap.add_argument("--cube-z", dest="cube_z", type=float, default=0.05,
+                    help="큐브 중심 z(base_link)[m] — 40mm 큐브=책상+반높이≈0.05")
+    ap.add_argument("--tilt-tol", dest="tilt_tol", type=float, default=25.0,
+                    help="top-down 판정: achieved TCP z축이 수직에서 이 각[deg] 이내")
+    ap.add_argument("--pos-tol", dest="pos_tol", type=float, default=0.02,
+                    help="위치 도달 판정 err 상한[m]")
+    ap.add_argument("--iters", type=int, default=1500, help="셀당 IK 반복(수렴)")
+    ap.add_argument("--csv", default=None, help="셀별 tilt/err CSV 출력 경로")
+    # 로봇암 주변 제외 박스(env-local m). 사용자: 책상 왼쪽끝(env x -0.44)서 X[35,48]cm,
+    # 책상 앞모서리(env y -0.045)서 Y[0,20]cm → base(0,0) straddle.
+    ap.add_argument("--ex-x0", dest="ex_x0", type=float, default=-0.09)
+    ap.add_argument("--ex-x1", dest="ex_x1", type=float, default=0.04)
+    ap.add_argument("--ex-y0", dest="ex_y0", type=float, default=-0.045)
+    ap.add_argument("--ex-y1", dest="ex_y1", type=float, default=0.155)
+    # gen-traj: graspable 셀마다 dense pick→lift 궤적을 dump → bridge 가 world 프레임서 replay·물리검증.
+    ap.add_argument("--gen-traj", dest="gen_traj", default=None,
+                    help="graspable 셀의 home→hover→descend→grasp→lift 궤적 JSON 출력 경로")
+    ap.add_argument("--traj-leg-sec", dest="traj_leg_sec", type=float, default=2.0,
+                    help="gen-traj 세그먼트당 이동 시간[s] (deployed node leg_sec 정합)")
+    ap.add_argument("--approach", type=float, default=0.14,
+                    help="gen-traj pre-approach 높이[m] (grasp점 위, 찌름 방지 안전고도)")
+    ap.add_argument("--traj-hover", dest="traj_hover", type=float, default=0.10,
+                    help="gen-traj hover 높이[m] (grasp점 위, 큐브 top 위여야: >0.064)")
+    ap.add_argument("--traj-hold", dest="traj_hold", type=int, default=15,
+                    help="gen-traj lift 후 정지 프레임(캡처 안정)")
+    ap.add_argument("--lift-success", dest="lift_success", type=float, default=0.04,
+                    help="grasp 성공 판정: cube z 가 spawn+이 값[m] 초과하면 잡아 든 것")
     ap.add_argument("--urdf", default=DEFAULT_URDF)
     ap.add_argument("--hz", type=float, default=30.0)
     ap.add_argument("--leg-sec", dest="leg_sec", type=float, default=2.0, help="waypoint 당 이동 시간[s]")
@@ -454,7 +683,11 @@ def main():
                     default="pick up the cube and place it in the bowl",
                     help="에피소드 task 문자열(--record)")
     args = ap.parse_args()
-    return self_check(args.urdf) if args.self_check else run_ros(args)
+    if args.self_check:
+        return self_check(args.urdf)
+    if args.sweep:
+        return sweep(args)
+    return run_ros(args)
 
 
 if __name__ == "__main__":

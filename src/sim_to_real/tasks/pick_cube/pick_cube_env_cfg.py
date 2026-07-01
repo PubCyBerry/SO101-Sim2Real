@@ -32,7 +32,6 @@ from sim_to_real.utils.constant import (
     CUBE_HALF_EXTENTS,
     CUBE_NAMES,
     CUBE_SIZES,
-    MAX_CUBE_FOOTPRINT_RADIUS,
 )
 from sim_to_real.utils.domain_randomization import (
     randomize_camera_focal,
@@ -91,25 +90,34 @@ _BOWL_INIT_STATE = ((-0.22, 0.265, 0.715), _yaw_quat(0.0))
 # 큐브 scatter workspace — randomize_cubes_scattered 기본값 및 커리큘럼 계산 기준
 # ---------------------------------------------------------------------------
 
-# 로봇 SO-101 이 **top-down 으로 grasp 가능한 범위**로 제한. pink IK top-down sweep 으로 측정
-# (2026-07-01, scripts/datagen/pink_ik_bridge_node.py --sweep, 2cm grid, robot base=(0,0)):
-#   각 큐브 중심에서 hover+grasp waypoint 를 azimuth 정렬 top-down 방향으로 IK 풀어
-#   ①위치 도달(err<2cm) ②achieved TCP z축이 수직에서 <25° 를 만족하면 graspable.
-#   측정 결과: 도달 가능=거의 곧 top-down(5-DOF 팔, 닿는 곳이면 아래로 향함) → binding=reachability.
-#   graspable envelope = 초승달(x∈[-0.25,0.25], y∈[0.06,0.28], 외곽 반원 r≤0.284).
-#   그 안에 맞는 **100%-graspable 최대 사각형(큐브 중심)** = x[-0.17,0.17]×y[0.08,0.22] 를 채택
-#   (사용자 선택 "최대 확장"; y=0.08 은 arm-fold 경계 근처). 아래 볼륨 rect = center rect ± volume_inset.
+# 로봇 SO-101 이 **top-down 으로 grasp 가능한 범위**를 **좌우대칭 종 모양(bell)**으로 반영.
+# 측정 파이프라인(2026-07-01): pink IK sweep(kinematic map) → gen-traj → isaac 물리 replay
+# 검증(46/50 셀 물리 grasp 성공, 고정 GRASP_ORIENT=face 정렬). 상세=[[grasp-sweep-topdown-validation]].
+#   물리 성공 셀의 **per-y 넓은쪽 |x|** 를 좌우대칭으로 취함(사용자 지시):
+#     y  6/10/14cm → |x|≤0.24  ·  18cm → 0.20  ·  22cm → 0.16  ·  26cm → 0.08
+#   → 밑동 넓고 위로 갈수록 좁아지는 종 모양. 사각형 대신 이 프로파일로 스폰 제한.
 #   base 발치(r<min_base_sep)·그릇 근접은 randomize_cubes 의 min_base_sep/min_bowl_sep 가 rejection.
 # 데스크 매트(860×400mm, env-local center=(0.09,0.245)) 안: 매트 x∈[-0.34,0.44] y∈[0.045,0.445].
-#   아래 범위는 매트 내부 + graspable — y_lo 는 매트 앞모서리(0.045)와 일치.
 _MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)  # 매트 좌하단 env-local (참고용)
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.205, 0.205)          # center inset 후 x∈[-0.17,0.17]
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (_MAT_BL_ENV[1], _MAT_BL_ENV[1] + 0.21)  # (0.045,0.255) → center y∈[0.08,0.22]
+# 종 모양 스폰 프로파일: (큐브중심 y, 좌우대칭 x 반너비) breakpoint. 사이는 선형보간.
+_CUBE_SCATTER_BELL: list[tuple[float, float]] = [
+    (0.06, 0.24), (0.14, 0.24), (0.18, 0.20), (0.22, 0.16), (0.26, 0.08),
+]
+# x/y bounding box = 종의 최대 외접 사각형(종 rejection 이 실제 경계). volume_inset=0
+# (프로파일이 이미 grasp 검증된 큐브 **중심** 위치라 별도 inset 불요).
+_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.24, 0.24)
+_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (0.06, 0.26)
+# 로봇암 주변 제외 박스(env-local, 사용자: 책상 왼쪽끝 X[35,48]cm·앞모서리 Y[0,20]cm →
+# base(0,0) straddle). full·base 모드 공통으로 이 안엔 큐브를 스폰하지 않는다.
+_CUBE_ARM_EXCLUDE: tuple[float, float, float, float] = (-0.09, 0.04, -0.045, 0.155)
+# base 모드 스폰 사각형(env-local): 책상 왼쪽끝서 X[30,50]cm·앞모서리 Y[25,35]cm →
+#   env_x = -0.44 + Xcm/100, env_y = -0.045 + Ycm/100. nominal 큐브(y=0.255) 주변 좁은 영역.
+_CUBE_BASE_X_RANGE: tuple[float, float] = (-0.14, 0.06)   # X 30~50cm
+_CUBE_BASE_Y_RANGE: tuple[float, float] = (0.205, 0.305)  # Y 25~35cm
 # 큐브 한 변 (cube_specs 단일 진실 소스): Cube1/2=40mm, Cube3/4=50mm.
 # DR 의 큐브간·그릇 이격이 footprint 반경(s·√2/2)에 맞춰 큐브별로 커지게 하는 기준.
 _CUBE_SIZES_M: dict[str, float] = dict(CUBE_SIZES)
-# 볼륨이 사각형 안에 들도록 중심 inset = max 큐브(50mm) face 대각 절반 ((s/2)·√2).
-_CUBE_VOLUME_INSET: float = MAX_CUBE_FOOTPRINT_RADIUS  # ≈ 0.0354
+_CUBE_VOLUME_INSET: float = 0.0  # 종 프로파일=중심 graspable → rect inset 불요
 
 # ---------------------------------------------------------------------------
 # 카메라 리그 상수 — North Star 계약: observation.images.{top,wrist,front}
@@ -447,28 +455,40 @@ class PickCubeEvalTerminationsCfg:
 # ---------------------------------------------------------------------------
 
 
-@configclass
-class PickCubeDREventCfg(SO101BaseEventCfg):
-    """base 리셋(씬/포즈 jitter) + 큐브/그릇 무작위 배치 + 물리 DR + 시각 DR (DR-on 변형)."""
+def _make_randomize_cubes(x_range, y_range, bell):
+    """큐브 배치 EventTerm 팩토리. full/base 모드 공통 인자 + 모드별 영역.
 
-    # 큐브(현재 1개)를 책상 위 사각형 영역에 완전 무작위 배치 (rejection sampling).
-    #   · 볼륨이 사각형 안: volume_inset(최대 50mm cube face 대각 절반)
-    #   · 볼륨 비겹침: cube_sizes 로 per-pair 이격 동적 계산 (r_i+r_j+margin). 50mm쌍 ≈0.071,
-    #                  40mm쌍 ≈0.061. min_cube_sep=0.060 은 cube_sizes 미지정 시 fallback.
-    #                  min_bowl_sep=0.14(40mm 정합)도 큐브별 +(r−r_40) 보정 → 50mm 면 ≈0.147.
-    #   · full_orient: 이산 stable-face + random yaw (face 다양·drift 0·z 띄움 불요)
-    randomize_cubes = randomize_cubes_scattered(
+    공통: full_orient · 큐브간/그릇 이격(min_cube_sep·min_bowl_sep, 겹침 금지) ·
+    base 발치 이격(min_base_sep) · **로봇암 주변 제외박스**(_CUBE_ARM_EXCLUDE).
+    모드별: full=좌우대칭 종모양(bell != None) · base=사각형(bell=None).
+    """
+    return randomize_cubes_scattered(
         CUBE_NAMES,
         BOWL_NAME,
-        x_range=_CUBE_SCATTER_X_RANGE,
-        y_range=_CUBE_SCATTER_Y_RANGE,
+        x_range=x_range,
+        y_range=y_range,
         full_orient=True,
         volume_inset=_CUBE_VOLUME_INSET,
         min_cube_sep=0.060,
-        min_bowl_sep=0.14,
-        cube_sizes=[_CUBE_SIZES_M[n] for n in CUBE_NAMES],  # 큐브 크기 대응 이격
-        # base 발치(inner-reach, r<~0.13)는 안전고도 접근 IK 부재로 수행 불가.
-        min_base_sep=0.135,
+        min_bowl_sep=0.14,                 # 큐브-그릇 겹침 금지(크기 대응 이격)
+        cube_sizes=[_CUBE_SIZES_M[n] for n in CUBE_NAMES],
+        min_base_sep=0.135,                # base 발치(inner-reach) 배제
+        x_halfwidth_by_y=bell,             # full=종모양 · base=None(사각형)
+        x_exclude_box=_CUBE_ARM_EXCLUDE,   # 로봇암 주변 배제(full·base 공통)
+    )
+
+
+@configclass
+class PickCubeDREventCfg(SO101BaseEventCfg):
+    """base 리셋(씬/포즈 jitter) + 큐브/그릇 무작위 배치 + 물리 DR + 시각 DR (DR-on 변형).
+
+    ``randomize_cubes`` = **full 모드**(좌우대칭 종모양, grasp 물리검증 범위). base 모드는
+    ``PickCubeDRBaseEventCfg`` (nominal 주변 좁은 사각형).
+    """
+
+    # full 모드: 좌우대칭 종모양 스폰 + 로봇암 제외 + 그릇/큐브/base 이격.
+    randomize_cubes = _make_randomize_cubes(
+        _CUBE_SCATTER_X_RANGE, _CUBE_SCATTER_Y_RANGE, _CUBE_SCATTER_BELL
     )
 
     # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
@@ -499,6 +519,20 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
         for name in CUBE_NAMES:
             setattr(self, f"randomize_{name.lower()}_material", randomize_object_material(name))
             setattr(self, f"randomize_{name.lower()}_mass", randomize_object_mass(name))
+
+
+@configclass
+class PickCubeDRBaseEventCfg(PickCubeDREventCfg):
+    """**base 모드** DR — 큐브를 nominal(y≈0.255) 주변 좁은 사각형(_CUBE_BASE_*)에만 스폰.
+
+    full 모드(PickCubeDREventCfg=좌우대칭 종모양)와 큐브 배치 영역만 다르고, 나머지
+    이벤트(그릇 arc·물리·시각 DR·로봇암 제외·그릇 이격)는 그대로 상속한다.
+    """
+
+    # base 모드: 사각형(bell=None) — 책상 왼쪽끝 X[30,50]cm·Y[25,35]cm.
+    randomize_cubes = _make_randomize_cubes(
+        _CUBE_BASE_X_RANGE, _CUBE_BASE_Y_RANGE, None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -536,9 +570,16 @@ class PickCubeEnvCfg(SO101TeleopEnvCfg):
 
 @configclass
 class PickCubeDREnvCfg(PickCubeEnvCfg):
-    """DR-on 변형 — 큐브/그릇 scatter+arc + 물리 DR + 시각 DR(sim2real·데이터 다양성)."""
+    """DR-on 변형(**full 모드**) — 큐브 좌우대칭 종모양 scatter + 그릇 arc + 물리·시각 DR."""
 
     events: PickCubeDREventCfg = PickCubeDREventCfg()
+
+
+@configclass
+class PickCubeDRBaseEnvCfg(PickCubeEnvCfg):
+    """DR-on **base 모드** 변형 — 큐브 스폰을 nominal 주변 좁은 사각형으로 제한(그 외 full 동일)."""
+
+    events: PickCubeDRBaseEventCfg = PickCubeDRBaseEventCfg()
 
 
 @configclass

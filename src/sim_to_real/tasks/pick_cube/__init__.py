@@ -3,7 +3,8 @@
 leisaac Workshop 사다리(base teleop → task leaf + DR/Eval 변형) 대응:
 - Teleop-v0        : base substrate(로봇+책상+조명, 성공/보상 없음) — teleop·씬 author.
 - PickCube-v0      : **DR-off 기본** (고정 실측 배치, 순간 성공 종료).
-- PickCube-DR-v0   : DR-on (큐브/그릇 scatter+arc + 물리·시각 DR) — 데이터 생성·sim2real.
+- PickCube-DR-v0   : DR-on **full 모드**(큐브 좌우대칭 종모양 scatter + 그릇 arc + 물리·시각 DR).
+- PickCube-DRBase-v0 : DR-on **base 모드**(큐브 스폰을 nominal 주변 좁은 사각형으로 제한, 그 외 full 동일).
 - PickCube-Eval-v0 : DR-off + 디바운스 성공 종료 — 재현성 평가.
 - PickCube-DR-Eval-v0 : DR-on + 디바운스 성공 종료.
 """
@@ -24,6 +25,7 @@ gym.register(
 _PICK_CUBE_VARIANTS = {
     "SimToReal-SO101-PickCube-v0": "PickCubeEnvCfg",
     "SimToReal-SO101-PickCube-DR-v0": "PickCubeDREnvCfg",
+    "SimToReal-SO101-PickCube-DRBase-v0": "PickCubeDRBaseEnvCfg",
     "SimToReal-SO101-PickCube-Eval-v0": "PickCubeEvalEnvCfg",
     "SimToReal-SO101-PickCube-DR-Eval-v0": "PickCubeEvalDREnvCfg",
 }

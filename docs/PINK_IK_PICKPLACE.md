@@ -329,3 +329,61 @@ livestream: `http://localhost:49100` (원격은 `PUBLIC_IP` env).
 
 각 항목 상세: `docs/TROUBLESHOOTING.md` (프레임 불일치) · memory `pink-ik-pickplace-container`.
 ```
+
+## 11. Grasp 범위 sweep + 물리 검증 → DR 확정 (2026-07-01)
+
+pick-place SM 을 재활용해 **SO-101 이 top-down 으로 잡을 수 있는 큐브 위치 범위**를 측정하고,
+그 범위를 학습 DR(큐브 스폰)에 반영했다. 2단계(오프라인 kinematic → 온라인 물리):
+
+### ① 오프라인 sweep + 궤적 생성 (pink 컨테이너, `pink_ik_bridge_node.py`)
+
+```bash
+# 큐브 (x,y) grid 를 훑어 top-down grasp reachability 맵(ASCII+CSV) + graspable 셀 궤적 JSON
+docker compose run --rm --no-deps --entrypoint python3 pink-ik \
+  /workspace/scripts/datagen/pink_ik_bridge_node.py --sweep --step 0.04 \
+  --gen-traj /workspace/outputs/grasp_traj.json
+```
+
+- **프레임**: sweep cell(env-local x,y) = bridge **world**(env_origin=0). base_link = 180°z 회전
+  (−x,−y), 그 뒤 §3 의 `rotz(base_yaw 90)` 로 URDF-solver 진입.
+- **판정**: 각 셀서 hover+grasp waypoint 를 **고정 GRASP_ORIENT**(§6③, finger axis 를 world 축
+  = identity 큐브 face 에 정렬 → **큐브 face 정렬 grasp**)로 IK 풀어 ①위치 err<2cm ②TCP z축이
+  수직서 <25° 면 graspable. 도달 가능 ≈ 곧 top-down (5-DOF 팔, 닿는 곳이면 아래로 향함).
+- **`--ex-*`**: 로봇암 주변 제외 박스(env x[−0.09,0.04]·y[−0.045,0.155], base straddle).
+- **`--gen-traj`**: graspable 셀마다 dense 궤적(home→**approach**→**hover**(큐브 top 위, 찌름
+  방지)→descend→grasp→lift) 을 JSON 으로 덤프.
+
+### ② 온라인 물리 검증 + 캡처 (isaac-sim, `run_cube_desk_ros_bridge.py --grasp_sweep`)
+
+```bash
+docker compose run --rm --no-deps -e OMNI_KIT_ACCEPT_EULA=YES isaac-sim \
+  python /workspace/scripts/inference/run_cube_desk_ros_bridge.py --headless \
+  --cube_name Cube1 --grasp_sweep /workspace/outputs/grasp_traj.json \
+  --grasp_sweep_out outputs/grasp_sweep
+```
+
+- 셀마다 큐브를 world 좌표로 teleport → 궤적을 **물리로 replay**(ROS 무경유, 직접
+  `ctrl.apply_action`; ROS graph 스킵해 OmniGraph 컨트롤러 경합 회피) → cube 상승(Δz>4cm)이면
+  grasp 성공.
+- **잡은 순간(gripper close, 큐브 책상 위)** 에 perspective/top/wrist/front **2x2 캡처**,
+  파일명 = 큐브 world 좌표(`grasp_wx{X}_wy{Y}.png`). sweep 중 그릇은 park(z=−1).
+- 결과(2026-07-01): kinematic graspable 50셀 중 **물리 grasp 46셀 성공(92%)**. 실패 4 = near-base
+  저-y(min_base_sep 컷) + far-forward(reach 한계).
+
+### ③ DR 반영 — 좌우대칭 종모양 + base/full 모드
+
+물리 성공 셀의 **per-y 넓은쪽 |x|** 를 좌우대칭으로 취해 **종 모양** 스폰 프로파일을 만들었다
+(`pick_cube_env_cfg._CUBE_SCATTER_BELL`, `domain_randomization` 의 `x_halfwidth_by_y` rejection):
+
+```
+y  6/10/14cm → |x|≤0.24  ·  18cm → 0.20  ·  22cm → 0.16  ·  26cm → 0.08   (밑동 넓고 위로 좁아짐)
+```
+
+- **full 모드**(`SimToReal-SO101-PickCube-DR-v0`): 위 종모양 전 범위.
+- **base 모드**(`SimToReal-SO101-PickCube-DRBase-v0`): nominal(y≈0.255) 주변 좁은 사각형
+  (책상 왼쪽끝 X[30,50]·앞모서리 Y[25,35]cm).
+- 양 모드 공통: 로봇암 제외(`_CUBE_ARM_EXCLUDE`) + 그릇 겹침금지(min_bowl_sep 0.14) + base발치
+  제외(min_base_sep 0.135). 두 모드는 `_make_randomize_cubes` 팩토리를 공유한다.
+
+> ⚠ caveat: 좌측 저-y 는 물리 미검증(mirror). 고정 GRASP_ORIENT 가 좌측 저-y 도달이 약해
+> 실측은 우측만 나왔고, 사용자 지시로 넓은쪽(우측) 기준 대칭 반영했다.

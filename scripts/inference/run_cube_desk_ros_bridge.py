@@ -124,6 +124,16 @@ parser.add_argument(
     help="scene reset generation을 기록할 파일. vla_policy_node가 같은 공유 파일을 읽어 "
          "episode 경계에서 stale action queue/timestep을 초기화한다.",
 )
+# ── grasp sweep 검증 모드 ────────────────────────────────────────────────────
+# pink IK top-down sweep(pink_ik_bridge_node.py --sweep --gen-traj)이 뽑은 궤적 JSON 을
+# world 프레임서 큐브를 셀마다 teleport→replay 하며 물리로 잡히는지 검증. 잡은 시점(lift 끝)에
+# perspective/top/wrist/front 4뷰를 2x2 로 캡처, 파일명=큐브 world 좌표.
+parser.add_argument("--grasp_sweep", default="",
+                    help="gen-traj JSON 경로. 지정 시 sweep replay+capture 모드(eval/loop 대신).")
+parser.add_argument("--grasp_sweep_out", default="outputs/grasp_sweep",
+                    help="2x2 캡처 PNG 출력 디렉터리(REPO_ROOT 상대).")
+parser.add_argument("--grasp_settle", type=int, default=20,
+                    help="셀 teleport 후 replay 전 settle step(큐브 안정).")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -181,7 +191,9 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     BOWL_HEIGHT_RANGE,
     BOWL_SUCCESS_RADIUS,
     _BOWL_INIT_STATE,
+    _CUBE_ARM_EXCLUDE,
     _CUBE_INIT_STATES,
+    _CUBE_SCATTER_BELL,
     _CUBE_SCATTER_X_RANGE,
     _CUBE_SCATTER_Y_RANGE,
     _FRONT_CAM_LOCAL_POS,
@@ -202,7 +214,6 @@ CUBE_DESK_TOP_Z = 0.705
 from sim_to_real.utils.constant import (  # noqa: E402
     BOWL_NAME,
     CUBE_NAMES,
-    MAX_CUBE_FOOTPRINT_RADIUS,
 )
 
 # 순수 isaacsim 경로의 stage prim 레이아웃 (env 네임스페이스 없음).
@@ -606,7 +617,9 @@ def main() -> None:
 
     # OmniGraph 는 reset(=play) 전 timeline 정지 상태에서 생성한다(그래프 wrap + OnPlaybackTick
     # 등록). 노드는 prim 경로만 참조하므로 prim 이 존재하면 된다.
-    ros_graph = build_ros_graph(object_prims, camera_specs)
+    # grasp_sweep(검증 batch)은 ROS 무경유 — 직접 ctrl.apply_action + annotator 캡처라 ROS graph
+    # 를 만들면 IsaacArticulationController(빈 /isaac_joint_commands)가 apply_action 과 경합한다 → 스킵.
+    ros_graph = None if args.grasp_sweep else build_ros_graph(object_prims, camera_specs)
 
     # reset: 물리 뷰 초기화 + timeline play → OnPlaybackTick 시작.
     world.reset()
@@ -715,9 +728,18 @@ def main() -> None:
     _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
     _MIN_BOWL_SEP = 0.14         # 큐브-그릇
     _MIN_BASE_SEP = 0.135        # 큐브-base 발치(inner-reach)
-    # PickCubeEnvCfg._CUBE_VOLUME_INSET과 동일 — cube_specs 단일 진실 소스에서 파생해
-    # env_cfg 와 자동 일치(하드코딩 시 크기 변경 누락→OOD eval 위험 차단).
-    _VOLUME_INSET = MAX_CUBE_FOOTPRINT_RADIUS   # ≈0.0354 = max cube(50mm) face 대각 절반
+    # env_cfg 가 종 모양 스폰으로 전환되며 volume_inset=0 (bell 프로파일=검증된 중심 위치).
+    _VOLUME_INSET = 0.0
+
+    def _bell_hw(y: float) -> float:
+        """종 모양 x 반너비 |x|<=w(y) piecewise-linear (env_cfg._CUBE_SCATTER_BELL 정합)."""
+        bp = sorted(_CUBE_SCATTER_BELL)
+        if y <= bp[0][0]:
+            return bp[0][1]
+        for (y0, w0), (y1, w1) in zip(bp, bp[1:]):
+            if y <= y1:
+                return w0 + (w1 - w0) * (y - y0) / (y1 - y0)
+        return bp[-1][1]
     _BOWL_ARC_RADIUS = 0.44
     _BOWL_ARC_DEG = (-4.0, 8.0)
     _MAX_ATTEMPTS = 50
@@ -756,6 +778,11 @@ def main() -> None:
             for _ in range(_MAX_ATTEMPTS):
                 cx = float(rng.uniform(x_lo, x_hi))
                 cy = float(rng.uniform(y_lo, y_hi))
+                if abs(cx) > _bell_hw(cy):   # 종 모양 밖 배제(좌우대칭 grasp 범위)
+                    continue
+                _ax0, _ax1, _ay0, _ay1 = _CUBE_ARM_EXCLUDE   # 로봇암 주변 배제
+                if _ax0 <= cx <= _ax1 and _ay0 <= cy <= _ay1:
+                    continue
                 if (cx - bowl_default_xy[0]) ** 2 + (cy - bowl_default_xy[1]) ** 2 < _MIN_BOWL_SEP ** 2:
                     continue
                 if (cx - base_xy[0]) ** 2 + (cy - base_xy[1]) ** 2 < _MIN_BASE_SEP ** 2:
@@ -907,6 +934,119 @@ def main() -> None:
             CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10
         )
         return (in_xy and in_z), dxy, z
+
+    # ── grasp sweep 검증: 궤적 JSON replay + 잡은 시점 4뷰 2x2 캡처 ────────────
+    if args.grasp_sweep:
+        import omni.replicator.core as _rep
+        from isaacsim.core.utils.types import ArticulationAction
+        from sim_to_real.tasks.common.utils import _look_at_quat_world
+        try:
+            import imageio.v2 as _imageio
+        except Exception:  # noqa: BLE001
+            _imageio = None
+        out_dir = _repo_path(args.grasp_sweep_out)
+        os.makedirs(out_dir, exist_ok=True)
+
+        # perspective 카메라 + render product (top/wrist/front 는 camera_specs 에 이미 있음).
+        persp_quat = _look_at_quat_world(tuple(args.view_eye), tuple(args.view_lookat))
+        _create_camera_prim(world.stage, "/World/SweepPersp", tuple(args.view_eye), persp_quat, 24.0)
+        persp_rp = _rep.create.render_product("/World/SweepPersp", (_CAM_W, _CAM_H))
+
+        rp_by_view = {"perspective": persp_rp.path}
+        for rp_path, topic, _fid in camera_specs:
+            for key in ("top", "wrist", "front"):
+                if f"/{key}/" in topic:
+                    rp_by_view[key] = rp_path
+        annots = {}
+        for v in ("perspective", "top", "wrist", "front"):
+            if v in rp_by_view:
+                a = _rep.AnnotatorRegistry.get_annotator("rgb")
+                a.attach(rp_by_view[v])
+                annots[v] = a
+        for _ in range(5):   # annotator warmup
+            world.step(render=True)
+
+        spec = json.load(open(_repo_path(args.grasp_sweep)))
+        cells = spec["cells"]
+        joint_order = spec["joint_order"]
+        lift_delta = float(spec["lift_delta"])
+        name2dof = {n: robot.get_dof_index(n) for n in joint_order}
+        cube_name = active_cubes[0]
+        cube_h = cube_handles[cube_name]
+        settle = max(0, int(args.grasp_settle))
+        _blank = np.zeros((_CAM_H, _CAM_W, 3), np.uint8)
+
+        def _grab_2x2():
+            imgs = {}
+            for v, a in annots.items():
+                arr = np.asarray(a.get_data())
+                if arr.size == 0:
+                    return None
+                if arr.ndim == 3 and arr.shape[-1] == 4:
+                    arr = arr[..., :3]
+                imgs[v] = arr.astype(np.uint8)
+            top = np.concatenate([imgs.get("perspective", _blank), imgs.get("top", _blank)], axis=1)
+            bot = np.concatenate([imgs.get("wrist", _blank), imgs.get("front", _blank)], axis=1)
+            return np.concatenate([top, bot], axis=0)
+
+        # sweep 테스트는 그릇 무관(사용자 요청) → 화면 밖으로 치운다. cube_in_bowl 은 항상 False 가
+        # 되지만 성공 판정은 lifted(Δz) 로 하므로 무관.
+        try:
+            bowl_handle.set_world_pose(position=np.array([0.0, 0.0, -1.0], np.float32))
+            _zero_velocity(bowl_handle)
+            print("[grasp_sweep] 그릇 park(z=-1) — sweep 테스트 화면에서 제거", flush=True)
+        except Exception as _e:  # noqa: BLE001
+            print(f"[grasp_sweep] 그릇 park 실패: {_e}", flush=True)
+
+        n_ok = 0
+        print(f"[grasp_sweep] {len(cells)} 셀 replay+capture (2x2 persp/top/wrist/front) → {out_dir}", flush=True)
+        for ci, cell in enumerate(cells):
+            if not simulation_app.is_running():
+                break
+            cx, cy, cz = cell["cube_world"]
+            park_inactive()
+            cube_h.set_world_pose(position=np.array([cx, cy, cz], np.float32),
+                                  orientation=np.array([1.0, 0.0, 0.0, 0.0], np.float32))
+            _zero_velocity(cube_h)
+            robot.set_joint_positions(home_q)
+            robot.set_joint_velocities(np.zeros(n_dof, np.float32))
+            for _ in range(settle):
+                if not simulation_app.is_running():
+                    break
+                ctrl.apply_action(ArticulationAction(joint_positions=home_q))
+                world.step(render=True)
+            spawn_z = float(cube_h.get_world_pose()[0][2])
+
+            traj = cell["traj"]
+            cap_idx = int(cell["capture_idx"])
+            cap_frame = None
+            max_z = spawn_z
+            for ti, q in enumerate(traj):
+                if not simulation_app.is_running():
+                    break
+                tgt = np.array(home_q, np.float32)
+                for jn, val in zip(joint_order, q):
+                    tgt[name2dof[jn]] = float(val)
+                ctrl.apply_action(ArticulationAction(joint_positions=tgt))
+                world.step(render=True)
+                max_z = max(max_z, float(cube_h.get_world_pose()[0][2]))
+                if ti == cap_idx:
+                    cap_frame = _grab_2x2()
+            lifted = max_z > spawn_z + lift_delta
+            in_bowl = cube_in_bowl(cube_h)[0]
+            if lifted and cap_frame is not None:
+                n_ok += 1
+                fn = f"grasp_wx{cx:+.3f}_wy{cy:+.3f}.png"
+                p = os.path.join(out_dir, fn)
+                (_imageio.imwrite(p, cap_frame) if _imageio is not None
+                 else np.save(p.replace(".png", ".npy"), cap_frame))
+                print(f"[grasp_sweep] {ci + 1}/{len(cells)} ({cx:+.3f},{cy:+.3f}) "
+                      f"✅ Δz={max_z - spawn_z:.3f} bowl={in_bowl} → {fn}", flush=True)
+            else:
+                print(f"[grasp_sweep] {ci + 1}/{len(cells)} ({cx:+.3f},{cy:+.3f}) "
+                      f"❌ maxΔz={max_z - spawn_z:.3f}", flush=True)
+        print(f"[grasp_sweep] 완료: {n_ok}/{len(cells)} grasp 성공 캡처 → {out_dir}", flush=True)
+        return
 
     if args.eval > 0:
         control_hz = 30
