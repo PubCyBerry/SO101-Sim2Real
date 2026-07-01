@@ -425,7 +425,7 @@ pin/scipy wheel 은 numpy 1.26 ABI 호환이라 런타임 정상. (numpy 2.x 를
 docker compose -f docker/docker-compose.yaml build pink-ik > /tmp/b.log 2>&1; echo "exit=$?"
 # 컨테이너 안 import + IK 자가검증
 docker compose -f docker/docker-compose.yaml run --rm --no-deps pink-ik \
-  python3 /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+  python3 /workspace/scripts/datagen/pink_ik_bridge_node.py --self-check
 # → "[self-check] PASS" 면 pinocchio/pink import·IK 정상.
 ```
 
@@ -464,7 +464,7 @@ q, err = ik.solve(rotz(cube_tf_xyz, 90.0), ...)   # 목표 90° 회전 후 IK
 
 ```bash
 # base_yaw=90 이면 cube IK pan 이 0 근처(전엔 97)
-python3 scripts/inference/pink_ik_bridge_node.py --self-check
+python3 scripts/datagen/pink_ik_bridge_node.py --self-check
 # → "pan= -1.9°" 처럼 sim 정렬. 라이브: 팔이 큐브 정면으로 감.
 ```
 

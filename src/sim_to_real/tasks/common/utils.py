@@ -1,4 +1,4 @@
-"""도메인 중립 robot/camera cfg helper (pick_pen_env_cfg 에서 relocate, VLA-only 리팩토링)."""
+"""도메인 중립 robot/camera cfg helper (VLA-only 리팩토링)."""
 
 from __future__ import annotations
 

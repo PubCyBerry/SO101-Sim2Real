@@ -11,13 +11,11 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
-from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCameraCfg, ContactSensorCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import GaussianNoiseCfg
 
 from sim_to_real.assets.robots.lerobot import SO101_FOLLOWER_CFG
 from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, CUBE_DESK_USD_PATH
@@ -404,14 +402,11 @@ class PickCubeActionsCfg:
 
 @configclass
 class PickCubeObservationsCfg:
-    """Observations: policy (6-dim joint pos) + subtask signals + rl_policy (privileged RL state).
+    """Observations: policy (6-dim joint pos) + subtask signals.
 
     Groups:
       policy      — 6-dim joint pos (North Star contract, immutable).
       subtask_terms — per-cube placement signals.
-      rl_policy   — TB.3 privileged state (43-dim) for RL actor/critic.
-                    Does NOT contain the policy group; use obs_groups in train.py
-                    to map both policy and critic to rl_policy.
     """
 
     @configclass
@@ -450,55 +445,8 @@ class PickCubeObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = False
 
-    @configclass
-    class RlPolicyCfg(ObsGroup):
-        """TB.3 privileged state for RL training (83-dim, concatenated).
-
-        Includes joint pos, gripper body pos, all cube/bowl positions relative to env
-        origin, gripper→cube relative vectors, gripper open fraction, velocities,
-        그리고 grasp 정렬용 방향·크기(cube yaw, half-extent, ee quat, grasp→cup).
-        No FrameTransformer dependency — resolves gripper body by name.
-        """
-
-        # 센서 노이즈(DR): 상태에 보수적 Gaussian(σ=0.005) 주입 → 추정/엔코더
-        # 오차에 대한 robust 화. 단위가 섞여 있어 작은 std 로 시작(필요 시 항목별 분리).
-        rl_state_obs = ObsTerm(
-            func=task_mdp.rl_state,
-            params={
-                "object_names": CUBE_NAMES,
-                "container_name": BOWL_NAME,
-                "include_velocities": True,  # joint_vel+ee vel+cube vel 추가(부분관측 해소) → 43→64dim
-                "include_orientation": True,  # cube yaw+half-extent+ee quat+grasp→cup → 64→83dim
-                "include_container_orientation": True,  # 그릇 quat → 83→87dim(동적 그릇 tilt/엎힘 관측)
-                # 큐브 크기(half-extent, m) — cube_specs 파생(40mm→0.020, 50mm→0.025).
-                # 평행 jaw 벌림 폭 매칭에 필수. 하드코딩 금지(예전 drift→실측보다 작게 관측한
-                # 잠복 결함 원인). CUBE_NAMES 순서와 일치.
-                "object_half_extents": tuple(CUBE_HALF_EXTENTS[n] for n in CUBE_NAMES),
-            },
-            noise=GaussianNoiseCfg(mean=0.0, std=0.005),
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = True  # DR: rl_state 에 노이즈 적용
-            self.concatenate_terms = True
-
-    @configclass
-    class GraspFocusCfg(ObsGroup):
-        """RND novelty 전용 grasp 부분공간(~30dim). 전체 rl_state 대신 grasp 직결 차원만."""
-
-        grasp_focus_obs = ObsTerm(
-            func=task_mdp.grasp_focus_state,
-            params={"cube_name": CUBE_NAMES[0]},
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = True
-
     policy: PolicyCfg = PolicyCfg()
     subtask_terms: SubtaskCfg = SubtaskCfg()
-    rl_policy: RlPolicyCfg = RlPolicyCfg()
-    grasp_focus: GraspFocusCfg = GraspFocusCfg()
 
 
 # ---------------------------------------------------------------------------

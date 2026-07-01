@@ -156,6 +156,22 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 ### 진입 스크립트 (`scripts/`)
 
+**배치 규약 (charter)** — 폴더 = 동사/단계 1개. "이 스크립트 어디?"는 *하는 일* 로 1:1 결정.
+
+| 폴더 | 배치 규칙 (한 줄) |
+|---|---|
+| `assets/` | 기존 로봇 USD 물리 편집 (collision·joint limit) |
+| `environments/` | sim 환경 구성·상호작용: 씬 author, env 조회, teleop, 머티리얼 |
+| `datagen/` | **새 데이터 생성**: SM·실기기·pink 궤적 record + SM replay |
+| `convert/` | 기존 데이터셋 **포맷·프레임 변환** |
+| `data/` | 데이터셋 **사후 ops**(변환 아님): 병합·업로드 |
+| `inference/` | **VLA 폐루프**(정책 경유) |
+| `contract/` | I/O 계약·스키마 검증 |
+| `real/` | Windows 실기기 native uv CLI |
+| `ece_4560/` | 보관용 과정 프로젝트(격리, 파이프라인 무관) |
+
+> 3중 모호 해소: **새 에피소드 만든다→datagen · 포맷/좌표 바꾼다→convert · 병합/업로드→data.**
+
 실재 스크립트만 기재 (진단/inproc 등 제거된 항목은 표에 없음).
 
 | 카테고리 | 스크립트 | 내용 |
@@ -163,6 +179,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | **환경 관리** | `environments/list_envs.py` | 등록 Gym 환경 일람 |
 | | `environments/author_pick_cube_scene.py` | 큐브 씬 USD 6쌍(scene + 객체 5개) 일괄 author. 공식 pxr/PhysxSchema API. `OMNI_KIT_ACCEPT_EULA=YES uv run --group isaac python ...` 필요 |
 | **에셋·충돌** | `assets/set_gripper_jaw_sdf_collision.py` | so101_follower.usd jaw/gripper collision → **SDF** (usd-core raw, isaac 불요, backup 유지) |
+| | `assets/set_arm_joint_limits.py` | so101_follower.usd 팔 관절 position limit → `leader_calibration.SO101_FOLLOWER_USD_JOINT_LIMITS` 단일소스로 동기화(usd-core, 실기기 가동범위 매칭) |
 | **teleop·데이터** | `environments/teleoperation/teleop_se3_agent.py` | PickCube GUI teleop + 데이터 기록. device=`keyboard`/`so101leader`/**`so101leader_remote`**(Windows leader→ZMQ `:5556`→Linux sim, `--leader_endpoint`), `--tune_cameras` docking viewport. **`--record --record_format lerobot_v3 --dataset_dir`** = LeRobot v3 기록(`record_state_machine` 와 동일 계약·기존 데이터셋 호환, `--enable_cameras` 필요. B=시작·N=성공저장·R=폐기). `hdf5` = 경량 action/state(카메라無). cross-machine 관전=`--public_ip` WebRTC livestream |
 | | `environments/teleoperation/replay.py` | 녹화 시퀀스 재실행 |
 | | `environments/teleoperation/so101_joint_state_server.py` | ZMQ PUB 로 실제 SO-101 leader 상태 원격 송출 |
@@ -171,15 +188,18 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | | `inference/replay_dataset_to_bridge.py` | LeRobot 데이터셋·npz·시퀀스JSON 1 에피소드를 bridge 로 replay(`/isaac_joint_commands`). `--arm_mapping {codec,calibration,follower}`(follower=실기기 녹화 replay) · `--sequence`(so101_gui 시퀀스 재현·move보간+hold) · `--ramp_in`(현재자세→첫frame, teleport 방지) · `--probe_tracking`. vla-ros 에서 실행 |
 | | `inference/policy_server_affine.py` | `AffineAdapterServer(PolicyServer)` — `JOINT_FRAME_MODE`(4-case) 별 정책 I/O(state·action) real↔sim affine 변환, 이미지 무변환. `policy-server-affine` 모드가 실행. cross-domain zero-shot 추론 |
 | | `inference/demo_vla.sh` | **VLA 라이브 데모 런처** — `start <act\|smolvla\|groot> [--ckpt\|--cubes\|--ip\|--gui\|--headless]` / `stop` / `status`. 정책 서버+vla-ros 자동 배선, livestream :49100 |
-| **pink IK SM** | `inference/pink_ik_bridge_node.py` | **결정적 pick-place SM**(pink 미분 IK, VLA 비경유). `/isaac_joint_states`(seed q_start)+`/tf`(cube/bowl) SUB → waypoint(hover→descend→grasp→lift→over_bowl→release→retreat→home) 각 1회 IK → smoothstep joint-space 보간 → `/isaac_joint_commands` PUB. **핵심**: URDF↔USD base z 90° 어긋남 `--base-yaw-deg 90` 보정 + grasp 방향/깊이/그리퍼는 실 trajectory(`ece_4560/.../pick_place_demo.json`) 역산. `pink-ik` 서비스가 실행. `--self-check`(offline). 상세=`docs/PINK_IK_PICKPLACE.md` |
+| **pink IK SM** | `inference/pink_ik_bridge_node.py` | **결정적 pick-place SM**(pink 미분 IK, VLA 비경유). `/isaac_joint_states`(seed q_start)+`/tf`(cube/bowl) SUB → waypoint(hover→descend→grasp→lift→over_bowl→release→retreat→home) 각 1회 IK → smoothstep joint-space 보간 → `/isaac_joint_commands` PUB. **핵심**: URDF↔USD base z 90° 어긋남 `--base-yaw-deg 90` 보정 + grasp 방향/깊이/그리퍼는 실 trajectory(`ece_4560/.../pick_place_demo.json`) 역산. `pink-ik` 서비스가 실행. `--self-check`(offline). **`--record`** = 폐루프 궤적(state=`/isaac_joint_states`·action=publish command·3-cam)을 LeRobot v3 로 1 에피소드 기록(datagen 겸용). 상세=`docs/PINK_IK_PICKPLACE.md` |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
 | | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |
 | **데이터 생성** | `datagen/record_state_machine.py` | SM 데이터 생성 드라이버. SM action → env step → LeRobot v3 writer 기록. isaac-sim `datagen` 모드가 실행 (`--task`·`--num_demos`·`--dataset_dir`) |
 | | `datagen/replay_state_machine.py` | 기록된 SM 데모 재생 |
 | | `datagen/record_real_sequence.py` | 실 follower joint 시퀀스(JSON)를 Gym env 에서 재생→LeRobot v3 기록. follower calibration 변환, action=실 follower 단위(실기기 `lerobot-replay` 호환). `--sequence`·`--self_check` |
-| | `convert/isaaclab2lerobotv3.py` (+`_lerobot_features.py`) | Isaac Lab HDF5 → LeRobot v3 변환 (**host-only fallback**; in-container recorder 우선, end-to-end 미검증) |
-| **데이터** | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER |
+| **데이터 변환** | `convert/isaaclab2lerobotv3.py` (+`_lerobot_features.py`) | Isaac Lab HDF5 → LeRobot v3 변환 (**host-only fallback**; in-container recorder 우선, end-to-end 미검증) |
+| | `convert/sim_dataset_to_real_follower.py` | sim-프레임 LeRobot v3(arm=sim degree·gripper feature[0,100])를 실 follower 프레임으로 **in-place** 변환(`follower_calibration.policy_feature_to_real_follower`, `record_real_sequence` 의 역방향). 실기기 `lerobot-replay` 재생용, Isaac 무의존. `--self-check`. ⚠ 충돌 위험, e-stop 준비 |
+| **데이터** | `data/append_sim_episode.py` | 실 follower replay 로 sim 에서 얻은 achieved 에피소드를 기존 LeRobot v3 데이터셋에 append(sim↔real replay 캘리브레이션 워크플로) |
+| | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER |
+| **실기기(Windows)** | `real/lerobot.sh` | `.env`(+`POLICY_PROFILE` 프로필) 자동 로드 후 LeRobot CLI 를 변수→인자 매핑 실행(find-port·setup-motors·calibrate·teleop·record·replay·policy-client·env·raw). native uv 래퍼(Git Bash) |
 | **기타** | `ece_4560/` | 과정 프로젝트 (보유) |
 
 ### 씬 재생성

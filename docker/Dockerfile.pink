@@ -8,7 +8,7 @@
 # 빌드:  docker compose -f docker/docker-compose.yaml build pink-ik
 # 실행:  docker compose -f docker/docker-compose.yaml up isaac-sim pink-ik
 # 검증:  docker compose run --rm pink-ik python3 \
-#          /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+#          /workspace/scripts/datagen/pink_ik_bridge_node.py --self-check
 FROM ros:jazzy-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -29,6 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 1.26.4, RECORD file not found" 로 빌드 실패. pin/scipy wheel 은 numpy 1.26 호환.
 RUN pip install --break-system-packages --no-cache-dir \
         pin-pink quadprog typing-extensions "numpy<2"
+
+# LeRobot v3 recorder(--record) deps: sim_to_real.data.lerobot_recorder 가 쓰는 pyarrow/
+# pandas/imageio. ABI 핀은 프로젝트 규약과 동일("pyarrow<19" = numpy 1.x C-API 마지막 메이저).
+# imageio-ffmpeg = 번들 libx264(시스템 ffmpeg 불요). "numpy<2" 재명시로 resolver 가 numpy 유지.
+RUN pip install --break-system-packages --no-cache-dir \
+        "pyarrow<19" pandas imageio imageio-ffmpeg "numpy<2"
 
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc
 

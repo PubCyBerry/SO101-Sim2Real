@@ -3,7 +3,7 @@
 pink(Pinocchio) 미분 역기구학(IK)을 백엔드로 SO-101 팔의 **pick-and-place 를 결정적으로**
 수행하는 시스템 문서. VLA 정책 없이(추론 비경유) Isaac Sim bridge 를 직접 구동한다.
 
-- **엔트리포인트**: `scripts/inference/pink_ik_bridge_node.py`
+- **엔트리포인트**: `scripts/datagen/pink_ik_bridge_node.py`
 - **컨테이너**: `pink-ik` (`docker/Dockerfile.pink`, compose 서비스)
 - **한 줄 실행**: `docker compose -f docker/docker-compose.yaml run --rm pink-ik`
 
@@ -299,7 +299,7 @@ docker compose -f docker/docker-compose.yaml build pink-ik
 
 # 오프라인 IK 검증 (ROS·sim 불요) — 7/7 waypoint 도달 확인
 docker compose -f docker/docker-compose.yaml run --rm --no-deps pink-ik \
-  python3 /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+  python3 /workspace/scripts/datagen/pink_ik_bridge_node.py --self-check
 
 # 라이브 pick-place (bridge 가 떠 있어야 함) — 1회 후 home 정지
 docker compose -f docker/docker-compose.yaml run --rm pink-ik

@@ -137,7 +137,7 @@ services:
   # ■ 빌드·실행
   #   빌드:  docker compose -f docker/docker-compose.yaml build pink-ik
   #   검증:  docker compose run --rm pink-ik python3 \
-  #            /workspace/scripts/inference/pink_ik_bridge_node.py --self-check
+  #            /workspace/scripts/datagen/pink_ik_bridge_node.py --self-check
   #   폐루프: docker compose -f docker/docker-compose.yaml up isaac-sim pink-ik
   #   플래그: PINK_ARGS="--loop --hover 0.12" docker compose ... up pink-ik
   pink-ik:
@@ -156,8 +156,12 @@ services:
       # 노드 플래그 주입(예: "--loop"). 미설정 시 1회 pick-place 후 자세 유지.
       PINK_ARGS:                  "${PINK_ARGS:-}"
     # repo 마운트(/workspace): URDF·src(so101_contract)·노드 스크립트.
+    # datasets 는 별도 bind-mount: repo 의 ./datasets 는 /DISK1 symlink 이라 ..:/workspace 로는
+    # 컨테이너 안에서 symlink 가 깨진다(/DISK1 미마운트 → --record 출력이 ephemeral 로 소실).
+    # host 경로를 직접 마운트하면 docker 가 symlink 를 realpath 로 풀어 영속(isaac-sim 과 동일).
     volumes:
       - ..:/workspace
+      - ../datasets:/workspace/datasets
     entrypoint: ["bash", "/workspace/docker/pink-ik-entrypoint.sh"]
     stdin_open: true
     tty: true

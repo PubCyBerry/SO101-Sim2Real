@@ -1,7 +1,7 @@
 """SO101 Follower USD의 재료 색상을 실물 사진 기준으로 패치하는 headless 스크립트.
 
 실행:
-    uv run scripts/utils/patch_robot_colors.py
+    uv run scripts/environments/utils/patch_robot_colors.py
 """
 
 import argparse

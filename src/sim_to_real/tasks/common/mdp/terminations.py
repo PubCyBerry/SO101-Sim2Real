@@ -10,9 +10,23 @@ from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 
 from ._geometry import DESK_TOP_Z
-from .rewards import _container_xy
 
 _REST_THRESHOLD_RAD: float = 15.0 * math.pi / 180.0
+
+
+def _container_xy(
+    env: ManagerBasedRLEnv,
+    container_center_xy: tuple[float, float],
+    container_cfg: SceneEntityCfg | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """컨테이너 xy 를 env-local frame으로 반환한다."""
+    if container_cfg is not None:
+        container: RigidObject = env.scene[container_cfg.name]
+        local = container.data.root_pos_w - env.scene.env_origins
+        return local[:, 0], local[:, 1]
+    cx = torch.full((env.num_envs,), container_center_xy[0], device=env.device)
+    cy = torch.full((env.num_envs,), container_center_xy[1], device=env.device)
+    return cx, cy
 
 
 def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:

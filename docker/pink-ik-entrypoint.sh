@@ -13,7 +13,7 @@ export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
 # so101_contract(SO101_JOINT_ORDER) 단일 소스 — repo 마운트(..:/workspace).
 export PYTHONPATH="/workspace/src:${PYTHONPATH:-}"
 
-NODE=/workspace/scripts/inference/pink_ik_bridge_node.py
+NODE=/workspace/scripts/datagen/pink_ik_bridge_node.py
 
 # CMD 인자가 있으면 그대로 실행(예: --self-check / bash). 없으면 노드 기본 구동.
 # PINK_ARGS(.env·compose)로 노드 플래그 주입(예: "--loop --hover 0.12").

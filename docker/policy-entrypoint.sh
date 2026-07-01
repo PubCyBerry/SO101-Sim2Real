@@ -315,12 +315,12 @@ case "$CMD" in
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
   #     policy-server train \
   #       --policy.path=lerobot/smolvla_base \
-  #       --policy.repo_id=${HF_USER}/smolvla_pick_pen \
+  #       --policy.repo_id=${HF_USER}/smolvla_pick_cube \
   #       --policy.push_to_hub=true \
   #       --dataset.repo_id=${HF_DATASET_REPO_ID} \
   #       --output_dir=${OUTPUT_DIR} \
   #       --steps=20000 --batch_size=64 \
-  #       --job_name=smolvla_pick_pen --wandb.enable=true
+  #       --job_name=smolvla_pick_cube --wandb.enable=true
   #
   # 예시 (GR00T N1.5 fine-tune):
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
@@ -429,7 +429,7 @@ case "$CMD" in
   # 예시:
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
   #     policy-server eval \
-  #       --policy.path=${HF_USER}/smolvla_pick_pen \
+  #       --policy.path=${HF_USER}/smolvla_pick_cube \
   #       --env.type=pusht --eval.n_episodes=20
   # ────────────────────────────────────────────────────────────────────────────
   eval)
