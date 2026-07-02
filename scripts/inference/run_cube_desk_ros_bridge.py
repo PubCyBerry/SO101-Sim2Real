@@ -74,10 +74,12 @@ parser.add_argument(
     help="top/wrist/front 카메라 ROS publish 비활성화 (기본은 publish — VLA obs 용).",
 )
 # GUI 뷰포트 레이아웃 — pick_cube_curobo_demo.py 와 동일(Perspective + top/wrist/front 3-패널 dock).
-parser.add_argument("--view_eye", type=float, nargs=3, default=[0.9, -0.9, 1.15],
-                    help="GUI Perspective 카메라 eye(world). demo 기본값과 동일.")
+parser.add_argument("--view_eye", type=float, nargs=3, default=[0.67, 0.7, 1.15],
+                    help="GUI Perspective 카메라 위치(world xyz).")
+parser.add_argument("--view_orient", type=float, nargs=3, default=[-50.0, 45.0, 150.0],
+                    help="GUI Perspective 카메라 회전(rotateXYZ, deg). roll 포함 지정 가능.")
 parser.add_argument("--view_lookat", type=float, nargs=3, default=[0.20, 0.10, 0.70],
-                    help="GUI Perspective 카메라 lookat(world). demo 기본값과 동일.")
+                    help="lookat(world) — grasp_sweep persp 캡처용(GUI perspective 는 --view_orient 사용).")
 parser.add_argument("--layout", default="assets/layouts/pick_cube_3cam.json",
                     help="viewport docking layout JSON(ui.Workspace dump). REPO_ROOT 상대경로. "
                          "없으면 수동 dock fallback. demo 와 동일 파일·window title 공유.")
@@ -966,8 +968,21 @@ def main() -> None:
     # livestream WebRTC 가 kit 창 전체를 캡처하므로 원격에서도 카메라 피드가 보인다.
     if not args.headless:
         try:
-            from isaacsim.core.utils.viewports import set_camera_view  # noqa: PLC0415
-            set_camera_view(eye=args.view_eye, target=args.view_lookat)
+            # perspective 카메라 pos + euler orient(rotateXYZ deg, GUI 튜너 정합) 직접 설정.
+            # set_camera_view(eye+target)는 up 고정이라 roll 을 못 줘 orient 지정 불가 → prim 직접.
+            _persp = world.stage.GetPrimAtPath("/OmniverseKit_Persp")
+            if _persp.IsValid():
+                _xf = UsdGeom.Xformable(_persp)
+                _xf.ClearXformOpOrder()
+                _xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
+                    Gf.Vec3d(*[float(v) for v in args.view_eye]))
+                _xf.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(
+                    Gf.Vec3d(*[float(v) for v in args.view_orient]))
+                print(f"[bridge] Perspective: eye={args.view_eye} "
+                      f"orient(XYZ°)={args.view_orient}", flush=True)
+            else:
+                from isaacsim.core.utils.viewports import set_camera_view  # noqa: PLC0415
+                set_camera_view(eye=args.view_eye, target=args.view_lookat)
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] Perspective view 설정 실패: {exc}", flush=True)
         if not args.no_cameras:
