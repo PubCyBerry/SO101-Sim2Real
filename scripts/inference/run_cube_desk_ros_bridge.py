@@ -769,16 +769,29 @@ def main() -> None:
                 pass
             _zero_velocity(h)
 
-    # ── DR (학습 randomize_cubes_scattered / randomize_object_on_arc 정합) ──
-    _MIN_CUBE_SEP = 0.060        # 큐브 볼륨 비겹침
-    _MIN_BOWL_SEP = 0.14         # 큐브-그릇
-    _MIN_BASE_SEP = 0.135        # 큐브-base 발치(inner-reach)
-    # env_cfg 가 종 모양 스폰으로 전환되며 volume_inset=0 (bell 프로파일=검증된 중심 위치).
-    _VOLUME_INSET = 0.0
+    # ── DR 배치 파라미터 = env_cfg.events.randomize_cubes 단일소스에서 읽기 ──
+    # bridge numpy 재현이 env_cfg 의 randomize_cubes EventTerm params 를 따라가 --task 의
+    # full(종모양 bell)/base(사각형) 모드를 그대로 반영한다(하드코딩 아님). v0/Eval(고정배치)
+    # 이나 --dr 수동+비-DR task 면 randomize_cubes 없음 → fallback(_CUBE_SCATTER 종모양).
+    _rc = getattr(env_cfg.events, "randomize_cubes", None)
+    _rcp = dict(getattr(_rc, "params", {}) or {}) if _rc is not None else {}
+    _DR_X_RANGE = tuple(_rcp.get("x_range", _CUBE_SCATTER_X_RANGE))
+    _DR_Y_RANGE = tuple(_rcp.get("y_range", _CUBE_SCATTER_Y_RANGE))
+    _DR_BELL = _rcp.get("x_halfwidth_by_y", _CUBE_SCATTER_BELL)   # base 모드=None(사각형)
+    _DR_EXCLUDE = _rcp.get("x_exclude_box", _CUBE_ARM_EXCLUDE)
+    _MIN_CUBE_SEP = float(_rcp.get("min_cube_sep", 0.060))        # 큐브 볼륨 비겹침
+    _MIN_BOWL_SEP = float(_rcp.get("min_bowl_sep", 0.14))         # 큐브-그릇
+    _MIN_BASE_SEP = float(_rcp.get("min_base_sep", 0.135))        # 큐브-base 발치(inner-reach)
+    _VOLUME_INSET = float(_rcp.get("volume_inset", 0.0))
+    print(f"[bridge] DR 배치: x={_DR_X_RANGE} y={_DR_Y_RANGE} "
+          f"mode={'bell(full)' if _DR_BELL else 'rect(base)'}", flush=True)
 
     def _bell_hw(y: float) -> float:
-        """종 모양 x 반너비 |x|<=w(y) piecewise-linear (env_cfg._CUBE_SCATTER_BELL 정합)."""
-        bp = sorted(_CUBE_SCATTER_BELL)
+        """종 모양 x 반너비 |x|<=w(y) piecewise-linear (env_cfg params x_halfwidth_by_y).
+        base 모드(_DR_BELL=None)면 inf → 종모양 제약 없음(사각형 스폰)."""
+        if _DR_BELL is None:
+            return float("inf")
+        bp = sorted(_DR_BELL)
         if y <= bp[0][0]:
             return bp[0][1]
         for (y0, w0), (y1, w1) in zip(bp, bp[1:]):
@@ -813,10 +826,10 @@ def main() -> None:
     def randomize_cubes(rng) -> None:
         """학습 _randomize_cubes_scattered_fn 정합: rejection(inset rect·bowl_default·base·placed 회피)
         + 6 stable-face + random yaw. 그릇 기준=bowl_default(학습 동일, arc 이동 전)."""
-        x_lo = _CUBE_SCATTER_X_RANGE[0] + _VOLUME_INSET
-        x_hi = _CUBE_SCATTER_X_RANGE[1] - _VOLUME_INSET
-        y_lo = _CUBE_SCATTER_Y_RANGE[0] + _VOLUME_INSET
-        y_hi = _CUBE_SCATTER_Y_RANGE[1] - _VOLUME_INSET
+        x_lo = _DR_X_RANGE[0] + _VOLUME_INSET
+        x_hi = _DR_X_RANGE[1] - _VOLUME_INSET
+        y_lo = _DR_Y_RANGE[0] + _VOLUME_INSET
+        y_hi = _DR_Y_RANGE[1] - _VOLUME_INSET
         placed: list[tuple[float, float]] = []
         for name, h in cube_handles.items():
             fx, fy = float(bowl_default_xy[0]), float(bowl_default_xy[1])  # fallback(드묾)
@@ -825,7 +838,7 @@ def main() -> None:
                 cy = float(rng.uniform(y_lo, y_hi))
                 if abs(cx) > _bell_hw(cy):   # 종 모양 밖 배제(좌우대칭 grasp 범위)
                     continue
-                _ax0, _ax1, _ay0, _ay1 = _CUBE_ARM_EXCLUDE   # 로봇암 주변 배제
+                _ax0, _ax1, _ay0, _ay1 = _DR_EXCLUDE   # 로봇암 주변 배제(env_cfg params)
                 if _ax0 <= cx <= _ax1 and _ay0 <= cy <= _ay1:
                     continue
                 if (cx - bowl_default_xy[0]) ** 2 + (cy - bowl_default_xy[1]) ** 2 < _MIN_BOWL_SEP ** 2:
