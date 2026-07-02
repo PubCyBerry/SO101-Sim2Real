@@ -1,17 +1,20 @@
 """공통 Pick-and-Place 관측 함수.
 
-두 계열:
+세 계열:
 - *완료 판정* (`object_grasped`, `object_in_container`) — 관리자 기반 관측 그룹과
   success termination 에서 사용. 그리퍼 상태를 포함하므로 "배치 완료" 는 릴리즈까지 의미함.
 - *기하 헬퍼* (`object_inside_container`, `object_lifted`, `ee_near_object`,
   `object_above_container_xy`) — 오라클 자동 채점기에서 각 서브페이즈 독립 패스/페일 추적.
+- *센서 관측* (`ee_frame_state`, `image_raw`) — Workshop ``mdp/obs.py`` 이식. EE pose(FrameTransformer)
+  와 카메라 이미지를 관측 그룹에 노출(policy 6-dim joint 계약과 별개, privileged/visual 그룹용).
 """
 
 from __future__ import annotations
 
 import torch
+import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, RigidObject
-from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
+from isaaclab.envs import DirectRLEnv, ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 
@@ -143,3 +146,44 @@ def ee_near_object(
     jaw_pos = ee_frame.data.target_pos_w[:, 1, :]
     obj_pos = obj.data.root_pos_w
     return torch.linalg.vector_norm(obj_pos - jaw_pos, dim=1) < distance_threshold
+
+
+# ---------------------------------------------------------------------------
+# 센서 관측 (Workshop mdp/obs.py 이식)
+# ---------------------------------------------------------------------------
+
+
+def ee_frame_state(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """End-effector frame pose 를 로봇 root frame 기준으로 반환 (7D: pos3 + quat4 wxyz).
+
+    Workshop ``mdp/obs.py:ee_frame_state`` 이식. FrameTransformer(``ee_frame``)의 첫 target
+    (index 0 = gripper)의 world pose 를 robot root 로 subtract 한다. 우리 ``ee_frame`` 은
+    target 2개(gripper=0, jaw=1)라 여기선 gripper(0)만 쓴다. policy 6-dim joint 계약과 별개
+    (privileged/subtask 관측 용).
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    robot_root_pos, robot_root_quat = robot.data.root_pos_w, robot.data.root_quat_w
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_frame_pos, ee_frame_quat = ee_frame.data.target_pos_w[:, 0, :], ee_frame.data.target_quat_w[:, 0, :]
+    ee_frame_pos_robot, ee_frame_quat_robot = math_utils.subtract_frame_transforms(
+        robot_root_pos, robot_root_quat, ee_frame_pos, ee_frame_quat
+    )
+    return torch.cat([ee_frame_pos_robot, ee_frame_quat_robot], dim=1)
+
+
+def image_raw(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera"),
+    data_type: str = "rgb",
+) -> torch.Tensor:
+    """카메라 sensor 의 raw 출력(``data.output[data_type]``)을 clone 해 반환.
+
+    Workshop ``mdp/obs.py:image_raw`` 이식. 정규화 없이 원본 텐서를 그대로 노출한다
+    (instance segmentation 등 비-RGB 채널용). RGB 정규화판은 isaaclab stock ``mdp.image``.
+    """
+    sensor = env.scene[sensor_cfg.name]
+    return sensor.data.output[data_type].clone()

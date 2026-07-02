@@ -55,6 +55,11 @@ os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4")
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="cube_desk Isaac Sim ROS 2 bridge")
+parser.add_argument("--task", default="SimToReal-SO101-PickCube-v0",
+                    help="실행할 등록 gym env id. env_cfg 를 로드해 actuator·DR 모드를 그 단일소스에서 "
+                         "읽는다(gym.make 는 안 함 — B안 pure World 유지로 ROS OmniGraph device -1 회피). "
+                         "예: SimToReal-SO101-PickCube-{v0,DR-v0,DRBase-v0,Eval-v0,DR-Eval-v0}. "
+                         "-DR* 는 큐브/그릇 DR 자동 on. 기본 v0=고정 실측 배치.")
 parser.add_argument("--num_cubes", type=int, default=4, choices=[1, 2, 3, 4])
 parser.add_argument("--cube_name", default="",
                     help="단일 활성 큐브 직접 지정(크기별 eval: Cube1/2=40mm·Cube3/4=50mm). "
@@ -301,6 +306,24 @@ def _repo_path(rel: str) -> str:
     return rel if os.path.isabs(rel) else os.path.join(REPO_ROOT, rel)
 
 
+def _load_env_cfg(task_id: str):
+    """등록 gym env id → env_cfg 인스턴스(필드 읽기용 — actuator·DR·성공 단일소스).
+
+    ``gym.make`` 는 하지 않는다: ManagerBasedRLEnv 의 GPU fabric view 와 ROS OmniGraph 노드가
+    ``device -1`` 로 충돌하는 구조적 문제(2026-06-09 B안 우회) 때문에 bridge 는 pure World 를
+    유지하고, env_cfg 는 **필드만** 읽는다. ``env_cfg_entry_point``("module:Class")를 import 해
+    인스턴스화한다. ``import sim_to_real`` 로 gym.register 부작용을 먼저 일으킨다.
+    """
+    import importlib
+    import gymnasium as gym
+    import sim_to_real  # noqa: F401  (gym.register 부작용)
+
+    spec = gym.spec(task_id)
+    entry = spec.kwargs["env_cfg_entry_point"]
+    mod_name, cls_name = entry.split(":")
+    return getattr(importlib.import_module(mod_name), cls_name)()
+
+
 def _apply_joint_limits(stage, root_path: str) -> None:
     """root_path 하위 RevoluteJoint 들의 physics:lower/upperLimit 를 leader_calibration
     단일 소스(SO101_FOLLOWER_USD_JOINT_LIMITS)로 **live stage 에 직접 set**한다.
@@ -519,6 +542,14 @@ def build_ros_graph(object_prims: list[str], camera_specs: list[tuple[str, str, 
 def main() -> None:
     np.random.seed(args.seed)
 
+    # 실행할 env 를 --task 로 골라 그 cfg 를 로드(actuator·DR 모드 단일소스). gym.make 안 함.
+    env_cfg = _load_env_cfg(args.task)
+    if "-DR" in args.task and not args.dr:
+        args.dr = True   # DR 변형 task → 큐브/그릇 무작위화 자동 on(명시 --dr 도 유지)
+        print(f"[bridge] task={args.task} → DR on (env_cfg DR 변형)", flush=True)
+    else:
+        print(f"[bridge] task={args.task} · DR={'on' if args.dr else 'off(고정배치)'}", flush=True)
+
     active_cubes = [args.cube_name] if args.cube_name else CUBE_NAMES[: args.num_cubes]
 
     # World — 순수 isaacsim.core. backend="numpy"(CPU) → OmniGraph 물리노드가 simulation
@@ -624,24 +655,37 @@ def main() -> None:
     # reset: 물리 뷰 초기화 + timeline play → OnPlaybackTick 시작.
     world.reset()
 
-    # ── actuator parity (PickCubeEnvCfg = VLA 학습 env) ──
-    # USD drive gain 은 micro 라 위치 명령 추종 불가 → 학습 env 와 동일 soft PD 로 덮어쓴다.
-    # arm·gripper 모두 stiffness 17.8·damping 0.6 (이전 gripper 80 은 cuMotion 용 → VLA parity 로 통일).
+    # ── actuator parity — env_cfg(SO101_FOLLOWER_CFG) per-joint gains 를 dof array 로 ──
+    # USD drive gain 은 micro 라 위치 명령 추종 불가 → 학습 env 와 동일 PD 로 덮어쓴다.
+    # 하드코딩 대신 env_cfg.scene.robot.actuators(Workshop per-joint 튜닝, lerobot.py 단일소스)를
+    # joint 이름→dof 로 펼쳐 sim2sim parity 를 자동 보장한다(actuator 값 바뀌면 bridge 도 자동 추종).
     n_dof = robot.num_dof
-    kps = np.full(n_dof, DRIVE_STIFFNESS, dtype=np.float32)
-    kds = np.full(n_dof, DRIVE_DAMPING, dtype=np.float32)
+    dof_names = list(robot.dof_names)
+    name2dof = {n: i for i, n in enumerate(dof_names)}
+    kps = np.zeros(n_dof, dtype=np.float32)
+    kds = np.zeros(n_dof, dtype=np.float32)
+    cfg_efforts = np.zeros(n_dof, dtype=np.float32)
+    for act in env_cfg.scene.robot.actuators.values():
+        for jn in act.joint_names_expr:
+            di = name2dof.get(jn)
+            if di is None:
+                continue
+            kps[di] = float(act.stiffness)
+            kds[di] = float(act.damping)
+            cfg_efforts[di] = float(act.effort_limit_sim)
+    # 미매핑 dof 안전망(정상 경로엔 없음) — 하드코딩 fallback.
+    kps[kps == 0.0] = DRIVE_STIFFNESS
+    kds[kds == 0.0] = DRIVE_DAMPING
+    cfg_efforts[cfg_efforts == 0.0] = ARM_EFFORT_LIMIT
     try:
         gi = robot.get_dof_index("gripper")
     except (ValueError, AttributeError, TypeError, KeyError):
         gi = n_dof - 1  # fallback: gripper 가 마지막 dof (/isaac_joint_states 순서 확인됨)
     ctrl = robot.get_articulation_controller()
     ctrl.set_gains(kps=kps, kds=kds)
-    try:
-        print(f"[bridge] dof_names order: {list(robot.dof_names)}", flush=True)
-    except Exception:
-        pass
-    print(f"[bridge] actuator parity: stiffness={DRIVE_STIFFNESS} damping={DRIVE_DAMPING} "
-          f"(arm·gripper 공통), gripper dof[{gi}]", flush=True)
+    print(f"[bridge] dof_names order: {dof_names}", flush=True)
+    print(f"[bridge] actuator parity(env_cfg per-joint): kps={[round(float(x), 1) for x in kps]} "
+          f"kds={[round(float(x), 2) for x in kds]}, gripper dof[{gi}]", flush=True)
 
     # 실제 articulation joint position limit 확인(USD/캐시 vs 적용값). _apply_joint_limits 가
     # 먹었으면 elbow=±100·wrist_flex/-95~105·lift±105 로 나와야. 90°로 나오면 limit 미적용.
@@ -655,12 +699,13 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] dof limit 조회 실패: {exc}", flush=True)
 
-    # effort 상한 (PickCubeEnvCfg parity): arm 10Nm, gripper gentle 0.5Nm(leisaac dynamic 동치).
-    efforts = np.full(n_dof, ARM_EFFORT_LIMIT, dtype=np.float32)
-    efforts[gi] = GRIPPER_EFFORT_LIMIT
+    # effort 상한 — env_cfg per-joint(Workshop arm 30N) 을 cfg 에서, gripper 만 dynamic clamp 동치로 override.
+    efforts = cfg_efforts.copy()
+    efforts[gi] = GRIPPER_EFFORT_LIMIT   # leisaac dynamic_reset_gripper_effort_limit(≤10, 큐브 gentle) 동치
     try:
         ctrl.set_max_efforts(values=efforts)
-        print(f"[bridge] effort 상한: arm={ARM_EFFORT_LIMIT}Nm · gripper={GRIPPER_EFFORT_LIMIT}Nm", flush=True)
+        print(f"[bridge] effort 상한(env_cfg): arm={[round(float(x), 1) for x in efforts]}Nm "
+              f"· gripper override={GRIPPER_EFFORT_LIMIT}Nm", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] set_max_efforts 실패: {exc}", flush=True)
 

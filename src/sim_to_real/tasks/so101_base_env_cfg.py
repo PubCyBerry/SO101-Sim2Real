@@ -3,12 +3,13 @@
 leisaac Workshop 의 3층 상속 사다리(``so101_env_cfg`` → ``task_env_cfg`` →
 ``vials_to_rack_env_cfg``)를 우리 저장소에 맞춰 이식한 것의 **1층**이다.
 
-Workshop 은 중간 ``task_env_cfg`` 층에서 카메라·라이트박스를 씬에 baked 로 얹어 여러
-태스크가 공유했지만, 우리는 (1) cube_desk 가 단일 USD 로 책상·조명이 이미 포함이고
-(2) 카메라는 env_smoke 를 ``--enable_cameras`` 없이 돌리려고 **선택 주입**(pick_cube_env_cfg
-의 ``add_pick_cube_cameras``)이라, 카메라 stage 를 위한 별도 중간 층은 빈 pass-through 가
-된다. 그래서 사다리는 **base(이 파일) → pick_cube leaf** 2층으로 접힌다. 새 태스크가
-생기면 이 base 를 상속해 씬 오브젝트·성공 판정만 얹으면 된다(Workshop leaf 패턴).
+Workshop 은 중간 ``task_env_cfg`` 층에서 카메라·라이트박스를 씬에 static 으로 얹어 여러
+태스크가 공유했지만, 우리는 cube_desk 가 단일 USD 로 책상·조명을 이미 포함하고, 카메라는
+leaf 의 ``PickCubeSceneCfg`` 에 **static** 으로 둔다(Workshop VisualCfg 패턴 이식). 그래서
+사다리는 **base(이 파일, 무카메라 substrate) → pick_cube leaf(+카메라·VisualCfg 관측)** 2층
+으로 접힌다. 무카메라 실행(teleop/smoke)은 base ``Teleop-v0`` 를 쓰거나 leaf 에서
+``remove_pick_cube_cameras`` 로 카메라·image 관측을 떼어낸다. 새 태스크는 이 base 를 상속해
+씬 오브젝트·성공 판정·카메라만 얹으면 된다(Workshop leaf 패턴).
 
 이 층이 담는 것: 로봇(+contact 리포트) · 책상 USD · 조명 · slew joint 액션 ·
 6-DOF joint 관측 · 리셋 이벤트 · sim/physx 설정. **성공/보상 없음**(teleop 은 무종료).
@@ -27,6 +28,7 @@ from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.utils import configclass
 
 from sim_to_real.assets.robots.lerobot import SO101_FOLLOWER_CFG
@@ -98,6 +100,19 @@ class SO101BaseSceneCfg(InteractiveSceneCfg):
                 "gripper": 0.0,
             },
         ),
+    )
+
+    # EE frame transformer — Workshop ``ee_frame`` 이식. base 링크 기준 gripper/jaw world pose 를
+    # 계산해 common mdp(``ee_frame_state``·``object_grasped``·``ee_near_object``)에 공급한다.
+    # kinematic 센서라 렌더/카메라와 무관(``--enable_cameras`` 불요). target 순서 고정:
+    #   idx0 = gripper (ee_frame_state 기준 프레임) · idx1 = jaw (object_grasped/ee_near_object jaw_pos).
+    ee_frame: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base",
+        debug_vis=False,
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(prim_path="{ENV_REGEX_NS}/Robot/gripper", name="gripper"),
+            FrameTransformerCfg.FrameCfg(prim_path="{ENV_REGEX_NS}/Robot/jaw", name="jaw"),
+        ],
     )
 
 

@@ -200,15 +200,32 @@ class PickCubeSceneCfg(SO101BaseSceneCfg):
     )
 
     # ------------------------------------------------------------------
-    # 카메라는 기본 씬에 두지 않는다 — env_smoke 가 --enable_cameras 없이 돌도록.
-    # 카메라 smoke/롤아웃은 gym.make() 전에 add_pick_cube_cameras(scene) 로 주입.
-    # (InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 동적 주입이 센서로
-    #  등록됨 — Isaac Lab 2.3.2 interactive_scene._add_entities_from_cfg 확인.)
+    # 카메라 리그 (static) — North Star 계약: observation.images.{top,wrist,front}, 640×480 RGB.
+    # Workshop 참조처럼 scene cfg 에 **static** 정의(옛 동적주입 add_pick_cube_cameras 대체).
+    # 동적주입 함수는 teleop ``--tune_cameras`` 오버라이드용으로 유지 — 같은 필드명(top/wrist/
+    # front_camera)을 setattr 로 덮어써 정합(무해).
+    #   top   = world 고정(급경사 부감) · wrist = gripper 링크 자식(gripper 회전 추종) ·
+    #   front = shoulder 링크 자식(shoulder_pan 회전 추종).
+    # ⚠ static 이므로 pick_cube env 생성은 **--enable_cameras 필요** — 무카메라 스모크는
+    #   base ``Teleop-v0`` 를 쓴다(카메라 없는 substrate).
     # ------------------------------------------------------------------
+    top_camera: TiledCameraCfg = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/TopCamera", _TOP_CAMERA_POS, _TOP_CAMERA_ROT, _TOP_CAMERA_FOCAL,
+        focus_distance=1.3, clipping_range=(0.1, 6.0),
+    )
+    wrist_camera: TiledCameraCfg = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/Robot/gripper/WristCamera", _WRIST_CAM_LOCAL_POS, _WRIST_CAM_LOCAL_ROT,
+        _WRIST_CAMERA_FOCAL, focus_distance=0.2, clipping_range=(0.02, 3.0),
+    )
+    front_camera: TiledCameraCfg = _pinhole_camera_cfg(
+        "{ENV_REGEX_NS}/Robot/shoulder/FrontCamera", _FRONT_CAM_LOCAL_POS, _FRONT_CAM_LOCAL_ROT,
+        _FRONT_CAMERA_FOCAL, focus_distance=1.0, clipping_range=(0.1, 6.0),
+    )
 
 
 # ---------------------------------------------------------------------------
-# 카메라 리그 (선택 주입) — observation.images.{top,wrist,front}
+# 카메라 리그 튜너 오버라이드 — static 카메라(PickCubeSceneCfg)를 --tune_cameras 로 덮어쓰기
+# (+ remove_pick_cube_cameras: 무카메라 실행 시 카메라·images 관측 제거)
 # ---------------------------------------------------------------------------
 
 
@@ -224,11 +241,11 @@ def make_pick_cube_camera_cfgs(
     front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
 ) -> dict[str, TiledCameraCfg]:
-    """top/wrist/front 카메라 cfg 3개를 반환.
+    """top/wrist/front 카메라 cfg 3개를 반환(각 640×480 RGB).
 
-    기본 PickCubeSceneCfg 밖에 두어 기본 env 가 --enable_cameras 없이 돌게 한다.
-    gym.make() 전에 add_pick_cube_cameras() 로 scene cfg 에 주입해서 쓴다.
-    각 카메라는 480×640 RGB.
+    카메라는 이제 PickCubeSceneCfg 에 **static** 필드로 있다(env 기본). 이 함수는 teleop
+    ``--tune_cameras`` GUI 튜너가 pos/rot/focal 을 런타임 오버라이드할 때 쓴다
+    (``add_pick_cube_cameras`` 가 반환 cfg 로 static 필드를 같은 이름으로 덮어씀).
 
     top 회전: ``top_target`` 이 주어지면 look_at 계산, 없으면 튜닝된 기본 ``_TOP_CAMERA_ROT``.
     front: shoulder_link 하위 prim — shoulder_pan 회전을 따라간다.
@@ -292,10 +309,10 @@ def add_pick_cube_cameras(
     front_local_rot: tuple[float, float, float, float] | None = None,
     front_focal: float | None = None,
 ) -> PickCubeSceneCfg:
-    """top/wrist/front 카메라 리그를 scene cfg 인스턴스에 in-place 주입하고 반환.
+    """top/wrist/front 카메라 cfg 를 scene cfg 인스턴스에 in-place setattr 하고 반환.
 
-    InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 여기서 추가한 속성이
-    gym.make() 시 센서로 등록된다.
+    static 카메라 필드(top/wrist/front_camera)를 **같은 이름으로 덮어쓴다** — teleop 튜너
+    오버라이드 용도(무해). InteractiveScene 이 scene_cfg.__dict__ 를 순회하므로 등록된다.
     """
 
     for name, cam_cfg in make_pick_cube_camera_cfgs(
@@ -311,6 +328,20 @@ def add_pick_cube_cameras(
     ).items():
         setattr(scene_cfg, name, cam_cfg)
     return scene_cfg
+
+
+def remove_pick_cube_cameras(env_cfg) -> None:
+    """카메라(scene static 필드 3개 + ``observations.images`` 그룹)를 env_cfg 에서 제거한다.
+
+    카메라가 이제 PickCubeSceneCfg 에 static 이라 env 기본은 ``--enable_cameras`` 를 요구한다.
+    무카메라 실행(teleop/smoke)은 gym.make 전에 이 함수로 scene 카메라와 image 관측을 **함께**
+    떼어낸다 — scene 만 지우면 images obs 가 없는 sensor 를 참조해 에러가 난다.
+    """
+    for name in ("top_camera", "wrist_camera", "front_camera"):
+        if hasattr(env_cfg.scene, name):
+            delattr(env_cfg.scene, name)
+    if hasattr(env_cfg.observations, "images"):
+        delattr(env_cfg.observations, "images")
 
 
 # ---------------------------------------------------------------------------
@@ -383,11 +414,49 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
             },
         )
 
+        # EE frame pose (7D, robot-root frame) — Workshop ee_frame_state 이식. privileged 신호
+        # (policy 6-dim joint 계약과 별개, datagen/eval/디버그용). idx0=gripper 기준.
+        ee_pose = ObsTerm(
+            func=task_mdp.ee_frame_state,
+            params={
+                "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+                "robot_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
         def __post_init__(self) -> None:
             self.enable_corruption = False
             self.concatenate_terms = False
 
     subtask_terms: SubtaskCfg = SubtaskCfg()
+
+    @configclass
+    class VisualCfg(ObsGroup):
+        """카메라 RGB 관측 — North Star ``observation.images.{top,wrist,front}`` (VLA 이미지 입력).
+
+        Workshop VisualCfg 이식. 각 term = static TiledCamera(PickCubeSceneCfg.{top,wrist,
+        front}_camera) 의 rgb. ``mdp.image``(isaaclab stock) 사용, normalize=False(uint8 원본).
+        concatenate_terms=False → 카메라별 개별 텐서. ⚠ --enable_cameras 필요.
+        """
+
+        top = ObsTerm(
+            func=task_mdp.image,
+            params={"sensor_cfg": SceneEntityCfg("top_camera"), "data_type": "rgb", "normalize": False},
+        )
+        wrist = ObsTerm(
+            func=task_mdp.image,
+            params={"sensor_cfg": SceneEntityCfg("wrist_camera"), "data_type": "rgb", "normalize": False},
+        )
+        front = ObsTerm(
+            func=task_mdp.image,
+            params={"sensor_cfg": SceneEntityCfg("front_camera"), "data_type": "rgb", "normalize": False},
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
+    images: VisualCfg = VisualCfg()
 
 
 # ---------------------------------------------------------------------------

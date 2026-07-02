@@ -294,7 +294,10 @@ from sim_to_real.data.lerobot_units import (  # noqa: E402
     read_camera_rgb_u8,
     to_lerobot_units,
 )
-from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import add_pick_cube_cameras  # noqa: E402
+from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
+    add_pick_cube_cameras,
+    remove_pick_cube_cameras,
+)
 from sim_to_real.utils.gripper_effort import dynamic_reset_gripper_effort_limit_sim  # noqa: E402
 
 
@@ -1247,6 +1250,11 @@ def main() -> None:  # noqa: C901
         # 카메라 sensor update_period 는 task cfg 기본값(1/30s)을 쓴다.
         # 이는 North Star observation.images.* fps 30 계약과 leisaac 템플릿 설정에 맞춘 값이다.
         # 실시간 성능은 보조 viewport docking 을 --tune_cameras 일 때만 켜서 확보한다.
+        # (add_pick_cube_cameras 는 scene 의 static 카메라 필드를 튜너 값으로 덮어쓴다.)
+    else:
+        # 카메라가 이제 PickCubeSceneCfg 에 static → --enable_cameras 없으면 스폰 실패.
+        # 무카메라 teleop 을 위해 scene 카메라 + images 관측을 함께 제거한다.
+        remove_pick_cube_cameras(env_cfg)
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     camera_viewports: list[object] = []

@@ -51,21 +51,50 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
         },
     ),
     actuators={
-        # Feetech STS3215 를 낮은 stiffness(soft PD) + 높은 effort 상한으로 모델링.
-        # 그리퍼가 큐브에 막혀도 클램프 토크가 최대 10 Nm 까지 올라가 grasp 가 유지된다.
-        "arm_joints": ImplicitActuatorCfg(
-            joint_names_expr=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
-            effort_limit_sim=10.0,
-            velocity_limit_sim=10.0,
-            stiffness=17.8,
-            damping=0.6,
+        # SO-101 Feetech STS3215 액추에이터 — Workshop 참조(``assets/so101.py``)의 **per-joint
+        # 튜닝을 그대로 이식**한다. joint 이름만 우리 규약(snake_case = feature_codec
+        # ``SO101_JOINT_ORDER``)으로 매핑하고, stiffness/damping/effort 값은 Workshop 을 복제.
+        # 주석의 Gear/Torque 는 실 하드웨어 스펙(감속비·정격 토크) — sim ``effort_limit_sim`` 은
+        # 안전 위해 전 축 30 N 으로 통일(하드웨어 토크보다 낮게). base 축은 stiffness 를 높여
+        # load-bearing, 손목·그리퍼는 낮춰 섬세 제어.
+        # ``velocity_limit_sim=10`` = slew cap(5 rad/s) 추종 헤드룸(common/utils.py 근거).
+        # ⚠ 그리퍼 effort 는 런타임에 ``gripper_effort.py`` dynamic clamp(≤10)가 override 하므로
+        #    ``effort_limit_sim=30`` 은 실질적으로 arm 에만 유효(그리퍼는 gentle 유지).
+        # ROTATION (Gear 1/191, Torque 34.4 N·m)
+        "shoulder_pan": ImplicitActuatorCfg(
+            joint_names_expr=["shoulder_pan"],
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=55, damping=0.7,
         ),
+        # PITCH (Gear 1/345, Torque 62.1 N·m — HIGHEST, load-bearing)
+        "shoulder_lift": ImplicitActuatorCfg(
+            joint_names_expr=["shoulder_lift"],
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=30, damping=0.8,
+        ),
+        # ELBOW (Gear 1/191, Torque 34.4 N·m)
+        "elbow_flex": ImplicitActuatorCfg(
+            joint_names_expr=["elbow_flex"],
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=25, damping=0.7,
+        ),
+        # WRIST PITCH (Gear 1/147, Torque 26.5 N·m)
+        "wrist_flex": ImplicitActuatorCfg(
+            joint_names_expr=["wrist_flex"],
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=12, damping=0.5,
+        ),
+        # WRIST ROLL (Gear 1/147, Torque 26.5 N·m)
+        "wrist_roll": ImplicitActuatorCfg(
+            joint_names_expr=["wrist_roll"],
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=7, damping=0.5,
+        ),
+        # GRIPPER / JAW (Gear 1/147, Torque 26.5 N·m)
         "gripper": ImplicitActuatorCfg(
             joint_names_expr=["gripper"],
-            effort_limit_sim=10.0,
-            velocity_limit_sim=10.0,
-            stiffness=17.8,
-            damping=0.6,
+            effort_limit_sim=30, velocity_limit_sim=10.0,
+            stiffness=4, damping=0.3,
         ),
     },
     soft_joint_pos_limit_factor=1.0,
