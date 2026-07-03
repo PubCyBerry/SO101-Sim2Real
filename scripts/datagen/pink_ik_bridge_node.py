@@ -1041,8 +1041,11 @@ def main():
     # ── SM: TCP(§3) — 검증 grasp 역산 EE-local 오프셋, GPU 재검증 시 여기만 갱신 ──
     ap.add_argument("--tcp-dx", dest="tcp_dx", type=float, default=DEFAULT_TCP_OFFSET[0],
                     help="TCP(tcp_grasp) EE-local x[m]")
-    ap.add_argument("--tcp-dy", dest="tcp_dy", type=float, default=DEFAULT_TCP_OFFSET[1],
-                    help="TCP(tcp_grasp) EE-local y[m]")
+    ap.add_argument("--tcp-dy", dest="tcp_dy", type=float, default=-0.010,
+                    help="TCP(tcp_grasp) EE-local y[m]. -0.019→-0.010(exp13): Mode B(negative ρ "
+                         "헛닫힘) 대응. moving jaw hinge=gripper y+0.019, TCP=y-0.019(fixed측). "
+                         "close 시 moving jaw 가 큐브 지나쳐 헛닫힘=큐브가 moving jaw arc 밖 → aim "
+                         "을 moving jaw 쪽(+y)으로 당겨 arc 안에 들임. gripper-frame 이라 ρ-aware")
     ap.add_argument("--tcp-dz", dest="tcp_dz", type=float, default=DEFAULT_TCP_OFFSET[2],
                     help="TCP(tcp_grasp) EE-local z[m]")
     # ── SM: grasp 선택(§4·§6) ──
