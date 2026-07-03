@@ -371,7 +371,7 @@ def select_grasp(ik, cube, psi, bowl, p, log=print):
             # 무해(§6 2R) — 대신 score 로 반영해 corridor 가 나쁜 α 를 자연 배제.
             if e_g > p.pos_tol or e_hov > p.pos_tol or ax > p.axis_tol_deg:
                 continue
-            if near and not swept_clear(p_pre, p_g, bowl[:2], p.gripper_half_w, p):
+            if near and not swept_clear(p_pre, p_g, bowl[:2], p.near_grasp_half_w, p):
                 continue
             score = 3.0 * e_g + e_hov + 0.3 * e_pre + 2e-4 * abs(a_deg)  # top-down 선호 tie-break
             if best is None or score < best["score"]:
@@ -1082,6 +1082,10 @@ def main():
     ap.add_argument("--near-bowl-margin", dest="near_bowl_margin", type=float, default=0.08,
                     help="근접 판정: cube-bowl 거리 < r_rim+이 값 → swept keep-out 게이트 + "
                          "short-approach fallback (DR min_bowl_sep=0.14 커버)")
+    ap.add_argument("--near-grasp-half-w", dest="near_grasp_half_w", type=float, default=0.015,
+                    help="near-bowl grasp 강하 swept_clear 반경[m]. 수직강하는 transit 캡슐보다 "
+                         "관대(finger 얇은쪽만 bowl 향함) → gripper_half_w(0.04) 과보수로 graspable "
+                         "near-bowl 큐브 dead-zone(ep7/11) 되던 것 완화. lift path 는 full 유지")
     ap.add_argument("--gripper-half-w", dest="gripper_half_w", type=float, default=0.04,
                     help="gripper(+큐브) 스윕 캡슐 반폭[m]")
     ap.add_argument("--hang", dest="hang", type=float, default=0.03,
