@@ -752,7 +752,7 @@ def run_ros(args):
             self.log_ct = 0
             self._grasp = None       # 폐루프 강하용 grasp 메타(_build 에서 채움)
             self.sink_ct = 0
-            self.sink_z = None       # 단조 강하 명령 z(solver frame)
+            self.q_ff = None         # 적분 feed-forward droop 보상 누적(nq)
             self._sink_locked = False
 
             self.sub = self.create_subscription(JointState, "/isaac_joint_states", self._on_state, 10)
@@ -838,7 +838,7 @@ def run_ros(args):
             self.seq = segs
             self._grasp = g          # 폐루프 강하용 grasp 메타(solver frame: p_g·R·z_g)
             self.sink_ct = 0         # 강하 피드백 스텝 카운터(에피소드/재계획당 리셋)
-            self.sink_z = None
+            self.q_ff = None
             self._sink_locked = False
             self.q_from = self.q_start.copy()
             self.idx = 0
@@ -872,27 +872,32 @@ def run_ros(args):
                 z_tgt = float(self._grasp["p_g"][2])
                 z_meas = float(self.ik.fk(self.ik.clamp(self.q_meas), TCP_FRAME).translation[2])
                 if z_meas > z_tgt + self.p.sink_tol and self.sink_ct < self.p.sink_max:
-                    # 단조 강하: 매 tick 측정보다 한 step 아래를 명령(command 는 되돌리지
-                    # 않음→droop 이 어디서 멈추든 계속 밀어 극복). step 이 작아 lateral 스윙·
-                    # 큐브 밀림 최소(exp2 의 big-overshoot 스윙 bulldoze fix). xy = grasp 점 고정.
-                    if self.sink_z is None:
-                        self.sink_z = z_meas
-                    self.sink_z = min(self.sink_z, z_meas) - self.p.sink_step
-                    self.sink_z = max(self.sink_z, z_tgt - self.p.sink_floor)   # 안전 하한
-                    tgt = self._grasp["p_g"].copy()
-                    tgt[2] = self.sink_z
-                    q_sink, _e = self.ik.solve(tgt, orient_R=self._grasp["R"],
-                                               ori_cost=self.p.ori_cost, q_seed=self.q_meas,
-                                               iters=150, frame=TCP_FRAME)
-                    q_sink[qi["gripper"]] = feat_to_rad(self.p.grip_open)  # 강하 중 개구 유지
-                    self._publish(self.ik.clamp(q_sink))
+                    # 적분 feed-forward droop 보상. 측정 진단(scratch/diag_ep4): far-reach
+                    # droop = elevation 체인 tracking 오차(shoulder_lift 측정<명령 ~6.6°=팔
+                    # sag, wrist_flex 측정>명령 ~6.6°=gripper sag; pan/roll ~0). elevation
+                    # 관절만 q_ff += ki·(q_g-q_meas) 누적 → q_meas 가 q_g 에 수렴(적분이라
+                    # 잔차 0, P-control exp5 의 overshoot/oscillation 없음). pan/roll 제외 →
+                    # azimuth 스윙·큐브 밀림 없음. windup 은 sink_ff_max 로 clamp.
+                    if self.q_ff is None:
+                        self.q_ff = np.zeros(self.ik.model.nq)
+                    q_m = self.ik.clamp(self.q_meas)
+                    lim = math.radians(self.p.sink_ff_max)
+                    for jn in ("shoulder_lift", "elbow_flex", "wrist_flex"):
+                        j = qi[jn]
+                        self.q_ff[j] = float(np.clip(
+                            self.q_ff[j] + self.p.sink_ki * (self._grasp["q_g"][j] - q_m[j]),
+                            -lim, lim))
+                    q_cmd = self._grasp["q_g"].copy() + self.q_ff
+                    q_cmd[qi["gripper"]] = feat_to_rad(self.p.grip_open)   # 강하 중 개구 유지
+                    self._publish(self.ik.clamp(q_cmd))
                     self.sink_ct += 1
                     self.log_ct += 1
                     if self.log_ct % max(1, int(round(self.p.hz / 5))) == 0:
+                        ffd = np.round(np.degrees([self.q_ff[qi[n]]
+                                       for n in ("shoulder_lift", "elbow_flex", "wrist_flex")]), 1)
                         self.get_logger().info(
-                            f"[sink#{self.idx}/{self.sink_ct}] z_meas={z_meas:.3f} cmd={self.sink_z:.3f} "
-                            f"z_tgt={z_tgt:.3f} q={arm_deg(self.ik.clamp(self.q_meas), qi)} "
-                            f"g={gripper_feat(self.ik.clamp(self.q_meas), qi)}")
+                            f"[sink#{self.idx}/{self.sink_ct}] z_meas={z_meas:.3f} z_tgt={z_tgt:.3f} "
+                            f"ff(lift,elb,wf)={ffd} q={arm_deg(q_m, qi)}")
                     return
                 # 강하 완료/budget → 현재(강하한) 자세에서 gripper 만 CLOSE(제자리 파지)
                 q_hold = self.ik.clamp(self.q_meas).copy()
@@ -1103,10 +1108,10 @@ def main():
                     help="grasp 폐루프 강하 STOP 임계[m]: 측정 TCP z ≤ z_g+tol 이면 close")
     ap.add_argument("--sink-max", dest="sink_max", type=int, default=60,
                     help="grasp 폐루프 강하 최대 tick(30Hz). droop 못 이기면 도달치서 close")
-    ap.add_argument("--sink-step", dest="sink_step", type=float, default=0.004,
-                    help="단조 강하 tick 당 하강 명령 step[m]. 작을수록 lateral 스윙·큐브 밀림↓")
-    ap.add_argument("--sink-floor", dest="sink_floor", type=float, default=0.045,
-                    help="강하 명령 z 안전 하한 = z_g-floor[m] (jaw tip 책상 penetration 방지)")
+    ap.add_argument("--sink-ki", dest="sink_ki", type=float, default=0.5,
+                    help="grasp 강하 적분 feed-forward 이득: q_ff += ki·(q_g-q_meas). 클수록 빠름")
+    ap.add_argument("--sink-ff-max", dest="sink_ff_max", type=float, default=25.0,
+                    help="feed-forward 누적 windup clamp[deg] (elevation 관절당)")
     ap.add_argument("--grip-close", dest="grip_close", type=float, default=5.0,
                     help="close gripper feature[0,100] (실=5; effort 제한은 sim gripper clamp 담당)")
     ap.add_argument("--loop", action="store_true", help="완료 후 재집기 반복(tf 재조회·재계획)")
