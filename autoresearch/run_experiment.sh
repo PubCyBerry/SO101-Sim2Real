@@ -68,8 +68,8 @@ echo "[harness] bridge 기동: $TASK · $N_EP ep × ${EVAL_SECONDS}s · seed=$SE
 docker logs -f so101_isaac_sim >> "$BRIDGE_LOG" 2>&1 &
 
 # ── ③ 에피소드 동기화: "scene reset" 마커마다 pink 노드 fresh 재기동 ─────────
-# bridge 는 기동 시 1회 선리셋 후 "EVAL 시작" → 에피소드마다 reset. 그래서
-# eval 시작 이후의 reset 수 - 0 이 아니라, 전체 reset 수 - 1 = 현재 에피소드 번호.
+# bridge 는 기동 시 선리셋 1회("EVAL 시작" 이전) 후 에피소드마다 reset 1회.
+# 따라서 현재 에피소드 번호 = 전체 reset 수 - 2 (선리셋 1 + 현 에피소드 자신 1).
 start_pink() {
   local ep="$1"
   docker ps -aq -f name='^ar_pink' | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -89,8 +89,8 @@ while :; do
   fi
   if [[ $started == 1 ]]; then
     n_resets=$(grep -c "scene reset" "$BRIDGE_LOG" || true)
-    ep_now=$((n_resets - 1))   # 기동 시 선리셋 1회 제외
-    if (( ep_now > ep_launched && ep_now < N_EP )); then
+    ep_now=$((n_resets - 2))   # 선리셋 1회 + 현 에피소드 자신 1회 차감
+    if (( ep_now >= 0 && ep_now > ep_launched && ep_now < N_EP )); then
       ep_launched=$ep_now
       start_pink "$ep_launched"
       echo "[harness] episode $ep_launched → pink 재기동"
