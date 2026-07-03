@@ -754,6 +754,7 @@ def run_ros(args):
             self.sink_ct = 0
             self.q_ff = None         # 적분 feed-forward droop 보상 누적(nq)
             self._sink_locked = False
+            self.grasp_try = 0       # 헛닫힘 outward 재파지 횟수(FK-mismatch undershoot 보상)
 
             self.sub = self.create_subscription(JointState, "/isaac_joint_states", self._on_state, 10)
             self.pub = self.create_publisher(JointState, "/isaac_joint_commands", 10)
@@ -840,6 +841,7 @@ def run_ros(args):
             self.sink_ct = 0         # 강하 피드백 스텝 카운터(에피소드/재계획당 리셋)
             self.q_ff = None
             self._sink_locked = False
+            self.grasp_try = 0
             self.q_from = self.q_start.copy()
             self.idx = 0
             self.t = 0.0
@@ -939,6 +941,37 @@ def run_ros(args):
 
             self.t += self.dt
             if self.t >= leg:
+                # ── 파지 검증 + outward 재파지(FK-mismatch undershoot 보상) ──────
+                # 시각 진단: 헛닫힘=gripper 가 큐브 위+뒤(base 쪽)로 undershoot(pink↔sim
+                # FK link-geometry mismatch). 관절은 q_g 도달(cmd-meas 작음)이나 sim
+                # gripper 물리 위치가 base 쪽으로 짧음. 유일 신호 g_meas. CLEAR 헛닫힘
+                # (g<catch_min=12, marginal PASS false-trigger 회피)이면 grasp 목표를
+                # radial outward(base 반대) 로 밀어 재-IK→그 자세로 이동 후 재close.
+                # 관절 도달하므로 direct move OK(FK-mismatch 는 droop 아님). catch 정지.
+                if tag == "grasp" and self._grasp is not None and self.q_meas is not None \
+                        and gripper_feat(self.ik.clamp(self.q_meas), self.ik.qidx) < self.p.grasp_catch_min \
+                        and self.grasp_try < self.p.grasp_retry_max:
+                    qi = self.ik.qidx
+                    self.grasp_try += 1
+                    g = self._grasp
+                    p_new = np.asarray(g["p_g"], float).copy()
+                    r = float(np.hypot(p_new[0], p_new[1]))
+                    if r > 1e-6:
+                        p_new[0] += self.p.grasp_shift_step * p_new[0] / r   # radial outward
+                        p_new[1] += self.p.grasp_shift_step * p_new[1] / r
+                    q_new, _e = self.ik.solve(p_new, orient_R=g["R"], ori_cost=self.p.ori_cost,
+                                              q_seed=g["q_g"], iters=300, frame=TCP_FRAME)
+                    q_new = self.ik.clamp(q_new)
+                    q_open = q_new.copy(); q_open[qi["gripper"]] = feat_to_rad(self.p.grip_open)
+                    q_cl = q_new.copy(); q_cl[qi["gripper"]] = feat_to_rad(self.p.grip_close)
+                    self.seq[self.idx] = ("grasp", [q_open, q_cl], leg * 1.5)
+                    g["p_g"] = p_new; g["q_g"] = q_new
+                    self.q_from = self.ik.clamp(self.q_meas)
+                    self.t = 0.0
+                    self.get_logger().info(
+                        f"[regrasp#{self.grasp_try}] 헛닫힘 → +{self.grasp_try*self.p.grasp_shift_step*1000:.0f}mm "
+                        f"outward 재파지")
+                    return
                 self.t = 0.0
                 self.q_from = path[-1]
                 self.idx += 1
@@ -1115,6 +1148,12 @@ def main():
                     help="grasp 폐루프 강하 STOP 임계[m]: 측정 TCP z ≤ z_g+tol 이면 close")
     ap.add_argument("--sink-max", dest="sink_max", type=int, default=60,
                     help="grasp 폐루프 강하 최대 tick(30Hz). droop 못 이기면 도달치서 close")
+    ap.add_argument("--grasp-catch-min", dest="grasp_catch_min", type=float, default=12.0,
+                    help="파지 성공 gripper feature 하한. close 후 g_meas<이 값=CLEAR 헛닫힘→재파지")
+    ap.add_argument("--grasp-retry-max", dest="grasp_retry_max", type=int, default=4,
+                    help="헛닫힘 outward 재파지 최대 횟수(catch 시 정지)")
+    ap.add_argument("--grasp-shift-step", dest="grasp_shift_step", type=float, default=0.008,
+                    help="재파지당 grasp 목표를 radial outward 로 미는 step[m] — FK undershoot 보상")
     ap.add_argument("--sink-ki", dest="sink_ki", type=float, default=0.5,
                     help="grasp 강하 적분 feed-forward 이득: q_ff += ki·(q_g-q_meas). 클수록 빠름")
     ap.add_argument("--sink-ff-max", dest="sink_ff_max", type=float, default=25.0,
