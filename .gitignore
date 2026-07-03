@@ -234,3 +234,8 @@ __marimo__/
 
 # 참조용 외부 레포 클론 (nested git repos — 커밋 대상 아님)
 ref_repos/
+
+# autoresearch 실험 산출물 (worktree 전용, 커밋 금지)
+autoresearch/results.tsv
+autoresearch/*.log
+autoresearch/progress.png
