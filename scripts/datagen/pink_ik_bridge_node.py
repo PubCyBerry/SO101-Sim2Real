@@ -463,7 +463,7 @@ def plan_pick_place(ik, cube_b, psi_b, bowl_b, q_start, p, base_yaw_deg, log=pri
         f"h_safe={h_safe:.3f} segs={[(t, len(pth)) for t, pth, _ in segs]} "
         f"cart_err[mm] descend={e_dsc * 1000:.1f} approach={e_app * 1000:.1f} "
         f"lift={e_lift * 1000:.1f} transit={e_tra * 1000:.1f}")
-    return segs
+    return segs, g
 
 
 # ── grasp-sweep 궤적 생성용 상수 (bridge world 프레임에서 replay·physics 검증) ──
@@ -527,9 +527,10 @@ def self_check(args):
              ("far-corner", (0.08, -0.26, 0.05), 0.0)]
     for name, cube, psi in cases:
         print(f"[self-check] ── plan: {name} cube={np.round(np.asarray(cube, float), 3)}")
-        segs = plan_pick_place(ik, cube, psi, DEFAULT_BOWL_XYZ, q_home, args,
-                               args.base_yaw_deg, log=log)
-        assert segs is not None, f"plan 실패: {name}"
+        res = plan_pick_place(ik, cube, psi, DEFAULT_BOWL_XYZ, q_home, args,
+                              args.base_yaw_deg, log=log)
+        assert res is not None, f"plan 실패: {name}"
+        segs, _g = res
         for tag, path, _leg in segs:
             q = path[-1]
             tcp = ik.fk(q, TCP_FRAME).translation
@@ -749,6 +750,9 @@ def run_ros(args):
             self.done = False
             self.finished = False   # record 완료 시 True → spin 루프 종료
             self.log_ct = 0
+            self._grasp = None       # 폐루프 강하용 grasp 메타(_build 에서 채움)
+            self.sink_ct = 0
+            self._sink_locked = False
 
             self.sub = self.create_subscription(JointState, "/isaac_joint_states", self._on_state, 10)
             self.pub = self.create_publisher(JointState, "/isaac_joint_commands", 10)
@@ -823,13 +827,17 @@ def run_ros(args):
             self.get_logger().info(
                 f"cube({cs})={np.round(cube, 3)} ψ={math.degrees(psi):.1f}° "
                 f"bowl({bs})={np.round(bowl, 3)} base_yaw={self.base_yaw}°")
-            segs = plan_pick_place(self.ik, cube, psi, bowl, self.q_start, self.p,
-                                   self.base_yaw, log=self.get_logger().info)
-            if segs is None:
+            res = plan_pick_place(self.ik, cube, psi, bowl, self.q_start, self.p,
+                                  self.base_yaw, log=self.get_logger().info)
+            if res is None:
                 self.get_logger().error("plan 실패(dead zone) — 정지")
                 self.done = True
                 return False
+            segs, g = res
             self.seq = segs
+            self._grasp = g          # 폐루프 강하용 grasp 메타(solver frame: p_g·R·z_g)
+            self.sink_ct = 0         # 강하 피드백 스텝 카운터(에피소드/재계획당 리셋)
+            self._sink_locked = False
             self.q_from = self.q_start.copy()
             self.idx = 0
             self.t = 0.0
@@ -849,6 +857,42 @@ def run_ros(args):
                 return
 
             tag, path, leg = self.seq[self.idx]
+
+            # ── grasp 진입 시 폐루프 강하(Mode-A fix) ─────────────────────────
+            # 낮은 wrist stiffness(7/4) 로 open-loop q_g 추종이 큐브 위 ~2.5cm 로 정착
+            # (steady-state droop) → 헛닫힘(g→5, 큐브 desk 잔류). 측정 q 의 pink-FK TCP z 가
+            # z_g 초과면 오차만큼 아래로 overshoot 재-IK 해 실제 큐브 높이까지 내린 뒤 close.
+            # STOP 조건 = 측정 z ≤ z_g+tol(도달) 또는 budget 소진 → 정착 정상 config(PASS)는
+            # 첫 tick 에 즉시 통과(무개입, 회귀 0). close 는 강하한 자세에서 제자리 수행.
+            if tag == "grasp" and self._grasp is not None and self.q_meas is not None \
+                    and not self._sink_locked:
+                qi = self.ik.qidx
+                z_tgt = float(self._grasp["p_g"][2])
+                z_meas = float(self.ik.fk(self.ik.clamp(self.q_meas), TCP_FRAME).translation[2])
+                if z_meas > z_tgt + self.p.sink_tol and self.sink_ct < self.p.sink_max:
+                    tgt = self._grasp["p_g"].copy()
+                    tgt[2] = z_tgt - (z_meas - z_tgt)   # 오차만큼 아래로 overshoot(droop 상쇄)
+                    q_sink, _e = self.ik.solve(tgt, orient_R=self._grasp["R"],
+                                               ori_cost=self.p.ori_cost, q_seed=self.q_meas,
+                                               iters=150, frame=TCP_FRAME)
+                    q_sink[qi["gripper"]] = feat_to_rad(self.p.grip_open)  # 강하 중 개구 유지
+                    self._publish(self.ik.clamp(q_sink))
+                    self.sink_ct += 1
+                    self.log_ct += 1
+                    if self.log_ct % max(1, int(round(self.p.hz / 5))) == 0:
+                        self.get_logger().info(
+                            f"[sink#{self.idx}/{self.sink_ct}] z_meas={z_meas:.3f} z_tgt={z_tgt:.3f} "
+                            f"q={arm_deg(self.ik.clamp(self.q_meas), qi)} "
+                            f"g={gripper_feat(self.ik.clamp(self.q_meas), qi)}")
+                    return
+                # 강하 완료/budget → 현재(강하한) 자세에서 gripper 만 CLOSE(제자리 파지)
+                q_hold = self.ik.clamp(self.q_meas).copy()
+                q_close = q_hold.copy(); q_close[qi["gripper"]] = feat_to_rad(self.p.grip_close)
+                self.seq[self.idx] = (tag, [q_close], leg)
+                self.q_from = q_hold
+                self._sink_locked = True
+                tag, path, leg = self.seq[self.idx]
+
             # [q_from]+path 인접점 lerp + 세그먼트 smoothstep — Cartesian 세그먼트는 path 가
             # dense IK 해라 직선 추종, joint 세그먼트는 기존과 동일한 1구간 보간.
             pts = [self.q_from] + path
@@ -1046,6 +1090,10 @@ def main():
                     help="그릇 중심 위 release TCP(=큐브 중심) 높이[m] — rim 상공 drop(§8.3)")
     ap.add_argument("--grip-open", dest="grip_open", type=float, default=47.0,
                     help="open gripper feature[0,100] (실=47; §5.2 개구 부등식은 실측 캘리브 대상)")
+    ap.add_argument("--sink-tol", dest="sink_tol", type=float, default=0.005,
+                    help="grasp 폐루프 강하 STOP 임계[m]: 측정 TCP z ≤ z_g+tol 이면 close")
+    ap.add_argument("--sink-max", dest="sink_max", type=int, default=45,
+                    help="grasp 폐루프 강하 최대 tick(30Hz→1.5s). droop 못 이기면 도달치서 close")
     ap.add_argument("--grip-close", dest="grip_close", type=float, default=5.0,
                     help="close gripper feature[0,100] (실=5; effort 제한은 sim gripper clamp 담당)")
     ap.add_argument("--loop", action="store_true", help="완료 후 재집기 반복(tf 재조회·재계획)")
