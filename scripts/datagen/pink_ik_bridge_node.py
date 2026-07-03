@@ -199,7 +199,6 @@ def pickplace_waypoints(cube, bowl, p):
         ("lift",       grasp + np.array([0, lb, lift]),     CLOSE, False),
         ("over_bowl",  bowl + np.array([0, 0, bz]),         CLOSE, False),
         ("release",    bowl + np.array([0, 0, bz]),         OPEN,  False),
-        ("retreat",    bowl + np.array([0, 0, bz + 0.03]),  OPEN,  False),
     ]
 
 
