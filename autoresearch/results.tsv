@@ -1,0 +1,51 @@
+commit	success_rate	ever_rate	status	description
+cf2ff8c	0.45	0.45	keep	baseline (무수정)
+444d1b0	0.50	0.50	keep	grasp 폐루프 강하(droop 헛닫힘 fix)
+6b8889c	0.55	0.55	keep	grasp 강하 단조화(oscillation·bulldoze fix)
+b98e751	0.50	0.50	discard	wrist_flex 벌점 — planned wf≠measured droop, 미회복+ep15 회귀
+f322fe0	0.55	0.55	discard	joint-space full-vector 보상 — 동률·lateral 스윙 bulldoze(ep4/5/9 큐브 5cm 밀림)
+48ac758	0.55	0.55	discard	wrist-only 보상 — 동률; ep4/9 froze(droop=shoulder/elbow far-reach), ep5 큐브밀림
+8bbe93c	0.50	0.50	discard	open 개구 47→65 — 하락, Mode B 미개선·ep15 flip
+5e5d34c	0.45	0.45	discard	grav comp gain1 — URDF 관성 과소로 보정 미약(ep4 z불변)·전궤적 교란
+40e1e77	0.60	0.60	keep	elevation-체인 적분 feed-forward droop 보상
+f04c109	0.60	0.60	keep	near-bowl swept_clear 완화 — ep7/11 dead-zone→graspable(Mode B 편입), correct enabler(score 동률=noise)
+5480ccf	0.50	0.50	discard	3D FF 트리거 — solver err 이미 ~1mm(frame 오해)라 Mode B 무발동, OK 케이스 교란
+a1f5xxx	0.60	0.60	discard	delta_bias 3mm — Mode B 미개선(c_hat=pan평면이라 ρ-dependent 비대칭 못잡음), killed
+837f754	0.65	0.65	keep	tcp_dy -0.019→-0.010 — ρ-aware Mode B fix, ep7/11 recovered
+302ec22	0.60	0.60	discard	tcp_dy -0.005 과다 — ep2/13 잡았으나 ep6/8/17 PASS 파손(단일 global tcp_dy 한계)
+c5c7972	0.65	0.65	keep	헛닫힘 재파지 탐색 — ep13 recovered(+12mm), g-rise 로 mechanism 검증, ep6=noise
+6db18ed	0.60	0.60	discard	retry_max 4 — marginal catch(g~14) noise 로 overshoot, ep13/19 파손
+cc90a9e	0.50	0.50	discard	z_g 0.05 deeper — tip-desk 접촉(경고 confirmed), ep7/17/19 파손
+92eaac4	0.65	0.65	discard	재접근 재파지 — grip g=20 partial(edge contact) 후 lift slip, gripper-cube geometry 한계
+9896af2	0.55	0.55	discard	z over-reach — 방향 틀림(undershoot=outward not z)·marginal PASS false-trigger 파손
+bec5b14	0.75	0.75	keep	헛닫힘 outward 재파지 — ep14/15 marginal recovered, catch12 no false-trigger
+e616ed6	0.65	0.65	discard	z-down 추가 — ep14/15 파손(과하강), ep13 미회복. outward-only 가 best
+8bef12c	0.65	0.65	discard	re-approach 느려 marginal timeout/disturb(ep6/17 파손), ep2/13 direction 여전히 틀림
+4cbae91	0.60	0.60	discard	adaptive gradient — small-lift+flip+5retry 가 marginal cluster(ep14/15/17) 파손, ep2/13 미회복. 단순 outward-lateral 이 robust optimum
+0278bd5	0.65	0.65	discard	post-lift verify — thresh/timing false-trigger marginal(ep14/17), 재파지 outward 방향 ep4/5/9 미회복
+93e545e	0.65	0.65	discard	gentle lift leg×1.8 — marginal cube 예산초과 timeout(ep14/17 파손), ep4/5/9 미회복
+DEBUG	0.75	0.75	discard	hover wrist-cam 검출 불안정(n 3~23566, off-center PASS/FAIL 미분리)·FK mismatch 는 descend 서 발생해 hover 서 안보임 → 단순 CV visual servo 불가
+5b317a3	0.00	0.00	crash	follower_calibration B offset — 전파괴 0%(through ep11)+timeout, device-encoder offset ≠ pink-URDF↔sim-USD 모델 mismatch
+abe8ace	0.65	0.65	discard	full-vector FF — ep4/9 여전히 무강하(hard limit 확정, singularity 아님)+marginal(ep14/15) 파손. elevation-only 가 best
+CALIB	0.65	0.65	analysis	 held-cube=simTCP 981프레임 calib: FK mismatch config-dependent(raw 18mm RMS, linear-in-q 잔차 7.8mm>tol). ep2/13 partial-fittable, ep4/9 는 별개 reach limit(FF windup)
+exp28	541d23d(reverted)	0.70	0.70	no-op	FK 선형보정 hold-fit: grasp config 전부 외삽>30mm cap→APPLIED 0/20. hold(팔↑)↔grasp(팔↓) q-region 불연속, mm은 hold서만 관측가능(chicken-egg 물리레벨 확정)
+exp29	reverted	0.65	0.65	regression	ρ-gated closing-axis 재파지: 큰|ρ| fail을 ±closing-axis(8/16mm) 탐색으로 회복 시도. 16회 발동했으나 ep4/5/9/13/14 미회복+ep17 파손. large-ρ miss는 closing-axis lateral 아님(가설 기각)
+exp30	reverted	0.60	0.60	regression	cube_face_yaw(6-face top-edge 추출, atan2 z-yaw 대체): ep2/4/5/9/13 불변(yaw무관 확정=good face)+ep6/15/16 파손. ★grasp_sweep 17/17 lift(ρ-39°포함)=기하 무죄→fail은 execution/input. rho-aware-sweep tooling도 함께 제거됨
+exp31	reverted	0.60	0.60	regression	close를 q_meas→q_g(planned)로(sweep 정합 시도): 지속 fail(ep2/4/5/9/13) 불변+ep6/15/16 marginal 파손. close pose 도 원인 아님. 큐브 대칭 확인(collision centroid 0)—asset 무죄. exp30과 동일 결과=marginal 이 perturbation 에 flip
+exp32	30053e4	0.70	0.70	no-gain	관절여유 soft barrier(임계20°·k0.3): edge/close top-down 대신 tilt 유도. fail margin 21-32°>임계라 tilt 4/20 미발동. 물리 α-sweep 확증(edge=+10/20 lift)
+exp33	c846906	0.70	0.70	no-gain	barrier 임계 0.35→0.50rad(29°): fail margin 포착 의도. tilt 여전 4/20(k0.3 barrier<e_g차). trace: ep9 α+10 e_g4.9mm selectable
+exp34	5add223	~0.67	partial	progress+bulldoze	barrier k1.5: tilt 채택 급증(7/14). ep2/4(prior fail) 잡힘 확인. 그러나 tilt approach+regrasp가 일부 큐브 bulldoze(204-433mm 이동)+eval crash. tilt 방향 검증됨, 실행부 bulldoze가 잔여 블로커
+exp35	ba1004e(reverted)	0.65	0.65	regression	tilt 수직corridor: clean 완주 0.65(fails ep2/4/5/9/13/14/17). 이전 0.80은 exp34재run 컨테이너 tangle 아티팩트. crash는 vertical corridor로 해소(20완주)하나 tilt barrier가 ep2/4 못잡고 ep14/17 파손=net regression. margin barrier가 too blunt(config별 tilt 아님)
+exp36	cec2651(reverted)	0.75	0.75	wash	position-gated tilt(edge |x|>0.18/|y|<0.10→α12)+수직corridor: edge fail(ep4/9) 잡음 but edge-position PASS 큐브(ep14/19) 과-tilt로 파손=net 0.75. ★결정: tilt-need는 position+yaw+config 의존(ep4/9 fail vs ep14/19 pass @유사위치)→단순 discriminator(margin/position) 불가+grasp_sweep yaw 고정이라 oracle도 불가. tilt 물리검증됐으나 selectable 아님
+exp37	bdc5b2e(reverted)	0.70	0.70	regression	반응형 tilt 재파지(top-down 헛닫힘시 tilt recovery): ep9(edge) 못잡음(reactive tilt<planned, 실패자세서 회복이라 약함)+ep6 marginal 파손(outward 재파지 대체 손실)=0.70. tilt 3구조(predictive exp32-35·position exp36·reactive exp37) 모두 net-improve 실패=fundamental trade-off
+exp38	40d2457(reverted)	0.65	0.65	regression	strong tilt 재파지(retry3, outward 후): ep4/9(edge) 여전 실패(outward-first가 시간예산 소진→tilt 너무 늦음)+ep6/14 marginal 파손(추가retry). ★planned-vs-reactive tension 확정: planned(exp36)=edge잡으나 over-tilt(0.75 wash)·reactive(exp37/38)=passing보존하나 too late/weak+marginal파손(0.65-0.70). tilt 4형태 全 net-improve 불가
+exp39-servo	uncommitted	0.75	0.75	★BREAKTHROUGH-wash	wrist-cam closed-loop visual servo(node-file 내): _cube_dev(gray felt 검출→target offset)→gripper XY 재-IK→settle→수렴. 캘리브 kx+1/ky-1/gain0.00026. ★Mode B(ep2/ep13, 11실험 全 미해결) 물리 수렴·FIX 확인. 그러나 near-thresh marginal(ep14/17) 과-servo로 파손=net 0.75. thresh 45→70 튜닝 중
+exp40	2108a9e(reverted)	dev-gated reactive servo(arm-dev 40px): Mode B(dev>=40)만 servo, marginal(dev<40)은 outward	0.70	REGRESSION. +2 Mode B(ep2/13) fixed, -3 far-marginal(ep14/15/17) broken. 서보 3변종 모두 <=0.75 확정(predictive 0.75·reactive 0.70·dev-gate 0.70). 서보=Mode B 고치나 far-marginal 파손 불가피. DISCARD
+exp41	06cd8a3(reverted)	sink FF windup clamp 25→45°: far-reach droop(edge) 보상 시도	0.70	REGRESSION. 진단 확정: far-reach edge(ep4/5/9)=Jacobian-limited droop(팔 extension서 elevation FF가 TCP z 못내림, z 0.081 stuck at ff[35,-41]), clamp-limited 아님→clamp 상향 무효. 게다가 marginal ep14 파손(clamp45 overcommand). edge=tilt(geometry)만 해결가능. DISCARD
+exp42	0b78cf9	sink-stall reactive tilt(force_alpha=15, stall_after10/margin16mm)	0.75	WASH but ★기전 작동: ep4 edge FIXED(11실험+FF clamp 다 실패한 far-reach droop을 tilt로 잡음)+ep14 marginal도 tilt로 catch. discriminator 청정(5 fire 전부 droop-stall, 정상 10ep 무발동). 그러나 ep5/9/17은 tilt가 z 9~11mm 내리나 episode TIME 부족으로 tilted sink 미수렴(0.070서 close)→헛닫힘. net +1(ep4)-1(ep17)=0.75. fix=수렴시간(조기발동+빠른 재접근)
+exp43	d5a30e5(reverted)	sink-stall tilt: stall_after 10→5 + stall_d_app 0.05(짧은 재접근)	0.65	REGRESSION. 조기발동+짧은접근이 far-edge ep9는 FIX(수렴시간↑)했으나 short approach(0.05, hover 0.04 근접)가 near-marginal descent 를 급격하게 만들어 ep14/15/17/19 4개 파손. +2(ep4,9)-4=−2. short approach 유해 확정. 조기발동만 분리 재시도(exp44)
+exp44	(reverted)	sink-stall tilt 조기발동만(stall_after 10→5, d_app 0.09)	0.70	REGRESSION. 조기발동(stall_after 5)이 marginal ep14/17 파손+ep9 미fix. exp42(after10)이 tilt 최선(0.75). 3변종 결론: stall-trigger 가 edge+marginal 둘다 발동→marginal 상쇄. ★clean discriminator=outward(edge는 outward 실패·marginal은 outward catch)→tilt 를 첫 outward 실패後 발동(exp45)
+exp45	(reverted)	outward-gated edge-tilt: tilt trigger 첫 outward 실패後	0.65	REGRESSION. outward false-catch(ep4/5/9 는 outward 가 g>=catch_min 주나 lift 서 slip)가 edge-tilt 차단→edge 미fix. boundary marginal(ep14/17)은 outward#1 이 가끔 empty→tilt 발동→파손. tilt timing 딜레마 확정: early=marginal 파손(exp42)·post-outward=edge 차단(exp45). ep4(edge)와 ep17(marginal)은 stall 깊이 동일(~21mm)+outward g 동일→node 구별 불가
+exp46	(reverted)	cube-z-follow slip-tilt: lift 중 cube 안따라오면 tilt	0.70	REGRESSION. discriminator 옳음(ground-truth catch, marginal 대부분 무발동 보존·slip 정확검출=Mode B ep2 fire 확인). 그러나 ①edge false-negative: empty close edge 는 outward retry 먼저→lift 늦음→slip-tilt 너무 늦게 발동, 재파지 예산 부족 미catch ②ep17 false-positive: 느리게 오르는 marginal grip 이 check 순간(tcp+0.03) cube 아직 <slip_thresh→false slip→tilt→파손. timing/threshold 정밀튜닝 필요(추가 cycle)
+exp47	(reverted)	(user) 헛닫힘 재파지 wide-open 80	0.65	REGRESSION. wide-open 이 far-edge 안잡음(오프셋=수직 위+뒤 droop이라 수평 개구확대 무효)+near-bowl marginal(ep6/14) bulldoze 파손. 사용자 unlock: 수직하강 불요→shallow/side approach 로 droop 회피(exp48)
+exp48	(reverted)	(user unlock)droop-avoidance shallow via elevation limit-margin	0.75	WASH. ★margin proxy 무용 확정: fail(ep2/5/9/13/14) margin 25-32° 가 PASS 와 完 산재(margin=25 ep5 FAIL vs ep8 PASS; margin=32 ep13 FAIL vs 5개 PASS). shallow 선택 불가. + exp49 universal shallow(alpha_min): 자기검증서 radial α-tilt 가 bell-end(α=20 unplannable)·near-arm(α=12 unplannable) 못 잡고 g_err 11-17mm 부정확 → universal 불가. radial tilt 로는 side-edge 도달 불가
