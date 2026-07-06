@@ -279,6 +279,74 @@ services:
     stdin_open: true
     tty: true
 
+  # ── cuRobo datagen (multi-env pick-place VLA 데이터 생성, in-process) ──────────
+  # so101-isaac-sim 스택 + cuRobo v0.8 collision-free motion planning. bridge 와 분리
+  # (cuRobo 는 datagen 에만 필요 → bridge 이미지 불변). cuRobo 가 env batch 를 한 번에
+  # 풀어 LeRobot v3 로 기록 — ROS·policy-server 불요(정책 아님, 결정적 motion planning).
+  #
+  # ■ 토폴로지 (단일 프로세스·단일 GPU)
+  #   IsaacLab N-env  →  cuRobo batch motion-gen  →  env.step  →  LeRobot v3 writer
+  #
+  # ■ 선행: isaac-sim 이미지 먼저 빌드 (FROM so101-isaac-sim:5.1.0).
+  # ■ 빌드:  docker compose -f docker/docker-compose.yaml build curobo-datagen
+  # ■ 검증:  docker compose run --rm curobo-datagen \
+  #            python -c "import torch,curobo,warp; print('curobo', curobo.__version__)"
+  # ■ 실행:  docker compose --env-file .env -f docker/docker-compose.yaml run --rm curobo-datagen
+  #
+  # ※ 현재 datagen 모드 = record_state_machine.py(SM+DLS-IK). cuRobo 드라이버
+  #   (record_curobo.py)는 후속 — 이 서비스는 그 드라이버가 꽂힐 자리다.
+  curobo-datagen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cuRobo
+    image: so101-curobo-datagen:5.1.0
+    container_name: so101_curobo_cuRobo
+    restart: "no"
+    # ── GPU (Isaac 물리·렌더 + cuRobo motion-gen, 같은 GPU 공유) ──────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # ── 볼륨 (isaac-sim 서비스와 동일: 캐시 named volume + 프로젝트 코드 bind) ──────
+    volumes:
+      - isaac_lab_cache_kit:/isaac-sim/kit/cache:rw
+      - isaac_lab_cache_ov:/root/.cache/ov:rw
+      - isaac_lab_cache_pip:/root/.cache/pip:rw
+      - isaac_lab_cache_gl:/root/.cache/nvidia/GLCache:rw
+      - isaac_lab_cache_compute:/root/.nv/ComputeCache:rw
+      - isaac_lab_logs:/root/.nvidia-omniverse/logs:rw
+      - isaac_lab_data:/root/.local/share/ov/data:rw
+      - isaac_lab_docs:/root/Documents:rw
+      - ../src:/workspace/src
+      - ../scripts:/workspace/scripts
+      - ../assets:/workspace/assets
+      - ../outputs:/workspace/outputs
+      # datagen LeRobot v3 출력 영속 (호스트 ./datasets)
+      - ../datasets:/workspace/datasets
+    env_file:
+      - ../.env
+      - ../env/${POLICY_PROFILE:-groot_n15}.env
+    environment:
+      ACCEPT_EULA:                  "Y"
+      PRIVACY_CONSENT:              "Y"
+      NVIDIA_VISIBLE_DEVICES:       all
+      NVIDIA_DRIVER_CAPABILITIES:   compute,utility,graphics
+      # datagen 파라미터 (isaac-sim-entrypoint.sh datagen 모드)
+      DATAGEN_TASK:                 "${DATAGEN_TASK:-SimToReal-SO101-PickCube-v0}"
+      NUM_DEMOS:                    "${NUM_DEMOS:-50}"
+      NUM_CUBES:                    "${NUM_CUBES:-1}"
+      DATAGEN_EXTRA_ARGS:           "${DATAGEN_EXTRA_ARGS:---headless}"
+      # 원격 관전(선택): LIVESTREAM=1 + PUBLIC_IP 지정 시 :49100 WebRTC
+      LIVESTREAM:                   "${LIVESTREAM:-0}"
+      PUBLIC_IP:                    "${PUBLIC_IP:-}"
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+
 # ── 공유 볼륨 ──────────────────────────────────────────────────────────────
 volumes:
   hf_cache:
