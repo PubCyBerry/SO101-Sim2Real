@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "discord@claude-plugins-official": true,
+    "ponytail@ponytail": true
+  }
+}
