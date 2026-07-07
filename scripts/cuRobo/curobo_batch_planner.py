@@ -18,7 +18,7 @@ BatchMotionPlanner 백엔드는 그 hook 으로 남겨두되, 계획 로직은 �
   ④ transit  = 그릇 상공(TRANSIT_Z) 이동, bank goalset(bowl obstacle 회피 + blob).
                드롭 XY 는 그릇 중심서 base(원점) 쪽으로 BOWL_PULL 당김(near-rim 착지)
   ⑤ release  = 그릇 상공서 settle hold → detach + gripper 개방(하강 없음, 큐브 낙하)
-  ⑥ retreat  = init(home=start) 자세로 cspace 복귀(empty-world, gripper open)
+  ⑥ retreat  = init(home=start) 자세로 cspace 복귀(full scene=hollow bowl ring, gripper open)
 프레임=base_link→solver rotz(90).
 
 collision 구성(cuRobo 정석 미러): target 큐브 = world obstacle("cube", per-request pose 주입,
@@ -45,7 +45,7 @@ import yaml
 import zmq
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo._src.geom.sphere_fit import SphereFitType
-from curobo._src.geom.types import Cuboid, SceneCfg
+from curobo._src.geom.types import Cuboid
 from curobo._src.motion.motion_planner_batch import BatchMotionPlanner
 from curobo.kinematics import Kinematics, KinematicsCfg
 from curobo.motion_planner import MotionPlannerCfg
@@ -87,6 +87,57 @@ TRANSIT_Z = 0.25   # ④ transit: 그릇 상공 안전고도(urdf, +BASE_T[2] �
                    # 폭에 먹혀 동적 그릇을 스침(사용자 "approach 중 그릇 침"). 5cm 올려 여유 확보.
 BOWL_PULL = 0.03   # ④ 드롭 XY 를 그릇 중심서 base(원점) 쪽으로 당김(m). 드롭이 그릇 far 쪽으로
                    # 너무 멀다(사용자 보고) → near-rim 쪽으로 당겨 착지. bowl obstacle 은 실좌표 유지
+# ── bowl obstacle = hollow rim ring (오목 그릇 fit) ───────────────────────────────
+# 실제 그릇 = 위로 열린 절두원뿔 shell(rim r0.075·높이 0.070·벽 4mm, author BOWL_R_TOP 등).
+# cuRobo world obstacle 은 solid convex(cuboid/mesh/voxel)뿐 — 오목 그릇을 solid box 로 넣으면
+# 내부(빈 공간)가 팔·retreat 자세와 허위충돌 + 0.15m 정사각 과다커버. rim 벽만 N× cuboid octagon
+# 으로 근사(내부 hole+상단 open)해 keep-out 유지·허위충돌 제거 → empty-world swap 없이 full scene.
+# ★박스는 다각형 '변'이라 tangential w≈변길이(2·RC·tan(π/N))+겹침, radial d 는 rim(0.075)을
+# 코너까지 덮을 만큼 두꺼워야(얇으면 코너 azimuth 에 벽 구멍) — 0-gap 은 _assert_bowl_ring_sealed 가 강제.
+BOWL_RING_N = 8
+BOWL_RING_RC = 0.080                   # box 중심 반경(m) — 벽 band [RC±d/2] 이 실제 rim 0.075 포함
+BOWL_RING_H = 0.075                    # ring 높이(테이블→rim)
+BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height] (scratch/search_ring.py 0-gap 검증)
+
+
+def _bowl_ring(bx, by):
+    """오목 그릇 rim → hollow octagon ring(BOWL_RING_N× cuboid) dict{name:{dims,pose}}.
+    각 box = 다각형 '변'(local-x=radial, quat=Rz(θ)), 배치 반경 RC → 내부 hole+상단 open.
+    중심(bx,by) 이동(DR)마다 재계산."""
+    z_c = TABLE_TOP + BOWL_RING_H / 2
+    ring = {}
+    for i in range(BOWL_RING_N):
+        th = 2 * math.pi * i / BOWL_RING_N
+        qw, qz = math.cos(th / 2), math.sin(th / 2)
+        ring[f"bowl_{i}"] = {
+            "dims": list(BOWL_RING_DIMS),
+            "pose": [bx + BOWL_RING_RC * math.cos(th),
+                     by + BOWL_RING_RC * math.sin(th), z_c, qw, 0.0, 0.0, qz]}
+    return ring
+
+
+def _assert_bowl_ring_sealed():
+    """로드시 1-check: (a) hole 이 drop+pad 여유 (b) rim 원둘레 전 azimuth 벽 연속(gap 없음).
+    얇은 radial d 는 코너에 벽 구멍→팔이 그릇 파고듦 → 임포트서 즉시 실패(scratch/search_ring.py 근거)."""
+    hole = BOWL_RING_RC - BOWL_RING_DIMS[0] / 2
+    assert hole >= BOWL_PULL + 0.028, f"bowl ring hole {hole:.3f}m < drop+pad(~0.028)"
+    ring = _bowl_ring(0.0, 0.0)
+
+    def _inside(px, py, e):
+        x, y, _z, qw, _qx, _qy, qz = e["pose"]
+        dx, dy, _dz = e["dims"]
+        th = 2 * math.atan2(qz, qw)
+        c, s = math.cos(-th), math.sin(-th)
+        return abs(c * (px - x) - s * (py - y)) <= dx / 2 and abs(s * (px - x) + c * (py - y)) <= dy / 2
+
+    for k in range(720):
+        ph = 2 * math.pi * k / 720
+        px, py = 0.075 * math.cos(ph), 0.075 * math.sin(ph)  # 실제 rim 원
+        assert any(_inside(px, py, e) for e in ring.values()), \
+            f"bowl ring wall gap @ {math.degrees(ph):.0f}° — radial d↑ 또는 N↑"
+
+
+_assert_bowl_ring_sealed()
 ALPHAS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]  # goalset fallback tilt ladder(deg)
 # grasp 후보 (α, sx) — ★tilted 도 허용(사용자 지시). 수직(α=0)은 긴 jaw(pad center tcp 아래 46mm)
 # +책상 clearance 때문에 pad center 가 cube 상단 edge(+9mm 위)에 닿아 corner grip → tilt(α~40-55°)
@@ -173,23 +224,19 @@ class PickPlacePlanner:
         self.n_envs = n_envs  # 배치 확장 hook (현재 로직은 단일 env)
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
-        rim_z = TABLE_TOP + 0.075
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
         # 안에 들어가 매 plan 이 start-collision 으로 거부됨. 대신 grasp 깊이는 pad-frame clamp
         # (TABLE_TOP+TABLE_MARGIN)로 제한 → "책상 obstacle+너무 깊은 descend reject" 를 clamp 로 대체.
+        # bowl = hollow rim ring(_bowl_ring) — 오목 그릇 내부를 비워 retreat hover 허위충돌 방지.
         world = {"cuboid": {
-            "bowl": {"dims": [0.15, 0.15, 0.075],
-                     "pose": [bx, by, (TABLE_TOP + rim_z) / 2, 1, 0, 0, 0]},
+            **_bowl_ring(bx, by),
             # target 큐브 world obstacle — per-request update_obstacle_pose 로 실좌표 주입
             # (placeholder 는 far). approach 중 팔 링크의 큐브 관통 방지.
             "cube": {"dims": [CUBE_DIMS] * 3, "pose": [9.0, 9.0, 0.02, 1, 0, 0, 0]}}}
         wf = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
         yaml.safe_dump(world, wf); wf.close()
-        # ⑥ retreat 용 월드 스왑: release 잔여 start 가 bowl 솔리드 cuboid 와 허위 충돌
-        # (실제 그릇은 오목) → start-collision 거부. retreat 세그먼트만 빈 월드로 계획.
-        self.scene_full = SceneCfg.create(world)
-        self.scene_empty = SceneCfg.create(
-            {"cuboid": {"far_dummy": {"dims": [0.01, 0.01, 0.01], "pose": [9, 9, 9, 1, 0, 0, 0]}}})
+        # planner 는 wf.name(=world) 로 로드 → per-request 는 update_obstacle_pose 로 그릇/큐브
+        # 좌표만 갱신. hollow ring 이라 retreat·self-check 모두 full scene(옛 empty-world swap 제거).
 
         # FK bank = transit 등 일반 reach goalset 용(bank pose 그대로 = 도달성 존재증명)
         kin = Kinematics(KinematicsCfg.from_robot_yaml_file(ROBOT))
@@ -419,14 +466,14 @@ class PickPlacePlanner:
             self._diag(f"[cube-obst] FAIL {type(e).__name__}: {e}")
 
     def _place_bowl_obstacle(self, bx, by):
-        """실 그릇 좌표(urdf)를 world "bowl" obstacle 에 주입 — 기본 pose 는 __init__ 값이라
+        """실 그릇 중심(urdf)을 8× rim-ring obstacle 에 주입 — 기본 pose 는 __init__ 값이라
         실제 그릇이 다른 곳(밀림·DR)이면 transit 이 엉뚱한 곳을 피함. 매 요청 동기화."""
         try:
-            rim_z = TABLE_TOP + 0.075
-            bpose = Pose(position=torch.tensor([[bx, by, (TABLE_TOP + rim_z) / 2]],
-                                               device="cuda", dtype=torch.float32),
-                         quaternion=torch.tensor([[1.0, 0, 0, 0]], device="cuda", dtype=torch.float32))
-            self.p.scene_collision_checker.update_obstacle_pose("bowl", bpose, env_idx=0)
+            for name, ent in _bowl_ring(bx, by).items():
+                x, y, z, qw, qx, qy, qz = ent["pose"]
+                bpose = Pose(position=torch.tensor([[x, y, z]], device="cuda", dtype=torch.float32),
+                             quaternion=torch.tensor([[qw, qx, qy, qz]], device="cuda", dtype=torch.float32))
+                self.p.scene_collision_checker.update_obstacle_pose(name, bpose, env_idx=0)
         except Exception as e:
             self._diag(f"[bowl-obst] FAIL {type(e).__name__}: {e}")
 
@@ -528,10 +575,8 @@ class PickPlacePlanner:
         q_home = start.clone()   # ⑥ retreat 가 여기로 복귀 → 다음 start 항상 init
         self._diag(f"[start] names={self.p.joint_names} recv={start_rad} "
                    f"clamped={start.position.view(-1).tolist()}")
-        # start 자체가 self-collision 인지 격리(empty-world cspace start→start).
-        self.p.update_world(self.scene_empty)
+        # start reachability 확인 (full scene; home=folded rest 라 obstacle 무관).
         self_ok = self._extract(self.p.plan_cspace(q_home, start), start)[0] is not None
-        self.p.update_world(self.scene_full)
         self._diag(f"[start] self_reachable={self_ok}")
         self._place_cube_obstacle(cube)
         self._place_bowl_obstacle(bx, by)
@@ -576,11 +621,9 @@ class PickPlacePlanner:
         if attached:  # release 직전 detach → retreat 는 빈 그리퍼로 계획
             self._detach()
 
-        # ⑥ RETREAT — init(home) 자세로 cspace 복귀(gripper open). bowl 근접 잔여 자세라
-        #    empty-world 로 계획(bowl 오목 허위 start-collision 회피).
-        self.p.update_world(self.scene_empty)
+        # ⑥ RETREAT — init(home) 자세로 cspace 복귀(gripper open). hollow rim ring 덕에 그릇
+        #    내부 허위충돌 없어 full scene 서 계획(옛 empty-world 스왑 불요).
         retreat, _ = self._extract(self.p.plan_cspace(q_home, q_transit), q_transit)
-        self.p.update_world(self.scene_full)
 
         phases = {"approach": pre, "grasp": desc, "lift": lift,
                   "transit": transit, "retreat": retreat}
