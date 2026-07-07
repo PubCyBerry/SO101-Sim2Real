@@ -62,13 +62,24 @@ GRIP_INIT = 0.0    # ⑥ retreat 끝 gripper 복원값(feature) = SM init(-10°=
 # open 60→75(2026-07-06): 조준 완벽(xy 3mm)·fold 정상인데 무파지인 straddle-마진 실패 모드 해소.
 # 60 은 pad 간격이 큐브+5mm 수준이라 tangential ~3mm 오차로 moving jaw 가 모서리 위로 하강 → squirt.
 # (yaw 미정렬 대각 접촉은 어떤 close 목표로도 squirt-out → 후보 pose 를 ρ=−Δψ/cosα 로 face 정렬.)
-CLOSE_STEPS = 38   # close ramp 프레임 — open 75 확대분 보상해 폐합 각속도 유지(급폐합=drop 레버)
-OPEN_STEPS = 20    # ⑤ release: gripper 개방 ramp 프레임(정지 상태 투하)
+CLOSE_STEPS = 5   # close ramp 프레임 — open 75 확대분 보상해 폐합 각속도 유지(급폐합=drop 레버)
+OPEN_STEPS = 10    # ⑤ release: gripper 개방 ramp 프레임(정지 상태 투하)
 TAU_MAX_DEG = 8.0  # |Δψ·tanα| 허용(deg) — tilted face-align 근사 손실 게이트(pink 규약)
 TABLE_TOP = 0.035 + BASE_T[2]  # 책상 상판 z (urdf 프레임)
 K = 40             # goalset 크기(bank reach·pregrasp)
-PRE_BACK = 0.12    # pre-grasp 후퇴(m). 12cm=jaw tip(tcp+PAD_LOW_OFF) 이 큐브 obstacle 위로 떠서
-                   # ladder 를 jaw-collision ON 으로 계획 가능(접근이 fixed jaw 로 큐브 안 쓸게)
+# ── pre-grasp 후퇴(m) = descend 거리 — 큐브 거리 적응형(사용자 제안) ─────────────────
+# jaw tip(tcp+PAD_LOW_OFF)이 큐브 obstacle 위로 떠서 ladder 를 jaw-collision ON 으로 계획.
+# 고정 0.12 는 pad-center 조준(+4.6cm)과 겹쳐 근거리(pan 축서 r≈0.12) pre IK 전멸(실측 pre z
+# 0.186 unreachable / 0.146 solved) → r 에 선형: 근거리 0.06(도달성) ~ 원거리 0.12(클리어런스).
+PRE_BACK_MIN, PRE_BACK_MAX = 0.06, 0.12
+PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24  # pan 축 기준 r≤R0→MIN · r≥R1→MAX (사이 선형)
+
+
+def _pre_back(cube):
+    """큐브(solver frame) → pan 축 거리 r 로 pre-grasp 후퇴량 보간."""
+    r = math.hypot(cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1])
+    t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
+    return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
 GRASP_Z_OFF = -0.008  # grasp 깊이 미세보정(m): pinch 가 큐브 상단걸침 → 8mm 하향(clamp 안 걸릴 때만)
 # ── bounded shallow-preload grasp (stall-press 대체) ─────────────────────────────
 # 물리 pad 최저점(fixed jaw tip: gripper z≈-0.092, r 0.008 → -0.100)이 tcp(z-0.025) 아래로
@@ -82,9 +93,10 @@ TABLE_MARGIN = 0.004  # pad 최저점을 table_top 위 이만큼서 정지. 사�
                       # 모델은 정확히 이 값이나 IK 잔차+tilt 투영오차가 먹으므로 4mm 조준 → 실제 ≥2mm.
 SETTLE_STEPS = 5     # ⑤ release 전 그릇 상공서 정지 hold(안정) 프레임 — 사용자 요청
 LIFT_BACK = 0.10   # lift = grasp 서 tool -z 최대 10cm 역행(approach 되감기)
-TRANSIT_Z = 0.25   # ④ transit: 그릇 상공 안전고도(urdf, +BASE_T[2] 는 사용처). 0.20→0.25:
-                   # FK 실측 옛 0.20 은 그릇 rim edge 통과 시 jaw tip 이 rim 위 0.8cm 뿐 → tilt+cube
-                   # 폭에 먹혀 동적 그릇을 스침(사용자 "approach 중 그릇 침"). 5cm 올려 여유 확보.
+TRANSIT_Z = 0.21   # ④ transit: 그릇 상공 안전고도(urdf, +BASE_T[2] 는 사용처). 이력: 0.20 은
+                   # rim 스침(jaw tip rim+0.8mm) → 0.25 로 회피했으나 드롭 과고(사용자 "너무 높다")
+                   # → bowl ring keep-out 도입 후 planner 가 rim 을 스스로 피해 0.21 로 인하.
+                   # 스침 재발 시 ring dims/RC 튜닝이 먼저, 그다음 이 값 ↑.
 BOWL_PULL = 0.03   # ④ 드롭 XY 를 그릇 중심서 base(원점) 쪽으로 당김(m). 드롭이 그릇 far 쪽으로
                    # 너무 멀다(사용자 보고) → near-rim 쪽으로 당겨 착지. bowl obstacle 은 실좌표 유지
 # ── bowl obstacle = hollow rim ring (오목 그릇 fit) ───────────────────────────────
@@ -333,8 +345,8 @@ class PickPlacePlanner:
         yax = np.array([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)])
         zax = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])  # approach
         cc = np.array(cube[:3])
-        # descend = pre 서 PRE_BACK(=pad-at-face-center 조준 backoff) 하강, table clamp(plan grasp 동일)
-        tstar = PRE_BACK; zaz = float(zax[2])
+        # descend = pre 서 _pre_back(=pad-at-face-center 조준 backoff, r 적응) 하강, table clamp 동일
+        tstar = _pre_back(cube); zaz = float(zax[2])
         if zaz < -1e-3:  # 하강 중 — pad 최저점이 table+margin 아래로 못 가게 clamp
             tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pos[2])) / zaz - PAD_LOW_OFF)
         grasp_tcp = pos + tstar * zax
@@ -382,7 +394,7 @@ class PickPlacePlanner:
             tcp_tgt = np.array(xyz) + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n - R @ fic
             ax_pt = tcp_tgt - R @ tcp_lat  # roll 축 점(고정점)
             phi = math.atan2(ax_pt[1] - PAN_AXIS_XY[1], ax_pt[0] - PAN_AXIS_XY[0])
-        return tcp_tgt - PRE_BACK * z_ax, _mat2quat(R), loss
+        return tcp_tgt - _pre_back(xyz) * z_ax, _mat2quat(R), loss
 
     # ── ① approach ──────────────────────────────────────────────────────────────
     def _pre_ladder(self, cube, yaw, start, ladder=None):
@@ -439,7 +451,7 @@ class PickPlacePlanner:
         """① approach = ladder → strict goalset → relaxed goalset. → (traj|None, q_pre, relaxed).
 
         ★ladder 는 jaw-collision ON — 접근 경로가 fixed jaw 로 큐브를 쓸어치지 않게(사용자 보고:
-        "집으러 가다 fixed jaw 로 큐브 쳤어"). PRE_BACK 0.12 라 pre-grasp jaw tip 이 큐브 obstacle
+        "집으러 가다 fixed jaw 로 큐브 쳤어"). _pre_back(0.06~0.12, r 적응) 만큼이라 pre-grasp jaw tip 이 큐브 obstacle
         위로 떠서 ON 계획 가능. goalset fallback 만 jaw off(coverage 우선, marginal pre 허용)."""
         pre, q_pre = self._pre_ladder(cube, yaw, start, ladder)  # jaws ON: 큐브 우회
         relaxed = False
@@ -503,8 +515,16 @@ class PickPlacePlanner:
             return False
 
     def _detach(self):
+        """detach + stale "cube" obstacle 재-disable.
+
+        cuRobo detach() 는 attach 때 disable한 world "cube" 를 **원래 pickup 좌표에** 재활성화
+        하는데, release 후 큐브는 실제론 그릇 안 = pickup 자리는 빈 공간. pickup 이 base 정면
+        (urdf x≈0.2)이면 이 유령 box 가 q_home jaw tip 과 margin 겹쳐 retreat 가
+        "Start or End state in collision" 으로 전멸(bisect 실증: cube-off 만으로 retreat 회복).
+        → 즉시 다시 disable. 다음 요청의 _place_cube_obstacle 이 재배치+재활성."""
         try:
             self._attachment_manager().detach()
+            self.p.scene_collision_checker.enable_obstacle("cube", False, env_idx=0)
         except Exception as e:
             self._diag(f"[attach] detach FAIL {type(e).__name__}: {e}")
 
@@ -584,13 +604,13 @@ class PickPlacePlanner:
         # ① APPROACH
         pre, q_pre, relaxed = self._approach(cube, yaw, start, ladder)
 
-        # ② GRASP — 도착 pre pose FK → approach축(ẑ)으로 PRE_BACK 하강(=pad-at-face-center 조준).
+        # ② GRASP — 도착 pre pose FK → approach축(ẑ)으로 _pre_back(r 적응) 하강(=pad-at-face-center 조준).
         #    ★bounded shallow-preload: 물리 pad 최저점(tcp+PAD_LOW_OFF·ẑ)이 table_top+margin
         #    아래로 못 가게 descend 깊이(tstar)를 clamp → 책상 stall-press 대신 얕은 preload.
-        #    (pre 는 _cand_pose 서 pad center 가 face center 에 앉게 조준·backoff → 하강량=PRE_BACK.)
+        #    (pre 는 _cand_pose 서 pad center 가 face center 에 앉게 조준·backoff → 하강량=_pre_back.)
         app, aq, zax = self._ee_pose_axis(q_pre)
         self._grasp_diag(cube_bl, aq, zax, yaw, relaxed, pre is not None)
-        tstar = PRE_BACK
+        tstar = _pre_back(cube)
         zaz = float(zax[2])
         if zaz < -1e-3:  # 하강 중 — pad 최저점 z ≥ TABLE_TOP+TABLE_MARGIN 로 tstar 상한
             tstar_cap = (TABLE_TOP + TABLE_MARGIN - float(app[2])) / zaz - PAD_LOW_OFF
