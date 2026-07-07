@@ -33,12 +33,13 @@ docker compose -f docker/docker-compose.yaml run --rm curobo-datagen \
 # 2) SM (planner "ready" 로그 뜬 뒤)
 docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
     python /workspace/scripts/cuRobo/pickplace_sm.py \
-    --task SimToReal-SO101-PickCube-DR-v0 --episodes 5 --livestream 2
+    --task SimToReal-SO101-PickCube-DR-v0 --livestream 2
 ```
 
+- **연속 실행**: episode 개념 없음. reset→plan(ZMQ)→replay→관찰 사이클을 무한 반복(livestream 계속 live). Ctrl-C·창 닫기로 종료.
 - 관전: WebRTC `:49100` (원격은 `.env`에 `LIVESTREAM=1` + `PUBLIC_IP`).
 - `--task`: env variant 선택 — `PickCube-v0`(고정) · `-DR-v0`(full DR) · `-DRBase-v0` · `-Eval-v0` · `-DR-Eval-v0`.
-- `--pause`: 에피소드 사이 Enter 대기 (step-through).
+- `--dwell`: 다음 사이클 전 결과 관찰 시간(초, render pump — 물리 정지·조작 가능).
 
 ## planner로 보내는 데이터 (`plan_pickplace` 요청)
 
@@ -64,4 +65,4 @@ shoulder_pan 0 · shoulder_lift -100 · elbow_flex 90 · wrist_flex 50 · wrist_
 3. **성공 판정** — `--bowl_tol`(기본 6cm xy)은 튜닝 knob. 엄밀히는 env `object_in_container`와 맞출 것.
 4. **auto-reset** — `env.step`이 termination에서 auto-reset. SM은 terminal state를 다음 step 전에 읽고 break.
 5. **livestream 상호작용** — plan 대기·종료 중에도 `simulation_app.update()`로 Kit을 계속 pump해야
-   zoom/drag/click이 먹는다(안 그러면 프리즈). `--pause`는 `input()`이라 대기 중 프리즈(opt-in).
+   zoom/drag/click이 먹는다(안 그러면 프리즈). 연속 loop이라 plan 대기·사이클 dwell 중에도 pump 유지.
