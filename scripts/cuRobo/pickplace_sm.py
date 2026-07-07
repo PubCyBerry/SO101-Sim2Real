@@ -13,6 +13,11 @@ half is ``curobo_batch_planner.py`` (curobo-datagen container).
 No ROS, no separate executor: we read cube/bowl poses (``env.scene``) and drive joints
 (``env.step``) directly — the cuRobo planner is the only remote piece.
 
+Multi-env (``--num_envs N``): all N envs reset/plan/replay in **lockstep**. One batch ZMQ
+request carries per-env cube/bowl/start; the planner returns per-env trajectories
+(null = plan fail → that env holds init). Shorter trajectories pad with their last row;
+success is judged per env at the end. Viewer camera follows env 0.
+
 Livestream keyboard (needs --livestream; keys arrive via the WebRTC client):
   N = reset to a NEW random DR layout (robot → init)
   R = reset to the SAME layout as before (robot → init)
@@ -44,6 +49,7 @@ parser = argparse.ArgumentParser(description="SO-101 pick-place SM (Isaac side, 
 parser.add_argument("--task", default="SimToReal-SO101-PickCube-DR-v0",
                     help="registered pick_cube env variant (tasks/pick_cube/__init__.py)")
 parser.add_argument("--planner", default="tcp://127.0.0.1:5599", help="cuRobo planner ZMQ REQ endpoint")
+parser.add_argument("--num_envs", type=int, default=1, help="parallel envs (lockstep plan+replay)")
 parser.add_argument("--grasp_z", type=float, default=0.06, help="grasp height in robot-base frame (m)")
 parser.add_argument("--settle", type=int, default=5, help="physics steps to settle after each reset")
 parser.add_argument("--bowl_tol", type=float, default=0.06,
@@ -90,27 +96,30 @@ INIT_RAD = {j: math.radians(d) for j, d in INIT_POSE_DEG.items()}
 INIT_ACTION = [INIT_RAD[j] for j in SO101_JOINT_ORDER]  # env action / planner start order (rad)
 
 
-# ── task-space reads (robot base frame) ─────────────────────────────────────────
-def _cube_bowl_in_base(env):
-    """Cube (6D) + bowl (xy) in the robot base_link frame — the planner's expected input
-    frame (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
-    Returns cube [x, y, grasp_z, qw,qx,qy,qz] (z = fixed grasp height, since the measured
-    z is noisy at rest) and bowl [x, y]. Planner face-aligns to the cube yaw."""
-    robot = env.scene["robot"]
-    base_p, base_q = robot.data.root_pos_w[:1], robot.data.root_quat_w[:1]
-    cube = env.scene[CUBE]
-    cp, cq = subtract_frame_transforms(base_p, base_q, cube.data.root_pos_w[:1], cube.data.root_quat_w[:1])
-    bowl = env.scene[BOWL]
-    bp, _ = subtract_frame_transforms(base_p, base_q, bowl.data.root_pos_w[:1], bowl.data.root_quat_w[:1])
-    cp, cq, bp = cp[0].tolist(), cq[0].tolist(), bp[0].tolist()
-    return [cp[0], cp[1], args.grasp_z, *cq], [bp[0], bp[1]]
+# ── task-space reads (robot base frame, per-env) ─────────────────────────────────
+def _cubes_bowls_in_base(env):
+    """Per-env cube (6D) + bowl (xy) in each robot's base_link frame — the planner input
+    (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
+    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]). z = fixed grasp height
+    (measured z is noisy at rest); planner face-aligns to the cube yaw quat."""
+    robot = env.scene["robot"].data
+    cp, cq = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
+                                       env.scene[CUBE].data.root_pos_w,
+                                       env.scene[CUBE].data.root_quat_w)
+    wp, _ = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
+                                      env.scene[BOWL].data.root_pos_w,
+                                      env.scene[BOWL].data.root_quat_w)
+    cubes = [[cp[i, 0].item(), cp[i, 1].item(), args.grasp_z, *cq[i].tolist()]
+             for i in range(env.num_envs)]
+    bowls = [[wp[i, 0].item(), wp[i, 1].item()] for i in range(env.num_envs)]
+    return cubes, bowls
 
 
-def _cube_in_bowl(env):
-    """Success proxy: cube center within --bowl_tol (xy) of the bowl center. World frame."""
-    c = env.scene[CUBE].data.root_pos_w[0]
-    b = env.scene[BOWL].data.root_pos_w[0]
-    return bool(torch.linalg.norm(c[:2] - b[:2]) < args.bowl_tol)
+def _cubes_in_bowl(env):
+    """Per-env success proxy: cube center within --bowl_tol (xy) of its bowl. → [bool ×N]."""
+    c = env.scene[CUBE].data.root_pos_w
+    b = env.scene[BOWL].data.root_pos_w
+    return (torch.linalg.norm(c[:, :2] - b[:, :2], dim=1) < args.bowl_tol).tolist()
 
 
 # ── per-step task-space logging ─────────────────────────────────────────────────
@@ -119,8 +128,8 @@ def _wrap180(rad):
 
 
 def _log_state(env):
-    """Print EE (gripper) 6D pose + cube 6D pose + bowl xy each step, all in the robot base
-    frame (task-space). pose = position (m), Euler-XYZ (deg), quaternion (wxyz)."""
+    """Print env-0 EE/cube 6D pose + bowl xy each step, robot-base frame (multi-env 은 env 0 만
+    — 전 env 출력은 로그 홍수). pose = position (m), Euler-XYZ (deg), quaternion (wxyz)."""
     robot = env.scene["robot"].data
     bp, bq = robot.root_pos_w[:1], robot.root_quat_w[:1]
     ee, cube, bowl = env.scene["ee_frame"].data, env.scene[CUBE].data, env.scene[BOWL].data
@@ -186,21 +195,21 @@ def _wait_key(state):
     return None
 
 
-# ── DR layout snapshot / restore (so R replays the exact same scene) ─────────────
+# ── DR layout snapshot / restore (so R replays the exact same scene, all envs) ───
 def _capture_layout(env):
-    """Snapshot the DR cube + bowl world poses so R can restore this exact layout."""
+    """Snapshot per-env DR cube + bowl world poses so R can restore this exact layout."""
     c, b = env.scene[CUBE].data, env.scene[BOWL].data
-    return {"cube": (c.root_pos_w[:1].clone(), c.root_quat_w[:1].clone()),
-            "bowl": (b.root_pos_w[:1].clone(), b.root_quat_w[:1].clone())}
+    return {"cube": (c.root_pos_w.clone(), c.root_quat_w.clone()),
+            "bowl": (b.root_pos_w.clone(), b.root_quat_w.clone())}
 
 
 def _restore_layout(env, layout):
-    """Overwrite the freshly-DR'd cube + bowl with the saved poses (zero velocity)."""
+    """Overwrite the freshly-DR'd cube + bowl with the saved poses (zero velocity), all envs."""
     for name, k in ((CUBE, "cube"), (BOWL, "bowl")):
         pos, quat = layout[k]
         obj = env.scene[name]
         obj.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1))
-        obj.write_root_velocity_to_sim(torch.zeros((1, 6), device=env.device))
+        obj.write_root_velocity_to_sim(torch.zeros((env.num_envs, 6), device=env.device))
 
 
 # ── planner request/reply ────────────────────────────────────────────────────────
@@ -217,8 +226,7 @@ def _recv_plan(sock, poller):
 
 
 def main():
-    # num_envs=1 for the interactive SM (one scene to watch).
-    env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=1)
+    env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     remove_pick_cube_cameras(env_cfg)  # SM plans on state only → skip camera spawn/render
     # Robot spawns AT the start pose from frame 0 (no neutral→init transient that corrupted
     # early inference), with reset jitter zeroed so the start is deterministic.
@@ -228,7 +236,7 @@ def main():
     # Replay the WHOLE planned trajectory: drop the early-cut terminations. `success` fires
     # while the held cube merely passes over the bowl mid-transit (z≈0.13, inside task_done's
     # [+0.005,+0.18] height band) → env would auto-reset before place/release ever runs. Keep
-    # only time_out (30 s = 900 steps ≫ ~442-row traj); judge success at the end via _cube_in_bowl.
+    # only time_out (30 s = 900 steps ≫ ~442-row traj); judge success at the end via _cubes_in_bowl.
     for _term in ("success", "cube_lost"):
         if hasattr(env_cfg.terminations, _term):
             setattr(env_cfg.terminations, _term, None)
@@ -242,7 +250,8 @@ def main():
 
     robot = env.scene["robot"]
     so101_idx = [robot.joint_names.index(j) for j in SO101_JOINT_ORDER]  # articulation → SO101 order
-    hold = torch.tensor(INIT_ACTION, device=env.device, dtype=torch.float32).unsqueeze(0)
+    hold = torch.tensor(INIT_ACTION, device=env.device,
+                        dtype=torch.float32).repeat(env.num_envs, 1)  # (N,6) init hold
 
     sock = zmq.Context().socket(zmq.REQ)
     sock.connect(args.planner)
@@ -265,38 +274,57 @@ def main():
             layout = _capture_layout(env)    # remember this new layout for a later R
 
     def _manipulate():
-        """B: request the cuRobo plan for the current cube and replay it. → (status, val):
-        ("closed",_) window closed · ("abort","N"/"R") R/N mid-run · ("done", success_bool)."""
-        cube_req, bowl_req = _cube_bowl_in_base(env)
-        start = robot.data.joint_pos[0][so101_idx].tolist()  # actual start pose (rad, SO101 order)
-        sock.send_string(json.dumps({"cmd": "plan_pickplace", "cubes": [cube_req],
-                                     "bowl": bowl_req, "start": [start]}))
+        """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
+
+        → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
+        ("done", (n_planned, n_placed)). plan-fail env 는 init hold(카운트는 실패 처리),
+        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다."""
+        cubes, bowls = _cubes_bowls_in_base(env)
+        starts = [robot.data.joint_pos[i][so101_idx].tolist() for i in range(env.num_envs)]
+        sock.send_string(json.dumps({"cmd": "plan_pickplace", "cubes": cubes,
+                                     "bowl": bowls, "start": starts}))
         rep = _recv_plan(sock, poller)
         if rep is None:
             return "closed", None
-        traj = rep.get("trajectories", [None])[0] if rep.get("ok") else None
-        if traj is None:
-            print(f"[sm] plan FAIL cube={cube_req[:2]}", flush=True)
-            return "done", False
-        # planner row = (arm deg ×5, gripper feature) → sim joint radians (SO101 order) → action.
-        tgt = np.stack([policy_feature_to_sim_joint_radians(np.asarray(r, np.float32)) for r in traj])
+        trajs = rep.get("trajectories") if rep.get("ok") else None
+        if not trajs or all(t is None for t in trajs):
+            print(f"[sm] plan FAIL (all {env.num_envs} envs)", flush=True)
+            return "done", (env.num_envs, 0)
+        planned = [t is not None for t in trajs]
+        n_steps = max(len(t) for t in trajs if t is not None)
+        # planner row = (arm deg ×5, gripper feature) → sim joint radians (SO101 order).
+        # plan-fail env 는 init hold, 짧은 궤적은 last-row 패딩 → (T, N, 6) lockstep 텐서.
+        per_env = []
+        for t in trajs:
+            if t is None:
+                per_env.append(np.tile(np.asarray(INIT_ACTION, np.float32), (n_steps, 1)))
+                continue
+            rows = np.stack([policy_feature_to_sim_joint_radians(np.asarray(r, np.float32))
+                             for r in t])
+            if len(rows) < n_steps:
+                rows = np.concatenate([rows, np.tile(rows[-1:], (n_steps - len(rows), 1))])
+            per_env.append(rows)
+        tgt = np.stack(per_env, axis=1)  # (T, N, 6)
         success = None
-        for row in tgt:
+        for step_rows in tgt:
             k = _poll_key(key)
             if k in ("N", "R"):              # cancel remaining actions → next reset command
                 return "abort", k
-            action = torch.as_tensor(row, device=env.device, dtype=torch.float32).unsqueeze(0)
+            action = torch.as_tensor(step_rows, device=env.device, dtype=torch.float32)
             _obs, _rew, term, trunc, _info = _step(env, action)
-            if bool(term[0]) or bool(trunc[0]):
-                success = _cube_in_bowl(env)  # read terminal state before env auto-resets
+            if bool(term.any()) or bool(trunc.any()):
+                success = _cubes_in_bowl(env)  # read terminal state before env auto-resets
                 break
         if success is None:
-            success = _cube_in_bowl(env)
-        return "done", bool(success)
+            success = _cubes_in_bowl(env)
+        n_placed = sum(1 for i, ok in enumerate(success) if planned[i] and ok)
+        for i, (p, ok) in enumerate(zip(planned, success)):
+            print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(ok)}", flush=True)
+        return "done", (env.num_envs, n_placed)
 
     _reset("N")  # initial scene = new DR layout
-    print("[sm] ready — B=plan+manipulate · N=new layout · R=same layout (livestream keys)",
-          flush=True)
+    print(f"[sm] ready — B=plan+manipulate · N=new layout · R=same layout "
+          f"(livestream keys, {env.num_envs} envs)", flush=True)
     n_ok = n_run = 0
     while simulation_app.is_running():
         k = _wait_key(key)
@@ -313,9 +341,10 @@ def main():
             _reset(val)
             print(f"[sm] ABORT → reset ({val})", flush=True)
             continue
-        n_run += 1
-        n_ok += val
-        print(f"[sm] manipulate {'OK ' if val else 'FAIL'} ({n_ok}/{n_run} placed)", flush=True)
+        n_attempt, n_placed = val
+        n_run += n_attempt
+        n_ok += n_placed
+        print(f"[sm] manipulate {n_placed}/{n_attempt} ({n_ok}/{n_run} placed total)", flush=True)
 
     env.close()
     simulation_app.close()

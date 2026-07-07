@@ -19,8 +19,8 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 
 | 파일 | 컨테이너 | 역할 |
 |---|---|---|
-| `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. cube/bowl(base_link) → 5-phase pick-place 궤적(arm deg + gripper feat). 아래 §grasp/place 파이프라인. |
-| `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env. 키보드 상태머신(N/R 리셋 · B plan+manipulate), EE pose 매 step 출력. **결정적 replay 위해 `success`/`cube_lost` termination 비활성**(들린 큐브가 transit 중 그릇 상공 통과 시 `task_done` 조기 발화→place 전 auto-reset 버그. time_out 30s 만 유지, 끝에 `_cube_in_bowl` 판정). |
+| `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. per-env cube/bowl(base_link) → 6-phase pick-place 궤적(arm deg + gripper feat) 리스트. **multi-env = cubes 길이만큼 순차 계획**(검증된 단일 로직 재사용; planner 지연 병목 시 true GPU-batch 로 승격). 아래 §grasp/place 파이프라인. |
+| `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env(`--num_envs N`). 키보드 상태머신(N/R 리셋 · B plan+manipulate) — **N envs lockstep**: 한 번의 B 로 batch plan → per-env 궤적 replay(plan-fail env 는 init hold, 짧은 궤적 last-row 패딩) → per-env `_cubes_in_bowl` 판정. **결정적 replay 위해 `success`/`cube_lost` termination 비활성**(transit 중 그릇 상공 통과 시 `task_done` 조기 발화 버그. time_out 30s 만 유지). |
 | `build_robot_model.py` | curobo-datagen | (기존) SO-101 cuRobo config 빌더. |
 
 ## 실행 (터미널 2개)
@@ -30,24 +30,25 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 docker compose -f docker/docker-compose.yaml run --rm curobo-datagen \
     python /workspace/scripts/cuRobo/curobo_batch_planner.py
 
-# 2) SM (planner "ready" 로그 뜬 뒤)
+# 2) SM (planner "ready" 로그 뜬 뒤; --num_envs 4 = 4-env 병렬)
 docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
     python /workspace/scripts/cuRobo/pickplace_sm.py \
-    --task SimToReal-SO101-PickCube-DR-v0 --livestream 2
+    --task SimToReal-SO101-PickCube-DR-v0 --livestream 2 --num_envs 4
 ```
 
 - **키보드 인터랙티브**(livestream 입력, `--livestream` 필수):
-  - **N** = 새 DR layout 리셋(로봇 → init) · **R** = 이전과 같은 layout 리셋 · **B** = cuRobo plan + manipulation 실행
+  - **N** = 새 DR layout 리셋(로봇 → init) · **R** = 이전과 같은 layout 리셋 · **B** = cuRobo plan + manipulation 실행(전 env)
   - R/N 은 manipulation 중에도 = 진행 동작 취소 + 로봇 pose·scene 리셋. Ctrl-C·창 닫기로 종료.
-- 관전: WebRTC `:49100` (원격은 `.env`에 `LIVESTREAM=1` + `PUBLIC_IP`).
+- 관전: WebRTC `:49100` (원격은 `.env`에 `LIVESTREAM=1` + `PUBLIC_IP`). viewer 는 env 0 추종.
 - `--task`: env variant 선택 — `PickCube-v0`(고정) · `-DR-v0`(full DR) · `-DRBase-v0` · `-Eval-v0` · `-DR-Eval-v0`.
 - `--cam_eye`/`--cam_target`: viewport 카메라(env 원점 상대).
 
-## planner로 보내는 데이터 (`plan_pickplace` 요청)
+## planner로 보내는 데이터 (`plan_pickplace` 요청, N=env 수)
 
-- `cubes`: `[[x, y, grasp_z, qw,qx,qy,qz]]` — **6-DOF pose**(위치+quat). planner가 quat으로 큐브 yaw face-align.
-- `bowl`: `[x, y]` — planner는 place 목표로 **xy만** 소비(그릇은 컨테이너+정적 obstacle이라 6D 불요).
-- `start`: `[[6 joint rad, SO101 순서]]` — **reset·settle 후 실제 robot joint**. planner가 이 자세부터 계획(arm 5개 사용).
+- `cubes`: `[[x, y, grasp_z, qw,qx,qy,qz] ×N]` — per-env **6-DOF pose**. planner가 quat으로 큐브 yaw face-align.
+- `bowl`: `[x, y]`(공용) 또는 `[[x, y] ×N]`(per-env) — place 목표로 **xy만** 소비.
+- `start`: `[[6 joint rad, SO101 순서] ×N]` — per-env **reset·settle 후 실제 robot joint**(arm 5개 사용).
+- 응답: `{"trajectories": [[[6]×T]|null ×N]}` — 실패 env 는 null.
 
 ## grasp/place 파이프라인 (`curobo_batch_planner.py`)
 

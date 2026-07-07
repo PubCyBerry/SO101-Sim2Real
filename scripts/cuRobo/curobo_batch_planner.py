@@ -4,33 +4,36 @@
 (so101-isaac-sim) ZMQ 분리(in-process 불가=warp ABI). executor 가 큐브(base_link)를 보내면
 planner 가 collision-aware full pick-place 궤적을 반환한다.
 
-**현재 num_envs=1(단일 env)만 처리한다.** 배치(multi-env)는 추후 확장 — `n_envs` 파라미터와
-BatchMotionPlanner 백엔드는 그 hook 으로 남겨두되, 계획 로직은 큐브 1개 기준으로 읽기 쉽게 쓴다.
+★multi-env: 요청의 `cubes` 리스트 길이 = env 수. env 마다 독립 6-phase 를 **순차** 계획해
+per-env 궤적(실패 env 는 null)을 돌려준다. executor 쪽이 N envs 를 병렬 스텝(진짜 이득);
+planner 는 검증된 단일-env 로직 재사용. # ponytail: 순차 계획 — planner 지연이 병목되면
+true GPU-batch(BatchMotionPlanner B>1 + per-env ladder) 로 승격.
 
 계획: tool frame = **tcp_grasp**(손가락 사이 pinch 점, so101.yml extra_link).
 ★5-DOF 원칙: orientation 고정 시 도달 위치는 2D 면 → goal 은 항상 **bank pose 그대로**
 (FK-harvest (pos,quat) 쌍 = 존재증명) 또는 그 tool-z 평행이동(pan-plane 불변)만 쓴다.
 
 6-phase(approach·grasp·lift·transit·release·retreat):
-  ① approach = pre-grasp goalset(pan-plane bank pose, 하강선이 큐브 중심 통과, contact off)
-  ② grasp    = 도착 pre pose FK → linear descend(하강선 위 큐브 최근접점) + gripper 폐합 ramp
+  ① approach = grasp 후보 ladder(IK+FK face-center 게이트) → goalset fallback
+  ② grasp    = 도착 pre pose FK → approach 축 linear descend(table clamp) + gripper 폐합
   ③ lift     = grasp 서 tool -z linear 역행(잡은 채 수직 이탈), attach 큐브 blob
-  ④ transit  = 그릇 상공(TRANSIT_Z) 이동, bank goalset(bowl obstacle 회피 + blob).
-               드롭 XY 는 그릇 중심서 base(원점) 쪽으로 BOWL_PULL 당김(near-rim 착지)
-  ⑤ release  = 그릇 상공서 settle hold → detach + gripper 개방(하강 없음, 큐브 낙하)
-  ⑥ retreat  = init(home=start) 자세로 cspace 복귀(full scene=hollow bowl ring, gripper open)
+  ④ transit  = 그릇 상공(TRANSIT_Z) bank goalset — 드롭 XY 는 BOWL_PULL 만큼 base 쪽
+  ⑤ release  = 그릇 상공 settle hold → detach + gripper 개방(하강 없음, 큐브 낙하)
+  ⑥ retreat  = init(home=start) 자세로 cspace 복귀(full scene, gripper open)
 프레임=base_link→solver rotz(90).
 
-collision 구성(cuRobo 정석 미러): target 큐브 = world obstacle("cube", per-request pose 주입,
-pre/descend 중 팔 링크 관통 방지 — contact link 는 pre~lift collision off) → grasp 후
-attachment_manager.attach 로 큐브 blob 을 attached_object(=tcp_grasp 동일 프레임)에 부착
-+ world "cube" disable → transit 은 잡은 큐브 부피 포함 계획 → release 직전 detach 복원.
+collision 구성(cuRobo 정석 미러): target 큐브 = world obstacle("cube", per-request pose 주입)
+→ grasp 후 attach 로 큐브 blob 을 attached_object(=tcp_grasp 동일 프레임)에 부착 + "cube"
+disable → transit 은 잡은 큐브 부피 포함 계획 → release 직전 detach(+stale cube 재-disable).
+그릇 = hollow rim ring(오목 fit) — §bowl ring 상수 참조.
 
-프로토콜(JSON REQ/REP, port 5599):
-  {"cmd":"ping"}                                                    → {"ok":true,"n_envs":N}
-  {"cmd":"plan_pickplace","cubes":[[x,y,z(,qw,qx,qy,qz)]],"bowl":[x,y]} → {"ok":true,
-        (base_link frame, cubes[0] 만 사용; quat 주면 yaw face-align)      "trajectories":[[[6]×T]|null]}
-  {"cmd":"shutdown"}                                                → {"ok":true}
+프로토콜(JSON REQ/REP, port 5599) — cube 는 base_link frame, quat 주면 yaw face-align:
+  {"cmd":"ping"}                                          → {"ok":true}
+  {"cmd":"plan_pickplace",
+   "cubes":[[x,y,z(,qw,qx,qy,qz)]×N],                     → {"ok":true,
+   "bowl":[x,y] | [[x,y]×N],                                  "trajectories":[[[6]×T]|null ×N]}
+   "start":[[6 joint rad]×N] (선택), "knobs":{...}(선택)}
+  {"cmd":"shutdown"}                                      → {"ok":true}
 
 실행: /isaac-sim/python.sh curobo_batch_planner.py [--port 5599] [--self-test]
 """
@@ -52,64 +55,90 @@ from curobo.motion_planner import MotionPlannerCfg
 from curobo.types import GoalToolPose, JointState, Pose
 
 ROBOT = "/workspace/assets/robots/so101.yml"
+DIAG_LOG = "/workspace/outputs/planner_diag.log"  # 호스트 마운트(./outputs) — 컨테이너 소멸 후 잔존
+
+# ═══ 프레임 정합 (bridge TF ↔ cuRobo URDF) ═══════════════════════════════════════
+# bridge TF(base_link)=USD so101_new_calib 규약, cuRobo URDF=so_arm101 규약. 두 체인의
+# shoulder_pan 프레임 일치 조건에서 T(urdf←usd)=Rz(90°)+BASE_T (실측 유도 — 미보정 시 ~3cm 빗나감).
 BASE_YAW = 90.0
-# ★base 프레임 완전 정합: bridge TF(base_link)=USD so101_new_calib 규약, cuRobo URDF=so_arm101 규약.
-# 두 체인의 shoulder_pan 조인트 프레임 일치 조건에서 T(urdf←usd) = Rz(90°)+BASE_T (실측 유도).
-# Rz(90°)=BASE_YAW, BASE_T=미보정이던 평행이동(≈(16,-21,-32)mm) — 실행층 ~3cm 빗나감의 진범.
 BASE_T = (0.01576, -0.02079, -0.03248)
-GRIP_OPEN, GRIP_CLOSE = 75.0, 5.0  # open 75=straddle 마진 확대. close 5=강파지 — face-align 전제
-GRIP_INIT = 0.0    # ⑥ retreat 끝 gripper 복원값(feature) = SM init(-10°=feature0). 미복원 버그 fix
-# open 60→75(2026-07-06): 조준 완벽(xy 3mm)·fold 정상인데 무파지인 straddle-마진 실패 모드 해소.
-# 60 은 pad 간격이 큐브+5mm 수준이라 tangential ~3mm 오차로 moving jaw 가 모서리 위로 하강 → squirt.
-# (yaw 미정렬 대각 접촉은 어떤 close 목표로도 squirt-out → 후보 pose 를 ρ=−Δψ/cosα 로 face 정렬.)
-CLOSE_STEPS = 5   # close ramp 프레임 — open 75 확대분 보상해 폐합 각속도 유지(급폐합=drop 레버)
-OPEN_STEPS = 10    # ⑤ release: gripper 개방 ramp 프레임(정지 상태 투하)
-TAU_MAX_DEG = 8.0  # |Δψ·tanα| 허용(deg) — tilted face-align 근사 손실 게이트(pink 규약)
-TABLE_TOP = 0.035 + BASE_T[2]  # 책상 상판 z (urdf 프레임)
-K = 40             # goalset 크기(bank reach·pregrasp)
-# ── pre-grasp 후퇴(m) = descend 거리 — 큐브 거리 적응형(사용자 제안) ─────────────────
-# jaw tip(tcp+PAD_LOW_OFF)이 큐브 obstacle 위로 떠서 ladder 를 jaw-collision ON 으로 계획.
-# 고정 0.12 는 pad-center 조준(+4.6cm)과 겹쳐 근거리(pan 축서 r≈0.12) pre IK 전멸(실측 pre z
-# 0.186 unreachable / 0.146 solved) → r 에 선형: 근거리 0.06(도달성) ~ 원거리 0.12(클리어런스).
+TABLE_TOP = 0.035 + BASE_T[2]   # 책상 상판 z (urdf 프레임)
+
+# ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
+PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — pan 평면·거리 기준점(URDF)
+TCP_LAT = (0.0, -0.015, 0.0)    # tcp_grasp(비대칭 jaw pinch 중심)의 wrist_roll 축 이탈 — pan 보정
+# fixed jaw pad 접촉면 center 의 tcp-frame 오프셋(gripper_link pad sphere centroid 실측).
+# pad 이 tcp 서 46mm 아래·15mm 옆 — tcp 조준 시 pad 이 face 서 크게 벗어나는(edge grip) 원인.
+FIXED_INNER_CENTER = (0.0215, 0.0147, 0.0463)  # (closing, lateral, jaw 아래방향) m
+PAD_LOW_OFF = 0.075   # tcp → 물리 pad 최저점(fixed jaw tip) approach축 거리 — so101.yml 실측
+                      # (tip -0.100 − tcp -0.025). moving jaw 는 12mm 얕음 → fixed 기준이 지배.
+CUBE_HALF = 0.020     # 큐브 반변(40mm) — face_center = cube_center + CUBE_HALF·closing_axis
+CUBE_DIMS = 0.05      # 큐브 obstacle/attach blob 한 변(m) — 보수적 최대값(cube_specs 40/50mm)
+CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
+DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가
+                      # 큐브 obstacle 과 모델상 겹침(짧은 wrist, 물리 접촉 없음=sphere 보수 근사)
+# so_arm101.urdf arm 관절 limit(rad) — start clamp 용(USD ±105° 와 어긋나는 5° 캘리브 마진)
+ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
+              (-1.65806, 1.65806), (-2.74385, 2.84121)]
+
+# ═══ grasp 후보 + face-center 게이트 ══════════════════════════════════════════════
+# 후보 = pan-plane pose (α tilt, sx closing 방향). tilted 허용(수직은 긴 jaw 가 cube 상단
+# edge 를 잡음) — 전 후보 평가 후 centerline(face-center 오차) 최소 채택, |α| 는 tiebreak.
+LADDER = [(a, sx) for a in (0, 20, 30, 40, 45, 50, 55) for sx in (1, -1)]
+ALPHAS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]  # goalset fallback tilt(deg)
+TAU_MAX_DEG = 8.0   # goalset strict: |Δψ·tanα| face-align 근사 손실 게이트(deg)
+# 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
+#   e_normal(closing clearance) ∈ [1,6]mm · |e_tangent| ≤ 22mm · |e_height| ≤ 28mm.
+# tangent/height 폭 = fingers-down(sx=+1) branch achievable. 이상(3/4mm)은 40mm 큐브서
+# kinematically 불가(75mm jaw+책상 clearance+tilt<50°); 미러 branch 가 더 좋았지만(e_h 6mm)
+# wrist ~223° 뒤집기라 금지(사용자). 좁히면 ladder 전멸→goalset(face-center 랭킹 없음) 추락.
+FIXED_JAW_CLEAR_TARGET = 0.003  # pad center 조준 clearance(게이트 1~6mm 중앙)
+FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.001, 0.006
+E_TANGENT_MAX = 0.022
+E_HEIGHT_MAX = 0.028
+# wrist_roll hard gate = fingers-down branch(init -90° 중심 ±120°)만. 물리한계까지 열면
+# 미러 branch(wr≈+133°)가 centerline 우위로 선택돼 wrist ~223° 회전+jaw 좌우 반전.
+WRIST_ROLL_RANGE = (math.radians(-210.0), math.radians(30.0))
+
+# ═══ phase 파라미터 ═══════════════════════════════════════════════════════════════
+K = 40              # goalset 크기(bank reach·pregrasp)
+GRASP_Z_OFF = -0.008  # grasp 깊이 미세보정(m): pinch 큐브 상단걸침 → 8mm 하향(clamp 우선)
+TABLE_MARGIN = 0.004  # pad 최저점 정지 고도(table_top 위, m). 사용자 요구 "실제 ≥2mm 무접촉"
+                      # — IK 잔차+tilt 투영오차가 먹으므로 4mm 조준 → 실제 ≥2mm.
+LIFT_BACK = 0.10    # ③ lift: grasp 서 tool -z 최대 역행(approach 되감기, m)
+TRANSIT_Z = 0.21    # ④ transit 그릇 상공 고도(urdf, m). 0.25→0.21: ring keep-out 이 rim 을
+                    # 스스로 피해 인하(드롭 과고 해소). 스침 재발 시 ring dims 먼저, 그다음 ↑.
+BOWL_PULL = 0.03    # ④ 드롭 XY 를 그릇 중심서 base 쪽으로 당김(m) — near-rim 착지
+# pre-grasp 후퇴(=descend 거리, m) — 큐브 pan-축 거리 r 적응(사용자 제안). jaw tip 이 큐브
+# obstacle 위로 떠 ladder 를 jaw-collision ON 으로 계획. 고정 0.12 는 pad-center 조준(+4.6cm)
+# 과 겹쳐 근거리(r≈0.12) pre IK 전멸(실측 pre z 0.186 unreachable / 0.146 solved).
 PRE_BACK_MIN, PRE_BACK_MAX = 0.06, 0.12
-PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24  # pan 축 기준 r≤R0→MIN · r≥R1→MAX (사이 선형)
+PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24   # r≤R0→MIN · r≥R1→MAX (사이 선형)
+
+# ═══ gripper 시퀀스 (feature [0,100]) ═════════════════════════════════════════════
+GRIP_OPEN, GRIP_CLOSE = 75.0, 5.0  # open 75=straddle 마진(60 은 tangential 3mm 오차로 squirt)
+GRIP_INIT = 0.0     # ⑥ retreat 끝 복원값 = SM init(-10°=feature 0)
+CLOSE_STEPS = 5     # ② grasp 폐합 ramp 프레임
+OPEN_STEPS = 10     # ⑤ release 개방 ramp 프레임(정지 상태 투하)
+SETTLE_STEPS = 5    # ⑤ release 전 그릇 상공 정지 hold 프레임
+
+# ═══ bowl obstacle = hollow rim ring (오목 그릇 fit) ══════════════════════════════
+# cuRobo world obstacle 은 solid convex 뿐 — 오목 그릇을 solid box 로 넣으면 내부(빈 공간)가
+# retreat 자세와 허위충돌. rim 벽만 N× cuboid octagon 으로 근사(내부 hole+상단 open) →
+# keep-out 유지·허위충돌 제거, empty-world swap 없이 full scene 계획.
+# 박스 = 다각형 '변': tangential w≈변길이+겹침, radial d 는 코너 azimuth 벽 구멍이 없을 만큼
+# 두껍게 — 0-gap 은 _assert_bowl_ring_sealed 가 임포트 시 강제(scratch/search_ring.py 근거).
+BOWL_RING_N = 8
+BOWL_RING_RC = 0.080   # box 중심 반경(m) — 벽 band [RC±d/2] 이 실제 rim 0.075 포함
+BOWL_RING_H = 0.075    # ring 높이(테이블→rim)
+BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height]
 
 
 def _pre_back(cube):
-    """큐브(solver frame) → pan 축 거리 r 로 pre-grasp 후퇴량 보간."""
+    """큐브(solver frame) → pan 축 거리 r 로 pre-grasp 후퇴량 보간(0.06~0.12m)."""
     r = math.hypot(cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1])
     t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
     return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
-GRASP_Z_OFF = -0.008  # grasp 깊이 미세보정(m): pinch 가 큐브 상단걸침 → 8mm 하향(clamp 안 걸릴 때만)
-# ── bounded shallow-preload grasp (stall-press 대체) ─────────────────────────────
-# 물리 pad 최저점(fixed jaw tip: gripper z≈-0.092, r 0.008 → -0.100)이 tcp(z-0.025) 아래로
-# 내려간 거리(approach축, m). descend 를 이 pad 기준으로 clamp 해 책상을 강하게 누르는 stall
-# 대신 table_top 바로 위(margin)서 멈추는 얕은 preload 로 잡는다.
-# ★0.075 = so101.yml 실측 드롭(fixed jaw tip -0.100 − tcp -0.025). 옛 0.070 은 5mm 과소평가라
-# 클램프가 fixed jaw 를 책상 3mm 관통시켰다(사용자 보고 "fixed jaw 가 책상 침"). moving jaw 는
-# close 전구간 tcp 아래 ≤0.063 드롭(fixed 보다 12mm 높음) → fixed 기준 clamp 로 양쪽 다 뜬다.
-PAD_LOW_OFF = 0.075
-TABLE_MARGIN = 0.004  # pad 최저점을 table_top 위 이만큼서 정지. 사용자 요구=실제 ≥2mm 유지·무접촉.
-                      # 모델은 정확히 이 값이나 IK 잔차+tilt 투영오차가 먹으므로 4mm 조준 → 실제 ≥2mm.
-SETTLE_STEPS = 5     # ⑤ release 전 그릇 상공서 정지 hold(안정) 프레임 — 사용자 요청
-LIFT_BACK = 0.10   # lift = grasp 서 tool -z 최대 10cm 역행(approach 되감기)
-TRANSIT_Z = 0.21   # ④ transit: 그릇 상공 안전고도(urdf, +BASE_T[2] 는 사용처). 이력: 0.20 은
-                   # rim 스침(jaw tip rim+0.8mm) → 0.25 로 회피했으나 드롭 과고(사용자 "너무 높다")
-                   # → bowl ring keep-out 도입 후 planner 가 rim 을 스스로 피해 0.21 로 인하.
-                   # 스침 재발 시 ring dims/RC 튜닝이 먼저, 그다음 이 값 ↑.
-BOWL_PULL = 0.03   # ④ 드롭 XY 를 그릇 중심서 base(원점) 쪽으로 당김(m). 드롭이 그릇 far 쪽으로
-                   # 너무 멀다(사용자 보고) → near-rim 쪽으로 당겨 착지. bowl obstacle 은 실좌표 유지
-# ── bowl obstacle = hollow rim ring (오목 그릇 fit) ───────────────────────────────
-# 실제 그릇 = 위로 열린 절두원뿔 shell(rim r0.075·높이 0.070·벽 4mm, author BOWL_R_TOP 등).
-# cuRobo world obstacle 은 solid convex(cuboid/mesh/voxel)뿐 — 오목 그릇을 solid box 로 넣으면
-# 내부(빈 공간)가 팔·retreat 자세와 허위충돌 + 0.15m 정사각 과다커버. rim 벽만 N× cuboid octagon
-# 으로 근사(내부 hole+상단 open)해 keep-out 유지·허위충돌 제거 → empty-world swap 없이 full scene.
-# ★박스는 다각형 '변'이라 tangential w≈변길이(2·RC·tan(π/N))+겹침, radial d 는 rim(0.075)을
-# 코너까지 덮을 만큼 두꺼워야(얇으면 코너 azimuth 에 벽 구멍) — 0-gap 은 _assert_bowl_ring_sealed 가 강제.
-BOWL_RING_N = 8
-BOWL_RING_RC = 0.080                   # box 중심 반경(m) — 벽 band [RC±d/2] 이 실제 rim 0.075 포함
-BOWL_RING_H = 0.075                    # ring 높이(테이블→rim)
-BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height] (scratch/search_ring.py 0-gap 검증)
 
 
 def _bowl_ring(bx, by):
@@ -130,7 +159,7 @@ def _bowl_ring(bx, by):
 
 def _assert_bowl_ring_sealed():
     """로드시 1-check: (a) hole 이 drop+pad 여유 (b) rim 원둘레 전 azimuth 벽 연속(gap 없음).
-    얇은 radial d 는 코너에 벽 구멍→팔이 그릇 파고듦 → 임포트서 즉시 실패(scratch/search_ring.py 근거)."""
+    얇은 radial d 는 코너에 벽 구멍→팔이 그릇 파고듦 → 임포트서 즉시 실패."""
     hole = BOWL_RING_RC - BOWL_RING_DIMS[0] / 2
     assert hole >= BOWL_PULL + 0.028, f"bowl ring hole {hole:.3f}m < drop+pad(~0.028)"
     ring = _bowl_ring(0.0, 0.0)
@@ -150,44 +179,6 @@ def _assert_bowl_ring_sealed():
 
 
 _assert_bowl_ring_sealed()
-ALPHAS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]  # goalset fallback tilt ladder(deg)
-# grasp 후보 (α, sx) — ★tilted 도 허용(사용자 지시). 수직(α=0)은 긴 jaw(pad center tcp 아래 46mm)
-# +책상 clearance 때문에 pad center 가 cube 상단 edge(+9mm 위)에 닿아 corner grip → tilt(α~40-55°)
-# 라야 pad center 가 face center 를 통과(geom 실측: α50 e_height≈0). 전 후보 평가 후 face-center
-# error(centerline) 최소 채택 — |α| 는 hard reject 아닌 마지막 tiebreak penalty. sx 양쪽 다 시도.
-LADDER = [(a, sx) for a in (0, 20, 30, 40, 45, 50, 55) for sx in (1, -1)]
-PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 base_link(=solver) XY 오프셋 — pan 평면 기준점(URDF)
-TCP_LAT = (0.0, -0.015, 0.0)    # tcp_grasp(=비대칭 jaw pinch 중심) 의 wrist_roll 축 이탈 lateral — pan 보정
-FIXED_JAW_CLEAR_TARGET = 0.003  # pad center 를 cube face 밖 이만큼 clearance 로 조준(gate 1~5mm 중앙)
-# ── ★fixed jaw inner face center ↔ cube face center 3D 검증(사용자 스펙): 옛 게이트는 1D closing
-# clearance 만 봐서 pad center 가 face center 를 통과하는지 검증 못 함 → edge/corner 를 잡았다.
-# IK-후-FK 실측 fixed jaw inner face center = grasp_tcp + R·FIXED_INNER_CENTER 로 face center 와 3D 비교.
-# FIXED_INNER_CENTER = pad 접촉면 center 의 tcp-frame 오프셋(측정: gripper_link pad sphere centroid).
-FIXED_INNER_CENTER = (0.0215, 0.0147, 0.0463)  # (dx closing, dy lateral, dz jaw 아래방향) m
-FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.001, 0.006  # e_normal(closing clearance) 허용(m)
-# ⚠ 이상적 |e_tangent|≤3mm·|e_height|≤4mm 는 40mm 큐브서 kinematically 불가(75mm jaw+≥2mm 책상
-# clearance+SO-101 5-DOF tilt<~50° → pad center 를 face center 에 못 앉힘). 미러 wrist branch(+130°)
-# 가 e_h 6-13mm 로 더 좋았으나 wrist 뒤집기 금지(사용자) → fingers-down(sx=+1) branch achievable
-# (e_tan 9~21·e_h 25~28mm)로 게이트 설정. 좁히면 ladder 전멸→goalset(face-center 랭킹 없음) 추락,
-# 이 폭이면 centerline 랭킹이 최소-오차 후보 선택. 진짜 face-center 는 50mm 큐브 필요.
-E_TANGENT_MAX = 0.022   # |e_tangent| — cube face plane 안 lateral 오차 허용(m, sx=+1 achievable)
-E_HEIGHT_MAX = 0.028    # |e_height| — pad center 와 face center 의 수직(world-z) 오차 허용(m, 〃)
-CUBE_HALF = 0.020       # 큐브 반변(40mm) — face_center = cube_center + CUBE_HALF·closing_axis
-CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]  # descend/retreat 중 collision off
-# descend/lift(linear) 추가 off: grasp 자세서 wrist sphere 가 큐브 obstacle 과 모델상 겹침
-# (SO-101 은 wrist 가 짧아 grasp envelope 에 들어옴; 물리 접촉 없음=sphere 보수 근사).
-DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]
-CUBE_DIMS = 0.05   # 큐브 obstacle/attach blob 한 변(m) — 보수적 최대값(cube_specs 40/50mm)
-# so_arm101.urdf arm 관절 limit(rad) — start clamp 용(USD ±105° 와 어긋나는 5° 캘리브 마진)
-ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
-              (-1.65806, 1.65806), (-2.74385, 2.84121)]
-# grasp 후보 wrist_roll hard gate [-210°,+30°] = fingers-down branch(init -90° 중심 ±120°).
-# ★한번 물리 한계(±160°)로 넓혔다가 미러 branch(sx=-1, wr≈+133°)가 centerline 우위로 선택돼
-# init 서 ~223° 회전 + jaw 좌우 반전(사용자 "의도와 180° 반대") → 복원. 미러 branch 는 pad
-# lateral(14.7mm)이 아래로 투영돼 face-center 가 실제로 더 좋지만(6.8 vs 19.8mm) wrist 뒤집기
-# 비용이 더 크다는 사용자 판단 — centerline 은 sx=+1 tilted 의 best-achievable 로 만족.
-WRIST_ROLL_RANGE = (math.radians(-210.0), math.radians(30.0))
-DIAG_LOG = "/workspace/outputs/planner_diag.log"  # 호스트 마운트(./outputs) — 컨테이너 소멸 후 잔존
 
 
 def rotz(x, y, deg):
@@ -230,10 +221,10 @@ def _grip(arm_deg, grip):
 
 
 class PickPlacePlanner:
-    """단일 env pick-place planner. plan_pickplace(cube) 가 6-phase 궤적을 반환한다."""
+    """pick-place planner. plan_pickplace(cube)가 6-phase 궤적 1개를 반환 — multi-env 는
+    serve_loop 가 cubes 리스트를 per-env 순차 호출(각 호출이 obstacle 을 자기 큐브/그릇으로 갱신)."""
 
-    def __init__(self, n_envs=1, bowl_bl=(0.22, -0.265)):
-        self.n_envs = n_envs  # 배치 확장 hook (현재 로직은 단일 env)
+    def __init__(self, bowl_bl=(0.22, -0.265)):
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
@@ -264,7 +255,7 @@ class PickPlacePlanner:
         print(f"[planner] FK bank {len(self.FK_POS_ALL)}", flush=True)
 
         self.p = BatchMotionPlanner(MotionPlannerCfg.create(
-            robot=ROBOT, scene_model=wf.name, max_batch_size=n_envs, max_goalset=K,
+            robot=ROBOT, scene_model=wf.name, max_batch_size=1, max_goalset=K,
             use_cuda_graph=False))
         self.p.warmup(enable_graph=False, num_warmup_iterations=2)
         self.tf = self.p.tool_frames
@@ -675,17 +666,33 @@ class PickPlacePlanner:
         return np.vstack(seq).astype(np.float32)
 
 
+def plan_batch(pl, req):
+    """plan_pickplace 요청 1건 → per-env 궤적 리스트(list|None ×N).
+
+    cubes[i] 마다 독립 6-phase 순차 계획. bowl 은 [x,y] 공용 또는 [[x,y]×N] per-env,
+    start 는 [[6]×N](i번째만 사용) 또는 생략."""
+    cubes = req["cubes"]
+    bowl = req.get("bowl")
+    per_env_bowl = bool(bowl) and isinstance(bowl[0], (list, tuple))
+    starts = req.get("start")
+    knobs = req.get("knobs")
+    out = []
+    for i, cube in enumerate(cubes):
+        b = bowl[i] if per_env_bowl else bowl
+        s = [starts[i]] if starts else None
+        traj = pl.plan_pickplace(cube, b, s, knobs)
+        out.append(traj.tolist() if traj is not None else None)
+    return out
+
+
 def serve_loop(pl, sock):
     while True:
         req = json.loads(sock.recv())
         cmd = req.get("cmd")
         if cmd == "ping":
-            sock.send_string(json.dumps({"ok": True, "n_envs": pl.n_envs}))
+            sock.send_string(json.dumps({"ok": True}))
         elif cmd == "plan_pickplace":
-            traj = pl.plan_pickplace(req["cubes"][0], req.get("bowl"), req.get("start"),
-                                     req.get("knobs"))
-            sock.send_string(json.dumps(
-                {"ok": True, "trajectories": [traj.tolist() if traj is not None else None]}))
+            sock.send_string(json.dumps({"ok": True, "trajectories": plan_batch(pl, req)}))
         elif cmd == "shutdown":
             sock.send_string(json.dumps({"ok": True})); return
         else:
@@ -695,16 +702,15 @@ def serve_loop(pl, sock):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=5599)
-    ap.add_argument("--n-envs", dest="n_envs", type=int, default=1)  # 배치 확장 hook
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
-    pl = PickPlacePlanner(n_envs=a.n_envs)
-    print(f"[planner] ready n_envs={pl.n_envs}", flush=True)
+    pl = PickPlacePlanner()
+    print("[planner] ready", flush=True)
     if a.self_test:
-        traj = pl.plan_pickplace([0.017, -0.253, 0.06])
-        print(f"self-test: {'OK' if traj is not None else 'FAIL'} "
-              f"shape={None if traj is None else traj.shape}")
-        print("SELFTEST_OK" if traj is not None else "SELFTEST_CHECK")
+        trajs = plan_batch(pl, {"cubes": [[0.017, -0.253, 0.06], [0.167, -0.133, 0.06]]})
+        ok = all(t is not None for t in trajs)
+        print(f"self-test(2-env): {[len(t) if t else None for t in trajs]}")
+        print("SELFTEST_OK" if ok else "SELFTEST_CHECK")
         return
     sock = zmq.Context().socket(zmq.REP); sock.bind(f"tcp://*:{a.port}")
     print(f"[planner] ZMQ REP :{a.port}", flush=True)
