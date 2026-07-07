@@ -103,11 +103,12 @@ FIXED_JAW_CLEAR_TARGET = 0.003  # pad center 를 cube face 밖 이만큼 clearan
 FIXED_INNER_CENTER = (0.0215, 0.0147, 0.0463)  # (dx closing, dy lateral, dz jaw 아래방향) m
 FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.001, 0.006  # e_normal(closing clearance) 허용(m)
 # ⚠ 이상적 |e_tangent|≤3mm·|e_height|≤4mm 는 40mm 큐브서 kinematically 불가(75mm jaw+≥2mm 책상
-# clearance+SO-101 5-DOF tilt<~50° → pad center 를 face center 에 못 앉힘, best α≈45°서 e_h≈12mm).
-# 그래서 achievable 로 완화 — centerline 랭킹이 best(최소 e_h) 후보 선택(수직 edge-grip 회피).
-# 진짜 face-center 는 50mm 큐브(pad 이 더 낮게 앉음) 또는 짧은 jaw 필요. 상세=사용자 보고.
-E_TANGENT_MAX = 0.012   # |e_tangent| — cube face plane 안 lateral 오차 허용(m, best-achievable)
-E_HEIGHT_MAX = 0.014    # |e_height| — pad center 와 face center 의 수직(world-z) 오차 허용(m, best-achiev.)
+# clearance+SO-101 5-DOF tilt<~50° → pad center 를 face center 에 못 앉힘). 미러 wrist branch(+130°)
+# 가 e_h 6-13mm 로 더 좋았으나 wrist 뒤집기 금지(사용자) → fingers-down(sx=+1) branch achievable
+# (e_tan 9~21·e_h 25~28mm)로 게이트 설정. 좁히면 ladder 전멸→goalset(face-center 랭킹 없음) 추락,
+# 이 폭이면 centerline 랭킹이 최소-오차 후보 선택. 진짜 face-center 는 50mm 큐브 필요.
+E_TANGENT_MAX = 0.022   # |e_tangent| — cube face plane 안 lateral 오차 허용(m, sx=+1 achievable)
+E_HEIGHT_MAX = 0.028    # |e_height| — pad center 와 face center 의 수직(world-z) 오차 허용(m, 〃)
 CUBE_HALF = 0.020       # 큐브 반변(40mm) — face_center = cube_center + CUBE_HALF·closing_axis
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]  # descend/retreat 중 collision off
 # descend/lift(linear) 추가 off: grasp 자세서 wrist sphere 가 큐브 obstacle 과 모델상 겹침
@@ -117,10 +118,12 @@ CUBE_DIMS = 0.05   # 큐브 obstacle/attach blob 한 변(m) — 보수적 최대
 # so_arm101.urdf arm 관절 limit(rad) — start clamp 용(USD ±105° 와 어긋나는 5° 캘리브 마진)
 ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
               (-1.65806, 1.65806), (-2.74385, 2.84121)]
-# grasp 후보 wrist_roll 허용 = URDF 물리 한계(-2.744~+2.841 rad). tilted face-center grasp 는
-# +flip(~+120°)을 요구 → 좁게 막으면 face center 못 잡음. 물리 범위만 hard-gate, 선호(fingers-down
-# ≈-90°)는 score 의 wrist branch 항으로 랭킹(hard reject 아님).
-WRIST_ROLL_RANGE = (-2.74385, 2.84121)
+# grasp 후보 wrist_roll hard gate [-210°,+30°] = fingers-down branch(init -90° 중심 ±120°).
+# ★한번 물리 한계(±160°)로 넓혔다가 미러 branch(sx=-1, wr≈+133°)가 centerline 우위로 선택돼
+# init 서 ~223° 회전 + jaw 좌우 반전(사용자 "의도와 180° 반대") → 복원. 미러 branch 는 pad
+# lateral(14.7mm)이 아래로 투영돼 face-center 가 실제로 더 좋지만(6.8 vs 19.8mm) wrist 뒤집기
+# 비용이 더 크다는 사용자 판단 — centerline 은 sx=+1 tilted 의 best-achievable 로 만족.
+WRIST_ROLL_RANGE = (math.radians(-210.0), math.radians(30.0))
 DIAG_LOG = "/workspace/outputs/planner_diag.log"  # 호스트 마운트(./outputs) — 컨테이너 소멸 후 잔존
 
 
