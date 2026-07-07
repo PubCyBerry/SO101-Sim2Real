@@ -1818,6 +1818,61 @@ stdout 에 `[INFO]: SO-101 pen Pick-and-Place scene is ready.` 가 찍히고 des
 
 ---
 
+## cuRobo pick-place SM 이 매 plan 실패 — `so101.yml` 에서 `tcp_grasp` tool frame 이 빠짐
+
+### 현상
+
+`scripts/cuRobo/curobo_batch_planner.py` `--self-test` 가 `phase-fail approach=False`. pan-plane grasp 후보가 하나도 IK 안 풀리고, 후보 pose 를 IK 하면 목표서 ~30cm 벗어남.
+
+### 오류 메시지
+
+```
+[planner] phase-fail approach=False grasp=False lift=True transit=True place=False retreat=True
+# ik_solver.solve_pose → count_nonzero(success)==0 → plan_pose 가 None 반환
+```
+
+### 원인
+
+`assets/robots/so101.yml` `extra_links` 가 `{}` 로 비어 `tool_frames` 가 `moving_jaw_so101_v1_link` 로 잡힘. planner 의 pan-plane 후보 기하·`TCP_LAT`·attach 는 전부 **`tcp_grasp`(손가락 사이 pinch 점)** 전제. tool frame 이 moving_jaw 로 바뀌면 구성상 5-DOF 도달 가능하게 만든 후보가 실제론 불가 pose 가 돼 IK 전멸. (scaffold 커밋이 검증본 yaml 에서 `tcp_grasp`+`attached_object` block 을 실수로 stripped.)
+
+### 해결 방법
+
+`so101.yml` 에 `tcp_grasp` extra_link 복원(`fixed_transform (0.012,-0.015,-0.025)+Ry(π-0.0487)`, `parent gripper_link`)·`attached_object`(동일 transform)·`tool_frames: [tcp_grasp]`·`extra_collision_spheres.attached_object: 10`·`lock_joints.gripper 1.6`. 검증본 = `curobo-batch-mp` 브랜치 so101.yml wholesale.
+
+### 확인 방법
+
+`--self-test: OK shape=(N,6)`. 오프라인 ZMQ plan 이 궤적 반환.
+
+---
+
+## cuRobo pick-place SM 이 실기기 init 자세서 approach/retreat 거부 (접힘 자세 self-collision)
+
+### 현상
+
+`--self-test`(default joint state)는 전 phase 통과하는데, SM 이 보내는 실제 init 자세(lift -100° 접힘)를 start 로 주면 approach·retreat 만 실패. 빈 월드 retreat(장애물 없음)도 실패.
+
+### 오류 메시지
+
+```
+Start or End state in collision
+[planner] phase-fail approach=False ... retreat=False
+# empty-world cspace start→start 도 실패 = 순수 self-collision
+```
+
+### 원인
+
+접힌 init 자세가 cuRobo self-collision sphere 모델서 **비인접 링크쌍 겹침**(lower_arm↔shoulder −8.7mm·base↔upper_arm −1.6mm). 손으로 친 init 은 아슬 통과하나 sim settle 후 elbow/wrist +0.5° 어긋난 실측 자세가 경계 넘김. approach 는 start(=init), retreat 는 end(=home=init) 가 거부됨.
+
+### 해결 방법
+
+접힘 자세서만 겹치는(pick/place 중엔 팔이 전방 신전이라 안 만남) 두 쌍을 `so101.yml` `self_collision_ignore` 에 추가: `lower_arm_link↔shoulder_link`, `base_link↔upper_arm_link`(양방향). 겹침쌍은 robot_spheres FK 슬라이스로 pinpoint.
+
+### 확인 방법
+
+diag `[start] self_reachable=True`, approach·retreat phase True.
+
+---
+
 ## Sim-to-Real 펜이 그리퍼에 잡히지 않음 (USD Cube scale + 얇은 code-spawn pen)
 
 **현상**: `scripts/record_pick_pen.py` 의 초기 pen scene 에서

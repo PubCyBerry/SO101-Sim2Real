@@ -222,6 +222,14 @@ def main():
     env_cfg.scene.robot.init_state.joint_pos = dict(INIT_RAD)
     if hasattr(env_cfg.events, "reset_robot_joints"):
         env_cfg.events.reset_robot_joints.params["position_range"] = (0.0, 0.0)
+    # Deterministic replay: run the WHOLE planned trajectory. Drop the early-cut terminations
+    # (`success` fires while the held cube merely passes over the bowl mid-transit at z≈0.13,
+    # inside task_done's [+0.005,+0.18] height band → env auto-resets before place/release ever
+    # runs). Keep only time_out (30 s = 900 steps ≫ ~442-row trajectory); judge success at the
+    # end via _cube_in_bowl.
+    for _term in ("success", "cube_lost"):
+        if hasattr(env_cfg.terminations, _term):
+            setattr(env_cfg.terminations, _term, None)
     # viewport / livestream camera — env-relative origin (env0 = world origin here)
     env_cfg.viewer.origin_type = "env"
     env_cfg.viewer.env_index = 0

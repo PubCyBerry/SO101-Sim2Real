@@ -2,7 +2,7 @@ kinematics:
   add_object_link: false
   asset_root_path: /workspace/assets/robots/urdf
   base_link: base_link
-  collision_link_names: &id001
+  collision_link_names:
   - base_link
   - front_cam_mount_link
   - gripper_link
@@ -12,6 +12,7 @@ kinematics:
   - upper_arm_link
   - wrist_cam_mount_link
   - wrist_link
+  - attached_object
   collision_sphere_buffer: 0.0
   collision_spheres:
     base_link:
@@ -348,17 +349,65 @@ kinematics:
   debug: null
   external_asset_path: null
   external_robot_configs_path: null
-  extra_collision_spheres: null
-  extra_links: {}
+  extra_collision_spheres:
+    attached_object: 10
+  extra_links:
+    # attached_object 는 tcp_grasp 와 동일 transform 필수: AttachmentManager.update() 가
+    # sphere offset 을 tool_frames[0](=tcp_grasp) 프레임으로 계산해 이 링크 슬롯에 기록하고
+    # FK 는 이 링크 프레임으로 배치 → 불일치 시 blob 이 (0,-0.015,-0.025)+Ry(π) 만큼 오배치됨.
+    attached_object:
+      fixed_transform:
+      - 0.012
+      - -0.015
+      - -0.025
+      - 0.024337
+      - 0.0
+      - 0.999704
+      - 0.0
+      joint_name: attach_joint
+      joint_type: FIXED
+      link_name: attached_object
+      parent_link_name: gripper_link
+    # grasp TCP: 손가락 사이 pinch 지점 — collision sphere 기하 유도(fixed pad x≈-0.018·
+    # jaw pad x≈+0.018 대칭, y≈0, pad 유효 z -0.05~-0.09 중심 -0.070; tip -0.092 는
+    # pinch 너머 2.2cm → top-down cube z0.06 에서 tip z≈0.038>책상 0.035 클리어).
+    # +z = approach(손끝 방향), x = closing 축. quat = Ry(pi - 0.0486795):
+    # USD 체인에 URDF wrist_roll origin 의 Ry(0.0487) 항이 없어(이중 FK Δrot=2.79°) 모델
+    # tool 이 sim 실제 대비 2.79° 피치 — TCP 회전으로 흡수(전 자세 상수라 정확 보정).
+    tcp_grasp:
+      fixed_transform:
+      - 0.012
+      - -0.015
+      - -0.025
+      - 0.024337
+      - 0.0
+      - 0.999704
+      - 0.0
+      joint_name: tcp_grasp_joint
+      joint_type: FIXED
+      link_name: tcp_grasp
+      parent_link_name: gripper_link
   format_version: 2.0
-  grasp_contact_link_names: null
+  grasp_contact_link_names:
+  - gripper_link
+  - moving_jaw_so101_v1_link
   load_meshes: false
   load_tool_frames_with_mesh: false
   lock_joints:
-    gripper: 0.785
-  mesh_link_names: *id001
+    gripper: 1.6
+  mesh_link_names:
+  - base_link
+  - front_cam_mount_link
+  - gripper_link
+  - lower_arm_link
+  - moving_jaw_so101_v1_link
+  - shoulder_link
+  - upper_arm_link
+  - wrist_cam_mount_link
+  - wrist_link
+  # 접힌 휴식자세(bridge 초기, lift≈-100°)가 sphere 근사 과대로 최대 -7.2mm 오겹침 →
+  # start state 거부돼 초기자세-발 planning 불가. 실기기 합법 자세이므로 표적 완화(검사는 유지).
   self_collision_buffer:
-    attached_object: 0.0
     base_link: -0.002
     front_cam_mount_link: -0.001
     gripper_link: 0.0
@@ -368,6 +417,7 @@ kinematics:
     upper_arm_link: -0.002
     wrist_cam_mount_link: 0.0
     wrist_link: 0.0
+    attached_object: 0.0
   self_collision_ignore:
     attached_object:
     - gripper_link
@@ -377,6 +427,7 @@ kinematics:
     base_link:
     - shoulder_link
     - front_cam_mount_link
+    - upper_arm_link
     front_cam_mount_link:
     - shoulder_link
     gripper_frame_link:
@@ -392,6 +443,7 @@ kinematics:
     - gripper_link
     - moving_jaw_so101_v1_link
     - wrist_cam_mount_link
+    - shoulder_link
     moving_jaw_so101_v1_link:
     - gripper_link
     - wrist_cam_mount_link
@@ -399,10 +451,12 @@ kinematics:
     - base_link
     - upper_arm_link
     - front_cam_mount_link
+    - lower_arm_link
     upper_arm_link:
     - shoulder_link
     - lower_arm_link
     - front_cam_mount_link
+    - base_link
     wrist_cam_mount_link:
     - gripper_link
     wrist_link:
@@ -411,7 +465,7 @@ kinematics:
     - moving_jaw_so101_v1_link
     - wrist_cam_mount_link
   tool_frames:
-  - moving_jaw_so101_v1_link
+  - tcp_grasp
   urdf_path: /workspace/assets/robots/urdf/so_arm101.urdf
   use_external_assets: false
   use_global_cumul: true
