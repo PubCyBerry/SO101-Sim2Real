@@ -10,15 +10,15 @@ half is ``curobo_batch_planner.py`` (curobo-datagen container).
     │  REP  tcp://*:5599           │  :5599  │  env.step replay→success check   │
     └──────────────────────────────┘         └──────────────────────────────────┘
 
-No ROS, no separate executor: inside the env we read cube/bowl poses (``env.scene``)
-and drive joints (``env.step``) directly — the cuRobo planner is the only remote piece.
-Interactive via the livestream keyboard:
-  **N** = reset to a NEW random DR layout (robot → init)
-  **R** = reset to the SAME layout as before (robot → init)
-  **B** = request cuRobo planning (ZMQ) and run the pick-place manipulation
-R/N (incl. mid-manipulation) cancel the remaining robot actions and reset the robot pose +
-scene. Needs --livestream (keyboard comes through the WebRTC client). Ctrl-C / close the
-stream to stop.
+No ROS, no separate executor: we read cube/bowl poses (``env.scene``) and drive joints
+(``env.step``) directly — the cuRobo planner is the only remote piece.
+
+Livestream keyboard (needs --livestream; keys arrive via the WebRTC client):
+  N = reset to a NEW random DR layout (robot → init)
+  R = reset to the SAME layout as before (robot → init)
+  B = request cuRobo planning (ZMQ) and run the pick-place
+R/N (incl. mid-manipulation) cancel remaining robot actions and reset the robot pose +
+scene. Ctrl-C / close the stream to stop.
 
 Run (two terminals; both services use network_mode: host so ZMQ localhost works):
 
@@ -32,8 +32,8 @@ Run (two terminals; both services use network_mode: host so ZMQ localhost works)
         --task SimToReal-SO101-PickCube-DR-v0 --livestream 2
 
 Watch: WebRTC livestream at :49100 (LIVESTREAM=1 + PUBLIC_IP for remote relay).
-Env variants (``--task``): see src/sim_to_real/tasks/pick_cube/__init__.py
-  PickCube-v0 (fixed) · -DR-v0 (full DR) · -DRBase-v0 · -Eval-v0 · -DR-Eval-v0.
+Env variants (--task): PickCube-v0 (fixed) · -DR-v0 · -DRBase-v0 · -Eval-v0 · -DR-Eval-v0
+(see src/sim_to_real/tasks/pick_cube/__init__.py).
 """
 import argparse
 
@@ -90,9 +90,12 @@ INIT_RAD = {j: math.radians(d) for j, d in INIT_POSE_DEG.items()}
 INIT_ACTION = [INIT_RAD[j] for j in SO101_JOINT_ORDER]  # env action / planner start order (rad)
 
 
+# ── task-space reads (robot base frame) ─────────────────────────────────────────
 def _cube_bowl_in_base(env):
     """Cube (6D) + bowl (xy) in the robot base_link frame — the planner's expected input
-    frame (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf)."""
+    frame (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
+    Returns cube [x, y, grasp_z, qw,qx,qy,qz] (z = fixed grasp height, since the measured
+    z is noisy at rest) and bowl [x, y]. Planner face-aligns to the cube yaw."""
     robot = env.scene["robot"]
     base_p, base_q = robot.data.root_pos_w[:1], robot.data.root_quat_w[:1]
     cube = env.scene[CUBE]
@@ -100,8 +103,6 @@ def _cube_bowl_in_base(env):
     bowl = env.scene[BOWL]
     bp, _ = subtract_frame_transforms(base_p, base_q, bowl.data.root_pos_w[:1], bowl.data.root_quat_w[:1])
     cp, cq, bp = cp[0].tolist(), cq[0].tolist(), bp[0].tolist()
-    # 6D cube [x, y, grasp_z, qw,qx,qy,qz] → planner face-aligns to cube yaw. z = fixed grasp
-    # height in base frame (matches curobo_executor --grasp_z; measured z is noisy at rest).
     return [cp[0], cp[1], args.grasp_z, *cq], [bp[0], bp[1]]
 
 
@@ -112,6 +113,7 @@ def _cube_in_bowl(env):
     return bool(torch.linalg.norm(c[:2] - b[:2]) < args.bowl_tol)
 
 
+# ── per-step task-space logging ─────────────────────────────────────────────────
 def _wrap180(rad):
     return (math.degrees(rad) + 180.0) % 360.0 - 180.0
 
@@ -144,8 +146,9 @@ def _step(env, action):
     return out
 
 
+# ── livestream keyboard (R/N/B one-shot flag) ────────────────────────────────────
 def _key_listener():
-    """Subscribe to carb keyboard (comes through the WebRTC livestream client). R/N set a
+    """Subscribe to carb keyboard (comes through the WebRTC livestream client). R/N/B set a
     one-shot flag consumed by the loop. Returns a dict holding the flag + the subscription."""
     state = {"key": None}
     app_window = omni.appwindow.get_default_app_window()
@@ -167,13 +170,13 @@ def _key_listener():
 
 
 def _poll_key(state):
-    """Consume and return a pending R/N key press (or None)."""
+    """Consume and return a pending R/N/B key press (or None)."""
     k, state["key"] = state["key"], None
     return k
 
 
 def _wait_key(state):
-    """Pump the app (livestream stays live) until R/N is pressed. Returns the key, or None
+    """Pump the app (livestream stays live) until a key is pressed. Returns the key, or None
     if the window closed. Honors an already-pending press (doesn't drop it)."""
     while simulation_app.is_running():
         k = _poll_key(state)
@@ -183,6 +186,7 @@ def _wait_key(state):
     return None
 
 
+# ── DR layout snapshot / restore (so R replays the exact same scene) ─────────────
 def _capture_layout(env):
     """Snapshot the DR cube + bowl world poses so R can restore this exact layout."""
     c, b = env.scene[CUBE].data, env.scene[BOWL].data
@@ -199,12 +203,11 @@ def _restore_layout(env, layout):
         obj.write_root_velocity_to_sim(torch.zeros((1, 6), device=env.device))
 
 
+# ── planner request/reply ────────────────────────────────────────────────────────
 def _recv_plan(sock, poller):
-    """Block for the planner reply while KEEPING the Kit app pumping — otherwise the app
-    freezes during the (multi-second) plan and the WebRTC livestream stops accepting
-    zoom/drag/click input. Poll timeout is short (2 ms) so the loop is render-bound
-    (~30 FPS) not poll-bound — a 50 ms timeout would cap the wait-time stream at ~20 FPS.
-    (GPU contention with the planner on the shared GPU can still dip it lower.) Returns
+    """Block for the planner reply while KEEPING the Kit app pumping — else the app freezes
+    during the (multi-second) plan and the WebRTC livestream stops accepting input. The
+    short 2 ms poll timeout keeps the wait render-bound (~30 FPS), not poll-bound. Returns
     None if the window is closed."""
     while not poller.poll(2):
         if not simulation_app.is_running():
@@ -222,11 +225,10 @@ def main():
     env_cfg.scene.robot.init_state.joint_pos = dict(INIT_RAD)
     if hasattr(env_cfg.events, "reset_robot_joints"):
         env_cfg.events.reset_robot_joints.params["position_range"] = (0.0, 0.0)
-    # Deterministic replay: run the WHOLE planned trajectory. Drop the early-cut terminations
-    # (`success` fires while the held cube merely passes over the bowl mid-transit at z≈0.13,
-    # inside task_done's [+0.005,+0.18] height band → env auto-resets before place/release ever
-    # runs). Keep only time_out (30 s = 900 steps ≫ ~442-row trajectory); judge success at the
-    # end via _cube_in_bowl.
+    # Replay the WHOLE planned trajectory: drop the early-cut terminations. `success` fires
+    # while the held cube merely passes over the bowl mid-transit (z≈0.13, inside task_done's
+    # [+0.005,+0.18] height band) → env would auto-reset before place/release ever runs. Keep
+    # only time_out (30 s = 900 steps ≫ ~442-row traj); judge success at the end via _cube_in_bowl.
     for _term in ("success", "cube_lost"):
         if hasattr(env_cfg.terminations, _term):
             setattr(env_cfg.terminations, _term, None)
