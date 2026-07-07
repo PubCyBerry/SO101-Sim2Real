@@ -603,22 +603,30 @@ def _randomize_camera_focal_fn(
     camera_prim_globs: list[str],
     focal_range: tuple[float, float],
 ) -> None:
-    """카메라 focalLength 무작위화(FOV 변화). 카메라별 1 샘플(전 env 공통), 카메라 없으면 no-op."""
+    """카메라 focalLength 무작위화(FOV 변화). 카메라 없으면 no-op.
+
+    ★per-env 독립 샘플(robot color 와 동일 수정): prim(=env clone)마다 새로 뽑고
+    env_ids 에 든 env 만 갱신 — 옛 구현은 glob 당 1 샘플이라 전 env 동일 FOV."""
+    import re
+
     import isaaclab.sim as sim_utils
     from pxr import Sdf
 
     if env_ids is None or len(env_ids) == 0:
         return
+    reset_envs = {int(i) for i in env_ids.tolist()}
     with Sdf.ChangeBlock():
         for glob in camera_prim_globs:
-            f = float(torch.empty(1).uniform_(float(focal_range[0]), float(focal_range[1])).item())
-            prims = sim_utils.find_matching_prims(glob)
-            for prim in prims:
+            for prim in sim_utils.find_matching_prims(glob):
                 if not prim.IsValid():
+                    continue
+                m = re.search(r"env_(\d+)", str(prim.GetPath()))
+                if m is not None and int(m.group(1)) not in reset_envs:
                     continue
                 fa = prim.GetAttribute("focalLength")
                 if fa.IsValid():
-                    fa.Set(f)
+                    fa.Set(float(torch.empty(1).uniform_(
+                        float(focal_range[0]), float(focal_range[1])).item()))
 
 
 def randomize_camera_focal(
@@ -694,24 +702,33 @@ def _randomize_robot_color_fn(
     robot_prim_glob: str,
     color_names: list[str] | None,
 ) -> None:
-    """로봇 plastic shader 를 팔레트에서 뽑은 색으로 재색칠. shader 없으면 no-op."""
+    """로봇 plastic shader 를 팔레트에서 뽑은 색으로 재색칠. shader 없으면 no-op.
+
+    ★per-env 독립 샘플: 옛 구현은 색 1개를 뽑아 전 env 로봇에 칠해 multi-env 서 전부
+    동색(사용자 보고). env root 마다 새로 뽑고, env_ids 에 든 env 만 재도색(리셋 안 된
+    env 의 에피소드 중 색 변화 방지)."""
+    import re
+
     from isaaclab.sim import get_current_stage  # noqa: F401 (stage 확보용, 아래 traverse 는 prim 직접)
     import isaaclab.sim as sim_utils
     from pxr import Gf, Sdf, Usd
 
     if env_ids is None or len(env_ids) == 0:
         return
+    reset_envs = {int(i) for i in env_ids.tolist()}
 
     names = list(color_names) if color_names else list(ROBOT_PLASTIC_COLORS.keys())
-    idx = int(torch.randint(0, len(names), (1,), device="cpu").item())
-    rgb = ROBOT_PLASTIC_COLORS[names[idx]]
-    col = Gf.Vec3f(float(rgb[0]), float(rgb[1]), float(rgb[2]))
-
     roots = sim_utils.find_matching_prims(robot_prim_glob)  # per-env Robot 루트들
     with Sdf.ChangeBlock():
         for root in roots:
             if not root.IsValid():
                 continue
+            m = re.search(r"env_(\d+)", str(root.GetPath()))
+            if m is not None and int(m.group(1)) not in reset_envs:
+                continue  # 이번 reset 대상 아닌 env 는 색 유지
+            idx = int(torch.randint(0, len(names), (1,), device="cpu").item())
+            rgb = ROBOT_PLASTIC_COLORS[names[idx]]
+            col = Gf.Vec3f(float(rgb[0]), float(rgb[1]), float(rgb[2]))
             for prim in Usd.PrimRange(root):
                 if prim.GetTypeName() != "Shader":
                     continue
