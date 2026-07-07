@@ -20,7 +20,7 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 | 파일 | 컨테이너 | 역할 |
 |---|---|---|
 | `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. cube/bowl(base_link) → full pick-place 궤적(arm deg + gripper feat). 검증본 재사용. |
-| `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env. episode 루프: reset(DR) → plan 요청 → 궤적 replay → 성공 판정. |
+| `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env. 키보드 상태머신(N/R 리셋 · B plan+manipulate), EE pose 매 step 출력. |
 | `build_robot_model.py` | curobo-datagen | (기존) SO-101 cuRobo config 빌더. |
 
 ## 실행 (터미널 2개)
@@ -36,10 +36,12 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
     --task SimToReal-SO101-PickCube-DR-v0 --livestream 2
 ```
 
-- **연속 실행**: episode 개념 없음. reset→plan(ZMQ)→replay→관찰 사이클을 무한 반복(livestream 계속 live). Ctrl-C·창 닫기로 종료.
+- **키보드 인터랙티브**(livestream 입력, `--livestream` 필수):
+  - **N** = 새 DR layout 리셋(로봇 → init) · **R** = 이전과 같은 layout 리셋 · **B** = cuRobo plan + manipulation 실행
+  - R/N 은 manipulation 중에도 = 진행 동작 취소 + 로봇 pose·scene 리셋. Ctrl-C·창 닫기로 종료.
 - 관전: WebRTC `:49100` (원격은 `.env`에 `LIVESTREAM=1` + `PUBLIC_IP`).
 - `--task`: env variant 선택 — `PickCube-v0`(고정) · `-DR-v0`(full DR) · `-DRBase-v0` · `-Eval-v0` · `-DR-Eval-v0`.
-- `--dwell`: 다음 사이클 전 결과 관찰 시간(초, render pump — 물리 정지·조작 가능).
+- `--cam_eye`/`--cam_target`: viewport 카메라(env 원점 상대).
 
 ## planner로 보내는 데이터 (`plan_pickplace` 요청)
 
@@ -65,4 +67,4 @@ shoulder_pan 0 · shoulder_lift -100 · elbow_flex 90 · wrist_flex 50 · wrist_
 3. **성공 판정** — `--bowl_tol`(기본 6cm xy)은 튜닝 knob. 엄밀히는 env `object_in_container`와 맞출 것.
 4. **auto-reset** — `env.step`이 termination에서 auto-reset. SM은 terminal state를 다음 step 전에 읽고 break.
 5. **livestream 상호작용** — plan 대기·종료 중에도 `simulation_app.update()`로 Kit을 계속 pump해야
-   zoom/drag/click이 먹는다(안 그러면 프리즈). 연속 loop이라 plan 대기·사이클 dwell 중에도 pump 유지.
+   zoom/drag/click·키(N/R/B)가 먹는다(안 그러면 프리즈). plan 대기·키 대기 중에도 `simulation_app.update()` pump 유지. **키 입력은 livestream 필수**(headless 는 입력 없음).

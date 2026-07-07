@@ -12,9 +12,13 @@ half is ``curobo_batch_planner.py`` (curobo-datagen container).
 
 No ROS, no separate executor: inside the env we read cube/bowl poses (``env.scene``)
 and drive joints (``env.step``) directly — the cuRobo planner is the only remote piece.
-Runs CONTINUOUSLY (no fixed episode count): reset → plan(ZMQ) → replay → observe, forever,
-stepping/pumping the sim throughout so the livestream stays interactive. Ctrl-C or close
-the stream window to stop.
+Interactive via the livestream keyboard:
+  **N** = reset to a NEW random DR layout (robot → init)
+  **R** = reset to the SAME layout as before (robot → init)
+  **B** = request cuRobo planning (ZMQ) and run the pick-place manipulation
+R/N (incl. mid-manipulation) cancel the remaining robot actions and reset the robot pose +
+scene. Needs --livestream (keyboard comes through the WebRTC client). Ctrl-C / close the
+stream to stop.
 
 Run (two terminals; both services use network_mode: host so ZMQ localhost works):
 
@@ -44,8 +48,6 @@ parser.add_argument("--grasp_z", type=float, default=0.06, help="grasp height in
 parser.add_argument("--settle", type=int, default=5, help="physics steps to settle after each reset")
 parser.add_argument("--bowl_tol", type=float, default=0.06,
                     help="success = cube-center within this xy radius of bowl center (m). Tuning knob.")
-parser.add_argument("--dwell", type=float, default=2.0,
-                    help="seconds to hold/observe the result before the next pick-place cycle")
 parser.add_argument("--cam_eye", type=float, nargs=3, default=[0.2, 0.8, 1.2],
                     help="viewport/livestream camera eye (env-relative)")
 parser.add_argument("--cam_target", type=float, nargs=3, default=[0.0, 0.1, 0.7],
@@ -54,7 +56,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
 # ⚠ AppLauncher gets a WHITELIST only (AGENTS.md): passing vars(args) whole feeds custom
-#   args (--task/--dwell/…) into _prepare_ui and breaks livestream viewport docking.
+#   args (--task/--cam_eye/…) into _prepare_ui and breaks livestream viewport docking.
 _LAUNCHER_KEYS = {"headless", "livestream", "enable_cameras", "device", "kit_args",
                   "experience", "rendering_mode"}
 app_launcher = AppLauncher({k: v for k, v in vars(args).items() if k in _LAUNCHER_KEYS})
@@ -64,7 +66,9 @@ simulation_app = app_launcher.app
 import json  # noqa: E402
 import math  # noqa: E402
 
+import carb  # noqa: E402
 import numpy as np  # noqa: E402
+import omni.appwindow  # noqa: E402
 import torch  # noqa: E402
 import zmq  # noqa: E402
 import gymnasium as gym  # noqa: E402
@@ -112,34 +116,87 @@ def _wrap180(rad):
     return (math.degrees(rad) + 180.0) % 360.0 - 180.0
 
 
-def _log_ee(env):
-    """Print the SO-101 EE (gripper) task-space 6D pose in the robot base frame each step:
-    position (m), Euler-XYZ (deg), quaternion (wxyz)."""
-    ee, robot = env.scene["ee_frame"].data, env.scene["robot"].data
-    # world EE (target idx0 = gripper) → robot base frame = task-space
-    p, q = subtract_frame_transforms(robot.root_pos_w[:1], robot.root_quat_w[:1],
-                                     ee.target_pos_w[:1, 0], ee.target_quat_w[:1, 0])
-    p, q = p[0], q[0]
-    r, pit, y = (a[0].item() for a in euler_xyz_from_quat(q.unsqueeze(0)))
-    print(f"[ee] pos=({p[0]:+.3f},{p[1]:+.3f},{p[2]:+.3f})m  "
-          f"euler_xyz=({_wrap180(r):+6.1f},{_wrap180(pit):+6.1f},{_wrap180(y):+6.1f})deg  "
-          f"quat_wxyz=({q[0]:+.3f},{q[1]:+.3f},{q[2]:+.3f},{q[3]:+.3f})", flush=True)
+def _log_state(env):
+    """Print EE (gripper) 6D pose + cube 6D pose + bowl xy each step, all in the robot base
+    frame (task-space). pose = position (m), Euler-XYZ (deg), quaternion (wxyz)."""
+    robot = env.scene["robot"].data
+    bp, bq = robot.root_pos_w[:1], robot.root_quat_w[:1]
+    ee, cube, bowl = env.scene["ee_frame"].data, env.scene[CUBE].data, env.scene[BOWL].data
+    ep, eq = subtract_frame_transforms(bp, bq, ee.target_pos_w[:1, 0], ee.target_quat_w[:1, 0])
+    cp, cq = subtract_frame_transforms(bp, bq, cube.root_pos_w[:1], cube.root_quat_w[:1])
+    wp, _ = subtract_frame_transforms(bp, bq, bowl.root_pos_w[:1], bowl.root_quat_w[:1])
+    ep, eq, cp, cq, wp = ep[0], eq[0], cp[0], cq[0], wp[0]
+    ee_e = tuple(_wrap180(a[0].item()) for a in euler_xyz_from_quat(eq.unsqueeze(0)))
+    cu_e = tuple(_wrap180(a[0].item()) for a in euler_xyz_from_quat(cq.unsqueeze(0)))
+    print(f"[ee]   pos=({ep[0]:+.3f},{ep[1]:+.3f},{ep[2]:+.3f}) "
+          f"eul=({ee_e[0]:+6.1f},{ee_e[1]:+6.1f},{ee_e[2]:+6.1f}) "
+          f"quat=({eq[0]:+.3f},{eq[1]:+.3f},{eq[2]:+.3f},{eq[3]:+.3f})", flush=True)
+    print(f"[cube] pos=({cp[0]:+.3f},{cp[1]:+.3f},{cp[2]:+.3f}) "
+          f"eul=({cu_e[0]:+6.1f},{cu_e[1]:+6.1f},{cu_e[2]:+6.1f}) "
+          f"quat=({cq[0]:+.3f},{cq[1]:+.3f},{cq[2]:+.3f},{cq[3]:+.3f})  "
+          f"bowl_xy=({wp[0]:+.3f},{wp[1]:+.3f})", flush=True)
 
 
 def _step(env, action):
-    """env.step + per-step EE task-space pose print."""
+    """env.step + per-step EE/cube/bowl task-space state print."""
     out = env.step(action)
-    _log_ee(env)
+    _log_state(env)
     return out
 
 
-def _pump(seconds):
-    """Render-only pump (physics frozen) — keeps the livestream interactive between cycles
-    so the placed result is viewable before the next reset. Exits early if the window closes."""
-    for _ in range(max(1, int(seconds / 0.02))):
-        if not simulation_app.is_running():
-            return
+def _key_listener():
+    """Subscribe to carb keyboard (comes through the WebRTC livestream client). R/N set a
+    one-shot flag consumed by the loop. Returns a dict holding the flag + the subscription."""
+    state = {"key": None}
+    app_window = omni.appwindow.get_default_app_window()
+    keyboard = app_window.get_keyboard()
+    inp = carb.input.acquire_input_interface()
+
+    def _on_kbd(event, *_):
+        if event.type == carb.input.KeyboardEventType.KEY_PRESS:
+            if event.input == carb.input.KeyboardInput.R:
+                state["key"] = "R"
+            elif event.input == carb.input.KeyboardInput.N:
+                state["key"] = "N"
+            elif event.input == carb.input.KeyboardInput.B:
+                state["key"] = "B"
+        return True
+
+    state["_sub"] = inp.subscribe_to_keyboard_events(keyboard, _on_kbd)  # keep ref alive
+    return state
+
+
+def _poll_key(state):
+    """Consume and return a pending R/N key press (or None)."""
+    k, state["key"] = state["key"], None
+    return k
+
+
+def _wait_key(state):
+    """Pump the app (livestream stays live) until R/N is pressed. Returns the key, or None
+    if the window closed. Honors an already-pending press (doesn't drop it)."""
+    while simulation_app.is_running():
+        k = _poll_key(state)
+        if k is not None:
+            return k
         simulation_app.update()
+    return None
+
+
+def _capture_layout(env):
+    """Snapshot the DR cube + bowl world poses so R can restore this exact layout."""
+    c, b = env.scene[CUBE].data, env.scene[BOWL].data
+    return {"cube": (c.root_pos_w[:1].clone(), c.root_quat_w[:1].clone()),
+            "bowl": (b.root_pos_w[:1].clone(), b.root_quat_w[:1].clone())}
+
+
+def _restore_layout(env, layout):
+    """Overwrite the freshly-DR'd cube + bowl with the saved poses (zero velocity)."""
+    for name, k in ((CUBE, "cube"), (BOWL, "bowl")):
+        pos, quat = layout[k]
+        obj = env.scene[name]
+        obj.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1))
+        obj.write_root_velocity_to_sim(torch.zeros((1, 6), device=env.device))
 
 
 def _recv_plan(sock, poller):
@@ -183,43 +240,72 @@ def main():
     poller.register(sock, zmq.POLLIN)
     print(f"[sm] planner {args.planner}", flush=True)
 
-    # Continuous interactive loop: reset → plan(ZMQ) → replay → observe, forever. The sim
-    # steps/pumps throughout so the livestream stays interactive; no fixed episode count.
-    cycle = n_ok = 0
-    while simulation_app.is_running():
-        cycle += 1
-        env.reset()  # robot → INIT (deterministic); DR variant scatters the cube
-        for _ in range(args.settle):  # HOLD init pose while the cube settles (zeros would drift the arm)
-            _step(env, hold)
+    key = _key_listener()
+    layout = None
 
+    def _reset(which):
+        """Scene reset: robot → init (env.reset), cube → NEW DR (N) or SAVED layout (R)."""
+        nonlocal layout
+        env.reset()
+        if which == "R" and layout is not None:
+            _restore_layout(env, layout)     # overwrite the fresh DR with the saved layout
+        for _ in range(args.settle):         # settle (hold init; zeros would drift the arm)
+            _step(env, hold)
+        if which == "N":
+            layout = _capture_layout(env)    # remember this new layout for a later R
+
+    def _manipulate():
+        """B: request the cuRobo plan for the current cube and replay it. → (status, val):
+        ("closed",_) window closed · ("abort","N"/"R") R/N mid-run · ("done", success_bool)."""
         cube_req, bowl_req = _cube_bowl_in_base(env)
         start = robot.data.joint_pos[0][so101_idx].tolist()  # actual start pose (rad, SO101 order)
         sock.send_string(json.dumps({"cmd": "plan_pickplace", "cubes": [cube_req],
                                      "bowl": bowl_req, "start": [start]}))
         rep = _recv_plan(sock, poller)
         if rep is None:
-            break  # window closed while waiting on the planner
+            return "closed", None
         traj = rep.get("trajectories", [None])[0] if rep.get("ok") else None
         if traj is None:
-            print(f"[sm] cycle{cycle} plan FAIL cube={cube_req[:2]} rep_ok={rep.get('ok')}", flush=True)
-            _pump(args.dwell)
-            continue
-
+            print(f"[sm] plan FAIL cube={cube_req[:2]}", flush=True)
+            return "done", False
         # planner row = (arm deg ×5, gripper feature) → sim joint radians (SO101 order) → action.
         tgt = np.stack([policy_feature_to_sim_joint_radians(np.asarray(r, np.float32)) for r in traj])
-        success = False
+        success = None
         for row in tgt:
+            k = _poll_key(key)
+            if k in ("N", "R"):              # cancel remaining actions → next reset command
+                return "abort", k
             action = torch.as_tensor(row, device=env.device, dtype=torch.float32).unsqueeze(0)
             _obs, _rew, term, trunc, _info = _step(env, action)
             if bool(term[0]) or bool(trunc[0]):
-                success = _cube_in_bowl(env)  # read terminal state before env auto-resets next step
+                success = _cube_in_bowl(env)  # read terminal state before env auto-resets
                 break
-        else:
+        if success is None:
             success = _cube_in_bowl(env)
-        n_ok += bool(success)
-        print(f"[sm] cycle{cycle} {'OK ' if success else 'FAIL'} cube={cube_req[:2]} "
-              f"waypoints={len(tgt)} ({n_ok}/{cycle} placed)", flush=True)
-        _pump(args.dwell)  # hold the result on-screen before the next reset
+        return "done", bool(success)
+
+    _reset("N")  # initial scene = new DR layout
+    print("[sm] ready — B=plan+manipulate · N=new layout · R=same layout (livestream keys)",
+          flush=True)
+    n_ok = n_run = 0
+    while simulation_app.is_running():
+        k = _wait_key(key)
+        if k is None:
+            break                            # window closed
+        if k in ("N", "R"):
+            _reset(k)
+            print(f"[sm] reset ({k})", flush=True)
+            continue
+        status, val = _manipulate()          # k == "B"
+        if status == "closed":
+            break
+        if status == "abort":                # R/N mid-run → cancel + reset robot pose + scene
+            _reset(val)
+            print(f"[sm] ABORT → reset ({val})", flush=True)
+            continue
+        n_run += 1
+        n_ok += val
+        print(f"[sm] manipulate {'OK ' if val else 'FAIL'} ({n_ok}/{n_run} placed)", flush=True)
 
     env.close()
     simulation_app.close()

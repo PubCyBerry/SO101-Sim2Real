@@ -411,8 +411,7 @@ kinematics:
     - moving_jaw_so101_v1_link
     - wrist_cam_mount_link
   tool_frames:
-  # - moving_jaw_so101_v1_link
-  - gripper_link
+  - moving_jaw_so101_v1_link
   urdf_path: /workspace/assets/robots/urdf/so_arm101.urdf
   use_external_assets: false
   use_global_cumul: true

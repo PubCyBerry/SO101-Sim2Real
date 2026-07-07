@@ -287,8 +287,9 @@ class PickPlacePlanner:
             ok = [c for c in cands if c[2] <= TAU_MAX_DEG] or sorted(cands, key=lambda c: c[2])[:4]
         else:
             ok = cands
-        while len(ok) < nc:              # goalset 크기 고정(패딩=사이클 반복)
-            ok.append(ok[len(ok) % len(cands)])
+        base = list(ok)                  # 패딩 전 스냅샷(사이클 기준 — ok 는 아래서 자람)
+        while len(ok) < nc:              # goalset 크기 고정(패딩=base 사이클 반복)
+            ok.append(base[len(ok) % len(base)])
         pos = np.array([c[0] for c in ok[:nc]], dtype=np.float32)
         quat = np.array([c[1] for c in ok[:nc]], dtype=np.float32)
         return self._goal(pos, quat)
