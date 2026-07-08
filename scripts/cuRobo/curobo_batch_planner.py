@@ -87,6 +87,8 @@ ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
 LADDER = [(a, sx) for a in (0, 20, 30, 40, 45, 50, 55) for sx in (1, -1)]
 ALPHAS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]  # goalset fallback tilt(deg)
 TAU_MAX_DEG = 8.0   # goalset strict: |Δψ·tanα| face-align 근사 손실 게이트(deg)
+SIMPLE_FACE_LOSS_MAX_DEG = 10.0
+SIMPLE_MAX_CANDIDATES = 20
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
 #   e_normal(closing clearance) ∈ [1,6]mm · |e_tangent| ≤ 22mm · |e_height| ≤ 28mm.
 # tangent/height 폭 = fingers-down(sx=+1) branch achievable. 이상(3/4mm)은 40mm 큐브서
@@ -260,6 +262,8 @@ class PickPlacePlanner:
         self.p.warmup(enable_graph=False, num_warmup_iterations=2)
         self.tf = self.p.tool_frames
         self.nA = len(self.p.joint_names)
+        self.last_candidate_diag = None
+        self.last_plan_diag = {}
 
     # ── small helpers ───────────────────────────────────────────────────────────
     @staticmethod
@@ -320,7 +324,7 @@ class PickPlacePlanner:
         zax = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
         return pos, quat, zax
 
-    def _grasp_face_error(self, q_pre, cube):
+    def _grasp_face_error(self, q_pre, cube, face_normal=None):
         """IK-후-FK 실측 fixed jaw inner face center 를 cube face center 와 **3D** 비교(사용자 스펙).
 
         grasp 자세 = pre 자세서 approach축(tcp z) linear descend(table clamp; plan_pickplace grasp
@@ -343,15 +347,106 @@ class PickPlacePlanner:
         grasp_tcp = pos + tstar * zax
         dx, dy, dz = FIXED_INNER_CENTER
         fixed_inner = grasp_tcp + dx * xax + dy * yax + dz * zax   # FK 실측 pad center(world)
-        face_center = cc + CUBE_HALF * xax                        # fixed jaw 가 닿는 +closing face 중심
+        n_face = np.array(face_normal, dtype=np.float64) if face_normal is not None else xax
+        n_face[2] = 0.0
+        n_norm = np.linalg.norm(n_face)
+        n_face = n_face / n_norm if n_norm > 1e-6 else xax
+        if float(np.dot(n_face, xax)) < 0.0:
+            n_face = -n_face
+        face_center = cc + CUBE_HALF * n_face                      # fixed jaw 가 닿는 실제 cube face 중심
         e = fixed_inner - face_center
-        t = np.cross(np.array([0.0, 0.0, 1.0]), xax); tn = np.linalg.norm(t)
+        t = np.cross(np.array([0.0, 0.0, 1.0]), n_face); tn = np.linalg.norm(t)
         t = t / tn if tn > 1e-6 else np.array([0.0, 1.0, 0.0])     # face-plane tangent(수평, ⊥ closing)
         e_t, e_h = float(np.dot(e, t)), float(e[2])
-        return {"n": float(np.dot(e, xax)), "t": e_t, "h": e_h,
-                "a": math.degrees(math.acos(max(-1.0, min(1.0, -zaz)))), "c": math.hypot(e_t, e_h)}
+        face_angle = math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(xax, n_face))))))
+        return {"n": float(np.dot(e, n_face)), "t": e_t, "h": e_h,
+                "a": math.degrees(math.acos(max(-1.0, min(1.0, -zaz)))), "c": math.hypot(e_t, e_h),
+                "face_angle": float(face_angle)}
 
     # ── candidate pose (pan-plane) ──────────────────────────────────────────────
+    @staticmethod
+    def _face_normals_from_yaw(yaw):
+        """cube yaw → solver-frame horizontal face outward normals 4개."""
+        if yaw is None:
+            return []
+        return [
+            np.array([math.cos(yaw + k * math.pi / 2), math.sin(yaw + k * math.pi / 2), 0.0],
+                     dtype=np.float64)
+            for k in range(4)
+        ]
+
+    def _cand_pose_simple(self, xyz, face_normal, a_deg):
+        """단순 후보: cube face normal + tilt α 만으로 full TCP pose(quat)를 만든다.
+
+        - approach ẑ: shoulder pan axis↔cube center 수직평면 안.
+        - closing x̂: 실제 cube face normal 을 ẑ 에 수직 투영한 방향.
+        - TCP 위치: fixed jaw inner pad center 가 face-front offset 에 오도록 역산.
+        """
+        cc = np.array(xyz[:3], dtype=np.float64)
+        f = np.array(face_normal, dtype=np.float64)
+        f[2] = 0.0
+        fn = np.linalg.norm(f)
+        if fn < 1e-6:
+            raise ValueError("face normal is degenerate")
+        f = f / fn
+
+        pan_to_cube = np.array([cc[0] - PAN_AXIS_XY[0], cc[1] - PAN_AXIS_XY[1], 0.0],
+                               dtype=np.float64)
+        rn = np.linalg.norm(pan_to_cube)
+        if rn < 1e-6:
+            raise ValueError("cube is too close to shoulder pan axis")
+        r_hat = pan_to_cube / rn
+
+        a = math.radians(a_deg)
+        z_ax = -math.cos(a) * np.array([0.0, 0.0, 1.0]) + math.sin(a) * r_hat
+        z_ax = z_ax / np.linalg.norm(z_ax)
+
+        x_proj = f - float(np.dot(f, z_ax)) * z_ax
+        x_norm = np.linalg.norm(x_proj)
+        if x_norm < 1e-6:
+            raise ValueError("face normal is parallel to approach axis")
+        x_ax = x_proj / x_norm
+        if float(np.dot(x_ax, f)) < 0.0:
+            x_ax = -x_ax
+        y_ax = np.cross(z_ax, x_ax)
+        y_ax = y_ax / np.linalg.norm(y_ax)
+        # 수치 오차 제거: x̂ = ŷ×ẑ 로 다시 직교화.
+        x_ax = np.cross(y_ax, z_ax)
+        x_ax = x_ax / np.linalg.norm(x_ax)
+        R = np.stack([x_ax, y_ax, z_ax], 1)
+
+        pad_target = cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * f
+        tcp_tgt = pad_target - R @ np.array(FIXED_INNER_CENTER, dtype=np.float64)
+        pre_pos = tcp_tgt - _pre_back(xyz) * z_ax
+        face_loss = math.degrees(math.asin(max(-1.0, min(1.0, abs(float(np.dot(f, z_ax)))))))
+        pan_residual = float(np.dot(z_ax, np.cross(r_hat, np.array([0.0, 0.0, 1.0]))))
+        return pre_pos, _mat2quat(R), {
+            "mode": "simple",
+            "alpha_deg": float(a_deg),
+            "face_normal": f.astype(float).tolist(),
+            "face_loss_deg": float(face_loss),
+            "pan_residual": pan_residual,
+            "tcp_target": tcp_tgt.astype(float).tolist(),
+            "pre_target": pre_pos.astype(float).tolist(),
+            "quat_wxyz": _mat2quat(R).astype(float).tolist(),
+        }
+
+    def _simple_candidates(self, xyz, yaw):
+        """실제 cube face normal×tilt 후보를 만들고 face-loss/top-down 선호 순으로 제한."""
+        cands = []
+        for face_idx, normal in enumerate(self._face_normals_from_yaw(yaw)):
+            for a_deg in ALPHAS:
+                try:
+                    pos, quat, meta = self._cand_pose_simple(xyz, normal, a_deg)
+                except ValueError:
+                    continue
+                meta["face_index"] = face_idx
+                if meta["face_loss_deg"] <= SIMPLE_FACE_LOSS_MAX_DEG:
+                    cands.append((pos, quat, meta))
+        cands.sort(key=lambda c: (round(c[2]["face_loss_deg"], 3), abs(c[2]["alpha_deg"]),
+                                  c[2]["face_index"]))
+        return cands[:SIMPLE_MAX_CANDIDATES]
+
     def _cand_pose(self, xyz, yaw, a_deg, sx):
         """pan-plane pre-grasp 후보 1개 → (pre_pos[3], quat_wxyz[4], loss).
 
@@ -396,30 +491,64 @@ class PickPlacePlanner:
         |e_height|≤E_HEIGHT_MAX · wrist_roll 범위. **tilted 도 통과**(|α| 는 reject 조건 아님).
         score 순위(사용자 지시): ①centerline(√(e_t²+e_h²)) ②clearance error ③yaw align(dpsi loss)
         ④wrist branch(fingers-down 선호) ⑤tilt penalty. 전 후보 평가(조기 종료 없음) 후 최소 채택."""
-        best = None  # (score, traj, end)
-        for a_deg, sx in (ladder or LADDER):
-            pos, quat, loss = self._cand_pose(cube, yaw, a_deg, sx)
+        best = None  # (score, traj, end, diag)
+        if ladder is None:
+            candidates = self._simple_candidates(cube, yaw)
+            if candidates:
+                self._diag(f"[simple] candidates={len(candidates)} yaw={math.degrees(yaw):.1f}")
+            else:
+                candidates = []
+        else:
+            candidates = []
+        if not candidates:
+            candidates = []
+            for a_deg, sx in (ladder or LADDER):
+                pos, quat, loss = self._cand_pose(cube, yaw, a_deg, sx)
+                candidates.append((pos, quat, {
+                    "mode": "legacy",
+                    "alpha_deg": float(a_deg),
+                    "sx": float(sx),
+                    "face_loss_deg": float(loss),
+                    "face_normal": None,
+                    "quat_wxyz": np.asarray(quat).astype(float).tolist(),
+                    "pre_target": np.asarray(pos).astype(float).tolist(),
+                }))
+
+        for pos, quat, meta in candidates:
+            label = (f"simple(face={meta.get('face_index')},alpha={meta['alpha_deg']:+.0f},"
+                     f"loss={meta['face_loss_deg']:.1f})"
+                     if meta["mode"] == "simple"
+                     else f"legacy(alpha={meta['alpha_deg']:+.0f},sx={meta.get('sx'):+.0f})")
             traj, end = self._plan_to(self._goal([pos], [quat]), start, attempts=2)
             if traj is None:
-                self._diag(f"[ladder] cand=({a_deg},{sx}) solved=False")
+                self._diag(f"[ladder] cand={label} solved=False")
                 continue
             wr = float(end.position.view(-1)[4].item())  # 해의 wrist_roll(rad)
             in_range = WRIST_ROLL_RANGE[0] <= wr <= WRIST_ROLL_RANGE[1]
-            fe = self._grasp_face_error(end, cube)
+            fe = self._grasp_face_error(end, cube, meta.get("face_normal"))
             ok = (in_range and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
-                  and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX)
-            self._diag(f"[ladder] cand=({a_deg},{sx}) wr={math.degrees(wr):.0f} in_range={in_range} "
+                  and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
+                  and fe["face_angle"] <= SIMPLE_FACE_LOSS_MAX_DEG)
+            self._diag(f"[ladder] cand={label} wr={math.degrees(wr):.0f} in_range={in_range} "
                        f"alpha={fe['a']:.0f} e_norm={fe['n'] * 1000:.1f} e_tan={fe['t'] * 1000:.1f} "
-                       f"e_h={fe['h'] * 1000:.1f} centerline={fe['c'] * 1000:.1f}mm ok={ok}")
+                       f"e_h={fe['h'] * 1000:.1f} centerline={fe['c'] * 1000:.1f}mm "
+                       f"face_angle={fe['face_angle']:.1f} ok={ok}")
             if ok:
                 score = (round(fe["c"] * 1000, 1),                    # ① centerline error(mm)
                          round(abs(fe["n"] - 0.003) * 1000, 1),       # ② clearance error vs 3mm 중앙
-                         round(loss, 1),                              # ③ yaw align(dpsi loss °)
+                         round(meta["face_loss_deg"], 1),             # ③ face normal align loss(°)
                          round(abs(math.degrees(wr) + 90.0)),         # ④ wrist branch(fingers-down=-90°)
                          round(fe["a"]))                              # ⑤ tilt penalty(작을수록)
                 if best is None or score < best[0]:
-                    best = (score, traj, end)
-        return (best[1], best[2]) if best else (None, start)
+                    diag = {**meta, "score": list(score), "wrist_roll_deg": math.degrees(wr),
+                            "fk_face_error": {k: float(v) for k, v in fe.items()}}
+                    best = (score, traj, end, diag)
+        if best:
+            self.last_candidate_diag = best[3]
+            self._diag(f"[ladder] selected={best[3]}")
+            return best[1], best[2]
+        self.last_candidate_diag = None
+        return None, start
 
     def _pregrasp_goalset(self, cube, yaw, strict):
         """pan-plane 후보 전체(α×sx)를 goalset 으로. strict=True 면 face-align 손실 게이트
@@ -577,11 +706,21 @@ class PickPlacePlanner:
         b_pull = float(kn.get("bowl_pull", BOWL_PULL))
         # 파티클 IK 는 process 누적 seed 상태 → 요청마다 리셋해 에피소드 결정론 복원.
         self.p.reset_seed()
+        self.last_candidate_diag = None
 
         cube = usd_to_urdf(cube_bl[:3])
         cube = (cube[0], cube[1], cube[2] + z_off)          # grasp 깊이 보정
         yaw = self._cube_yaw(cube_bl)
         bx, by = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))[:2] if bowl_bl is not None else self.bowl_s
+        self.last_plan_diag = {
+            "ok": False,
+            "cube_base_link": [float(v) for v in cube_bl],
+            "cube_solver": [float(v) for v in cube],
+            "cube_yaw_deg": None if yaw is None else float(math.degrees(yaw)),
+            "bowl_solver_xy": [float(bx), float(by)],
+            "candidate": None,
+            "phases": {},
+        }
         start = self._start_state(start_rad)
         q_home = start.clone()   # ⑥ retreat 가 여기로 복귀 → 다음 start 항상 init
         self._diag(f"[start] names={self.p.joint_names} recv={start_rad} "
@@ -638,11 +777,15 @@ class PickPlacePlanner:
 
         phases = {"approach": pre, "grasp": desc, "lift": lift,
                   "transit": transit, "retreat": retreat}
+        self.last_plan_diag["candidate"] = self.last_candidate_diag
+        self.last_plan_diag["phases"] = {k: v is not None for k, v in phases.items()}
+        self.last_plan_diag["attached"] = bool(attached)
         if any(t is None for t in phases.values()):
             msg = "[planner] phase-fail {} cube={}".format(
                 " ".join(f"{k}={v is not None}" for k, v in phases.items()), cube_bl)
             print(msg, flush=True); self._diag(msg)
             return None
+        self.last_plan_diag["ok"] = True
         return self._assemble(phases, g_open, g_close)
 
     def _assemble(self, phases, g_open, g_close):
@@ -677,12 +820,14 @@ def plan_batch(pl, req):
     starts = req.get("start")
     knobs = req.get("knobs")
     out = []
+    diagnostics = []
     for i, cube in enumerate(cubes):
         b = bowl[i] if per_env_bowl else bowl
         s = [starts[i]] if starts else None
         traj = pl.plan_pickplace(cube, b, s, knobs)
         out.append(traj.tolist() if traj is not None else None)
-    return out
+        diagnostics.append(pl.last_plan_diag)
+    return out, diagnostics
 
 
 def serve_loop(pl, sock):
@@ -692,7 +837,8 @@ def serve_loop(pl, sock):
         if cmd == "ping":
             sock.send_string(json.dumps({"ok": True}))
         elif cmd == "plan_pickplace":
-            sock.send_string(json.dumps({"ok": True, "trajectories": plan_batch(pl, req)}))
+            trajs, diagnostics = plan_batch(pl, req)
+            sock.send_string(json.dumps({"ok": True, "trajectories": trajs, "diagnostics": diagnostics}))
         elif cmd == "shutdown":
             sock.send_string(json.dumps({"ok": True})); return
         else:
@@ -707,7 +853,7 @@ def main():
     pl = PickPlacePlanner()
     print("[planner] ready", flush=True)
     if a.self_test:
-        trajs = plan_batch(pl, {"cubes": [[0.017, -0.253, 0.06], [0.167, -0.133, 0.06]]})
+        trajs, _diagnostics = plan_batch(pl, {"cubes": [[0.017, -0.253, 0.06], [0.167, -0.133, 0.06]]})
         ok = all(t is not None for t in trajs)
         print(f"self-test(2-env): {[len(t) if t else None for t in trajs]}")
         print("SELFTEST_OK" if ok else "SELFTEST_CHECK")

@@ -54,6 +54,19 @@ parser.add_argument("--grasp_z", type=float, default=0.06, help="grasp height in
 parser.add_argument("--settle", type=int, default=5, help="physics steps to settle after each reset")
 parser.add_argument("--bowl_tol", type=float, default=0.06,
                     help="success = cube-center within this xy radius of bowl center (m). Tuning knob.")
+parser.add_argument("--seed", type=int, default=0, help="base seed for auto trials and env reset")
+parser.add_argument("--auto_trials", type=int, default=0,
+                    help="run this many random trials without keyboard input, then exit")
+parser.add_argument("--record_viewport_dir", default=None,
+                    help="directory for auto-trial viewport MP4 files. Use 'none' to disable video.")
+parser.add_argument("--summary_dir", default=None,
+                    help="directory for auto-trial summary.json. Defaults to record_viewport_dir or scratch.")
+parser.add_argument("--record_fps", type=int, default=30, help="viewport MP4 FPS")
+parser.add_argument("--record_every", type=int, default=1, help="record every N simulation steps")
+parser.add_argument("--planner_knobs_json", default=None,
+                    help="JSON object forwarded to cuRobo planner request.knobs")
+parser.add_argument("--log_every", type=int, default=1,
+                    help="print EE/cube state every N env steps. Use 0 to disable per-step logs.")
 parser.add_argument("--cam_eye", type=float, nargs=3, default=[0.2, 0.8, 1.2],
                     help="viewport/livestream camera eye (env-relative)")
 parser.add_argument("--cam_target", type=float, nargs=3, default=[0.0, 0.1, 0.7],
@@ -71,6 +84,7 @@ simulation_app = app_launcher.app
 # ── isaac / project imports (only valid after SimulationApp exists) ──────────────
 import json  # noqa: E402
 import math  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import carb  # noqa: E402
 import numpy as np  # noqa: E402
@@ -94,6 +108,76 @@ INIT_POSE_DEG = {
 }
 INIT_RAD = {j: math.radians(d) for j, d in INIT_POSE_DEG.items()}
 INIT_ACTION = [INIT_RAD[j] for j in SO101_JOINT_ORDER]  # env action / planner start order (rad)
+
+
+class ViewportVideoRecorder:
+    """Active viewport RGB를 step마다 MP4로 기록한다(auto trial 전용)."""
+
+    def __init__(self, out_dir, fps=30, every=1):
+        self.out_dir = Path(out_dir) if out_dir else None
+        self.fps = int(fps)
+        self.every = max(1, int(every))
+        self.writer = None
+        self.path = None
+        self.step_i = 0
+        self._imageio = None
+        self._annotator = None
+        if self.out_dir is None:
+            return
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        import imageio.v2 as imageio  # noqa: PLC0415
+        import omni.kit.viewport.utility as viewport_utils  # noqa: PLC0415
+        import omni.replicator.core as rep  # noqa: PLC0415
+
+        viewport = viewport_utils.get_active_viewport()
+        if viewport is None or not viewport.render_product_path:
+            raise RuntimeError(
+                "active viewport render product 없음. --record_viewport_dir 사용 시 GUI 또는 --livestream 2로 실행하세요."
+            )
+        annotator = rep.AnnotatorRegistry.get_annotator("rgb")
+        annotator.attach(viewport.render_product_path)
+        self._imageio = imageio
+        self._annotator = annotator
+        self.render_product_path = str(viewport.render_product_path)
+
+    @property
+    def enabled(self):
+        return self.out_dir is not None
+
+    def start(self, trial_idx):
+        if not self.enabled:
+            return None
+        self.close()
+        self.path = self.out_dir / f"trial_{trial_idx:03d}.mp4"
+        self.step_i = 0
+        self.writer = self._imageio.get_writer(
+            self.path,
+            fps=self.fps,
+            codec="libx264",
+            quality=8,
+            macro_block_size=1,
+            output_params=["-pix_fmt", "yuv420p"],
+        )
+        return str(self.path)
+
+    def capture(self):
+        if self.writer is None:
+            return
+        self.step_i += 1
+        if self.step_i % self.every:
+            return
+        arr = np.asarray(self._annotator.get_data())
+        if arr.size == 0:
+            return
+        if arr.ndim == 3 and arr.shape[-1] == 4:
+            arr = arr[..., :3]
+        if arr.ndim == 3 and arr.shape[-1] == 3:
+            self.writer.append_data(arr.astype(np.uint8))
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.close()
+            self.writer = None
 
 
 # ── task-space reads (robot base frame, per-env) ─────────────────────────────────
@@ -148,10 +232,14 @@ def _log_state(env):
           f"bowl_xy=({wp[0]:+.3f},{wp[1]:+.3f})", flush=True)
 
 
-def _step(env, action):
+def _step(env, action, recorder=None):
     """env.step + per-step EE/cube/bowl task-space state print."""
     out = env.step(action)
-    _log_state(env)
+    _step.i = getattr(_step, "i", 0) + 1
+    if args.log_every > 0 and _step.i % args.log_every == 0:
+        _log_state(env)
+    if recorder is not None:
+        recorder.capture()
     return out
 
 
@@ -180,6 +268,8 @@ def _key_listener():
 
 def _poll_key(state):
     """Consume and return a pending R/N/B key press (or None)."""
+    if state is None:
+        return None
     k, state["key"] = state["key"], None
     return k
 
@@ -245,6 +335,7 @@ def main():
     env_cfg.viewer.env_index = 0
     env_cfg.viewer.eye = tuple(args.cam_eye)
     env_cfg.viewer.lookat = tuple(args.cam_target)
+    env_cfg.seed = args.seed
     env = gym.make(args.task, cfg=env_cfg).unwrapped
     print(f"[sm] env={args.task} action_dim={env.action_space.shape} device={env.device}", flush=True)
 
@@ -259,39 +350,61 @@ def main():
     poller.register(sock, zmq.POLLIN)
     print(f"[sm] planner {args.planner}", flush=True)
 
-    key = _key_listener()
+    key = None if args.auto_trials > 0 else _key_listener()
     layout = None
+    last_manip = {}
+    planner_knobs = json.loads(args.planner_knobs_json) if args.planner_knobs_json else None
+    if planner_knobs is not None and not isinstance(planner_knobs, dict):
+        raise ValueError("--planner_knobs_json must decode to a JSON object")
 
-    def _reset(which):
+    def _reset(which, seed=None, recorder=None):
         """Scene reset: robot → init (env.reset), cube → NEW DR (N) or SAVED layout (R)."""
         nonlocal layout
-        env.reset()
+        if seed is None:
+            env.reset()
+        else:
+            env.reset(seed=int(seed))
         if which == "R" and layout is not None:
             _restore_layout(env, layout)     # overwrite the fresh DR with the saved layout
         for _ in range(args.settle):         # settle (hold init; zeros would drift the arm)
-            _step(env, hold)
+            _step(env, hold, recorder)
         if which == "N":
             layout = _capture_layout(env)    # remember this new layout for a later R
 
-    def _manipulate():
+    def _manipulate(recorder=None):
         """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
 
         → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
         ("done", (n_planned, n_placed)). plan-fail env 는 init hold(카운트는 실패 처리),
         짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다."""
+        nonlocal last_manip
         cubes, bowls = _cubes_bowls_in_base(env)
         starts = [robot.data.joint_pos[i][so101_idx].tolist() for i in range(env.num_envs)]
-        sock.send_string(json.dumps({"cmd": "plan_pickplace", "cubes": cubes,
-                                     "bowl": bowls, "start": starts}))
+        req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts}
+        if planner_knobs is not None:
+            req["knobs"] = planner_knobs
+        sock.send_string(json.dumps(req))
         rep = _recv_plan(sock, poller)
         if rep is None:
             return "closed", None
         trajs = rep.get("trajectories") if rep.get("ok") else None
+        last_manip = {
+            "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
+            "planner_ok": bool(rep.get("ok")),
+            "diagnostics": rep.get("diagnostics", []),
+            "planned": [],
+            "placed": [],
+            "n_steps": 0,
+        }
         if not trajs or all(t is None for t in trajs):
             print(f"[sm] plan FAIL (all {env.num_envs} envs)", flush=True)
+            last_manip["planned"] = [False] * env.num_envs
+            last_manip["placed"] = [False] * env.num_envs
             return "done", (env.num_envs, 0)
         planned = [t is not None for t in trajs]
         n_steps = max(len(t) for t in trajs if t is not None)
+        last_manip["planned"] = [bool(v) for v in planned]
+        last_manip["n_steps"] = int(n_steps)
         # planner row = (arm deg ×5, gripper feature) → sim joint radians (SO101 order).
         # plan-fail env 는 init hold, 짧은 궤적은 last-row 패딩 → (T, N, 6) lockstep 텐서.
         per_env = []
@@ -311,16 +424,74 @@ def main():
             if k in ("N", "R"):              # cancel remaining actions → next reset command
                 return "abort", k
             action = torch.as_tensor(step_rows, device=env.device, dtype=torch.float32)
-            _obs, _rew, term, trunc, _info = _step(env, action)
+            _obs, _rew, term, trunc, _info = _step(env, action, recorder)
             if bool(term.any()) or bool(trunc.any()):
                 success = _cubes_in_bowl(env)  # read terminal state before env auto-resets
                 break
         if success is None:
             success = _cubes_in_bowl(env)
+        last_manip["placed"] = [bool(v) for v in success]
         n_placed = sum(1 for i, ok in enumerate(success) if planned[i] and ok)
         for i, (p, ok) in enumerate(zip(planned, success)):
             print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(ok)}", flush=True)
         return "done", (env.num_envs, n_placed)
+
+    if args.auto_trials > 0:
+        record_dir = args.record_viewport_dir
+        if record_dir is not None and record_dir.lower() in {"", "none", "off", "false", "0"}:
+            record_dir = None
+        summary_dir = args.summary_dir or record_dir or "/workspace/scratch/curobo-auto-trials"
+        recorder = ViewportVideoRecorder(record_dir, fps=args.record_fps, every=args.record_every)
+        trials = []
+        print(f"[sm] auto_trials={args.auto_trials} seed={args.seed} "
+              f"record_dir={record_dir} summary_dir={summary_dir}", flush=True)
+        try:
+            for trial_i in range(1, args.auto_trials + 1):
+                if not simulation_app.is_running():
+                    break
+                trial_seed = int(args.seed + trial_i - 1)
+                video_path = recorder.start(trial_i) if recorder.enabled else None
+                print(f"[sm] auto trial {trial_i}/{args.auto_trials} seed={trial_seed}", flush=True)
+                status = "unknown"
+                val = None
+                try:
+                    _reset("N", seed=trial_seed, recorder=recorder)
+                    status, val = _manipulate(recorder=recorder)
+                finally:
+                    recorder.close()
+                n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
+                trial_summary = {
+                    "trial": trial_i,
+                    "seed": trial_seed,
+                    "status": status,
+                    "video": video_path,
+                    "n_attempt": int(n_attempt),
+                    "n_placed": int(n_placed),
+                    **last_manip,
+                }
+                trials.append(trial_summary)
+                print(f"[sm] auto trial {trial_i}: status={status} placed={n_placed}/{n_attempt} "
+                      f"video={video_path}", flush=True)
+                if status == "closed":
+                    break
+        finally:
+            summary = {
+                "task": args.task,
+                "num_envs": args.num_envs,
+                "base_seed": args.seed,
+                "record_fps": args.record_fps,
+                "record_every": args.record_every,
+                "viewport_render_product": getattr(recorder, "render_product_path", None),
+                "trials": trials,
+            }
+            summary_path = Path(summary_dir) / "summary.json"
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            with summary_path.open("w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+            print(f"[sm] auto summary → {summary_path}", flush=True)
+            env.close()
+            simulation_app.close()
+        return
 
     _reset("N")  # initial scene = new DR layout
     print(f"[sm] ready — B=plan+manipulate · N=new layout · R=same layout "
