@@ -19,7 +19,7 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 
 | 파일 | 컨테이너 | 역할 |
 |---|---|---|
-| `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. per-env cube/bowl(base_link) → 6-phase pick-place 궤적(arm deg + gripper feat) 리스트. **multi-env = cubes 길이만큼 순차 계획**(검증된 단일 로직 재사용; planner 지연 병목 시 true GPU-batch 로 승격). 아래 §grasp/place 파이프라인. |
+| `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. per-env cube/bowl(base_link) → 6-phase pick-place 궤적(arm deg + gripper feat) 리스트. **multi-env 실행은 IsaacLab lockstep**, planner는 env별 obstacle을 순차로 바꾸되 **각 env 안의 grasp 후보는 cuRobo BatchMotionPlanner batch 차원으로 한 번에 검증**한다. 아래 §grasp/place 파이프라인. |
 | `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env(`--num_envs N`). 키보드 상태머신(N/R 리셋 · B plan+manipulate) — **N envs lockstep**: 한 번의 B 로 batch plan → per-env 궤적 replay(plan-fail env 는 init hold, 짧은 궤적 last-row 패딩) → per-env `_cubes_in_bowl` 판정. **결정적 replay 위해 `success`/`cube_lost` termination 비활성**(transit 중 그릇 상공 통과 시 `task_done` 조기 발화 버그. time_out 30s 만 유지). |
 | `build_robot_model.py` | curobo-datagen | (기존) SO-101 cuRobo config 빌더. |
 
@@ -48,6 +48,7 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 - `cubes`: `[[x, y, grasp_z, qw,qx,qy,qz] ×N]` — per-env **6-DOF pose**. planner가 quat으로 큐브 yaw face-align.
 - `bowl`: `[x, y]`(공용) 또는 `[[x, y] ×N]`(per-env) — place 목표로 **xy만** 소비.
 - `start`: `[[6 joint rad, SO101 순서] ×N]` — per-env **reset·settle 후 실제 robot joint**(arm 5개 사용).
+- `knobs`: 선택. `grasp_z_off`, `grip_open`, `grip_close`, `bowl_pull`, `simple_face_count`, `seed`.
 - 응답: `{"trajectories": [[[6]×T]|null ×N]}` — 실패 env 는 null.
 
 ## grasp/place 파이프라인 (`curobo_batch_planner.py`)
@@ -57,15 +58,22 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 **tool frame·grasp 기하** (`assets/robots/so101.yml` `extra_links.tcp_grasp` 단일 소스):
 - **tool_frames = `tcp_grasp`** (손가락 사이 pinch 점). scaffold 커밋이 이 extra_link 를 실수로 제거해 tool 이 `moving_jaw` 로 바뀌면서 pan-plane 후보 IK 전멸했던 적 있음 → **복원 필수**. `docs/TROUBLESHOOTING.md` 참조.
 - `tcp_grasp` = gripper_link 기준 `(0.012, -0.015, -0.025)+Ry(π-0.0487)`. approach 축 = tcp z(하향), closing 축 = tcp x.
-- **★pad center 조준**(tcp 아님): fixed jaw **inner face center** 는 tcp 서 `FIXED_INNER_CENTER=(0.0215, 0.0147, 0.0463)`(closing·lateral·jaw-아래방향, m) 만큼 떨어짐(pad 이 tcp 아래 46mm·옆 15mm). tcp 를 cube center 에 조준하면 pad 이 face 서 크게 벗어나 **edge/corner 를 잡음** → `_cand_pose` 가 **pad center** 를 cube face center 밖 `FIXED_JAW_CLEAR_TARGET`(3mm)로 조준: `tcp_tgt = cube + (CUBE_HALF+clear)·n − R·FIXED_INNER_CENTER`.
+- **★pad center 조준**(tcp 아님): fixed jaw **inner face center** 는 tcp 서 `FIXED_INNER_CENTER=(0.0215, 0.0147, 0.0463)`(closing·lateral·jaw-아래방향, m) 만큼 떨어짐(pad 이 tcp 아래 46mm·옆 15mm). tcp 를 cube center 에 조준하면 pad 이 face 서 크게 벗어나 **edge/corner 를 잡음** → simple pose가 **pad center** 를 cube face center 밖 `FIXED_JAW_CLEAR_TARGET`(3mm)로 조준: `tcp_tgt = cube + (CUBE_HALF+clear)·n − R·FIXED_INNER_CENTER`.
+
+**simple grasp 후보 선택**:
+- cube quaternion에서 얻은 face normal 4개를 만들고, start pose에서 **shoulder_pan만 cube vertical plane으로 align한 FK 자세**를 계산한다.
+- 그 pan-aligned 자세의 gripper closing axis(`tcp_grasp` x축, 현재 wrist_roll 반영)에 가까운 순서로 cube face를 정렬한다. 기본은 4개 face를 모두 후보에 넣되, 선택 시 가능한 한 가까운 face_rank를 우선한다.
+- 각 face에 대해 tilt α(`-50..50°`) 후보를 만들고, `BatchMotionPlanner(max_batch_size=SIMPLE_MAX_CANDIDATES)`의 batch 차원으로 한 번에 approach 계획을 시도한다.
+- cuRobo 성공 후보를 다시 FK로 검증해 `e_normal/e_tangent/e_height`, wrist_roll range, face angle gate를 통과한 후보만 grasp 가능 후보로 본다.
+- 선택은 **top-down 우선 랜덤**이다. 실제 FK tilt가 `TOPDOWN_ALPHA_MAX_DEG` 이하인 후보가 있으면 그 안에서 가장 가까운 face_rank 풀을 랜덤 선택하고, 없으면 전체 feasible 후보 중 가장 가까운 face_rank 풀에서 랜덤 선택한다. `seed` knob가 있으면 trial/env별 재현 가능하다.
 
 **grasp 후보 검증 = 3D face-center error**(`_grasp_face_error`, IK 후 **FK 실측** 기준):
 - IK→FK 실측 fixed jaw inner face center(`grasp_tcp + R·FIXED_INNER_CENTER`)를 cube face center(`cube + CUBE_HALF·n`)와 비교, `e = fixed_inner − face_center` 를 3축 분해: **e_normal**(closing clearance) · **e_tangent**(face 평면 lateral) · **e_height**(world-z). 옛 1D closing clearance 만 봐선 pad 이 face center 를 통과하는지 검증 못 해 edge 를 잡았다.
 - 게이트: `e_normal∈[1,6]mm` · `|e_tangent|≤E_TANGENT_MAX` · `|e_height|≤E_HEIGHT_MAX` · wrist_roll 물리범위. IK 성공만으론 불충분.
-- **★tilted 허용**: |α| 는 hard-reject 아님. score 순위 = ①centerline(√(e_t²+e_h²)) ②clearance ③yaw(dpsi) ④wrist branch(fingers-down 선호) ⑤tilt penalty. 전 후보(α 0~55°·sx 양쪽) 평가 후 최소 채택.
-- **⚠ 40mm 큐브 하드웨어 한계**: pad center 를 face center 에 앉히려면 α≈55–60° 필요(geom 실측)인데 SO-101 5-DOF 로 unreachable(α≥55 IK 전멸). 75mm jaw + ≥2mm 책상 clearance 라 table clamp 가 descend 를 끊어 pad 이 상단에 걸림 — best α≈45°서 `e_h≈13mm`(수직은 +28mm=큐브 위). E_TANGENT/E_HEIGHT_MAX 를 **best-achievable(12/14mm)로 완화**해 centerline 랭킹이 최소 후보 선택(수직 edge-grip 회피). **진짜 face-center 는 50mm 큐브**(pad 이 더 낮게 앉음) 또는 짧은 jaw 필요.
+- **★tilted 허용**: |α| 는 hard-reject 아님. score는 diagnostic으로 남기지만 deterministic 최소값 선택은 하지 않는다. top-down feasible 후보가 있으면 top-down+closest-face 풀에서 랜덤, 없으면 closest-face feasible 풀에서 랜덤 선택한다.
+- **⚠ 40mm 큐브 하드웨어 한계**: pad center 를 face center 에 앉히려면 α≈55–60° 필요(geom 실측)인데 SO-101 5-DOF 로 unreachable(α≥55 IK 전멸). 75mm jaw + ≥2mm 책상 clearance 라 table clamp 가 descend 를 끊어 pad 이 상단에 걸림 — best α≈45°서 `e_h≈13mm`(수직은 +28mm=큐브 위). E_TANGENT/E_HEIGHT_MAX 는 **best-achievable** 범위에 맞춘 gate다. **진짜 face-center 는 50mm 큐브**(pad 이 더 낮게 앉음) 또는 짧은 jaw 필요.
 
-**cube yaw**(`_cube_yaw`): 큐브 USD 는 rest 에 body 축 하나가 **수직**(eul pitch≈−84°) → naive z-yaw(atan2)는 gimbal-lock 쓰레기(face 서 ~28° 어긋남) → **가장 수평인 body 축**(min|z|=옆면 normal)의 solver-frame azimuth 사용. face-align(ρ=−Δψ/cosα)가 이 yaw 로 closing 축을 정렬.
+**cube yaw**(`_cube_yaw`): 큐브 USD 는 rest 에 body 축 하나가 **수직**(eul pitch≈−84°) → naive z-yaw(atan2)는 gimbal-lock 쓰레기(face 서 ~28° 어긋남) → **가장 수평인 body 축**(min|z|=옆면 normal)의 solver-frame azimuth 사용. simple 후보는 이 yaw에서 face normal 4개를 복원한다.
 
 **grasp 물리** — **bounded shallow-preload**(stall-press 대체): descend 를 물리 pad 최저점(tcp+`PAD_LOW_OFF`·ẑ, `PAD_LOW_OFF`=0.075=so101.yml 실측 fixed jaw tip drop) 이 `TABLE_TOP+TABLE_MARGIN`(4mm→실제 ≥2mm, IK/tilt 잔차 보상) 아래로 못 가게 `tstar` clamp → **책상 무접촉**. **table 은 world obstacle 로 넣지 않음**(로봇이 책상 위 장착→base 구가 상판 안=전 plan start-collision) — clamp 로 대체.
 
@@ -75,7 +83,7 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 
 **start self-collision**: 접힌 init(lift -100°) 이 cuRobo sphere 모델서 self-col(lower_arm↔shoulder·base↔upper_arm) → so101.yml `self_collision_ignore` 에 두 쌍 추가(접힘서만 겹치는 비인접쌍).
 
-**오프라인 검증**: `--self-test`(고정 큐브 1개) · 별도 curobo-datagen 컨테이너에서 ZMQ REQ 로 임의 cube/start plan(isaac 불요, ~40s/plan). diag=`/workspace/outputs/planner_diag.log`(host `./outputs` 마운트) — `[ladder]` cand 별 wrist_roll·alpha·e_norm·e_tan·e_h·centerline·ok 기록(선택 grasp 추적).
+**오프라인 검증**: `--self-test`(고정 큐브 1개) · 별도 curobo-datagen 컨테이너에서 ZMQ REQ 로 임의 cube/start plan(isaac 불요, ~40s/plan). diag=`/workspace/outputs/planner_diag.log`(host `./outputs` 마운트) — `[simple]` cand 별 wrist_roll·alpha·e_norm·e_tan·e_h·centerline·ok·selected 기록(선택 grasp 추적).
 
 ## robot 시작 자세
 

@@ -4,17 +4,16 @@
 (so101-isaac-sim) ZMQ 분리(in-process 불가=warp ABI). executor 가 큐브(base_link)를 보내면
 planner 가 collision-aware full pick-place 궤적을 반환한다.
 
-★multi-env: 요청의 `cubes` 리스트 길이 = env 수. env 마다 독립 6-phase 를 **순차** 계획해
-per-env 궤적(실패 env 는 null)을 돌려준다. executor 쪽이 N envs 를 병렬 스텝(진짜 이득);
-planner 는 검증된 단일-env 로직 재사용. # ponytail: 순차 계획 — planner 지연이 병목되면
-true GPU-batch(BatchMotionPlanner B>1 + per-env ladder) 로 승격.
+★multi-env: 요청의 `cubes` 리스트 길이 = env 수. executor 는 N envs 를 IsaacLab native
+lockstep 으로 병렬 replay 한다. planner 는 per-env obstacle 이 다르므로 env 단위는 순차 처리하되,
+각 env 안의 grasp 후보는 BatchMotionPlanner batch 차원으로 한 번에 검증한다.
 
 계획: tool frame = **tcp_grasp**(손가락 사이 pinch 점, so101.yml extra_link).
 ★5-DOF 원칙: orientation 고정 시 도달 위치는 2D 면 → goal 은 항상 **bank pose 그대로**
 (FK-harvest (pos,quat) 쌍 = 존재증명) 또는 그 tool-z 평행이동(pan-plane 불변)만 쓴다.
 
 6-phase(approach·grasp·lift·transit·release·retreat):
-  ① approach = grasp 후보 ladder(IK+FK face-center 게이트) → goalset fallback
+  ① approach = simple face-normal grasp 후보 batch 검증 → top-down 우선 랜덤 선택
   ② grasp    = 도착 pre pose FK → approach 축 linear descend(table clamp) + gripper 폐합
   ③ lift     = grasp 서 tool -z linear 역행(잡은 채 수직 이탈), attach 큐브 blob
   ④ transit  = 그릇 상공(TRANSIT_Z) bank goalset — 드롭 XY 는 BOWL_PULL 만큼 base 쪽
@@ -82,18 +81,20 @@ ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
               (-1.65806, 1.65806), (-2.74385, 2.84121)]
 
 # ═══ grasp 후보 + face-center 게이트 ══════════════════════════════════════════════
-# 후보 = pan-plane pose (α tilt, sx closing 방향). tilted 허용(수직은 긴 jaw 가 cube 상단
-# edge 를 잡음) — 전 후보 평가 후 centerline(face-center 오차) 최소 채택, |α| 는 tiebreak.
-LADDER = [(a, sx) for a in (0, 20, 30, 40, 45, 50, 55) for sx in (1, -1)]
-ALPHAS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]  # goalset fallback tilt(deg)
-TAU_MAX_DEG = 8.0   # goalset strict: |Δψ·tanα| face-align 근사 손실 게이트(deg)
+# 후보 = cube face normal + pan-plane tilt α. wrist_roll 은 init 그대로 보지 않고,
+# shoulder_pan 을 먼저 cube vertical plane 에 맞춘 FK 자세의 gripper closing axis 를 기준으로
+# closer face 를 고른다. cuRobo 는 후보를 batch 차원으로 한 번에 풀고, FK face-center gate 를
+# 통과한 후보 중 top-down 을 우선 랜덤 선택한다.
+SIMPLE_TILTS_DEG = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
 SIMPLE_FACE_LOSS_MAX_DEG = 10.0
-SIMPLE_MAX_CANDIDATES = 20
+SIMPLE_FACE_COUNT = 4
+SIMPLE_MAX_CANDIDATES = len(SIMPLE_TILTS_DEG) * SIMPLE_FACE_COUNT
+TOPDOWN_ALPHA_MAX_DEG = 10.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
 #   e_normal(closing clearance) ∈ [1,6]mm · |e_tangent| ≤ 22mm · |e_height| ≤ 28mm.
-# tangent/height 폭 = fingers-down(sx=+1) branch achievable. 이상(3/4mm)은 40mm 큐브서
+# tangent/height 폭 = fingers-down branch 에서 실제 도달 가능한 범위. 이상(3/4mm)은 40mm 큐브서
 # kinematically 불가(75mm jaw+책상 clearance+tilt<50°); 미러 branch 가 더 좋았지만(e_h 6mm)
-# wrist ~223° 뒤집기라 금지(사용자). 좁히면 ladder 전멸→goalset(face-center 랭킹 없음) 추락.
+# wrist ~223° 뒤집기라 금지(사용자). 좁히면 simple 후보가 전멸한다.
 FIXED_JAW_CLEAR_TARGET = 0.003  # pad center 조준 clearance(게이트 1~6mm 중앙)
 FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.001, 0.006
 E_TANGENT_MAX = 0.022
@@ -103,7 +104,7 @@ E_HEIGHT_MAX = 0.028
 WRIST_ROLL_RANGE = (math.radians(-210.0), math.radians(30.0))
 
 # ═══ phase 파라미터 ═══════════════════════════════════════════════════════════════
-K = 40              # goalset 크기(bank reach·pregrasp)
+K = 40              # goalset 크기(bank reach)
 GRASP_Z_OFF = -0.008  # grasp 깊이 미세보정(m): pinch 큐브 상단걸침 → 8mm 하향(clamp 우선)
 TABLE_MARGIN = 0.004  # pad 최저점 정지 고도(table_top 위, m). 사용자 요구 "실제 ≥2mm 무접촉"
                       # — IK 잔차+tilt 투영오차가 먹으므로 4mm 조준 → 실제 ≥2mm.
@@ -112,7 +113,7 @@ TRANSIT_Z = 0.21    # ④ transit 그릇 상공 고도(urdf, m). 0.25→0.21: ri
                     # 스스로 피해 인하(드롭 과고 해소). 스침 재발 시 ring dims 먼저, 그다음 ↑.
 BOWL_PULL = 0.03    # ④ 드롭 XY 를 그릇 중심서 base 쪽으로 당김(m) — near-rim 착지
 # pre-grasp 후퇴(=descend 거리, m) — 큐브 pan-축 거리 r 적응(사용자 제안). jaw tip 이 큐브
-# obstacle 위로 떠 ladder 를 jaw-collision ON 으로 계획. 고정 0.12 는 pad-center 조준(+4.6cm)
+# obstacle 위로 떠 approach 를 jaw-collision ON 으로 계획. 고정 0.12 는 pad-center 조준(+4.6cm)
 # 과 겹쳐 근거리(r≈0.12) pre IK 전멸(실측 pre z 0.186 unreachable / 0.146 solved).
 PRE_BACK_MIN, PRE_BACK_MAX = 0.06, 0.12
 PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24   # r≤R0→MIN · r≥R1→MAX (사이 선형)
@@ -259,9 +260,15 @@ class PickPlacePlanner:
         self.p = BatchMotionPlanner(MotionPlannerCfg.create(
             robot=ROBOT, scene_model=wf.name, max_batch_size=1, max_goalset=K,
             use_cuda_graph=False))
+        self.pb = BatchMotionPlanner(MotionPlannerCfg.create(
+            robot=ROBOT, scene_model=wf.name, max_batch_size=SIMPLE_MAX_CANDIDATES, max_goalset=1,
+            use_cuda_graph=False))
         self.p.warmup(enable_graph=False, num_warmup_iterations=2)
+        self.pb.warmup(enable_graph=False, num_warmup_iterations=2)
         self.tf = self.p.tool_frames
+        self.tf_batch = self.pb.tool_frames
         self.nA = len(self.p.joint_names)
+        self.rng = np.random.default_rng()
         self.last_candidate_diag = None
         self.last_plan_diag = {}
 
@@ -279,6 +286,18 @@ class PickPlacePlanner:
         p = torch.as_tensor(np.asarray(pos), device="cuda", dtype=torch.float32).view(1, 1, 1, -1, 3)
         q = torch.as_tensor(np.asarray(quat), device="cuda", dtype=torch.float32).view(1, 1, 1, -1, 4)
         return GoalToolPose(tool_frames=self.tf, position=p, quaternion=q)
+
+    def _goal_batch(self, pos, quat):
+        """(B,3)/(B,4) → B개 독립 problem GoalToolPose (각 problem goalset=1)."""
+        p = torch.as_tensor(np.asarray(pos), device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 3)
+        q = torch.as_tensor(np.asarray(quat), device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 4)
+        return GoalToolPose(tool_frames=self.tf_batch, position=p, quaternion=q)
+
+    def _repeat_state(self, state, n):
+        pos = state.position.detach()
+        if pos.dim() == 1:
+            pos = pos.unsqueeze(0)
+        return JointState.from_position(pos[:1].repeat(n, 1).clone(), joint_names=self.p.joint_names)
 
     def _goalset(self, xyz):
         """xyz 최근접 K개 **bank pose 그대로** goalset(전부 정확히 도달가능=존재증명). 5-DOF 는
@@ -301,6 +320,27 @@ class PickPlacePlanner:
         end = JointState.from_position(q[-1:].clone(), joint_names=self.p.joint_names)
         return (q.cpu().numpy() if ok else None), end
 
+    def _extract_batch(self, r, start, n):
+        """Batched plan_pose 결과를 후보별 (traj|None, end) 리스트로 분해한다."""
+        if r is None:
+            return [(None, start) for _ in range(n)]
+        pos = r.interpolated_trajectory.position.detach()
+        if pos.dim() == 4 and pos.shape[1] == 1:
+            pos = pos[:, 0]
+        while pos.dim() > 3:
+            pos = pos[..., 0, :, :]
+        success = r.success.detach().view(-1)
+        last = r.interpolated_last_tstep
+        last_flat = last.detach().view(-1) if last is not None else None
+        out = []
+        for bi in range(n):
+            ok = bi < success.numel() and bool(success[bi].item())
+            ti = int(last_flat[bi].item()) if last_flat is not None and bi < last_flat.numel() else pos.shape[1]
+            q = pos[bi, : max(ti, 2), : self.nA]
+            end = JointState.from_position(q[-1:].clone(), joint_names=self.p.joint_names)
+            out.append((q.cpu().numpy() if ok else None, end))
+        return out
+
     def _plan_to(self, goal, start, linear=False, attempts=3):
         """GoalToolPose 직접 계획 → (traj|None, end). linear=True 면 tool-z 직선 corridor +
         contact link collision off. attempts: 파티클 IK 확률성 안정화(성공 시 조기 종료)."""
@@ -315,14 +355,38 @@ class PickPlacePlanner:
             self.p.enable_link_collision(CONTACT_LINKS + DESCEND_EXTRA_OFF)
         return self._extract(r, start)
 
+    @staticmethod
+    def _quat_axes(quat):
+        w, x, y, z = quat
+        xax = np.array([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)])
+        yax = np.array([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)])
+        zax = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
+        return xax, yax, zax
+
     def _ee_pose_axis(self, q):
         """FK of q → (ee_pos[3], ee_quat_wxyz[4], approach_axis ẑ[3]) numpy (단일 env)."""
         tp = self.p.compute_kinematics(q).tool_poses.get_link_pose(self.tf[0])
         pos = tp.position.detach().view(-1).cpu().numpy()[:3]
         quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
-        w, x, y, z = quat
-        zax = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
+        _xax, _yax, zax = self._quat_axes(quat)
         return pos, quat, zax
+
+    def _pan_aligned_closing_axis(self, start, cube):
+        """start 에서 shoulder_pan 만 cube vertical plane 으로 돌린 뒤 gripper x축을 읽는다."""
+        qpos = start.position.detach().clone()
+        if qpos.dim() == 1:
+            qpos = qpos.unsqueeze(0)
+        pan_idx = self.p.joint_names.index("shoulder_pan")
+        qpos[0, pan_idx] = math.atan2(cube[1] - PAN_AXIS_XY[1], cube[0] - PAN_AXIS_XY[0])
+        q_pan = JointState.from_position(qpos[:1], joint_names=self.p.joint_names)
+        tp = self.p.compute_kinematics(q_pan).tool_poses.get_link_pose(self.tf[0])
+        quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
+        xax, _yax, _zax = self._quat_axes(quat)
+        xax[2] = 0.0
+        norm = np.linalg.norm(xax)
+        if norm < 1e-6:
+            return np.array([cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1], 0.0])
+        return xax / norm
 
     def _grasp_face_error(self, q_pre, cube, face_normal=None):
         """IK-후-FK 실측 fixed jaw inner face center 를 cube face center 와 **3D** 비교(사용자 스펙).
@@ -335,10 +399,8 @@ class PickPlacePlanner:
                  a:alpha(tilt°), c:centerline(√(t²+h²))}."""
         tp = self.p.compute_kinematics(q_pre).tool_poses.get_link_pose(self.tf[0])
         pos = tp.position.detach().view(-1).cpu().numpy()[:3]
-        w, x, y, z = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
-        xax = np.array([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)])  # closing
-        yax = np.array([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)])
-        zax = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])  # approach
+        quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
+        xax, yax, zax = self._quat_axes(quat)  # x=closing, z=approach
         cc = np.array(cube[:3])
         # descend = pre 서 _pre_back(=pad-at-face-center 조준 backoff, r 적응) 하강, table clamp 동일
         tstar = _pre_back(cube); zaz = float(zax[2])
@@ -374,6 +436,24 @@ class PickPlacePlanner:
                      dtype=np.float64)
             for k in range(4)
         ]
+
+    def _ordered_face_normals(self, xyz, yaw, start):
+        """pan-align 후 gripper closing axis 에 가장 가까운 cube face normal 순서."""
+        faces = self._face_normals_from_yaw(yaw)
+        if not faces:
+            return [], None
+        ref = self._pan_aligned_closing_axis(start, xyz)
+        rn = np.linalg.norm(ref)
+        if rn < 1e-6:
+            ref = np.array([1.0, 0.0, 0.0])
+        else:
+            ref = ref / rn
+        ranked = []
+        for face_idx, normal in enumerate(faces):
+            dot = max(-1.0, min(1.0, float(np.dot(ref, normal))))
+            ranked.append((face_idx, normal, math.degrees(math.acos(dot)), dot))
+        ranked.sort(key=lambda item: item[2])
+        return ranked, ref
 
     def _cand_pose_simple(self, xyz, face_normal, a_deg):
         """단순 후보: cube face normal + tilt α 만으로 full TCP pose(quat)를 만든다.
@@ -431,97 +511,68 @@ class PickPlacePlanner:
             "quat_wxyz": _mat2quat(R).astype(float).tolist(),
         }
 
-    def _simple_candidates(self, xyz, yaw):
-        """실제 cube face normal×tilt 후보를 만들고 face-loss/top-down 선호 순으로 제한."""
+    def _simple_candidates(self, xyz, yaw, start, face_count=SIMPLE_FACE_COUNT):
+        """가까운 cube face normal×tilt 후보를 만든다."""
+        ranked_faces, ref_axis = self._ordered_face_normals(xyz, yaw, start)
+        if not ranked_faces:
+            return []
+        face_count = max(1, min(int(face_count), len(ranked_faces)))
+        face_msg = " ".join(
+            f"#{idx}:angle={angle:.1f},dot={dot:.2f}" for idx, _n, angle, dot in ranked_faces
+        )
+        self._diag(f"[simple] pan-aligned closing={None if ref_axis is None else ref_axis.tolist()} faces={face_msg}")
         cands = []
-        for face_idx, normal in enumerate(self._face_normals_from_yaw(yaw)):
-            for a_deg in ALPHAS:
+        for face_rank, (face_idx, normal, ref_angle, ref_dot) in enumerate(ranked_faces[:face_count]):
+            for a_deg in SIMPLE_TILTS_DEG:
                 try:
                     pos, quat, meta = self._cand_pose_simple(xyz, normal, a_deg)
                 except ValueError:
                     continue
                 meta["face_index"] = face_idx
+                meta["face_rank"] = face_rank
+                meta["reference_face_angle_deg"] = float(ref_angle)
+                meta["reference_dot"] = float(ref_dot)
                 if meta["face_loss_deg"] <= SIMPLE_FACE_LOSS_MAX_DEG:
                     cands.append((pos, quat, meta))
-        cands.sort(key=lambda c: (round(c[2]["face_loss_deg"], 3), abs(c[2]["alpha_deg"]),
-                                  c[2]["face_index"]))
+        cands.sort(key=lambda c: (c[2]["face_rank"], abs(c[2]["alpha_deg"]),
+                                  round(c[2]["face_loss_deg"], 3), c[2]["face_index"]))
         return cands[:SIMPLE_MAX_CANDIDATES]
 
-    def _cand_pose(self, xyz, yaw, a_deg, sx):
-        """pan-plane pre-grasp 후보 1개 → (pre_pos[3], quat_wxyz[4], loss).
-
-        ★tcp 가 아니라 **fixed jaw pad center**(tcp+R·FIXED_INNER_CENTER)를 cube face center 밖
-        FIXED_JAW_CLEAR_TARGET 로 조준 → tcp_tgt = cube + (CUBE_HALF+clear)·n − R·FIXED_INNER_CENTER.
-        pad 이 tcp 서 46mm 아래·15mm 옆이라 tcp 조준이면 pad 이 face 서 크게 벗어나(edge grip) 문제.
-        approach 축은 pan 수직평면 안 → 5-DOF 도달가능. ẑ=−cosα·ê_z+sinα·r̂, closing x̂=±t̂(sx), yaw 면
-        ρ=−Δψ/cosα face 정렬(loss=|Δψ·tanα|°). pan 고정점 반복(roll 축=tcp−R·TCP_LAT) φ 수렴."""
-        a = math.radians(a_deg)
-        tcp_lat = np.array(TCP_LAT)
-        fic = np.array(FIXED_INNER_CENTER)
-        phi = math.atan2(xyz[1] - PAN_AXIS_XY[1], xyz[0] - PAN_AXIS_XY[0])
-        R = z_ax = tcp_tgt = None
-        loss = 0.0
-        for _ in range(3):
-            r_hat = np.array([math.cos(phi), math.sin(phi), 0.0])
-            t_hat = np.array([-math.sin(phi), math.cos(phi), 0.0])
-            z_ax = -math.cos(a) * np.array([0.0, 0.0, 1.0]) + math.sin(a) * r_hat
-            x_ax = sx * t_hat
-            y_ax = np.cross(z_ax, x_ax)
-            R = np.stack([x_ax, y_ax, z_ax], 1)
-            loss = 0.0
-            if yaw is not None:
-                azim = phi + (0.0 if sx > 0 else math.pi) + math.pi / 2  # x̂0=±t̂ 방위
-                dpsi = (yaw - azim + math.pi / 4) % (math.pi / 2) - math.pi / 4
-                rho = -dpsi / max(math.cos(a), 0.3)
-                cr, sr = math.cos(rho), math.sin(rho)
-                R = R @ np.array([[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]])
-                loss = abs(math.degrees(dpsi * math.tan(a)))
-            n = R[:, 0]
-            tcp_tgt = np.array(xyz) + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n - R @ fic
-            ax_pt = tcp_tgt - R @ tcp_lat  # roll 축 점(고정점)
-            phi = math.atan2(ax_pt[1] - PAN_AXIS_XY[1], ax_pt[0] - PAN_AXIS_XY[0])
-        return tcp_tgt - _pre_back(xyz) * z_ax, _mat2quat(R), loss
-
     # ── ① approach ──────────────────────────────────────────────────────────────
-    def _pre_ladder(self, cube, yaw, start, ladder=None):
-        """후보 ladder → fixed jaw inner face center 가 cube face center 를 통과하는 grasp 선택.
-
-        각 후보 pre-grasp IK → FK → _grasp_face_error(하강 후 실측 3D). ★게이트(사용자 스펙): IK 성공
-        만으론 부족 — e_normal(closing clearance)∈[1,5]mm · |e_tangent|≤E_TANGENT_MAX ·
-        |e_height|≤E_HEIGHT_MAX · wrist_roll 범위. **tilted 도 통과**(|α| 는 reject 조건 아님).
-        score 순위(사용자 지시): ①centerline(√(e_t²+e_h²)) ②clearance error ③yaw align(dpsi loss)
-        ④wrist branch(fingers-down 선호) ⑤tilt penalty. 전 후보 평가(조기 종료 없음) 후 최소 채택."""
-        best = None  # (score, traj, end, diag)
-        if ladder is None:
-            candidates = self._simple_candidates(cube, yaw)
-            if candidates:
-                self._diag(f"[simple] candidates={len(candidates)} yaw={math.degrees(yaw):.1f}")
-            else:
-                candidates = []
-        else:
-            candidates = []
+    def _plan_pregrasp(self, cube, yaw, start, knobs):
+        """simple 후보를 batch 로 계획하고, FK gate 통과 후보 중 하나를 고른다."""
+        kn = knobs or {}
+        seed = kn.get("seed")
+        rng = np.random.default_rng(int(seed)) if seed is not None else self.rng
+        face_count = int(kn.get("simple_face_count", SIMPLE_FACE_COUNT))
+        candidates = self._simple_candidates(cube, yaw, start, face_count=face_count)
+        yaw_msg = "None" if yaw is None else f"{math.degrees(yaw):.1f}"
+        self._diag(f"[simple] candidates={len(candidates)} yaw={yaw_msg} face_count={face_count} seed={seed}")
         if not candidates:
-            candidates = []
-            for a_deg, sx in (ladder or LADDER):
-                pos, quat, loss = self._cand_pose(cube, yaw, a_deg, sx)
-                candidates.append((pos, quat, {
-                    "mode": "legacy",
-                    "alpha_deg": float(a_deg),
-                    "sx": float(sx),
-                    "face_loss_deg": float(loss),
-                    "face_normal": None,
-                    "quat_wxyz": np.asarray(quat).astype(float).tolist(),
-                    "pre_target": np.asarray(pos).astype(float).tolist(),
-                }))
+            self.last_candidate_diag = {"mode": "simple", "fail": "no_candidates"}
+            return None, start
 
-        for pos, quat, meta in candidates:
-            label = (f"simple(face={meta.get('face_index')},alpha={meta['alpha_deg']:+.0f},"
-                     f"loss={meta['face_loss_deg']:.1f})"
-                     if meta["mode"] == "simple"
-                     else f"legacy(alpha={meta['alpha_deg']:+.0f},sx={meta.get('sx'):+.0f})")
-            traj, end = self._plan_to(self._goal([pos], [quat]), start, attempts=2)
+        n_candidates = len(candidates)
+        pos = np.asarray([c[0] for c in candidates], dtype=np.float32)
+        quat = np.asarray([c[1] for c in candidates], dtype=np.float32)
+        if n_candidates < SIMPLE_MAX_CANDIDATES:
+            pad_n = SIMPLE_MAX_CANDIDATES - n_candidates
+            pos = np.concatenate([pos, np.repeat(pos[-1:], pad_n, axis=0)], axis=0)
+            quat = np.concatenate([quat, np.repeat(quat[-1:], pad_n, axis=0)], axis=0)
+        batched_start = self._repeat_state(start, SIMPLE_MAX_CANDIDATES)
+        result = self.pb.plan_pose(
+            goal_tool_poses=self._goal_batch(pos, quat),
+            current_state=batched_start,
+            max_attempts=2,
+            success_ratio=1.0,
+        )
+        planned = self._extract_batch(result, batched_start, n_candidates)
+
+        feasible = []
+        for cand_idx, ((_pos, _quat, meta), (traj, end)) in enumerate(zip(candidates, planned)):
+            label = f"simple(face={meta.get('face_index')},rank={meta.get('face_rank')},alpha={meta['alpha_deg']:+.0f})"
             if traj is None:
-                self._diag(f"[ladder] cand={label} solved=False")
+                self._diag(f"[simple] cand={label} solved=False")
                 continue
             wr = float(end.position.view(-1)[4].item())  # 해의 wrist_roll(rad)
             in_range = WRIST_ROLL_RANGE[0] <= wr <= WRIST_ROLL_RANGE[1]
@@ -529,7 +580,7 @@ class PickPlacePlanner:
             ok = (in_range and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
                   and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
                   and fe["face_angle"] <= SIMPLE_FACE_LOSS_MAX_DEG)
-            self._diag(f"[ladder] cand={label} wr={math.degrees(wr):.0f} in_range={in_range} "
+            self._diag(f"[simple] cand={label} wr={math.degrees(wr):.0f} in_range={in_range} "
                        f"alpha={fe['a']:.0f} e_norm={fe['n'] * 1000:.1f} e_tan={fe['t'] * 1000:.1f} "
                        f"e_h={fe['h'] * 1000:.1f} centerline={fe['c'] * 1000:.1f}mm "
                        f"face_angle={fe['face_angle']:.1f} ok={ok}")
@@ -539,52 +590,41 @@ class PickPlacePlanner:
                          round(meta["face_loss_deg"], 1),             # ③ face normal align loss(°)
                          round(abs(math.degrees(wr) + 90.0)),         # ④ wrist branch(fingers-down=-90°)
                          round(fe["a"]))                              # ⑤ tilt penalty(작을수록)
-                if best is None or score < best[0]:
-                    diag = {**meta, "score": list(score), "wrist_roll_deg": math.degrees(wr),
-                            "fk_face_error": {k: float(v) for k, v in fe.items()}}
-                    best = (score, traj, end, diag)
-        if best:
-            self.last_candidate_diag = best[3]
-            self._diag(f"[ladder] selected={best[3]}")
-            return best[1], best[2]
-        self.last_candidate_diag = None
-        return None, start
+                diag = {**meta, "candidate_index": cand_idx, "score": list(score),
+                        "wrist_roll_deg": math.degrees(wr),
+                        "fk_face_error": {k: float(v) for k, v in fe.items()}}
+                feasible.append((diag, traj, end))
 
-    def _pregrasp_goalset(self, cube, yaw, strict):
-        """pan-plane 후보 전체(α×sx)를 goalset 으로. strict=True 면 face-align 손실 게이트
-        (TAU_MAX_DEG), 전멸 시 손실 최소 4개. relaxed=coverage 우선(게이트 없음)."""
-        nc = len(ALPHAS) * 2
-        cands = [self._cand_pose(cube, yaw, a_deg, sx)   # (pos, quat, loss)
-                 for a_deg in ALPHAS for sx in (1.0, -1.0)]
-        if strict:
-            ok = [c for c in cands if c[2] <= TAU_MAX_DEG] or sorted(cands, key=lambda c: c[2])[:4]
-        else:
-            ok = cands
-        base = list(ok)                  # 패딩 전 스냅샷(사이클 기준 — ok 는 아래서 자람)
-        while len(ok) < nc:              # goalset 크기 고정(패딩=base 사이클 반복)
-            ok.append(base[len(ok) % len(base)])
-        pos = np.array([c[0] for c in ok[:nc]], dtype=np.float32)
-        quat = np.array([c[1] for c in ok[:nc]], dtype=np.float32)
-        return self._goal(pos, quat)
+        if not feasible:
+            self.last_candidate_diag = {
+                "mode": "simple",
+                "fail": "no_feasible_candidate",
+                "num_candidates": len(candidates),
+            }
+            return None, start
 
-    def _approach(self, cube, yaw, start, ladder):
-        """① approach = ladder → strict goalset → relaxed goalset. → (traj|None, q_pre, relaxed).
+        topdown = [item for item in feasible if item[0]["fk_face_error"]["a"] <= TOPDOWN_ALPHA_MAX_DEG]
+        base_pool = topdown if topdown else feasible
+        best_rank = min(item[0].get("face_rank", 0) for item in base_pool)
+        pool = [item for item in base_pool if item[0].get("face_rank", 0) == best_rank]
+        selected = pool[int(rng.integers(len(pool)))]
+        diag, traj, end = selected
+        diag["selection"] = {
+            "policy": "random_topdown_then_closest_face",
+            "feasible_count": len(feasible),
+            "topdown_count": len(topdown),
+            "pool": "topdown" if topdown else "all_feasible",
+            "pool_face_rank": int(best_rank),
+            "pool_count": len(pool),
+            "seed": None if seed is None else int(seed),
+        }
+        self.last_candidate_diag = diag
+        self._diag(f"[simple] selected={diag}")
+        return traj, end
 
-        ★ladder 는 jaw-collision ON — 접근 경로가 fixed jaw 로 큐브를 쓸어치지 않게(사용자 보고:
-        "집으러 가다 fixed jaw 로 큐브 쳤어"). _pre_back(0.06~0.12, r 적응) 만큼이라 pre-grasp jaw tip 이 큐브 obstacle
-        위로 떠서 ON 계획 가능. goalset fallback 만 jaw off(coverage 우선, marginal pre 허용)."""
-        pre, q_pre = self._pre_ladder(cube, yaw, start, ladder)  # jaws ON: 큐브 우회
-        relaxed = False
-        if pre is None:
-            self.p.disable_link_collision(CONTACT_LINKS)
-            try:
-                pre, q_pre = self._plan_to(self._pregrasp_goalset(cube, yaw, strict=True), start)
-                if pre is None:
-                    pre, q_pre = self._plan_to(self._pregrasp_goalset(cube, yaw, strict=False), start)
-                    relaxed = pre is not None
-            finally:
-                self.p.enable_link_collision(CONTACT_LINKS)
-        return pre, q_pre, relaxed
+    def _approach(self, cube, yaw, start, knobs):
+        """① approach = simple 후보 batch 검증 → top-down 우선 랜덤 선택."""
+        return self._plan_pregrasp(cube, yaw, start, knobs)
 
     # ── obstacle / attach helpers ───────────────────────────────────────────────
     def _place_cube_obstacle(self, cube):
@@ -592,8 +632,9 @@ class PickPlacePlanner:
         try:
             cpose = Pose(position=torch.tensor([list(cube)], device="cuda", dtype=torch.float32),
                          quaternion=torch.tensor([[1.0, 0, 0, 0]], device="cuda", dtype=torch.float32))
-            self.p.scene_collision_checker.update_obstacle_pose("cube", cpose, env_idx=0)
-            self.p.scene_collision_checker.enable_obstacle("cube", True, env_idx=0)
+            for planner in (self.p, self.pb):
+                planner.scene_collision_checker.update_obstacle_pose("cube", cpose, env_idx=0)
+                planner.scene_collision_checker.enable_obstacle("cube", True, env_idx=0)
         except Exception as e:
             self._diag(f"[cube-obst] FAIL {type(e).__name__}: {e}")
 
@@ -605,7 +646,8 @@ class PickPlacePlanner:
                 x, y, z, qw, qx, qy, qz = ent["pose"]
                 bpose = Pose(position=torch.tensor([[x, y, z]], device="cuda", dtype=torch.float32),
                              quaternion=torch.tensor([[qw, qx, qy, qz]], device="cuda", dtype=torch.float32))
-                self.p.scene_collision_checker.update_obstacle_pose(name, bpose, env_idx=0)
+                for planner in (self.p, self.pb):
+                    planner.scene_collision_checker.update_obstacle_pose(name, bpose, env_idx=0)
         except Exception as e:
             self._diag(f"[bowl-obst] FAIL {type(e).__name__}: {e}")
 
@@ -668,7 +710,7 @@ class PickPlacePlanner:
         naive z-yaw(atan2 공식)는 pitch±90 gimbal-lock 이라 near-vertical 축의 미세 XY 투영을 쫓아
         실제 face 서 ~28° 어긋난 쓰레기 → 가운데손가락 closing축이 큐브 대각 접촉(사용자 보고).
         → body 3축 중 **가장 수평인 축**(min|z|, = 옆면 normal)의 XY 방위를 쓴다. 큐브 face 4방(90°)
-        이라 두 수평축은 mod 90 동일 → ρ 정렬(_cand_pose)이 나머지 흡수."""
+        이라 두 수평축은 mod 90 동일 → simple face-normal 후보가 나머지를 흡수."""
         if len(cube_bl) < 7:
             return None
         w, x, y, z = cube_bl[3:7]
@@ -680,8 +722,8 @@ class PickPlacePlanner:
         ax = Rs[:, int(np.argmin(np.abs(Rs[2, :])))]  # 가장 수평인 body축 = 옆면 normal
         return math.atan2(ax[1], ax[0])
 
-    def _grasp_diag(self, cube_bl, aq, zax, yaw, relaxed, pre_ok):
-        """달성 자세 grip 진단: α(접근 기울기)·Δψ(face 정렬오차)·relaxed."""
+    def _grasp_diag(self, cube_bl, aq, zax, yaw, pre_ok):
+        """달성 자세 grip 진단: α(접근 기울기)·Δψ(face 정렬오차)."""
         w, x, y, z = aq
         xcol = np.array([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)])
         al = math.degrees(math.acos(max(-1.0, min(1.0, -float(zax[2])))))
@@ -689,23 +731,24 @@ class PickPlacePlanner:
         dps = "-" if yaw is None else round(
             math.degrees((yaw - azim + math.pi / 4) % (math.pi / 2) - math.pi / 4), 1)
         self._diag(f"[graspdiag] cube=({cube_bl[0]:.3f},{cube_bl[1]:.3f}) alpha={al:.1f} "
-                   f"dpsi={dps} relaxed={relaxed} pre_ok={pre_ok}")
+                   f"dpsi={dps} pre_ok={pre_ok}")
 
     # ── main entry ──────────────────────────────────────────────────────────────
     def plan_pickplace(self, cube_bl, bowl_bl=None, start_rad=None, knobs=None):
         """큐브 1개(base_link frame) full 6-phase pick-place 궤적 (T,6) [arm deg×5 + gripper
         feature] 또는 None(어느 phase 든 실패 시).
 
-        knobs: 물리 phase 스윕용 per-request 오버라이드(기본=상수 → 무변경):
-          {"grasp_z_off": f, "grip_open": f, "grip_close": f, "ladder": [[α,sx],..]}"""
+        knobs: per-request 오버라이드(기본=상수 → 무변경):
+          {"grasp_z_off": f, "grip_open": f, "grip_close": f,
+           "simple_face_count": 4, "seed": int}"""
         kn = knobs or {}
         z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
         g_close = float(kn.get("grip_close", GRIP_CLOSE))
-        ladder = [tuple(c) for c in kn.get("ladder", [])] or None
         b_pull = float(kn.get("bowl_pull", BOWL_PULL))
         # 파티클 IK 는 process 누적 seed 상태 → 요청마다 리셋해 에피소드 결정론 복원.
         self.p.reset_seed()
+        self.pb.reset_seed()
         self.last_candidate_diag = None
 
         cube = usd_to_urdf(cube_bl[:3])
@@ -732,14 +775,20 @@ class PickPlacePlanner:
         self._place_bowl_obstacle(bx, by)
 
         # ① APPROACH
-        pre, q_pre, relaxed = self._approach(cube, yaw, start, ladder)
+        pre, q_pre = self._approach(cube, yaw, start, kn)
+        if pre is None:
+            self.last_plan_diag["candidate"] = self.last_candidate_diag
+            self.last_plan_diag["phases"] = {"approach": False}
+            msg = f"[planner] approach-fail cube={cube_bl}"
+            print(msg, flush=True); self._diag(msg)
+            return None
 
         # ② GRASP — 도착 pre pose FK → approach축(ẑ)으로 _pre_back(r 적응) 하강(=pad-at-face-center 조준).
         #    ★bounded shallow-preload: 물리 pad 최저점(tcp+PAD_LOW_OFF·ẑ)이 table_top+margin
         #    아래로 못 가게 descend 깊이(tstar)를 clamp → 책상 stall-press 대신 얕은 preload.
-        #    (pre 는 _cand_pose 서 pad center 가 face center 에 앉게 조준·backoff → 하강량=_pre_back.)
+        #    (pre 는 simple pose 에서 pad center 가 face center 에 앉게 조준·backoff → 하강량=_pre_back.)
         app, aq, zax = self._ee_pose_axis(q_pre)
-        self._grasp_diag(cube_bl, aq, zax, yaw, relaxed, pre is not None)
+        self._grasp_diag(cube_bl, aq, zax, yaw, True)
         tstar = _pre_back(cube)
         zaz = float(zax[2])
         if zaz < -1e-3:  # 하강 중 — pad 최저점 z ≥ TABLE_TOP+TABLE_MARGIN 로 tstar 상한
@@ -824,7 +873,10 @@ def plan_batch(pl, req):
     for i, cube in enumerate(cubes):
         b = bowl[i] if per_env_bowl else bowl
         s = [starts[i]] if starts else None
-        traj = pl.plan_pickplace(cube, b, s, knobs)
+        env_knobs = dict(knobs or {})
+        if "seed" in env_knobs and env_knobs["seed"] is not None:
+            env_knobs["seed"] = int(env_knobs["seed"]) + i
+        traj = pl.plan_pickplace(cube, b, s, env_knobs)
         out.append(traj.tolist() if traj is not None else None)
         diagnostics.append(pl.last_plan_diag)
     return out, diagnostics
@@ -853,7 +905,13 @@ def main():
     pl = PickPlacePlanner()
     print("[planner] ready", flush=True)
     if a.self_test:
-        trajs, _diagnostics = plan_batch(pl, {"cubes": [[0.017, -0.253, 0.06], [0.167, -0.133, 0.06]]})
+        q_identity = [1.0, 0.0, 0.0, 0.0]
+        init = [math.radians(v) for v in (0.0, -100.0, 90.0, 50.0, -90.0, -10.0)]
+        trajs, _diagnostics = plan_batch(pl, {
+            "cubes": [[0.017, -0.253, 0.06, *q_identity],
+                      [0.167, -0.133, 0.06, *q_identity]],
+            "start": [init, init],
+        })
         ok = all(t is not None for t in trajs)
         print(f"self-test(2-env): {[len(t) if t else None for t in trajs]}")
         print("SELFTEST_OK" if ok else "SELFTEST_CHECK")

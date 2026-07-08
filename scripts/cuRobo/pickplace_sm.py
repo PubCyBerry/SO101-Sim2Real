@@ -371,7 +371,7 @@ def main():
         if which == "N":
             layout = _capture_layout(env)    # remember this new layout for a later R
 
-    def _manipulate(recorder=None):
+    def _manipulate(recorder=None, plan_seed=None):
         """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
 
         → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
@@ -381,8 +381,11 @@ def main():
         cubes, bowls = _cubes_bowls_in_base(env)
         starts = [robot.data.joint_pos[i][so101_idx].tolist() for i in range(env.num_envs)]
         req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts}
-        if planner_knobs is not None:
-            req["knobs"] = planner_knobs
+        req_knobs = dict(planner_knobs or {})
+        if plan_seed is not None:
+            req_knobs.setdefault("seed", int(plan_seed))
+        if req_knobs:
+            req["knobs"] = req_knobs
         sock.send_string(json.dumps(req))
         rep = _recv_plan(sock, poller)
         if rep is None:
@@ -456,7 +459,7 @@ def main():
                 val = None
                 try:
                     _reset("N", seed=trial_seed, recorder=recorder)
-                    status, val = _manipulate(recorder=recorder)
+                    status, val = _manipulate(recorder=recorder, plan_seed=trial_seed)
                 finally:
                     recorder.close()
                 n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
