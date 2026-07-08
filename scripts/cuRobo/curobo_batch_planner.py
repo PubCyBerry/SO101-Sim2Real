@@ -5,8 +5,8 @@
 planner 가 collision-aware full pick-place 궤적을 반환한다.
 
 ★multi-env: 요청의 `cubes` 리스트 길이 = env 수. executor 는 N envs 를 IsaacLab native
-lockstep 으로 병렬 replay 한다. planner 는 per-env obstacle 이 다르므로 env 단위는 순차 처리하되,
-각 env 안의 grasp 후보는 BatchMotionPlanner batch 차원으로 한 번에 검증한다.
+lockstep 으로 병렬 replay 한다. planner 도 cuRobo `BatchMotionPlanner(multi_env=True)`의
+batch 차원을 env 차원으로 맞춰 N개 env를 한 번에 푼다. grasp 후보는 env별 goalset 차원이다.
 
 계획: tool frame = **tcp_grasp**(손가락 사이 pinch 점, so101.yml extra_link).
 ★5-DOF 원칙: orientation 고정 시 도달 위치는 2D 면 → goal 은 항상 **bank pose 그대로**
@@ -40,6 +40,7 @@ import argparse
 import json
 import math
 import tempfile
+import time
 
 import numpy as np
 import torch
@@ -85,11 +86,12 @@ ARM_LIMITS = [(-1.91986, 1.91986), (-1.74533, 1.74533), (-1.69, 1.69),
 # shoulder_pan 을 먼저 cube vertical plane 에 맞춘 FK 자세의 gripper closing axis 를 기준으로
 # closer face 를 고른다. cuRobo 는 후보를 batch 차원으로 한 번에 풀고, FK face-center gate 를
 # 통과한 후보 중 top-down 을 우선 랜덤 선택한다.
-SIMPLE_TILTS_DEG = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
+SIMPLE_TILTS_DEG = [-70, -60, -50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70]
 SIMPLE_FACE_LOSS_MAX_DEG = 10.0
 SIMPLE_FACE_COUNT = 4
 SIMPLE_MAX_CANDIDATES = len(SIMPLE_TILTS_DEG) * SIMPLE_FACE_COUNT
 TOPDOWN_ALPHA_MAX_DEG = 10.0
+WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
 #   e_normal(closing clearance) ∈ [1,6]mm · |e_tangent| ≤ 22mm · |e_height| ≤ 28mm.
 # tangent/height 폭 = fingers-down branch 에서 실제 도달 가능한 범위. 이상(3/4mm)은 40mm 큐브서
@@ -99,9 +101,10 @@ FIXED_JAW_CLEAR_TARGET = 0.003  # pad center 조준 clearance(게이트 1~6mm �
 FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.001, 0.006
 E_TANGENT_MAX = 0.022
 E_HEIGHT_MAX = 0.028
-# wrist_roll hard gate = fingers-down branch(init -90° 중심 ±120°)만. 물리한계까지 열면
-# 미러 branch(wr≈+133°)가 centerline 우위로 선택돼 wrist ~223° 회전+jaw 좌우 반전.
-WRIST_ROLL_RANGE = (math.radians(-210.0), math.radians(30.0))
+# wrist_roll gate = pan-aligned init pose 의 wrist_roll 기준 ±100°. shoulder_pan 만 cube plane으로
+# 돌린 자세를 기준으로 보기 때문에 wrist_roll 값 자체는 start와 동일하며, SO-101 5-DoF에서
+# cube face normal 정렬은 이 상대 회전 범위 안에 머물러야 한다.
+WRIST_ROLL_DELTA_LIMIT = math.radians(WRIST_ROLL_DELTA_LIMIT_DEG)
 
 # ═══ phase 파라미터 ═══════════════════════════════════════════════════════════════
 K = 40              # goalset 크기(bank reach)
@@ -224,10 +227,17 @@ def _grip(arm_deg, grip):
 
 
 class PickPlacePlanner:
-    """pick-place planner. plan_pickplace(cube)가 6-phase 궤적 1개를 반환 — multi-env 는
-    serve_loop 가 cubes 리스트를 per-env 순차 호출(각 호출이 obstacle 을 자기 큐브/그릇으로 갱신)."""
+    """pick-place planner. BatchMotionPlanner batch 차원 = IsaacLab env 차원.
 
-    def __init__(self, bowl_bl=(0.22, -0.265)):
+    후보 grasp 는 goalset 으로 넣고, phase별 plan_pose/plan_cspace 는 N개 env를 한 번에 푼다.
+    cuRobo `multi_env=True`에서는 batch index가 collision env index가 되므로 이 매핑을 유지해야
+    DR로 서로 다른 cube/bowl obstacle을 병렬 계획에 올바르게 적용할 수 있다.
+    """
+
+    def __init__(self, bowl_bl=(0.22, -0.265), max_batch_size=64):
+        self.default_bowl_bl = bowl_bl
+        self.max_batch_size = int(max_batch_size)
+        self.max_goalset = max(K, SIMPLE_MAX_CANDIDATES)
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
@@ -240,7 +250,10 @@ class PickPlacePlanner:
             # (placeholder 는 far). approach 중 팔 링크의 큐브 관통 방지.
             "cube": {"dims": [CUBE_DIMS] * 3, "pose": [9.0, 9.0, 0.02, 1, 0, 0, 0]}}}
         wf = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
-        yaml.safe_dump(world, wf); wf.close()
+        # cuRobo SceneCollisionCfg 는 scene_model 이 list 일 때만 collision world num_envs 를
+        # list 길이로 잡는다. multi_env=True에서 batch index=env_idx 이므로 world도 N개 복제한다.
+        yaml.safe_dump([json.loads(json.dumps(world)) for _ in range(self.max_batch_size)], wf)
+        wf.close()
         # planner 는 wf.name(=world) 로 로드 → per-request 는 update_obstacle_pose 로 그릇/큐브
         # 좌표만 갱신. hollow ring 이라 retreat·self-check 모두 full scene(옛 empty-world swap 제거).
 
@@ -258,19 +271,32 @@ class PickPlacePlanner:
         print(f"[planner] FK bank {len(self.FK_POS_ALL)}", flush=True)
 
         self.p = BatchMotionPlanner(MotionPlannerCfg.create(
-            robot=ROBOT, scene_model=wf.name, max_batch_size=1, max_goalset=K,
-            use_cuda_graph=False))
-        self.pb = BatchMotionPlanner(MotionPlannerCfg.create(
-            robot=ROBOT, scene_model=wf.name, max_batch_size=SIMPLE_MAX_CANDIDATES, max_goalset=1,
+            robot=ROBOT, scene_model=wf.name,
+            max_batch_size=self.max_batch_size,
+            max_goalset=self.max_goalset,
+            multi_env=True,
             use_cuda_graph=False))
         self.p.warmup(enable_graph=False, num_warmup_iterations=2)
-        self.pb.warmup(enable_graph=False, num_warmup_iterations=2)
         self.tf = self.p.tool_frames
-        self.tf_batch = self.pb.tool_frames
         self.nA = len(self.p.joint_names)
         self.rng = np.random.default_rng()
         self.last_candidate_diag = None
         self.last_plan_diag = {}
+
+    def _ensure_batch_size(self, batch_size):
+        """BatchMotionPlanner는 config.max_batch_size가 실제 batch 크기다.
+
+        cuRobo 내부 padding 경로는 JointState jerk 등에서 shape 문제가 있어, 요청 env 수와
+        planner batch size를 정확히 맞춘다. 동시에 살아있는 BatchMotionPlanner는 항상 1개다.
+        """
+        batch_size = int(batch_size)
+        if batch_size == self.max_batch_size:
+            return
+        try:
+            self.p.destroy()
+        except Exception:
+            pass
+        self.__init__(bowl_bl=self.default_bowl_bl, max_batch_size=batch_size)
 
     # ── small helpers ───────────────────────────────────────────────────────────
     @staticmethod
@@ -287,17 +313,36 @@ class PickPlacePlanner:
         q = torch.as_tensor(np.asarray(quat), device="cuda", dtype=torch.float32).view(1, 1, 1, -1, 4)
         return GoalToolPose(tool_frames=self.tf, position=p, quaternion=q)
 
-    def _goal_batch(self, pos, quat):
-        """(B,3)/(B,4) → B개 독립 problem GoalToolPose (각 problem goalset=1)."""
-        p = torch.as_tensor(np.asarray(pos), device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 3)
-        q = torch.as_tensor(np.asarray(quat), device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 4)
-        return GoalToolPose(tool_frames=self.tf_batch, position=p, quaternion=q)
+    def _goalset_batch(self, pos, quat):
+        """(B,G,3)/(B,G,4) → B개 env, env별 G개 goalset."""
+        pos_arr = np.asarray(pos)
+        quat_arr = np.asarray(quat)
+        if pos_arr.shape[0] < self.max_batch_size:
+            pad = self.max_batch_size - pos_arr.shape[0]
+            pos_arr = np.concatenate([pos_arr, np.repeat(pos_arr[:1], pad, axis=0)], axis=0)
+            quat_arr = np.concatenate([quat_arr, np.repeat(quat_arr[:1], pad, axis=0)], axis=0)
+        b, g = pos_arr.shape[:2]
+        p = torch.as_tensor(pos_arr, device="cuda", dtype=torch.float32).view(b, 1, 1, g, 3)
+        q = torch.as_tensor(quat_arr, device="cuda", dtype=torch.float32).view(b, 1, 1, g, 4)
+        return GoalToolPose(tool_frames=self.tf, position=p, quaternion=q)
 
-    def _repeat_state(self, state, n):
-        pos = state.position.detach()
-        if pos.dim() == 1:
-            pos = pos.unsqueeze(0)
-        return JointState.from_position(pos[:1].repeat(n, 1).clone(), joint_names=self.p.joint_names)
+    def _pose_batch(self, pos, quat):
+        """(B,3)/(B,4) → B개 env, env별 단일 pose goal."""
+        pos_arr = np.asarray(pos)
+        quat_arr = np.asarray(quat)
+        if pos_arr.shape[0] < self.max_batch_size:
+            pad = self.max_batch_size - pos_arr.shape[0]
+            pos_arr = np.concatenate([pos_arr, np.repeat(pos_arr[:1], pad, axis=0)], axis=0)
+            quat_arr = np.concatenate([quat_arr, np.repeat(quat_arr[:1], pad, axis=0)], axis=0)
+        p = torch.as_tensor(pos_arr, device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 3)
+        q = torch.as_tensor(quat_arr, device="cuda", dtype=torch.float32).view(-1, 1, 1, 1, 4)
+        return GoalToolPose(tool_frames=self.tf, position=p, quaternion=q)
+
+    def _joint_state_batch(self, q):
+        q = torch.as_tensor(q, device="cuda", dtype=torch.float32)
+        if q.dim() == 1:
+            q = q.unsqueeze(0)
+        return JointState.from_position(q[:, :self.nA].clone(), joint_names=self.p.joint_names)
 
     def _goalset(self, xyz):
         """xyz 최근접 K개 **bank pose 그대로** goalset(전부 정확히 도달가능=존재증명). 5-DOF 는
@@ -355,6 +400,23 @@ class PickPlacePlanner:
             self.p.enable_link_collision(CONTACT_LINKS + DESCEND_EXTRA_OFF)
         return self._extract(r, start)
 
+    def _plan_to_batch(self, goal, start, n, linear=False, attempts=3):
+        """Batched GoalToolPose 직접 계획 → [(traj|None,end)]×n."""
+        if linear:
+            self.p.disable_link_collision(CONTACT_LINKS + DESCEND_EXTRA_OFF)
+            lin = ToolPoseCriteria.linear_motion(axis="z", non_terminal_scale=1.0,
+                                                 project_distance_to_goal=True)
+            self.p.update_tool_pose_criteria({k: lin for k in self.tf})
+        r = self.p.plan_pose(goal_tool_poses=goal, current_state=start, max_attempts=attempts)
+        if linear:
+            self.p.update_tool_pose_criteria({k: ToolPoseCriteria() for k in self.tf})
+            self.p.enable_link_collision(CONTACT_LINKS + DESCEND_EXTRA_OFF)
+        return self._extract_batch(r, start, n)
+
+    def _plan_cspace_batch(self, goal_states, current_state, n, attempts=1):
+        r = self.p.plan_cspace(goal_states, current_state, max_attempts=attempts)
+        return self._extract_batch(r, current_state, n)
+
     @staticmethod
     def _quat_axes(quat):
         w, x, y, z = quat
@@ -370,6 +432,17 @@ class PickPlacePlanner:
         quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
         _xax, _yax, zax = self._quat_axes(quat)
         return pos, quat, zax
+
+    def _ee_pose_axis_batch(self, q):
+        """FK of q(N) → pos(N,3), quat(N,4), z_axis(N,3)."""
+        tp = self.p.compute_kinematics(q).tool_poses.get_link_pose(self.tf[0])
+        pos = tp.position.detach().view(-1, 3).cpu().numpy()
+        quat = tp.quaternion.detach().view(-1, 4).cpu().numpy()
+        z_axes = []
+        for qq in quat:
+            _xax, _yax, zax = self._quat_axes(qq)
+            z_axes.append(zax)
+        return pos, quat, np.asarray(z_axes, dtype=np.float64)
 
     def _pan_aligned_closing_axis(self, start, cube):
         """start 에서 shoulder_pan 만 cube vertical plane 으로 돌린 뒤 gripper x축을 읽는다."""
@@ -516,6 +589,9 @@ class PickPlacePlanner:
         ranked_faces, ref_axis = self._ordered_face_normals(xyz, yaw, start)
         if not ranked_faces:
             return []
+        ranked_faces = [f for f in ranked_faces if f[2] <= WRIST_ROLL_DELTA_LIMIT_DEG]
+        if not ranked_faces:
+            return []
         face_count = max(1, min(int(face_count), len(ranked_faces)))
         face_msg = " ".join(
             f"#{idx}:angle={angle:.1f},dot={dot:.2f}" for idx, _n, angle, dot in ranked_faces
@@ -538,14 +614,40 @@ class PickPlacePlanner:
                                   round(c[2]["face_loss_deg"], 3), c[2]["face_index"]))
         return cands[:SIMPLE_MAX_CANDIDATES]
 
+    @staticmethod
+    def _priority_shuffle_candidates(cands, rng):
+        """top-down 가능 후보를 먼저, 그 안에서는 closest face 우선 + 랜덤 tie-break."""
+        if not cands:
+            return []
+        topdown = [c for c in cands if abs(c[2]["alpha_deg"]) <= TOPDOWN_ALPHA_MAX_DEG]
+        base = topdown if topdown else cands
+        best_rank = min(c[2].get("face_rank", 0) for c in base)
+        primary = [c for c in base if c[2].get("face_rank", 0) == best_rank]
+        primary_idx = list(range(len(primary)))
+        rng.shuffle(primary_idx)
+        primary = [primary[i] for i in primary_idx]
+        primary_keys = {id(c) for c in primary}
+        rest = [c for c in cands if id(c) not in primary_keys]
+        return primary + rest
+
+    def _wrist_delta_ok(self, q, start):
+        wr_idx = self.p.joint_names.index("wrist_roll")
+        qpos = q.position.detach()
+        spos = start.position.detach()
+        wr = float(qpos.view(-1, self.nA)[0, wr_idx].item())
+        swr = float(spos.view(-1, self.nA)[0, wr_idx].item())
+        delta = wr - swr
+        return abs(delta) <= WRIST_ROLL_DELTA_LIMIT, wr, delta
+
     # ── ① approach ──────────────────────────────────────────────────────────────
     def _plan_pregrasp(self, cube, yaw, start, knobs):
-        """simple 후보를 batch 로 계획하고, FK gate 통과 후보 중 하나를 고른다."""
+        """simple 후보를 goalset 으로 계획하고, cuRobo가 고른 후보를 FK gate로 검증한다."""
         kn = knobs or {}
         seed = kn.get("seed")
         rng = np.random.default_rng(int(seed)) if seed is not None else self.rng
         face_count = int(kn.get("simple_face_count", SIMPLE_FACE_COUNT))
-        candidates = self._simple_candidates(cube, yaw, start, face_count=face_count)
+        candidates = self._priority_shuffle_candidates(
+            self._simple_candidates(cube, yaw, start, face_count=face_count), rng)
         yaw_msg = "None" if yaw is None else f"{math.degrees(yaw):.1f}"
         self._diag(f"[simple] candidates={len(candidates)} yaw={yaw_msg} face_count={face_count} seed={seed}")
         if not candidates:
@@ -555,90 +657,191 @@ class PickPlacePlanner:
         n_candidates = len(candidates)
         pos = np.asarray([c[0] for c in candidates], dtype=np.float32)
         quat = np.asarray([c[1] for c in candidates], dtype=np.float32)
-        if n_candidates < SIMPLE_MAX_CANDIDATES:
-            pad_n = SIMPLE_MAX_CANDIDATES - n_candidates
-            pos = np.concatenate([pos, np.repeat(pos[-1:], pad_n, axis=0)], axis=0)
-            quat = np.concatenate([quat, np.repeat(quat[-1:], pad_n, axis=0)], axis=0)
-        batched_start = self._repeat_state(start, SIMPLE_MAX_CANDIDATES)
-        result = self.pb.plan_pose(
-            goal_tool_poses=self._goal_batch(pos, quat),
-            current_state=batched_start,
+        result = self.p.plan_pose(
+            goal_tool_poses=self._goal(pos, quat),
+            current_state=start,
             max_attempts=2,
             success_ratio=1.0,
         )
-        planned = self._extract_batch(result, batched_start, n_candidates)
-
-        feasible = []
-        for cand_idx, ((_pos, _quat, meta), (traj, end)) in enumerate(zip(candidates, planned)):
-            label = f"simple(face={meta.get('face_index')},rank={meta.get('face_rank')},alpha={meta['alpha_deg']:+.0f})"
-            if traj is None:
-                self._diag(f"[simple] cand={label} solved=False")
-                continue
-            wr = float(end.position.view(-1)[4].item())  # 해의 wrist_roll(rad)
-            in_range = WRIST_ROLL_RANGE[0] <= wr <= WRIST_ROLL_RANGE[1]
-            fe = self._grasp_face_error(end, cube, meta.get("face_normal"))
-            ok = (in_range and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
-                  and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
-                  and fe["face_angle"] <= SIMPLE_FACE_LOSS_MAX_DEG)
-            self._diag(f"[simple] cand={label} wr={math.degrees(wr):.0f} in_range={in_range} "
-                       f"alpha={fe['a']:.0f} e_norm={fe['n'] * 1000:.1f} e_tan={fe['t'] * 1000:.1f} "
-                       f"e_h={fe['h'] * 1000:.1f} centerline={fe['c'] * 1000:.1f}mm "
-                       f"face_angle={fe['face_angle']:.1f} ok={ok}")
-            if ok:
-                score = (round(fe["c"] * 1000, 1),                    # ① centerline error(mm)
-                         round(abs(fe["n"] - 0.003) * 1000, 1),       # ② clearance error vs 3mm 중앙
-                         round(meta["face_loss_deg"], 1),             # ③ face normal align loss(°)
-                         round(abs(math.degrees(wr) + 90.0)),         # ④ wrist branch(fingers-down=-90°)
-                         round(fe["a"]))                              # ⑤ tilt penalty(작을수록)
-                diag = {**meta, "candidate_index": cand_idx, "score": list(score),
-                        "wrist_roll_deg": math.degrees(wr),
-                        "fk_face_error": {k: float(v) for k, v in fe.items()}}
-                feasible.append((diag, traj, end))
-
-        if not feasible:
+        (traj, end), = self._extract_batch(result, start, 1)
+        if traj is None:
             self.last_candidate_diag = {
                 "mode": "simple",
-                "fail": "no_feasible_candidate",
+                "fail": "no_curobo_goalset_solution",
                 "num_candidates": len(candidates),
             }
             return None, start
 
-        topdown = [item for item in feasible if item[0]["fk_face_error"]["a"] <= TOPDOWN_ALPHA_MAX_DEG]
-        base_pool = topdown if topdown else feasible
-        best_rank = min(item[0].get("face_rank", 0) for item in base_pool)
-        pool = [item for item in base_pool if item[0].get("face_rank", 0) == best_rank]
-        selected = pool[int(rng.integers(len(pool)))]
-        diag, traj, end = selected
+        cand_idx = 0
+        if result is not None and result.goalset_index is not None:
+            cand_idx = int(result.goalset_index.detach().view(-1)[0].item())
+            cand_idx = max(0, min(cand_idx, n_candidates - 1))
+        meta = candidates[cand_idx][2]
+        wrist_ok, wr, wr_delta = self._wrist_delta_ok(end, start)
+        fe = self._grasp_face_error(end, cube, meta.get("face_normal"))
+        ok = (wrist_ok and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
+              and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
+              and fe["face_angle"] <= SIMPLE_FACE_LOSS_MAX_DEG)
+        label = f"simple(face={meta.get('face_index')},rank={meta.get('face_rank')},alpha={meta['alpha_deg']:+.0f})"
+        self._diag(f"[simple] selected_cand={label} wr={math.degrees(wr):.0f} "
+                   f"wr_delta={math.degrees(wr_delta):+.1f} wrist_ok={wrist_ok} "
+                   f"alpha={fe['a']:.0f} e_norm={fe['n'] * 1000:.1f} e_tan={fe['t'] * 1000:.1f} "
+                   f"e_h={fe['h'] * 1000:.1f} centerline={fe['c'] * 1000:.1f}mm "
+                   f"face_angle={fe['face_angle']:.1f} ok={ok}")
+        if not ok:
+            self.last_candidate_diag = {
+                "mode": "simple",
+                "fail": "selected_candidate_failed_fk_gate",
+                "num_candidates": len(candidates),
+                "candidate_index": int(cand_idx),
+                "wrist_roll_deg": math.degrees(wr),
+                "wrist_delta_deg": math.degrees(wr_delta),
+                "fk_face_error": {k: float(v) for k, v in fe.items()},
+            }
+            return None, start
+
+        score = (round(fe["c"] * 1000, 1),
+                 round(abs(fe["n"] - 0.003) * 1000, 1),
+                 round(meta["face_loss_deg"], 1),
+                 round(abs(math.degrees(wr_delta))),
+                 round(fe["a"]))
+        diag = {**meta, "candidate_index": int(cand_idx), "score": list(score),
+                "wrist_roll_deg": math.degrees(wr),
+                "wrist_delta_deg": math.degrees(wr_delta),
+                "fk_face_error": {k: float(v) for k, v in fe.items()}}
         diag["selection"] = {
-            "policy": "random_topdown_then_closest_face",
-            "feasible_count": len(feasible),
-            "topdown_count": len(topdown),
-            "pool": "topdown" if topdown else "all_feasible",
-            "pool_face_rank": int(best_rank),
-            "pool_count": len(pool),
+            "policy": "goalset_topdown_closest_face_randomized_order",
+            "num_candidates": len(candidates),
+            "goalset_index": int(cand_idx),
             "seed": None if seed is None else int(seed),
         }
         self.last_candidate_diag = diag
         self._diag(f"[simple] selected={diag}")
         return traj, end
 
+    def _plan_pregrasp_batch(self, cubes, yaws, starts, knobs):
+        """N env simple 후보를 priority order로 검사한다.
+
+        각 pass는 env별 후보 1개씩을 BatchMotionPlanner batch 차원으로 병렬 계획한다.
+        후보 순서는 top-down/closest-face 우선이고 primary pool 내부만 seed 기반으로 섞는다.
+        """
+        n_env = len(cubes)
+        kn = knobs or {}
+        seed = kn.get("seed")
+        face_count = int(kn.get("simple_face_count", SIMPLE_FACE_COUNT))
+        start_pos, start_quat, _ = self._ee_pose_axis_batch(starts)
+        per_env = []
+        for i, (cube, yaw) in enumerate(zip(cubes, yaws)):
+            start_i = JointState.from_position(
+                starts.position[i: i + 1].detach().clone(), joint_names=self.p.joint_names)
+            rng = np.random.default_rng(int(seed) + i) if seed is not None else self.rng
+            cands = self._priority_shuffle_candidates(
+                self._simple_candidates(cube, yaw, start_i, face_count=face_count), rng)
+            if not cands:
+                fallback = (start_pos[i], start_quat[i], {
+                    "mode": "simple", "fail": "no_candidates", "env": i,
+                })
+                cands = [fallback]
+            per_env.append(cands[:self.max_goalset])
+
+        max_pass = max(len(c) for c in per_env)
+        trajs = [None] * n_env
+        ends = [JointState.from_position(starts.position[i: i + 1].detach().clone(),
+                                         joint_names=self.p.joint_names)
+                for i in range(n_env)]
+        diagnostics = [{"mode": "simple", "fail": "not_attempted", "num_candidates": len(per_env[i])}
+                       for i in range(n_env)]
+        ok_mask = [False] * n_env
+        plan_ms = 0.0
+        for pass_idx in range(max_pass):
+            active = [i for i in range(n_env) if not ok_mask[i] and pass_idx < len(per_env[i])]
+            if not active:
+                break
+            pos = np.zeros((n_env, 3), dtype=np.float32)
+            quat = np.zeros((n_env, 4), dtype=np.float32)
+            pass_meta = []
+            for i in range(n_env):
+                if i in active:
+                    p_i, q_i, m_i = per_env[i][pass_idx]
+                else:
+                    p_i, q_i, m_i = start_pos[i], start_quat[i], {"mode": "fallback"}
+                pos[i] = p_i
+                quat[i] = q_i
+                pass_meta.append(m_i)
+            t0 = time.perf_counter()
+            result = self.p.plan_pose(
+                goal_tool_poses=self._pose_batch(pos, quat),
+                current_state=starts,
+                max_attempts=2,
+                success_ratio=1.0,
+            )
+            plan_ms += (time.perf_counter() - t0) * 1000.0
+            planned = self._extract_batch(result, starts, n_env)
+            for i in active:
+                meta = pass_meta[i]
+                traj, end = planned[i]
+                if traj is None:
+                    diagnostics[i] = {**meta, "fail": "no_curobo_solution",
+                                      "candidate_index": pass_idx,
+                                      "num_candidates": len(per_env[i])}
+                    continue
+                wrist_ok, wr, wr_delta = self._wrist_delta_ok(
+                    end,
+                    JointState.from_position(starts.position[i: i + 1].detach().clone(),
+                                             joint_names=self.p.joint_names),
+                )
+                fe = self._grasp_face_error(end, cubes[i], meta.get("face_normal"))
+                ok = (wrist_ok and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
+                      and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
+                      and fe["face_angle"] <= SIMPLE_FACE_LOSS_MAX_DEG)
+                diag = {**meta,
+                        "candidate_index": pass_idx,
+                        "wrist_roll_deg": math.degrees(wr),
+                        "wrist_delta_deg": math.degrees(wr_delta),
+                        "fk_face_error": {k: float(v) for k, v in fe.items()},
+                        "selection": {
+                            "policy": "batched_priority_candidate_scan",
+                            "num_candidates": len(per_env[i]),
+                            "candidate_rank": int(pass_idx),
+                            "seed": None if seed is None else int(seed) + i,
+                        }}
+                if ok:
+                    trajs[i] = traj
+                    ends[i] = end
+                    diagnostics[i] = diag
+                    ok_mask[i] = True
+                else:
+                    diag["fail"] = "candidate_failed_fk_gate"
+                    diagnostics[i] = diag
+            if all(ok_mask):
+                break
+
+        for i, ok in enumerate(ok_mask):
+            diagnostics[i]["plan_ms"] = plan_ms
+            if not ok and diagnostics[i].get("fail") == "not_attempted":
+                diagnostics[i]["fail"] = "no_feasible_candidate"
+        q_rows = [e.position.detach().view(1, -1) for e in ends]
+        if starts.position.shape[0] > n_env:
+            q_rows.append(starts.position[n_env:].detach())
+        q_end = self._joint_state_batch(torch.cat(q_rows, dim=0))
+        return trajs, q_end, diagnostics, ok_mask, {"approach_plan_ms": plan_ms, "candidate_passes": int(max_pass)}
+
     def _approach(self, cube, yaw, start, knobs):
         """① approach = simple 후보 batch 검증 → top-down 우선 랜덤 선택."""
         return self._plan_pregrasp(cube, yaw, start, knobs)
 
     # ── obstacle / attach helpers ───────────────────────────────────────────────
-    def _place_cube_obstacle(self, cube):
+    def _place_cube_obstacle(self, cube, env_idx=0):
         """target 큐브 실좌표를 world "cube" obstacle 에 주입(placeholder 는 far)."""
         try:
             cpose = Pose(position=torch.tensor([list(cube)], device="cuda", dtype=torch.float32),
                          quaternion=torch.tensor([[1.0, 0, 0, 0]], device="cuda", dtype=torch.float32))
-            for planner in (self.p, self.pb):
-                planner.scene_collision_checker.update_obstacle_pose("cube", cpose, env_idx=0)
-                planner.scene_collision_checker.enable_obstacle("cube", True, env_idx=0)
+            self.p.scene_collision_checker.update_obstacle_pose("cube", cpose, env_idx=env_idx)
+            self.p.scene_collision_checker.enable_obstacle("cube", True, env_idx=env_idx)
         except Exception as e:
             self._diag(f"[cube-obst] FAIL {type(e).__name__}: {e}")
 
-    def _place_bowl_obstacle(self, bx, by):
+    def _place_bowl_obstacle(self, bx, by, env_idx=0):
         """실 그릇 중심(urdf)을 8× rim-ring obstacle 에 주입 — 기본 pose 는 __init__ 값이라
         실제 그릇이 다른 곳(밀림·DR)이면 transit 이 엉뚱한 곳을 피함. 매 요청 동기화."""
         try:
@@ -646,8 +849,7 @@ class PickPlacePlanner:
                 x, y, z, qw, qx, qy, qz = ent["pose"]
                 bpose = Pose(position=torch.tensor([[x, y, z]], device="cuda", dtype=torch.float32),
                              quaternion=torch.tensor([[qw, qx, qy, qz]], device="cuda", dtype=torch.float32))
-                for planner in (self.p, self.pb):
-                    planner.scene_collision_checker.update_obstacle_pose(name, bpose, env_idx=0)
+                self.p.scene_collision_checker.update_obstacle_pose(name, bpose, env_idx=env_idx)
         except Exception as e:
             self._diag(f"[bowl-obst] FAIL {type(e).__name__}: {e}")
 
@@ -676,7 +878,7 @@ class PickPlacePlanner:
             self._diag(f"[attach] FAIL {type(e).__name__}: {e} — 무부착 fallback")
             return False
 
-    def _detach(self):
+    def _detach(self, num_envs=1):
         """detach + stale "cube" obstacle 재-disable.
 
         cuRobo detach() 는 attach 때 disable한 world "cube" 를 **원래 pickup 좌표에** 재활성화
@@ -686,7 +888,8 @@ class PickPlacePlanner:
         → 즉시 다시 disable. 다음 요청의 _place_cube_obstacle 이 재배치+재활성."""
         try:
             self._attachment_manager().detach()
-            self.p.scene_collision_checker.enable_obstacle("cube", False, env_idx=0)
+            for env_idx in range(num_envs):
+                self.p.scene_collision_checker.enable_obstacle("cube", False, env_idx=env_idx)
         except Exception as e:
             self._diag(f"[attach] detach FAIL {type(e).__name__}: {e}")
 
@@ -701,6 +904,32 @@ class PickPlacePlanner:
         lim = torch.tensor(ARM_LIMITS, device="cuda", dtype=torch.float32)
         arm = torch.clamp(arm, lim[:, 0] + 0.005, lim[:, 1] - 0.005).unsqueeze(0)
         return JointState.from_position(arm, joint_names=self.p.joint_names)
+
+    def _start_states(self, starts, n):
+        """요청 start 자세 N개 → JointState(N,dof)."""
+        if starts is None:
+            q = self.p.default_joint_state.position.unsqueeze(0).repeat(self.max_batch_size, 1)
+            return JointState.from_position(q, joint_names=self.p.joint_names)
+        lim = torch.tensor(ARM_LIMITS, device="cuda", dtype=torch.float32)
+        rows = []
+        for i in range(n):
+            arm = torch.tensor(starts[i][: self.nA], device="cuda", dtype=torch.float32)
+            rows.append(torch.clamp(arm, lim[:, 0] + 0.005, lim[:, 1] - 0.005))
+        if n < self.max_batch_size:
+            rows.extend([rows[0].clone() for _ in range(self.max_batch_size - n)])
+        return JointState.from_position(torch.stack(rows, dim=0), joint_names=self.p.joint_names)
+
+    def _merge_phase_ends(self, planned, fallback, prev_ok):
+        """phase 결과에서 성공 env는 end, 실패 env는 fallback state를 유지."""
+        rows, ok = [], []
+        for i, (traj, end) in enumerate(planned):
+            good = bool(prev_ok[i]) and traj is not None
+            ok.append(good)
+            src = end.position if good else fallback.position[i: i + 1]
+            rows.append(src.detach().view(1, -1))
+        if fallback.position.shape[0] > len(planned):
+            rows.append(fallback.position[len(planned):].detach())
+        return self._joint_state_batch(torch.cat(rows, dim=0)), ok
 
     @staticmethod
     def _cube_yaw(cube_bl):
@@ -734,108 +963,152 @@ class PickPlacePlanner:
                    f"dpsi={dps} pre_ok={pre_ok}")
 
     # ── main entry ──────────────────────────────────────────────────────────────
-    def plan_pickplace(self, cube_bl, bowl_bl=None, start_rad=None, knobs=None):
-        """큐브 1개(base_link frame) full 6-phase pick-place 궤적 (T,6) [arm deg×5 + gripper
-        feature] 또는 None(어느 phase 든 실패 시).
-
-        knobs: per-request 오버라이드(기본=상수 → 무변경):
-          {"grasp_z_off": f, "grip_open": f, "grip_close": f,
-           "simple_face_count": 4, "seed": int}"""
+    def plan_pickplace_batch(self, cube_bls, bowl_bls=None, starts_rad=None, knobs=None):
+        """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획."""
+        n_env = len(cube_bls)
+        self._ensure_batch_size(n_env)
         kn = knobs or {}
         z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
         g_close = float(kn.get("grip_close", GRIP_CLOSE))
         b_pull = float(kn.get("bowl_pull", BOWL_PULL))
-        # 파티클 IK 는 process 누적 seed 상태 → 요청마다 리셋해 에피소드 결정론 복원.
+        t_all0 = time.perf_counter()
+        profile = {}
         self.p.reset_seed()
-        self.pb.reset_seed()
-        self.last_candidate_diag = None
 
-        cube = usd_to_urdf(cube_bl[:3])
-        cube = (cube[0], cube[1], cube[2] + z_off)          # grasp 깊이 보정
-        yaw = self._cube_yaw(cube_bl)
-        bx, by = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))[:2] if bowl_bl is not None else self.bowl_s
-        self.last_plan_diag = {
-            "ok": False,
-            "cube_base_link": [float(v) for v in cube_bl],
-            "cube_solver": [float(v) for v in cube],
-            "cube_yaw_deg": None if yaw is None else float(math.degrees(yaw)),
-            "bowl_solver_xy": [float(bx), float(by)],
-            "candidate": None,
-            "phases": {},
-        }
-        start = self._start_state(start_rad)
-        q_home = start.clone()   # ⑥ retreat 가 여기로 복귀 → 다음 start 항상 init
-        self._diag(f"[start] names={self.p.joint_names} recv={start_rad} "
-                   f"clamped={start.position.view(-1).tolist()}")
-        # start reachability 확인 (full scene; home=folded rest 라 obstacle 무관).
-        self_ok = self._extract(self.p.plan_cspace(q_home, start), start)[0] is not None
-        self._diag(f"[start] self_reachable={self_ok}")
-        self._place_cube_obstacle(cube)
-        self._place_bowl_obstacle(bx, by)
+        cubes = []
+        yaws = []
+        bowls = []
+        per_env_bowl = bool(bowl_bls) and isinstance(bowl_bls[0], (list, tuple))
+        for i, cube_bl in enumerate(cube_bls):
+            cube = usd_to_urdf(cube_bl[:3])
+            cube = (cube[0], cube[1], cube[2] + z_off)
+            cubes.append(cube)
+            yaws.append(self._cube_yaw(cube_bl))
+            bsrc = bowl_bls[i] if per_env_bowl else bowl_bls
+            bx, by = usd_to_urdf((bsrc[0], bsrc[1], 0.0))[:2] if bsrc is not None else self.bowl_s
+            bowls.append((bx, by))
 
-        # ① APPROACH
-        pre, q_pre = self._approach(cube, yaw, start, kn)
-        if pre is None:
-            self.last_plan_diag["candidate"] = self.last_candidate_diag
-            self.last_plan_diag["phases"] = {"approach": False}
-            msg = f"[planner] approach-fail cube={cube_bl}"
-            print(msg, flush=True); self._diag(msg)
-            return None
+        starts = self._start_states(starts_rad, n_env)
+        q_home = starts.clone()
+        diagnostics = []
+        for i, cube_bl in enumerate(cube_bls):
+            diagnostics.append({
+                "ok": False,
+                "cube_base_link": [float(v) for v in cube_bl],
+                "cube_solver": [float(v) for v in cubes[i]],
+                "cube_yaw_deg": None if yaws[i] is None else float(math.degrees(yaws[i])),
+                "bowl_solver_xy": [float(bowls[i][0]), float(bowls[i][1])],
+                "candidate": None,
+                "phases": {},
+                "profile_ms": {},
+            })
+            self._place_cube_obstacle(cubes[i], env_idx=i)
+            self._place_bowl_obstacle(bowls[i][0], bowls[i][1], env_idx=i)
+        for env_idx in range(n_env, self.max_batch_size):
+            try:
+                self.p.scene_collision_checker.enable_obstacle("cube", False, env_idx=env_idx)
+            except Exception:
+                pass
 
-        # ② GRASP — 도착 pre pose FK → approach축(ẑ)으로 _pre_back(r 적응) 하강(=pad-at-face-center 조준).
-        #    ★bounded shallow-preload: 물리 pad 최저점(tcp+PAD_LOW_OFF·ẑ)이 table_top+margin
-        #    아래로 못 가게 descend 깊이(tstar)를 clamp → 책상 stall-press 대신 얕은 preload.
-        #    (pre 는 simple pose 에서 pad center 가 face center 에 앉게 조준·backoff → 하강량=_pre_back.)
-        app, aq, zax = self._ee_pose_axis(q_pre)
-        self._grasp_diag(cube_bl, aq, zax, yaw, True)
-        tstar = _pre_back(cube)
-        zaz = float(zax[2])
-        if zaz < -1e-3:  # 하강 중 — pad 최저점 z ≥ TABLE_TOP+TABLE_MARGIN 로 tstar 상한
-            tstar_cap = (TABLE_TOP + TABLE_MARGIN - float(app[2])) / zaz - PAD_LOW_OFF
-            tstar = min(tstar, tstar_cap)
-        self._diag(f"[grasp] tstar={tstar:.4f} cap_z(pad)={TABLE_TOP + TABLE_MARGIN:.4f} zaz={zaz:.3f}")
-        gpos = app + tstar * zax
-        desc, q_grasp = self._plan_to(self._goal([gpos], [aq]), q_pre, linear=True)
+        # ① APPROACH: batch=N, goalset=candidates.
+        pre, q_pre, cand_diag, pre_ok, pre_prof = self._plan_pregrasp_batch(cubes, yaws, starts, kn)
+        profile.update(pre_prof)
 
-        # ③ LIFT — grasp 서 tool -z linear 역행(pre 지점 너머로 안 나감)
-        up = gpos - min(tstar, LIFT_BACK) * zax
-        lift, q_lift = self._plan_to(self._goal([up], [aq]), q_grasp, linear=True)
+        # ② GRASP descend.
+        app, aq, zaxes = self._ee_pose_axis_batch(q_pre)
+        gpos, tstars = [], []
+        for i, (cube, zax) in enumerate(zip(cubes, zaxes)):
+            tstar = _pre_back(cube)
+            zaz = float(zax[2])
+            if zaz < -1e-3:
+                tstar_cap = (TABLE_TOP + TABLE_MARGIN - float(app[i, 2])) / zaz - PAD_LOW_OFF
+                tstar = min(tstar, tstar_cap)
+            tstars.append(tstar)
+            gpos.append(app[i] + tstar * zax)
+        t0 = time.perf_counter()
+        desc_planned = self._plan_to_batch(self._pose_batch(np.asarray(gpos), aq), q_pre, n_env, linear=True)
+        profile["grasp_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+        q_grasp, grasp_ok = self._merge_phase_ends(desc_planned, q_pre, pre_ok)
 
-        # attach(lift 후·transit 전) — grasp 직후 attach 는 blob 이 bowl 마진과 겹쳐 lift 허위 FAIL
-        attached = self._attach_cube(q_lift)
+        # ③ LIFT.
+        up = np.asarray([gpos[i] - min(tstars[i], LIFT_BACK) * zaxes[i] for i in range(n_env)])
+        t0 = time.perf_counter()
+        lift_planned = self._plan_to_batch(self._pose_batch(up, aq), q_grasp, n_env, linear=True)
+        profile["lift_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+        q_lift, lift_ok = self._merge_phase_ends(lift_planned, q_grasp, grasp_ok)
 
+        attached = False
+        if any(lift_ok):
+            attached = self._attach_cube(q_lift)
+
+        # ④ TRANSIT: env별 bowl 상공 FK-bank goalset.
+        fk_pos, fk_quat, _ = self._ee_pose_axis_batch(q_lift)
+        tr_pos = np.zeros((n_env, K, 3), dtype=np.float32)
+        tr_quat = np.zeros((n_env, K, 4), dtype=np.float32)
         transit_z = TRANSIT_Z + BASE_T[2]
-        # ④ TRANSIT — 그릇 상공(bank goalset, bowl obstacle + blob). bowl obstacle 을 계속
-        #    켜둬 팔·pad 가 그릇에 진입 못 하게 한다(collision-aware).
-        #    드롭 XY = 그릇 중심서 base(원점) 쪽으로 b_pull 당김(near-rim 착지). obstacle=실좌표 유지.
-        bd = math.hypot(bx, by)
-        s = 1.0 - b_pull / bd if bd > 1e-6 else 1.0
-        px, py = bx * s, by * s
-        transit, q_transit = self._plan_to(self._goalset((px, py, transit_z)), q_lift)
+        for i, (bx, by) in enumerate(bowls):
+            if not lift_ok[i]:
+                tr_pos[i] = np.repeat(fk_pos[i: i + 1], K, axis=0)
+                tr_quat[i] = np.repeat(fk_quat[i: i + 1], K, axis=0)
+                continue
+            bd = math.hypot(bx, by)
+            s = 1.0 - b_pull / bd if bd > 1e-6 else 1.0
+            px, py = bx * s, by * s
+            idx = np.argsort(np.linalg.norm(self.FK_POS_ALL - np.array((px, py, transit_z)), axis=1))[:K]
+            tr_pos[i] = self.FK_POS_ALL[idx]
+            tr_quat[i] = self.FK_QUAT_ALL[idx]
+        t0 = time.perf_counter()
+        transit_planned = self._plan_to_batch(self._goalset_batch(tr_pos, tr_quat), q_lift, n_env)
+        profile["transit_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+        q_transit, transit_ok = self._merge_phase_ends(transit_planned, q_lift, lift_ok)
 
-        # ⑤ RELEASE — 그릇 상공서 그대로 개방. ★깊은 linear 하강(bowl disable) 은 pad 가 동적
-        #    bowl 을 밀어냈다(사용자 보고 A: "bowl 밀어버리고 그 자리에 놓임"). transit 이 이미
-        #    큐브를 그릇 위로 옮겼으니 여기선 개방만 → 큐브가 그릇 안으로 낙하(내부 미끄럼→중앙).
-        if attached:  # release 직전 detach → retreat 는 빈 그리퍼로 계획
-            self._detach()
+        if attached:
+            self._detach(num_envs=self.max_batch_size)
 
-        # ⑥ RETREAT — init(home) 자세로 cspace 복귀(gripper open). hollow rim ring 덕에 그릇
-        #    내부 허위충돌 없어 full scene 서 계획(옛 empty-world 스왑 불요).
-        retreat, _ = self._extract(self.p.plan_cspace(q_home, q_transit), q_transit)
+        # ⑥ RETREAT.
+        t0 = time.perf_counter()
+        retreat_planned = self._plan_cspace_batch(q_home, q_transit, n_env)
+        profile["retreat_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+        retreat_ok = [bool(transit_ok[i]) and retreat_planned[i][0] is not None for i in range(n_env)]
+        profile["total_plan_ms"] = (time.perf_counter() - t_all0) * 1000.0
 
-        phases = {"approach": pre, "grasp": desc, "lift": lift,
-                  "transit": transit, "retreat": retreat}
-        self.last_plan_diag["candidate"] = self.last_candidate_diag
-        self.last_plan_diag["phases"] = {k: v is not None for k, v in phases.items()}
-        self.last_plan_diag["attached"] = bool(attached)
-        if any(t is None for t in phases.values()):
-            msg = "[planner] phase-fail {} cube={}".format(
-                " ".join(f"{k}={v is not None}" for k, v in phases.items()), cube_bl)
-            print(msg, flush=True); self._diag(msg)
-            return None
-        self.last_plan_diag["ok"] = True
-        return self._assemble(phases, g_open, g_close)
+        trajectories = []
+        for i in range(n_env):
+            phases = {
+                "approach": pre[i],
+                "grasp": desc_planned[i][0],
+                "lift": lift_planned[i][0],
+                "transit": transit_planned[i][0],
+                "retreat": retreat_planned[i][0],
+            }
+            diagnostics[i]["candidate"] = cand_diag[i]
+            diagnostics[i]["phases"] = {k: v is not None for k, v in phases.items()}
+            diagnostics[i]["attached"] = bool(attached)
+            diagnostics[i]["profile_ms"] = {k: float(v) for k, v in profile.items()}
+            ok = all(v is not None for v in phases.values()) and bool(retreat_ok[i])
+            diagnostics[i]["ok"] = ok
+            if ok:
+                trajectories.append(self._assemble(phases, g_open, g_close))
+            else:
+                trajectories.append(None)
+        self.last_plan_diag = diagnostics[0] if diagnostics else {}
+        self.last_candidate_diag = cand_diag[0] if cand_diag else None
+        return trajectories, diagnostics
+
+    def plan_pickplace(self, cube_bl, bowl_bl=None, start_rad=None, knobs=None):
+        """단일 env 호환 wrapper."""
+        if start_rad is None:
+            starts = None
+        elif start_rad and isinstance(start_rad[0], (list, tuple)):
+            starts = [start_rad[0]]
+        else:
+            starts = [start_rad]
+        trajs, diagnostics = self.plan_pickplace_batch([cube_bl], [bowl_bl] if bowl_bl is not None else None,
+                                                       starts, knobs)
+        self.last_plan_diag = diagnostics[0]
+        self.last_candidate_diag = diagnostics[0].get("candidate")
+        return trajs[0]
 
     def _assemble(self, phases, g_open, g_close):
         """5 phase 궤적(rad) → 단일 (T,6) 시퀀스[arm deg + gripper feature].
@@ -861,24 +1134,14 @@ class PickPlacePlanner:
 def plan_batch(pl, req):
     """plan_pickplace 요청 1건 → per-env 궤적 리스트(list|None ×N).
 
-    cubes[i] 마다 독립 6-phase 순차 계획. bowl 은 [x,y] 공용 또는 [[x,y]×N] per-env,
-    start 는 [[6]×N](i번째만 사용) 또는 생략."""
+    BatchMotionPlanner batch 차원으로 N env를 병렬 계획한다. bowl 은 [x,y] 공용 또는
+    [[x,y]×N] per-env, start 는 [[6]×N] 또는 생략."""
     cubes = req["cubes"]
     bowl = req.get("bowl")
-    per_env_bowl = bool(bowl) and isinstance(bowl[0], (list, tuple))
     starts = req.get("start")
     knobs = req.get("knobs")
-    out = []
-    diagnostics = []
-    for i, cube in enumerate(cubes):
-        b = bowl[i] if per_env_bowl else bowl
-        s = [starts[i]] if starts else None
-        env_knobs = dict(knobs or {})
-        if "seed" in env_knobs and env_knobs["seed"] is not None:
-            env_knobs["seed"] = int(env_knobs["seed"]) + i
-        traj = pl.plan_pickplace(cube, b, s, env_knobs)
-        out.append(traj.tolist() if traj is not None else None)
-        diagnostics.append(pl.last_plan_diag)
+    trajs, diagnostics = pl.plan_pickplace_batch(cubes, bowl, starts, dict(knobs or {}))
+    out = [traj.tolist() if traj is not None else None for traj in trajs]
     return out, diagnostics
 
 
@@ -900,19 +1163,25 @@ def serve_loop(pl, sock):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=5599)
+    ap.add_argument("--max_batch_size", type=int, default=64,
+                    help="cuRobo BatchMotionPlanner max_batch_size; batch dimension maps to env index.")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
-    pl = PickPlacePlanner()
+    pl = PickPlacePlanner(max_batch_size=a.max_batch_size)
     print("[planner] ready", flush=True)
     if a.self_test:
         q_identity = [1.0, 0.0, 0.0, 0.0]
         init = [math.radians(v) for v in (0.0, -100.0, 90.0, 50.0, -90.0, -10.0)]
-        trajs, _diagnostics = plan_batch(pl, {
+        trajs, diagnostics = plan_batch(pl, {
             "cubes": [[0.017, -0.253, 0.06, *q_identity],
                       [0.167, -0.133, 0.06, *q_identity]],
             "start": [init, init],
         })
         ok = all(t is not None for t in trajs)
+        for i, d in enumerate(diagnostics):
+            print(f"self-test env{i}: ok={d.get('ok')} phases={d.get('phases')} "
+                  f"candidate_fail={d.get('candidate', {}).get('fail')} "
+                  f"profile_ms={d.get('profile_ms')}")
         print(f"self-test(2-env): {[len(t) if t else None for t in trajs]}")
         print("SELFTEST_OK" if ok else "SELFTEST_CHECK")
         return
