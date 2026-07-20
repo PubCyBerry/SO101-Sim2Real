@@ -73,6 +73,7 @@ def main() -> None:
         "planner_visual": report_dir / "planner_visual_generation.json",
         "source_annotation": report_dir / "source_annotation_validation.json",
         "smoke_hdf5": report_dir / "smoke_hdf5_validation.json",
+        "smoke_action": report_dir / "smoke_action_quality.json",
         "generation": data_root / "full" / "generation_summary.json",
         "merge": report_dir / "full_merge.json",
         "full_hdf5": report_dir / "full_hdf5_validation.json",
@@ -92,6 +93,8 @@ def main() -> None:
     info = _load(lerobot_root / "meta" / "info.json")
     boundary_images = sorted(args.boundary_evidence_dir.resolve().glob("*.png"))
     failure_video = args.failure_video.resolve()
+    shard_action_paths = sorted((data_root / "full" / "reports").glob("shard_*_action_qa.json"))
+    shard_action_reports = [_load(path) for path in shard_action_paths]
 
     generation = reports["generation"]
     conversion = reports["conversion"]
@@ -155,6 +158,9 @@ def main() -> None:
             and reports["smoke_hdf5"]["episode_count"] == 10
             and reports["smoke_hdf5"]["unique_layout_count"] == 10
             and reports["smoke_hdf5"]["success_only"]
+            and reports["smoke_action"]["status"] == "complete"
+            and reports["smoke_action"]["action_limits"]["violation_count"] == 0
+            and reports["smoke_action"]["velocity_limits"]["violation_count"] == 0
         ),
         "F": (
             generation["status"] == "complete"
@@ -173,6 +179,16 @@ def main() -> None:
             and reports["full_hdf5"]["unique_layout_count"] == 1000
             and reports["full_hdf5"]["success_only"]
             and reports["full_hdf5"]["require_images"]
+            and len(shard_action_reports) == 40
+            and all(report["status"] == "complete" for report in shard_action_reports)
+            and sum(
+                report["action_limits"]["violation_count"] for report in shard_action_reports
+            )
+            == 0
+            and sum(
+                report["velocity_limits"]["violation_count"] for report in shard_action_reports
+            )
+            == 0
             and full_file.is_file()
         ),
         "G": (
