@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# IsaacLab 2.3.2 공식 SkillGen 전용 runtime.
+#
+# 기존 Dockerfile.cuRobo(v0.8)와 이미지·site-packages·source path를 완전히 분리한다.
+# 공식 문서가 검증한 cuRobo commit만 editable install하며 다른 revision은 허용하지 않는다.
+# =============================================================================
+
+FROM so101-isaac-sim:5.1.0
+
+ARG CUROBO_COMMIT=ebb71702f3f70e767f40fd8e050674af0288abe8
+ENV SKILLGEN_CUROBO_COMMIT=${CUROBO_COMMIT} \
+    CUDA_HOME=/usr/local/cuda-12.8 \
+    PATH=/usr/local/cuda-12.8/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH} \
+    TORCH_CUDA_ARCH_LIST=12.0+PTX
+
+# Isaac Lab 통합 이미지는 CUDA runtime만 제공한다. 공식 SkillGen cuRobo commit은
+# editable install 중 extension을 빌드하므로 공식 NVIDIA CUDA 12.8 toolkit이 필요하다.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && curl -fsSLo /tmp/cuda-keyring.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+ && dpkg -i /tmp/cuda-keyring.deb \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends cuda-toolkit-12-8 \
+ && apt-get clean
+
+RUN git clone https://github.com/NVlabs/curobo.git /opt/skillgen-curobo \
+ && git -C /opt/skillgen-curobo checkout --detach "${CUROBO_COMMIT}" \
+ && test "$(git -C /opt/skillgen-curobo rev-parse HEAD)" = "${CUROBO_COMMIT}" \
+ && /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation \
+        -e /opt/skillgen-curobo "packaging==23.0" \
+ && test "$(git -C /opt/skillgen-curobo rev-parse HEAD)" = "${CUROBO_COMMIT}"
+
+# Isaac Lab 공식 docker/Dockerfile.curobo와 같은 forward-compatible PTX build.
+# pinned v0.7 extension을 native sm_120으로 빌드하면 Blackwell에서 line_search_cu가
+# illegal access를 내므로, 검증된 compute_80 PTX를 driver가 sm_120으로 JIT하게 한다.
+ENV TORCH_CUDA_ARCH_LIST=8.0+PTX
+RUN find /opt/skillgen-curobo/src/curobo/curobolib -name '*.so' -delete \
+ && /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation --no-deps \
+        --force-reinstall -e /opt/skillgen-curobo \
+ && /usr/local/cuda-12.8/bin/cuobjdump --list-ptx \
+        /opt/skillgen-curobo/src/curobo/curobolib/line_search_cu*.so \
+      | grep -q 'sm_80.ptx' \
+ && test "$(git -C /opt/skillgen-curobo rev-parse HEAD)" = "${CUROBO_COMMIT}"
+
+LABEL org.opencontainers.image.title="SO-101 IsaacLab SkillGen runtime" \
+      org.opencontainers.image.isaaclab.version="2.3.2" \
+      org.opencontainers.image.isaacsim.version="5.1.0" \
+      org.opencontainers.image.curobo.commit="ebb71702f3f70e767f40fd8e050674af0288abe8"
+
+CMD ["bash"]

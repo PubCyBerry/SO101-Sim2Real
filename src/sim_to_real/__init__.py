@@ -36,5 +36,9 @@ except ModuleNotFoundError as exc:
     # T0.3 이후: 외부 task wrapper 의존성 제거 완료.
     # isaaclab/isaacsim 없이 import 시(예: schema 검증 스크립트) omni.* 오류는 허용.
     missing = exc.name or ""
-    if not missing.startswith("omni.") and not missing.startswith("isaacsim"):
+    if (
+        not missing.startswith("omni.")
+        and not missing.startswith("isaacsim")
+        and not missing.startswith("isaaclab")
+    ):
         raise

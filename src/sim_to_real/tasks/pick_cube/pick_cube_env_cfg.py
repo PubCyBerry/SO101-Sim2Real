@@ -404,6 +404,7 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
             func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube1"),
+                "container_cfg": SceneEntityCfg("Bowl"),
                 "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,

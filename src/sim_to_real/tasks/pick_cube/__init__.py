@@ -38,3 +38,19 @@ for _env_id, _cfg_cls in _PICK_CUBE_VARIANTS.items():
             "env_cfg_entry_point": f"{__name__}.pick_cube_env_cfg:{_cfg_cls}",
         },
     )
+
+# SkillGen은 8D Cartesian action과 ManagerBasedRLMimicEnv API를 사용하므로 일반
+# 6D joint-space VLA 환경과 별도 ID로 등록한다.
+_SKILLGEN_VARIANTS = {
+    "SimToReal-SO101-PickCube-SkillGen-DRBase-v0": "PickCubeSkillGenDRBaseEnvCfg",
+    "SimToReal-SO101-PickCube-SkillGen-DR-v0": "PickCubeSkillGenDREnvCfg",
+}
+for _env_id, _cfg_cls in _SKILLGEN_VARIANTS.items():
+    gym.register(
+        id=_env_id,
+        entry_point=f"{__name__}.skillgen_env:PickCubeSkillGenEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.skillgen_env_cfg:{_cfg_cls}",
+        },
+    )

@@ -14,19 +14,20 @@ from ._geometry import DESK_TOP_Z
 _REST_THRESHOLD_RAD: float = 15.0 * math.pi / 180.0
 
 
-def _container_xy(
+def _container_pose(
     env: ManagerBasedRLEnv,
     container_center_xy: tuple[float, float],
     container_cfg: SceneEntityCfg | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """컨테이너 xy 를 env-local frame으로 반환한다."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """컨테이너 중심 xy와 floor 기준 z를 env-local frame으로 반환한다."""
     if container_cfg is not None:
         container: RigidObject = env.scene[container_cfg.name]
         local = container.data.root_pos_w - env.scene.env_origins
-        return local[:, 0], local[:, 1]
+        return local[:, 0], local[:, 1], local[:, 2]
     cx = torch.full((env.num_envs,), container_center_xy[0], device=env.device)
     cy = torch.full((env.num_envs,), container_center_xy[1], device=env.device)
-    return cx, cy
+    cz = torch.full((env.num_envs,), DESK_TOP_Z, device=env.device)
+    return cx, cy, cz
 
 
 def _is_at_rest_pose(joint_pos: torch.Tensor) -> torch.Tensor:
@@ -45,14 +46,14 @@ def task_done(
 ) -> torch.Tensor:
     """모든 물체가 컨테이너 안에 있고 (require_rest_pose 시) 팔이 rest pose 이면 True."""
     done = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
-    cx, cy = _container_xy(env, container_center_xy, container_cfg)
+    cx, cy, cz = _container_pose(env, container_center_xy, container_cfg)
 
     for obj_cfg in objects_cfg:
         obj: RigidObject = env.scene[obj_cfg.name]
         obj_pos = obj.data.root_pos_w - env.scene.env_origins
         inside_xy = torch.hypot(obj_pos[:, 0] - cx, obj_pos[:, 1] - cy) < radius
-        above_floor = obj_pos[:, 2] > (DESK_TOP_Z + height_range[0])
-        below_lip = obj_pos[:, 2] < (DESK_TOP_Z + height_range[1])
+        above_floor = obj_pos[:, 2] > (cz + height_range[0])
+        below_lip = obj_pos[:, 2] < (cz + height_range[1])
         done = torch.logical_and(
             done,
             torch.logical_and(inside_xy, torch.logical_and(above_floor, below_lip)),

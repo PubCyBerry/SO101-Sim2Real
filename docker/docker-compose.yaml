@@ -347,6 +347,65 @@ services:
     stdin_open: true
     tty: true
 
+  # ── Isaac Lab SkillGen (공식 cuRobo pinned runtime) ────────────────────────
+  # 기존 curobo-datagen(v0.8)과 별도 이미지/site-packages/source tree를 쓴다.
+  # source 기록:
+  #   docker compose run --rm skillgen python \
+  #     /workspace/scripts/datagen/record_skillgen_source.py --headless \
+  #     --enable_cameras --num-demos 10
+  # runtime smoke:
+  #   docker compose run --rm skillgen python -c \
+  #     "import curobo,isaaclab_mimic; print('skillgen imports OK')"
+  skillgen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.skillgen
+      args:
+        CUROBO_COMMIT: ebb71702f3f70e767f40fd8e050674af0288abe8
+    image: so101-skillgen:isaaclab-2.3.2-curobo-ebb7170
+    container_name: so101_skillgen
+    restart: "no"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - isaac_lab_cache_kit:/isaac-sim/kit/cache:rw
+      - isaac_lab_cache_ov:/root/.cache/ov:rw
+      - isaac_lab_cache_pip:/root/.cache/pip:rw
+      - isaac_lab_cache_gl:/root/.cache/nvidia/GLCache:rw
+      - isaac_lab_cache_compute:/root/.nv/ComputeCache:rw
+      - isaac_lab_logs:/root/.nvidia-omniverse/logs:rw
+      - isaac_lab_data:/root/.local/share/ov/data:rw
+      - isaac_lab_docs:/root/Documents:rw
+      - ../src:/workspace/src
+      - ../scripts:/workspace/scripts
+      - ../assets:/workspace/assets
+      - ../outputs:/workspace/outputs
+      - ../datasets:/workspace/datasets
+      # 카메라 3개를 포함한 1,000-episode full HDF5는 수백 GB까지 커질 수 있다.
+      # 기본은 프로젝트 datasets/skillgen이며, 서버에서는 절대경로를 주입해 대용량
+      # 디스크에 격리한다: SKILLGEN_DATA_ROOT=/DISK1/SO101-SkillGen
+      - ${SKILLGEN_DATA_ROOT:-../datasets/skillgen}:/workspace/skillgen-data
+    env_file:
+      - ../.env
+      - ../env/${POLICY_PROFILE:-groot_n15}.env
+    environment:
+      ACCEPT_EULA:                  "Y"
+      PRIVACY_CONSENT:              "Y"
+      NVIDIA_VISIBLE_DEVICES:       all
+      NVIDIA_DRIVER_CAPABILITIES:   compute,utility,graphics
+      SKILLGEN_CUROBO_COMMIT:       ebb71702f3f70e767f40fd8e050674af0288abe8
+      LIVESTREAM:                   "${LIVESTREAM:-0}"
+      PUBLIC_IP:                    "${PUBLIC_IP:-}"
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+
 # ── 공유 볼륨 ──────────────────────────────────────────────────────────────
 volumes:
   hf_cache:

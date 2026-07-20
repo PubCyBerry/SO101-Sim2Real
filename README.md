@@ -66,6 +66,7 @@ flowchart LR
 | **실기기 VLA 추론** | Windows (native uv) | `uv run python -m lerobot.async_inference.robot_client` | policy-client → Linux policy-server gRPC |
 | **sim VLA 폐루프** | Linux (Docker) | `docker compose up policy-server isaac-sim vla-ros` | `SimToReal-SO101-PickCube-Eval-v0` closed-loop 평가 (디바운스 성공; 데이터생성은 `-DR-v0`) |
 | **sim SM 데이터 생성** | Linux (Docker) | isaac-sim `datagen` 모드 (`record_state_machine.py`) | State Machine 데모 → LeRobot v3 (GPU 런타임 검증 진행 중) |
+| **sim SkillGen 데이터 생성** | Linux (Docker) | 별도 `skillgen` service | 자동 SM 8D source → pinned cuRobo 증강 → 1,000-episode canonical LeRobot v3. [`docs/SKILLGEN_SO101.md`](docs/SKILLGEN_SO101.md) |
 | **VLA 학습** | Linux (Docker) | policy-server `train` | SmolVLA · ACT · GR00T-N1.5 (모두 네이티브) |
 | **sim 수동 teleop** (보조) | Linux (host uv) | `uv run scripts/.../teleop_se3_agent.py` | Isaac Lab 로컬 teleop · USD 씬 author |
 
@@ -257,6 +258,7 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-S
 | 문서 | 내용 |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | 내부 구조·규칙·자주 쓰는 명령 (개발자용) |
+| [`docs/SKILLGEN_SO101.md`](docs/SKILLGEN_SO101.md) | Isaac Lab 2.3.2 SkillGen으로 SO-101 LeRobot v3 데이터 생성·검증 |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 |
 
 ---

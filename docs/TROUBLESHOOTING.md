@@ -4377,3 +4377,197 @@ Isaac Sim 은 **Fabric(flatcache)** 로 렌더한다 → **런타임 USD materia
 
 ### 확인 방법
 `-DR-v0` num_envs=3 top_camera 캡처 = 3 로봇이 서로 다른 팔레트 단일색(pairwise 패치 diff ~34–49, 고장 시 ~2). grasp 물리 무영향(replicate_physics=False 서 sweep 21/23≈91%).
+
+## Isaac Lab SkillGen pinned cuRobo가 SO-101 planner warmup/plan에서 CUDA illegal memory access
+
+### 현상
+
+Isaac Lab 2.3.2 공식 호환 cuRobo commit을 설치하고 SO-101 5-DOF MotionGen을 초기화하면
+Franka 예제와 달리 warmup 또는 첫 `plan_single`에서 CUDA context가 깨진다. 이후 정상적인
+PyTorch CUDA 연산도 연쇄 실패한다.
+
+### 오류 메시지
+
+```text
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call
+```
+
+### 원인
+
+pinned v0.7 계열 fused LBFGS CUDA kernel은 optimization vector dimension이 32보다 작을 때 일부
+thread가 block barrier(`__syncthreads`) 전에 return한다. Gripper를 lock한 SO-101 IK dimension은
+5라 이 경로를 밟지만 Franka 7×32 trajectory 설정에서는 드러나지 않는다. Blackwell native
+`sm_120` extension 문제와도 별개다.
+
+### 해결 방법
+
+`Dockerfile.skillgen`에서 extension을 `compute_80` PTX로 격리 빌드하고,
+`skillgen_curobo._write_safe_solver_configs`가 `gradient_ik_autotune.yml`과
+`gradient_trajopt.yml`의 아래 세 fused kernel만 cuRobo 내장 PyTorch fallback으로 전환한다.
+
+```yaml
+use_cuda_kernel: false
+use_cuda_line_search_kernel: false
+use_cuda_update_best_kernel: false
+```
+
+공식 SkillGen image와 기존 cuRobo v0.8 image/site-packages는 공유하지 않는다.
+
+### 확인 방법
+
+동일 container에서 planner warmup 뒤 full-DR generation을 실행한다. CUDA error 없이
+`Motion planning succeeded`가 출력되고 `planner.planning_successes`가 증가해야 한다. canonical
+smoke 10개에서 planner 23/23, attachment check 11/11을 확인했다.
+
+## SkillGen applied joint target이 30 FPS velocity/joint limit을 초과
+
+### 현상
+
+SkillGen HDF5의 `joint_data/target`을 canonical degree로 검사하면 arm이 허용 9.549°/frame보다
+최대 38.2° 움직이고, `wrist_flex` target이 USD 상한 105°를 넘어 127.6°까지 기록된다.
+
+### 오류 메시지
+
+```text
+action QA failed: joint_limit=446, velocity=15
+max arm delta = 38.197 deg/frame (allowed 9.549 deg/frame)
+wrist_flex max = 127.646 deg (allowed 105.000 deg)
+```
+
+### 원인
+
+`DifferentialInverseKinematicsAction.apply_actions()`는 policy step마다 한 번이 아니라 decimation의
+각 physics substep마다 호출된다. limiter가 `policy_dt`를 한 호출의 step으로 사용해 실제 허용량이
+decimation 4배가 됐다. 또한 unconstrained DLS update를 articulation limit으로 clamp하지 않았다.
+
+### 해결 방법
+
+`SlewLimitedDifferentialInverseKinematicsAction`의 arm max step은 `env.cfg.sim.dt`로 계산한다.
+DLS 결과는 slew 적용 전에 `asset.data.soft_joint_pos_limits`로 clamp한다. 그리퍼 limiter는
+`process_actions()`가 policy step마다 한 번 호출되므로 기존 policy dt를 유지한다.
+
+### 확인 방법
+
+```bash
+.venv/bin/python scripts/contract/validate_skillgen_action_quality.py \
+  --input-hdf5 <generated.hdf5> --report-file <action_quality.json>
+```
+
+모든 joint의 `action_limits.violation_count`와 `velocity_limits.violation_count`가 0이어야 한다.
+수정 후 full-DR 1-success probe 407 frames에서 두 값 모두 0이었다.
+
+## SkillGen HDF5 evidence를 호스트에서 인코딩할 때 `Permission denied`
+
+### 현상
+
+SkillGen 컨테이너가 만든 `evidence/` 아래에 호스트 Python으로 대표 실패 영상을 바로 쓰면
+FFmpeg가 output을 열지 못한다.
+
+### 오류 메시지
+
+```text
+Error opening output .../evidence/representative_failure.mp4: Permission denied
+BrokenPipeError: [Errno 32] Broken pipe
+```
+
+### 원인
+
+컨테이너가 bind mount 하위 `evidence/`를 `root:root 0755`로 생성했다. 데이터셋 HDF5는
+읽을 수 있지만 호스트 사용자는 그 디렉터리에 새 파일을 만들 수 없다. SkillGen image에는
+`/usr/bin/ffmpeg`도 없으므로 encoder를 그대로 컨테이너로 옮기는 것만으로는 해결되지 않는다.
+
+### 해결 방법
+
+사용자 소유인 `SKILLGEN_DATA_ROOT` 바로 아래에 별도 `final_evidence/`를 만들고, 시스템
+FFmpeg/NVENC가 있는 호스트 `.venv`에서 그 경로로 인코딩한다. 성공 canonical HDF5와 실패
+HDF5/영상 경로는 계속 분리한다.
+
+### 확인 방법
+
+```bash
+ffprobe -v error -select_streams v:0 -count_frames \
+  -show_entries stream=codec_name,width,height,r_frame_rate,nb_read_frames \
+  -of json /DISK1/so101-sim2real/skillgen/final_evidence/representative_failure.mp4
+
+ffmpeg -v error -i \
+  /DISK1/so101-sim2real/skillgen/final_evidence/representative_failure.mp4 \
+  -f null -
+```
+
+411-frame evidence에서 H.264, 1920×480, 30 FPS가 확인됐고 full decode 오류가 0건이었다.
+
+## SkillGen `--visualize-plan` 실행 즉시 `Rerun is not installed`
+
+### 현상
+
+cuRobo planner 자체는 정상인데 검수 run에서 `visualize_plan=True`를 켜면 planner warmup 전에
+종료된다.
+
+### 오류 메시지
+
+```text
+ImportError: Rerun is not installed!
+```
+
+### 원인
+
+Isaac Lab 2.3.2의 `visualize_plan`은 Isaac Sim viewport 옵션이 아니라 optional Rerun viewer
+integration이다. pinned SkillGen image에는 `rerun-sdk`가 없고 production generation에도
+필요하지 않다.
+
+### 해결 방법
+
+Isaac Sim 안에서 collision model과 실제 trajectory를 검수할 때는 `--visualize-spheres`와
+`--enable_cameras --record-images`를 사용한다. Rerun viewer가 명시적으로 필요한 별도 debug
+환경에서만 호환 `rerun-sdk`를 격리 설치하며 production image 의존성에는 추가하지 않는다.
+
+### 확인 방법
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm skillgen \
+  python /workspace/scripts/datagen/generate_skillgen.py \
+  --headless --enable_cameras --record-images --visualize-spheres \
+  --generation-num-trials 1 <나머지 input/output 인자>
+```
+
+검수 report에서 `visualize_spheres=true`, `record_images=true`, planner success와
+`plans_with_attached_cube>0`을 함께 확인한다.
+
+## SkillGen object-centric target이 작업공간 밖으로 이동하거나 attach 직후 ghost collision
+
+### 현상
+
+source HDF5는 정상인데 SkillGen 재배치 후 target z가 책상 아래/작업공간 밖으로 이동하거나,
+Cube1 attach 직후 모든 transition이 `IK_FAIL` 또는 collision 실패가 된다.
+
+### 오류 메시지
+
+```text
+MotionGenStatus.IK_FAIL
+Sphere count after attach is successful: ...
+# 이어지는 attached-object transition planning failure
+```
+
+### 원인
+
+두 문제가 겹쳤다.
+
+1. 공식 Franka adapter의 object pose는 env-origin과 robot root가 같은 것을 전제로 한다. SO-101은
+   책상 위 translation+yaw가 있어 object pose를 env-origin frame으로 넘기면 robot-base absolute
+   EE action과 frame이 다르다.
+2. cuRobo USD helper는 `PhysicsCollisionAPI`만 보지 않고 render geometry도 obstacle로 읽는다.
+   Cube1 attach 때 collision prim만 disable하면 같은 자리의 visual mesh가 ghost obstacle로 남는다.
+
+### 해결 방법
+
+`get_object_poses`와 planner dynamic sync 모두 robot root의 full SE(3)를 제거해 robot-base frame을
+쓴다. USD world 추출에서는 `/Visual`, Bowl `/Wall`·`/Bottom`, desk visual surface를 제외하고 실제
+Collision prim만 유지한다. 고정 robot mount/table의 의도적 겹침은 base collision sphere만
+제외하며 moving-link/table과 attached Cube1 collision은 유지한다.
+
+### 확인 방법
+
+full-DR camera probe에서 planner transition 3/3, attached plan 1, attachment check 1/1과 최종 물리
+성공을 확인한다. 별도 no-world diagnostic에서도 같은 IK 실패라면 collision이 아니라 5-DOF pose
+constraint 문제이므로 `PoseCostMetric` 설정을 구분해 점검한다.

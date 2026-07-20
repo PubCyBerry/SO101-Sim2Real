@@ -64,7 +64,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 ## Docker 컨테이너 구조 (Linux 서버)
 
-### 서비스 (4종)
+### 서비스 (5종)
 
 | 서비스 | 이미지 / Dockerfile | 스택 | 역할 |
 |---|---|---|---|
@@ -72,6 +72,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | `isaac-sim` | `nvcr.io/nvidia/isaac-sim:5.1.0` (공식, Dockerfile.isaac_sim 래퍼) | Ubuntu 22.04 + Isaac Sim 5.1 + ROS2 Jazzy + isaacsim.ros2_bridge | sim 폐루프: `SimToReal-SO101-PickCube-*`(eval=`-Eval-v0`) 실행 + `/isaac_joint_states` PUB + `/isaac_joint_commands` SUB + WebRTC livestream :49100 |
 | `vla-ros` | `so101-vla-ros:jazzy` / `Dockerfile.vla_ros` | ROS 2 Jazzy + vendored mini-lerobot | sim 폐루프 VLA 추론 노드 (`vla_policy_node`, gRPC 클라이언트) |
 | `pink-ik` | `so101-pink-ik:jazzy` / `Dockerfile.pink` | ROS 2 Jazzy + pin-pink(Pinocchio)·quadprog (CPU only) | **결정적 pick-place SM**(VLA 비경유). pink 미분 IK 로 큐브집기 궤적 생성 → bridge 직접 구동. `/isaac_joint_states`+`/tf` SUB → `/isaac_joint_commands` PUB. 상세=`docs/PINK_IK_PICKPLACE.md` |
+| `skillgen` | `so101-skillgen:isaaclab-2.3.2-curobo-ebb7170` / `Dockerfile.skillgen` | Isaac Sim 5.1 + Isaac Lab 2.3.2 + cuRobo `ebb7170` | 공식 Mimic/SkillGen 전용 격리 runtime. 자동 SM source→cuRobo 증강 HDF5→canonical LeRobot v3. 기존 cuRobo v0.8 image/path와 혼용 금지. 상세=`docs/SKILLGEN_SO101.md` |
 
 - 빌드: `docker compose -f docker/docker-compose.yaml build <서비스>`. torch/CUDA 계층 일부만 BuildKit 캐시로 공유.
 - GR00T-N1.5 는 LeRobot 0.5.1 내장 `groot` policy(Eagle-2.5 backbone)라 policy-server 안에서 직접 추론·학습한다(ACT/SmolVLA 와 동일, 별도 이미지·ZMQ 불필요).
@@ -86,6 +87,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
   - `./src` → `/workspace/src:ro` (policy-server — `policy-server-affine` 모드의 `so101_contract` import용, read-only)
   - 명명 볼륨 `lerobot_hf_cache` (compose key `hf_cache`) → `/workspace/.cache/huggingface` (HF_HOME). **policy-server 전용**. non-root UID 실행 때문에 `/root` 가 아닌 `/workspace` 하위. 머신 이전 시 `docker run -v lerobot_hf_cache:/cache alpine tar czf ...` 로 export.
   - `isaac_lab_cache_*` (kit/ov/pip/gl/compute/logs/data) → isaac-sim 전용.
+  - `${SKILLGEN_DATA_ROOT:-../datasets/skillgen}` → `/workspace/skillgen-data` (skillgen 전용). 3-camera 1,000-episode HDF5는 수백 GB이므로 서버에서는 `/DISK1/so101-sim2real/skillgen`을 주입.
 
 ### 진입점 모드
 
@@ -113,6 +115,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | 파일 | 용도 |
 |---|---|
 | `docker/groot_compat_patch.py` | `Dockerfile.policy` 빌드 시 `lerobot[smolvla,async]==0.5.1` 설치 직후 1회 실행. transformers 5.3 + torch 2.10 에서 LeRobot 0.5.1 GR00T-N1.5 네이티브 wrapper(`policies/groot`)가 깨지는 4지점을 site-packages 에서 멱등 패치. **N1.5 추론·학습 필수 — 삭제 금지.** 형태가 다르면 `RuntimeError` 로 빌드 중단(버전 트립와이어) — lerobot/transformers 업그레이드 시 이 패치부터 점검. |
+| `docker/Dockerfile.skillgen` | Isaac Lab 공식 호환 cuRobo commit `ebb71702f3f70e767f40fd8e050674af0288abe8` 고정. CUDA 12.8 toolkit과 compute_80 PTX를 별도 image에 빌드해 Blackwell에서 JIT. 기존 v0.8 runtime은 변경하지 않음. |
 
 ### `.env` / 모델 프로필
 
@@ -136,11 +139,12 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | `tasks/__init__.py` | `isaaclab_tasks.utils.import_packages` 로 하위 task config 자동 등록 (블랙리스트: `utils`, `.mdp`) |
 | `tasks/so101_base_env_cfg.py` | **base 층**(leisaac Workshop 이식). `SO101BaseSceneCfg`(로봇+cube_desk USD+조명, contact 리포트 on, FrameTransformer ee_frame 신규)·`SO101ActionsCfg`(slew joint)·`SO101PolicyObservationsCfg`(6D joint)·`SO101BaseEventCfg`(씬 리셋+포즈 jitter)·`SO101TeleopEnvCfg`(무종료 substrate + teleop-device 배선 `use_teleop_device`/`preprocess_device_action`). 신규 태스크는 이걸 상속 |
 | `tasks/pick_cube/` | **leaf 층**. `PickCubeEnvCfg(SO101TeleopEnvCfg)` + 변형 3종(`PickCubeDREnvCfg`·`PickCubeEvalEnvCfg`·`PickCubeEvalDREnvCfg`). env class = `PickCubeEnv`(ManagerBasedRLEnv + 동적 gripper effort). base 씬에 큐브/그릇/contact 센서(`contact_jaw`+`contact_gripper`), subtask obs(`any_cube_grasped`+`object_in_container`), 종료(`task_done`/Eval=`task_done_confirmed`/`cube_lost`), DR 이벤트 추가. **RL 제거됨**(PickCubeRewardsCfg=empty stub). Action = `SlewLimitedJointPositionActionCfg(use_default_offset=False)` 절대 joint target. **신규**: per-joint actuator stiffness/damping(Workshop 값), ee_frame_state(privileged obs), image_raw(uint8 원본), VisualCfg로 static 카메라 3개(top/wrist/front)·--enable_cameras 필수 |
+| `tasks/pick_cube/skillgen_{env,env_cfg}.py` | 전용 `PickCubeSkillGenEnv(ManagerBasedRLMimicEnv)` + `{DRBase,DR}` cfg. 8D robot-base absolute EE pose+binary gripper, 두 subtask(`grasp_cube`,`place_cube`), Mimic API, 5-DOF DLS action. arm target은 physics-step 5 rad/s slew+soft joint-limit clamp, gripper 2.5 rad/s. |
 | `tasks/pick_cube/mdp/` | pick_cube 전용 MDP term. `observations.py:any_cube_grasped`(contact-sensor 양 손가락 envelope grasp 신호, env-state hysteresis, leisaac `any_vial_grasped` 이식) + `terminations.py:task_done_confirmed`(N-step 디바운스 성공)·`cube_lost` |
 | `tasks/common/` | `utils.py` (수학·카메라 헬퍼) + `mdp/` (공용 obs/termination 컴포넌트) — 도메인 중립 |
 | `data/` | `lerobot_recorder.py` (LeRobot v3 writer 라이브러리) + `lerobot_units.py` (단위 변환, 단일 소스 = `src/so101_contract/feature_codec.py`) |
 | `utils/{constant,domain_randomization,cube_specs,gripper_effort,env_utils,general_assets,math_utils,monkey_patch}.py` | `CUBE_NAMES`·`BOWL_NAME` + DR 헬퍼, 큐브 크기/질량 단일 소스 (`cube_specs.py`), 그리퍼 effort clamp + vendored leisaac 유틸(`env_utils`·`general_assets`·`math_utils`·`monkey_patch`=IsaacLab 2.3.2 TerminationManager 버그 게이트 패치) |
-| `datagen/` | **SM 데이터 생성 scaffold**(leisaac식): `state_machine/{base,pick_cube}.py`(StateMachineBase + PickCube SM) + `sm_actions.py`. 드라이버 = `scripts/datagen/record_state_machine.py` |
+| `datagen/` | **SM/SkillGen 데이터 생성**: 기존 `state_machine/{base,pick_cube}.py`와 별도로 `state_machine/skillgen_pick_cube.py`(자동 boundary 8D source), `skillgen_curobo.py`(공식 pinned planner SO-101 adapter), `skillgen_recorders.py`(applied target/state/3-camera recorder). |
 | `devices/` | **vendored leisaac teleop 스택**: `device_base`·`action_process`·`keyboard`(SO101Keyboard)·`gamepad`(SO101Gamepad)·`lerobot`(SO101Leader/Remote). lazy `__init__`(serial/lerobot 없이 import 가능). lekiwi/bi-arm 제외 |
 | `assets/robots/lerobot.py` | `SO101_FOLLOWER_CFG` 단일 소스(leisaac vendor). `pick_cube_env_cfg` 가 `.replace()` 로 씬 특화만 override. limit/motor/rest 테이블은 `so101_contract.leader_calibration` 에서 가져옴(값 중복 0) |
 
@@ -193,11 +197,24 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 | **pink IK SM** | `datagen/pink_ik_bridge_node.py` | **결정적 pick-place SM**(pink 미분 IK, VLA 비경유, 2026-07-03 motion-planning 설계 구현). `/isaac_joint_states`+`/tf`(cube xyz·yaw, bowl) SUB → **(pan,±α,ρ) 파라미터화 grasp 선택**(pan 수직평면 안 pose 만 생성=IK 항상 풀림; α 양방향 스캔 후 grasp+hover+pre corridor err score 로 최적 채택 — +α=원거리 2R 해소·-α=근거리 최소반경 해소, top-down 선호 tie-break; ρ=-Δψ/cosα 큐브 yaw face 정렬, \|Δψ·tanα\|≤τ_max; grasp z 하한=책상+jaw_floor_clear+jaw_tip_drop) → SM(pan_align→pre_grasp→**Cartesian 직선 approach**(tool축, step IK seed 연쇄)→grasp→수직 lift(H_SAFE)→등고 transit(그릇 중심서 base 쪽 --bowl-pull 당김)→release(0.5×leg)→home(REST 자세); drop·retreat 없음) → 인접점 lerp+smoothstep 재생 → `/isaac_joint_commands` PUB. IK 타겟 = **정적 TCP OP_FRAME `tcp_grasp`**(검증 grasp 역산 EE-local 오프셋, `--tcp-d*`). 그릇 회피 = 절두 원뿔 keep-out(`cone_radius(z)`, BOWL_R 실측) 스윕 체크. **핵심**: URDF↔USD base z 90° 어긋남 `--base-yaw-deg 90` 보정. `pink-ik` 서비스가 실행. 게이트는 grasp 점만(pre-grasp via 는 top-down↔도달반경 상충으로 err 큰 게 정상 — pre 까지 게이트하면 α 가 누워 양단 lateral miss). pan_align=IK 해의 shoulder_pan(URDF pan 부호가 azimuth 와 반대). `--self-check`(offline: yaw-comp 기하+plan 7케이스 — DR bell 양단·min_bowl_sep 근접·근거리·원거리). **`--record`** = 폐루프 궤적(state=`/isaac_joint_states`·action=publish command·3-cam)을 LeRobot v3 로 1 에피소드 기록(datagen 겸용). **`--sweep`** = 오프라인 kinematic: 큐브 (x,y) grid top-down grasp reachability 측정(고정 GRASP_ORIENT=face 정렬) → ASCII map+CSV. **`--gen-traj OUT.json`** = graspable 셀 dense 궤적(home→approach→hover→descend→grasp→lift) 출력 → bridge `--grasp_sweep`로 물리검증. `--ex-*`=로봇암 제외박스. 상세=`docs/PINK_IK_PICKPLACE.md` |
 | **계약·검증** | `contract/validate_so101_io_contract.py` | SO-101 feature codec 정책 입출력 검증 (affine 그리퍼 [0,100]) |
 | | `contract/replay_so101_policy_snapshot.py` | 정책 snapshot 재실행 (기록된 입력→정책 출력 비교) |
-| | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증 |
+| | `contract/validate_lerobot_schema.py` | LeRobot v3 데이터셋 schema 검증. SkillGen canonical은 `--require-all-cameras` 사용 |
+| | `contract/validate_skillgen_env_contract.py` | `ManagerBasedRLMimicEnv`/Mimic API/frame/pose round-trip/finite object/single gripper 계약 runtime 검증 |
+| | `contract/validate_skillgen_source_annotation.py` | source/annotated 8D action, quaternion, boundary transition/순서, grasp/place 물리 증거 검증 |
+| | `contract/validate_skillgen_action_quality.py` | HDF5/LeRobot 6D joint·velocity limit 0건 gate와 action-state tracking mean/P95/max |
+| | `contract/validate_lerobot_videos.py` | top/wrist/front H.264 frame/FPS/resolution 및 전 frame decode 검증 |
+| | `contract/replay_skillgen_lerobot_audit.py` | 최종 LeRobot 6D action을 동일 초기 state에서 직접 replay, 30개 층화 표본+3-camera 합성 영상 |
+| | `contract/encode_skillgen_failure_video.py` | canonical과 분리 보존한 failed HDF5의 top/wrist/front를 대표 합성 H.264로 인코딩 |
+| | `contract/collect_skillgen_runtime_evidence.py` | worktree/reference/image labels/pinned commit/PTX/import/GPU 상태 JSON 수집 |
+| | `contract/finalize_skillgen_artifacts.py` | Gate A–J 독립 판정 후 SHA256SUMS·manifest·최종 RESULT.md 생성 |
 | **데이터 생성** | `datagen/record_state_machine.py` | SM 데이터 생성 드라이버. SM action → env step → LeRobot v3 writer 기록. isaac-sim `datagen` 모드가 실행 (`--task`·`--num_demos`·`--dataset_dir`) |
 | | `datagen/replay_state_machine.py` | 기록된 SM 데모 재생 |
 | | `datagen/record_real_sequence.py` | 실 follower joint 시퀀스(JSON)를 Gym env 에서 재생→LeRobot v3 기록. follower calibration 변환, action=실 follower 단위(실기기 `lerobot-replay` 호환). `--sequence`·`--self_check` |
+| | `datagen/record_skillgen_source.py` | 자동 State Machine 성공 source 10개와 boundary-annotated HDF5를 별도 생성, 3 episodes×4 boundaries×3 cameras 증빙 |
+| | `datagen/generate_skillgen.py` | 공식 `isaaclab_mimic.datagen.generation`+SO-101 cuRobo adapter, 성공만 commit, failure taxonomy/report |
+| | `datagen/run_skillgen_full.py` | 25-success shard 단위 1,000-episode full 생성 coordinator. 검증된 shard skip, 미완성 격리, `--resume` |
+| | `datagen/merge_skillgen_shards.py` | 검증된 shard를 per-demo atomic copy로 단일 HDF5 병합. `.partial` resume 지원 |
 | **데이터 변환** | `convert/isaaclab2lerobotv3.py` (+`_lerobot_features.py`) | Isaac Lab HDF5 → LeRobot v3 변환 (**host-only fallback**; in-container recorder 우선, end-to-end 미검증) |
+| | `convert/skillgen_hdf5_to_lerobot_v3.py` | 검증된 SkillGen `joint_data/{target,state}`와 top/wrist/front를 canonical LeRobot v3(6D, H.264 30 FPS)로 변환. SkillGen에는 이 경로만 사용 |
 | | `convert/sim_dataset_to_real_follower.py` | sim-프레임 LeRobot v3(arm=sim degree·gripper feature[0,100])를 실 follower 프레임으로 **in-place** 변환(`follower_calibration.policy_feature_to_real_follower`, `record_real_sequence` 의 역방향). 실기기 `lerobot-replay` 재생용, Isaac 무의존. `--self-check`. ⚠ 충돌 위험, e-stop 준비 |
 | **데이터** | `data/append_sim_episode.py` | 실 follower replay 로 sim 에서 얻은 achieved 에피소드를 기존 LeRobot v3 데이터셋에 append(sim↔real replay 캘리브레이션 워크플로) |
 | | `data/upload_to_huggingface.py` | LeRobot v3 dataset HF 업로드 + codebase_version 태그 자동 생성/이동. `.env` HF_TOKEN/HF_USER |

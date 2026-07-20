@@ -59,7 +59,13 @@ REQUIRED_DATA_COLS = {
 # ---------- 검증 함수 ----------
 
 
-def validate_info(dataset_root: str, errors: list[str], warnings: list[str] | None = None) -> None:
+def validate_info(
+    dataset_root: str,
+    errors: list[str],
+    warnings: list[str] | None = None,
+    *,
+    require_all_cameras: bool = False,
+) -> None:
     """meta/info.json 검증."""
     path = os.path.join(dataset_root, "meta", "info.json")
     if not os.path.exists(path):
@@ -121,7 +127,9 @@ def validate_info(dataset_root: str, errors: list[str], warnings: list[str] | No
         errors.extend(_check_camera(cam))
     for cam in OPTIONAL_CAMERAS:
         issues = _check_camera(cam)
-        if issues and warnings is not None:
+        if require_all_cameras:
+            errors.extend(issues)
+        elif issues and warnings is not None:
             warnings.extend(f"[선택 카메라 {cam}] {msg}" for msg in issues)
 
 
@@ -377,6 +385,12 @@ def main() -> None:
     parser.add_argument("dataset_root", nargs="?", help="데이터셋 루트 경로")
     parser.add_argument("--self-test", action="store_true", help="내부 픽스처로 검증기 동작 확인")
     parser.add_argument("--expected-task", default=EXPECTED_TASK, help="tasks.parquet에 기대하는 task 문자열")
+    parser.add_argument(
+        "--require-all-cameras",
+        action="store_true",
+        help="top/wrist/front 세 카메라를 모두 필수로 검증",
+    )
+    parser.add_argument("--report-file", help="검증 결과 JSON 출력 경로")
     args = parser.parse_args()
 
     if args.self_test:
@@ -394,9 +408,25 @@ def main() -> None:
 
     errors: list[str] = []
     warnings: list[str] = []
-    validate_info(root, errors, warnings)
+    validate_info(root, errors, warnings, require_all_cameras=args.require_all_cameras)
     validate_tasks(root, errors, expected_task=args.expected_task)
     validate_data_parquet(root, errors)
+
+    report = {
+        "status": "complete" if not errors else "failed",
+        "dataset_root": os.path.abspath(root),
+        "require_all_cameras": bool(args.require_all_cameras),
+        "expected_task": args.expected_task,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "errors": errors,
+        "warnings": warnings,
+    }
+    if args.report_file:
+        report_path = os.path.abspath(args.report_file)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
