@@ -4316,3 +4316,64 @@ HF_TOKEN="$HF_TOKEN_VAL" uv run --no-sync huggingface-cli upload <repo> <local_c
 
 ### 확인 방법
 업로드 로그 끝 `https://huggingface.co/<repo>/tree/main/.` + HF 웹에서 파일 확인.
+
+## cuRobo grasp 후보 IK 전멸 (world 고정 face-normal full pose = 5-DOF manifold 밖)
+
+### 현상
+`curobo_batch_planner.py` grasp approach 가 큐브 yaw 가 조금만 틀어져도 후보 전멸. 실측 825 후보 중 IK 성공 26(3%), FK gate 통과 0.
+
+### 오류 메시지
+```
+[simple] candidate=left tilt=+10 solved=False   (… 30/30 전부)
+self-test env0: ok=False … candidate_fail=no_curobo_solution
+```
+
+### 원인
+SO-101 체인 = pan(z-yaw) + 3×pitch(평행축) + wrist_roll(tool-z) → tool 접근축은 **항상 pan 수직평면 안**. 도달 가능 orientation 은 `R = Rz(pan)·Ry(-α)·R_TOPDOWN·Rz(ρ)·Ry(-0.0486795)` 3-파라미터 manifold 뿐인데, 옛 후보는 closing x축을 world cube face normal 에 고정 + face-plane tilt 로 full pose 를 만들어 face 가 pan 평면과 어긋난 만큼 **구성 자체가 manifold 밖** — cuRobo full-pose IK 가 못 푸는 게 정상. 추가 함정: cuRobo `tcp_grasp` 는 gripper_link·Ry(π-0.0487) 라 tcp ẑ 가 wrist_roll 축과 **2.79°** 어긋남(trailing twist 미보정 시 후보가 2.79° off-manifold → 회전 수렴 예산 소진 + pad 조준 ~2.4mm 편향).
+
+### 해결 방법
+pink_ik_bridge_node §4·§6 파라미터화 이식(`cand_pose_manifold`): α 스캔(`0,±5,…,±50°` interleave) × `ρ = -Δψ/cosα`(cube yaw face 정렬, `Δψ=wrap90(ψ_face-(pan+90°))`) + 결합 게이트 `|Δψ·tanα|≤τ`(기본 10°) + pan 고정점 ×5(tcp lateral offset 보정) + ρ 실측 잔차 feedback(TCP twist 수평성분 소거, 부호 주의: `d(closing_az)/dρ = -cosα` → 상쇄는 `rho_corr += resid/cosα`).
+
+### 확인 방법
+`--self-check-geom`(컨테이너, GPU plan 불요) → `GEOM_SELFCHECK_OK`; `--self-test`(yaw 0/22.5/45° 4 env) → `SELFTEST_OK`, diag 에 `face_alpha≈0.0·e_tan≈0mm`.
+
+## cuRobo BatchMotionPlanner 혼합 batch 가 어려운 env 를 굶김 (단독은 풀리는 pose 가 batch 서 전 pass 실패)
+
+### 현상
+단독 planner(또는 동일 goal 복제 batch)는 attempts=2 로 즉시 푸는 pre-grasp pose 를, 서로 다른 goal 이 섞인 batch 에선 그 env 만 전 candidate pass 실패. 원거리(r≈0.23, nominal v0 큐브 자리)가 전형 피해자. `max_attempts=10` 으로도 회복 안 됨.
+
+### 오류 메시지
+```
+[manifold] candidate=f0 alpha=+10 … solved=False   (혼합 batch)
+# 동일 pose 단독/복제 batch: success=[True, True, True, True]
+```
+
+### 원인
+cuRobo BatchMotionPlanner 가 이질 goal batch 에서 solver 자원(seed/수렴)을 공유해 어려운 row 를 굶김(실증: `attempts=10` 무효, 동일 goal 4-row 복제 시 전 row 성공 — obstacle 동기화 여부 무관).
+
+### 해결 방법
+lockstep 스캔 후 **동질 batch rescue**(`_plan_pregrasp_batch`): 미해결 env 의 후보를 goal·start 전 row 복제로 재계획, row i 결과만 채택(다른 row 는 다른 env world 라 실패해도 무해). 추가로 원거리 IK undershoot 이 clearance gate(e_norm∈[3,5]mm)만 깨는 경우(실측 5.8~8.5mm) 실측 오차만큼 pad 조준을 face 쪽으로 이동해 1회 재시도(bias correction).
+
+### 확인 방법
+`--self-test` 4/4 `SELFTEST_OK`(env0/env2 가 `rescue_envs=2` 경유, diag `[manifold] rescue … ok=True`).
+
+## multi-env robot color DR 이 렌더에 안 나옴 (전 로봇 동색 = author 색, 런타임 material 편집 무반영)
+
+### 현상
+`randomize_robot_color`(시각 DR)를 켠 `-DR` env 를 multi-env 로 띄우면 **모든 로봇이 같은 색**(author 보라)으로 렌더된다. 큐브/포즈 등 다른 변화는 정상 반영. USD 상으론 per-env material diffuse 가 서로 다르게 기록돼 있는데(데이터는 맞음) 화면만 동색.
+
+### 오류 메시지
+```
+# 에러 없음(silent). 진단: per-env USD diffuse_color_constant = 서로 다른 값,
+#   그러나 top_camera 캡처 = 전 env 동일 (author 색). pose 변경은 캡처에 반영(카메라 live).
+#   USD shader 직접 Set·새 material fresh-bind·rep.functional 직접호출 모두 렌더 무반영.
+```
+
+### 원인
+Isaac Sim 은 **Fabric(flatcache)** 로 렌더한다 → **런타임 USD material 편집이 렌더에 반영되지 않는다**(author 시점 값만 렌더). 게다가 `scene.replicate_physics=True`(IsaacLab 기본)면 Fabric 이 전 env 를 env_0 의 복제로 취급해 per-env material 자체가 무시된다. 스톡 `randomize_visual_color` 가 `replicate_physics=False` 를 강제하고 replicator 를 쓰는 이유. 추가로 body plastic 은 링크 prim 에 강하게 바인딩돼 mesh 단위 재바인딩으론 안 바뀐다(관절만 바뀜).
+
+### 해결 방법
+① `-DR` scene 에 `scene.replicate_physics = False`(DR env cfg `__post_init__`). ② 색 적용은 **Replicator** 경로(`rep.functional.create_batch.material` + `modify.attribute("diffuse_color_constant")`, = Fabric 반영). ③ body 까지 덮으려면 robot **root** prim 에 OmniPBR 를 `strongerThanDescendants` 로 바인딩(전 서브트리 override). ④ env 당 색 1개 → 로봇 통짜 단일색(servo 개별 고정은 포기). 구현 = `domain_randomization._RandomizeRobotColor`(mode=`prestartup`).
+
+### 확인 방법
+`-DR-v0` num_envs=3 top_camera 캡처 = 3 로봇이 서로 다른 팔레트 단일색(pairwise 패치 diff ~34–49, 고장 시 ~2). grasp 물리 무영향(replicate_physics=False 서 sweep 21/23≈91%).

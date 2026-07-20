@@ -44,6 +44,7 @@ from sim_to_real.utils.domain_randomization import (
 )
 
 from sim_to_real.tasks.pick_cube import mdp as task_mdp
+from sim_to_real.tasks.pick_cube import spawn_area  # DR 스폰 영역 단일 기하 소스
 from sim_to_real.tasks.so101_base_env_cfg import (
     SO101BaseEventCfg,
     SO101BaseSceneCfg,
@@ -57,7 +58,7 @@ from sim_to_real.tasks.so101_base_env_cfg import (
 # World-frame (x, y) of the bowl = success/obs 컨테이너 중심. _BOWL_INIT_STATE 와 반드시 동기화
 # (object_in_container 가 이 중심 기준 success radius 판정). 2026-06-29 사용자 DR-off 위치 변경에
 # 맞춰 y 0.315→0.265 (책상 앞 모서리 env y=-0.035 에서 +30cm).
-BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.265)
+BOWL_CENTER_XY: tuple[float, float] = spawn_area.BOWL_CENTER_XY  # 단일 소스=spawn_area
 BOWL_SUCCESS_RADIUS: float = 0.06
 BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
 
@@ -99,17 +100,12 @@ _BOWL_INIT_STATE = ((-0.22, 0.265, 0.715), _yaw_quat(0.0))
 #   base 발치(r<min_base_sep)·그릇 근접은 randomize_cubes 의 min_base_sep/min_bowl_sep 가 rejection.
 # 데스크 매트(860×400mm, env-local center=(0.09,0.245)) 안: 매트 x∈[-0.34,0.44] y∈[0.045,0.445].
 _MAT_BL_ENV: tuple[float, float] = (-0.34, 0.045)  # 매트 좌하단 env-local (참고용)
-# 종 모양 스폰 프로파일: (큐브중심 y, 좌우대칭 x 반너비) breakpoint. 사이는 선형보간.
-_CUBE_SCATTER_BELL: list[tuple[float, float]] = [
-    (0.06, 0.24), (0.14, 0.24), (0.18, 0.20), (0.22, 0.16), (0.26, 0.08),
-]
-# x/y bounding box = 종의 최대 외접 사각형(종 rejection 이 실제 경계). volume_inset=0
-# (프로파일이 이미 grasp 검증된 큐브 **중심** 위치라 별도 inset 불요).
-_CUBE_SCATTER_X_RANGE: tuple[float, float] = (-0.24, 0.24)
-_CUBE_SCATTER_Y_RANGE: tuple[float, float] = (0.06, 0.26)
-# 로봇암 주변 제외 박스(env-local, 사용자: 책상 왼쪽끝 X[35,48]cm·앞모서리 Y[0,20]cm →
-# base(0,0) straddle). full·base 모드 공통으로 이 안엔 큐브를 스폰하지 않는다.
-_CUBE_ARM_EXCLUDE: tuple[float, float, float, float] = (-0.09, 0.04, -0.045, 0.155)
+# 종 모양 스폰 프로파일·bounding box·로봇암 제외박스 = spawn_area 단일 소스(순수 python,
+# isaaclab 무의존). pickplace_sm --sweep_grid·plot_sweep 가 같은 상수를 import → 경계 정합.
+_CUBE_SCATTER_BELL = spawn_area.CUBE_SCATTER_BELL
+_CUBE_SCATTER_X_RANGE = spawn_area.CUBE_SCATTER_X_RANGE
+_CUBE_SCATTER_Y_RANGE = spawn_area.CUBE_SCATTER_Y_RANGE
+_CUBE_ARM_EXCLUDE = spawn_area.CUBE_ARM_EXCLUDE
 # base 모드 스폰 사각형(env-local): 책상 왼쪽끝서 X[30,50]cm·앞모서리 Y[25,35]cm →
 #   env_x = -0.44 + Xcm/100, env_y = -0.045 + Ycm/100. nominal 큐브(y=0.255) 주변 좁은 영역.
 _CUBE_BASE_X_RANGE: tuple[float, float] = (-0.14, 0.06)   # X 30~50cm
@@ -539,9 +535,9 @@ def _make_randomize_cubes(x_range, y_range, bell):
         full_orient=True,
         volume_inset=_CUBE_VOLUME_INSET,
         min_cube_sep=0.060,
-        min_bowl_sep=0.14,                 # 큐브-그릇 겹침 금지(크기 대응 이격)
+        min_bowl_sep=spawn_area.MIN_BOWL_SEP,   # 큐브-그릇 겹침 금지(spawn_area 단일 소스)
         cube_sizes=[_CUBE_SIZES_M[n] for n in CUBE_NAMES],
-        min_base_sep=0.135,                # base 발치(inner-reach) 배제
+        min_base_sep=spawn_area.MIN_BASE_SEP,   # base 발치(inner-reach) 배제
         x_halfwidth_by_y=bell,             # full=종모양 · base=None(사각형)
         x_exclude_box=_CUBE_ARM_EXCLUDE,   # 로봇암 주변 배제(full·base 공통)
     )
@@ -643,12 +639,23 @@ class PickCubeDREnvCfg(PickCubeEnvCfg):
 
     events: PickCubeDREventCfg = PickCubeDREventCfg()
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # 시각 DR 의 robot color 는 Replicator 로 per-env OmniPBR 를 바인딩한다. Fabric
+        # replication 이 켜지면 전 env 가 env_0 material 로 렌더돼 색이 무시되므로 끈다
+        # (randomize_robot_color 가 True 면 RuntimeError). 상세=domain_randomization.
+        self.scene.replicate_physics = False
+
 
 @configclass
 class PickCubeDRBaseEnvCfg(PickCubeEnvCfg):
     """DR-on **base 모드** 변형 — 큐브 스폰을 nominal 주변 좁은 사각형으로 제한(그 외 full 동일)."""
 
     events: PickCubeDRBaseEventCfg = PickCubeDRBaseEventCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.replicate_physics = False  # robot color DR(Replicator) 요구 — 위 참조
 
 
 @configclass

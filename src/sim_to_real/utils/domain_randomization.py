@@ -29,6 +29,7 @@ import torch
 from isaaclab.assets import RigidObject
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ManagerTermBase
 from isaaclab.managers import SceneEntityCfg
 
 
@@ -653,18 +654,20 @@ def randomize_camera_focal(
 
 
 # ---------------------------------------------------------------------------
-# 로봇 외형 색 DR (sim2real) — NVIDIA Workshop resets.py:randomize_robot_color 이식.
+# 로봇 외형 색 DR (sim2real) — env 당 팔레트 색 1개로 로봇 전체 재색칠.
 #
-# Workshop 은 단일 material(`/Looks/material_a_3d_printed/Shader`) 만 바꿨지만 우리
-# so101_follower.usd 는 **다중 material**(plastic 바디 · servo · metal 나사)이라
-# `scripts/environments/utils/patch_robot_colors.py` 의 분류/속성-fallback 규약을 재사용해
-# **plastic(3D-print 바디) shader 만** 재색칠하고 servo(검정)/metal(실버)은 고정한다.
-# 팔레트는 실 SO-101 offerings(WowRobo·Seeed) 색 + 우리 기본 보라. reset 당 1 샘플(전 env 공통).
-# UsdPreviewSurface(inputs:diffuseColor)·MDL/OmniPBR fallback 모두 IsValid 가드(무크래시).
+# ★2026-07-20 재작성: 옛 구현(USD shader diffuse 직접 Set)은 Isaac Fabric(flatcache) 렌더에
+# 반영 안 돼 multi-env 서 전 로봇이 author 색(보라)으로 렌더됐다(실측). 스톡 randomize_visual_color
+# 처럼 Replicator(create_batch.material + modify.attribute)로 OmniPBR 을 새로 만들어야 Fabric 에
+# 반영된다. body 는 링크에 강하게 바인딩돼 mesh 재바인딩으론 안 바뀌어 → robot **root** 에
+# strongerThanDescendants 로 바인딩해 전 서브트리를 한 색으로 override. servo/metal 개별 고정은
+# 이 방식에선 불가(로봇 통짜 한 색). ★scene.replicate_physics=False 필수(-DR scene 이 끔).
+# 상세 = _RandomizeRobotColor docstring. 팔레트 = 실 SO-101 offerings 색 + 기본 보라.
 # ---------------------------------------------------------------------------
 
 
-# 실 SO-101 3D-print 바디 색 팔레트 (Workshop ROBOT_COLORS + 우리 기본 보라).
+# 실 SO-101 색 팔레트 (Workshop ROBOT_COLORS + 우리 기본 보라). root 바인딩이라 로봇 전체를
+# 이 중 한 색으로 칠한다(servo/metal 개별 고정은 없음 — Fabric 반영엔 root override 가 필요).
 ROBOT_PLASTIC_COLORS: dict[str, tuple[float, float, float]] = {
     "purple": (0.40, 0.03, 0.75),   # 우리 기본 (patch_robot_colors PLASTIC_PURPLE)
     "orange": (0.876, 0.317, 0.132),
@@ -672,73 +675,99 @@ ROBOT_PLASTIC_COLORS: dict[str, tuple[float, float, float]] = {
     "white": (0.95, 0.95, 0.95),
     "black": (0.08, 0.08, 0.08),
 }
-# servo/metal 은 색 고정(재색칠 제외) — patch_robot_colors 키워드 규약과 동일 단일 규칙.
-_SERVO_KEYWORDS = ("servo", "motor", "sts", "actuator", "driver", "controller")
-_METAL_KEYWORDS = (
-    "screw", "bolt", "nut", "bearing", "shaft", "axle",
-    "steel", "metal", "aluminum", "aluminium", "bracket_metal",
-)
-# diffuse color 속성 후보 (UsdPreviewSurface 우선 → MDL/OmniPBR fallback).
-_ROBOT_COLOR_ATTRS = (
-    "inputs:diffuseColor",
-    "inputs:diffuse_color_constant",
-    "inputs:albedo_add",
-    "inputs:base_color",
-)
 
 
-def _shader_is_recolorable(path_lower: str) -> bool:
-    """shader prim 경로가 plastic(재색칠 대상)이면 True. servo/metal 키워드면 False."""
-    if any(k in path_lower for k in _SERVO_KEYWORDS):
-        return False
-    if any(k in path_lower for k in _METAL_KEYWORDS):
-        return False
-    return True
+class _RandomizeRobotColor(ManagerTermBase):
+    """로봇 plastic 바디를 **env 당 팔레트 색 1개**로 재색칠 (Replicator = Fabric-aware).
 
+    ★왜 USD-edit 이 아니라 Replicator 인가 (2026-07-20 실측): Isaac Sim 은 Fabric(flatcache)
+    로 렌더하므로 런타임 USD material 편집(shader diffuse 직접 Set·새 material 바인딩 모두)이
+    **렌더에 반영되지 않는다**. 그 결과 multi-env 서 전 로봇이 author 색(보라)으로 렌더됐다.
+    스톡 ``randomize_visual_color`` 과 동일하게 replicator ``create_batch.material`` +
+    ``modify.attribute`` 로 OmniPBR 을 새로 바인딩·수정해야 Fabric 에 반영된다. 스톡은
+    per-mesh 랜덤(무지개)이지만 여기선 **env 당 색 1개**를 그 env 의 전 plastic mesh 에 균일 적용.
 
-def _randomize_robot_color_fn(
-    env: ManagerBasedRLEnv,
-    env_ids: torch.Tensor,
-    robot_prim_glob: str,
-    color_names: list[str] | None,
-) -> None:
-    """로봇 plastic shader 를 팔레트에서 뽑은 색으로 재색칠. shader 없으면 no-op.
+    ★``scene.replicate_physics=False`` 필수: replication(Fabric) 이 켜지면 전 env 가 env_0 의
+    material 로 렌더돼 per-env 색이 무시된다(전 로봇 동색). -DR scene 이 이를 False 로 둔다.
 
-    ★per-env 독립 샘플: 옛 구현은 색 1개를 뽑아 전 env 로봇에 칠해 multi-env 서 전부
-    동색(사용자 보고). env root 마다 새로 뽑고, env_ids 에 든 env 만 재도색(리셋 안 된
-    env 의 에피소드 중 색 변화 방지)."""
-    import re
+    servo/metal(``material_sts3215`` 등)은 재색칠 대상 material 을 바인딩한 mesh 만 고르는
+    방식으로 자동 제외(색 고정).
 
-    from isaaclab.sim import get_current_stage  # noqa: F401 (stage 확보용, 아래 traverse 는 prim 직접)
-    import isaaclab.sim as sim_utils
-    from pxr import Gf, Sdf, Usd
+    ★mode=``prestartup`` 인 이유(reset 불가, 2026-07-20 실측): __init__ 이 robot subtree 를
+    de-instance(구조 변경)해 physx tensor view 를 무효화한다. prestartup 은 ``scene.update``
+    **전에** apply 되며 그 Replicator op 이 view 를 리프레시 → 정상. reset 모드면 __call__ 이
+    scene.update 후로 밀려 view 무효 상태로 ``get_dof_velocities`` 크래시("Simulation view
+    invalidated"). 즉 **런타임 Replicator 재색칠은 리셋마다 못 한다** → env 당 색은 런 내내 고정.
+    N/R·에피소드 리셋으로 재추첨하려면 Fabric 직접 write(구조 변경 없는) 경로 필요(후속 과제).
+    다양성: env 수만큼 서로 다른 팔레트 색(≤팔레트 크기) + 새 ``--seed`` 로 재추첨.
+    """
 
-    if env_ids is None or len(env_ids) == 0:
-        return
-    reset_envs = {int(i) for i in env_ids.tolist()}
+    def __init__(self, cfg: EventTerm, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        import re
 
-    names = list(color_names) if color_names else list(ROBOT_PLASTIC_COLORS.keys())
-    roots = sim_utils.find_matching_prims(robot_prim_glob)  # per-env Robot 루트들
-    with Sdf.ChangeBlock():
+        from isaacsim.core.utils.extensions import enable_extension
+        import isaaclab.sim as sim_utils
+        from pxr import Usd, UsdShade
+
+        if env.cfg.scene.replicate_physics:
+            raise RuntimeError(
+                "randomize_robot_color 는 scene.replicate_physics=False 필요 — Fabric replication "
+                "이 켜지면 per-env robot material 이 무시돼 전 로봇이 같은 색으로 렌더된다.")
+
+        enable_extension("omni.replicator.core")
+        import omni.replicator.core as rep
+
+        glob = cfg.params.get("robot_prim_glob", "/World/envs/env_.*/Robot")
+        names = cfg.params.get("color_names") or list(ROBOT_PLASTIC_COLORS.keys())
+        self._palette = [ROBOT_PLASTIC_COLORS[n] for n in names]
+        self._rep = rep
+
+        # per-env robot **root** 에 OmniPBR 1개를 strongerThanDescendants 로 바인딩 → 로봇 전
+        # 서브트리(body 포함) 를 한 색으로 override. mesh 단위 재바인딩은 body 처럼 링크에 강하게
+        # 바인딩된 원본 material 을 못 이겨 body 가 안 바뀌었다(실측: 관절만 바뀜). root override 가
+        # 전 하위 binding 을 이긴다. OmniPBR 생성은 스톡 randomize_visual_color 와 동일 = Fabric 반영.
+        # env 인덱스 자연 정렬(lexicographic 는 env_10 < env_2 라 ≥10 env 서 self._mats[i]↔env i 깨짐).
+        def _env_idx(prim):
+            m = re.search(r"env_(\d+)", str(prim.GetPath()))
+            return int(m.group(1)) if m else 0
+        roots = sorted(sim_utils.find_matching_prims(glob), key=_env_idx)
         for root in roots:
-            if not root.IsValid():
-                continue
-            m = re.search(r"env_(\d+)", str(root.GetPath()))
-            if m is not None and int(m.group(1)) not in reset_envs:
-                continue  # 이번 reset 대상 아닌 env 는 색 유지
-            idx = int(torch.randint(0, len(names), (1,), device="cpu").item())
-            rgb = ROBOT_PLASTIC_COLORS[names[idx]]
-            col = Gf.Vec3f(float(rgb[0]), float(rgb[1]), float(rgb[2]))
             for prim in Usd.PrimRange(root):
-                if prim.GetTypeName() != "Shader":
-                    continue
-                if not _shader_is_recolorable(str(prim.GetPath()).lower()):
-                    continue
-                for attr_name in _ROBOT_COLOR_ATTRS:
-                    attr = prim.GetAttribute(attr_name)
-                    if attr.IsValid() and attr.Get() is not None:
-                        attr.Set(col)
-                        break
+                if prim.IsInstanceable():
+                    prim.SetInstanceable(False)
+        self._mats = (rep.functional.create_batch.material(
+            mdl="OmniPBR.mdl", bind_prims=roots, count=len(roots), project_uvw=True)
+            if roots else None)
+        stage = env.sim.stage
+        for root, mat in zip(roots, self._mats or []):
+            mat_prim = mat if isinstance(mat, Usd.Prim) else stage.GetPrimAtPath(str(mat))
+            if mat_prim and mat_prim.IsValid():
+                UsdShade.MaterialBindingAPI(root).Bind(
+                    UsdShade.Material(mat_prim),
+                    bindingStrength=UsdShade.Tokens.strongerThanDescendants)
+
+    def __call__(self, env: ManagerBasedRLEnv, env_ids, robot_prim_glob=None, color_names=None):
+        import numpy as np
+
+        if self._mats is None:
+            return
+        # reset 이벤트: **리셋된 env 만** 재색칠(에피소드 시작마다 새 색, 에피소드 내 고정).
+        # self._mats 는 env 인덱스 순(자연 정렬)이라 self._mats[i] = env i 의 material.
+        # 다른 env 를 건드리면 진행 중 에피소드의 로봇색이 바뀌므로 env_ids 로만 국한한다.
+        if env_ids is None:                                       # 전 env 대상 호출(방어)
+            ids = list(range(len(self._mats)))
+        elif torch.is_tensor(env_ids):
+            ids = env_ids.detach().cpu().tolist()
+        else:
+            ids = list(env_ids)
+        ids = [i for i in ids if 0 <= i < len(self._mats)]
+        if not ids:
+            return
+        mats = [self._mats[i] for i in ids]
+        pick = torch.randint(0, len(self._palette), (len(mats),))
+        cols = np.array([self._palette[int(pick[k])] for k in range(len(mats))], dtype=float)
+        self._rep.functional.modify.attribute(mats, "diffuse_color_constant", cols)
 
 
 def randomize_robot_color(
@@ -746,14 +775,19 @@ def randomize_robot_color(
     *,
     color_names: list[str] | None = None,
 ) -> EventTerm:
-    """로봇 plastic 바디 색 무작위화 EventTerm(reset). sim2real 외형 다양성.
+    """로봇 plastic 바디 색 per-env 무작위화 EventTerm. sim2real 외형 다양성.
+
+    ★``scene.replicate_physics=False`` 필요(Fabric replication 이 per-env 색을 무시). -DR
+    scene 이 이를 끈다. Replicator 로 OmniPBR 재바인딩 → Fabric 반영(USD-edit 은 무반영).
+    mode=``prestartup`` → env 당 색 1개를 런 내내 고정(각 로봇 고유색). reset 모드는 physx
+    view 무효화로 크래시(위 클래스 docstring 참조) → 리셋 재추첨 불가, 새 ``--seed`` 로 재추첨.
 
     Args:
-        robot_prim_glob: per-env Robot 루트 prim glob (하위 shader 트리를 순회).
+        robot_prim_glob: per-env Robot 루트 prim glob (하위 mesh 트리를 순회).
         color_names: 사용할 ``ROBOT_PLASTIC_COLORS`` 키 목록. None 이면 전체 팔레트.
     """
     return EventTerm(
-        func=_randomize_robot_color_fn,
-        mode="reset",
+        func=_RandomizeRobotColor,
+        mode="prestartup",
         params={"robot_prim_glob": robot_prim_glob, "color_names": color_names},
     )
