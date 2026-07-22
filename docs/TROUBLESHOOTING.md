@@ -3810,6 +3810,44 @@ pick_cube cfg 에서 0.135 지정 — rejection sampling 이 base 발치 후보�
 위와 동일 명령 — `IK 실패(approach ...)` 0건, DRAG 발동 로그로 끌기 확인.
 
 
+## cube DR min-reach 가드가 마운트 원점 기준이라 -x 근접 corner 를 도달불가인데 통과시킴
+
+### 현상
+
+위 `min_base_sep` 가드 도입 후에도 cuRobo SM sweep 에서 base 근접 -x corner 셀이
+grasp/place 실패로 남음(base_arc kind 68% 정체). 큐브는 스폰영역 판정(`in_spawn_area`)을
+통과하는데 IK 가 approach 부터 안 풀린다.
+
+### 오류 메시지
+
+```
+[SM] IK 실패(approach ...) — 재시도 소진   # env(-0.092,0.107) 등 -x 근접 corner
+sweep: base_arc 68% (다른 kind 는 95~100%)
+```
+
+### 원인
+
+`min_base_sep` 원의 중심이 **base_link 마운트 원점**(env-local (0,0))이었으나, 팔의 실제
+회전중심은 **shoulder_pan 축**이다. URDF `shoulder_pan` origin (0.0388,0,0.0624 rel
+base_link)을 USD→env 프레임(Rz90+BASE_T, env=Rz180·base_link)으로 변환하면 축이 마운트
+원점서 -x 2.1cm·+y 2.3cm 어긋난다(env-local (-0.021,0.023)). 마운트 원점 기준 원은 -x 쪽으로
+치우쳐, pan축 기준으론 도달불가인 corner 를 통과시킨다. 예: env(-0.092,0.107) 은 마운트거리
+0.141>0.135 통과하나 **pan축거리 0.109 = IK 도달불가**.
+
+### 해결 방법
+
+가드 중심을 pan축으로 이동. `spawn_area.PAN_AXIS_XY=(-0.021,0.023)` 단일 소스를
+`in_spawn_area`·`sweep_targets`(스폰영역 판정)와 `randomize_cubes_scattered`
+(런타임 DR — `base_sep_offset_xy` param, `pick_cube_env_cfg` 가 전달)가 공유한다.
+`MIN_BASE_SEP` 0.135→0.123(pan축 기준 도달경계). `plot_sweep.py` 에 pan축 마커 P 추가
+(min-reach 원을 pan축 중심으로 그림).
+
+### 확인 방법
+
+`pickplace_sm sweep` → base_arc 68→100%, yaw0 전체 100%·회귀0. `plot_sweep` PNG 에서
+min-reach 점선 원이 마운트원점(▲) 아닌 pan축(P) 중심에 그려짐.
+
+
 ## Isaac Lab SO-101 SM 운반 시 팔이 위로 휘둘렸다 그릇에 내리꽂힘 (pitch 불연속)
 
 ### 현상

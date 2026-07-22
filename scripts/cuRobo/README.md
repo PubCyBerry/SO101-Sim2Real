@@ -123,6 +123,28 @@ base/bowl/exclude 경계 셀을 항상 포함한다(`spawn_area.sweep_targets`).
 
 **오프라인 검증**: `--self-check-geom`(후보 기하만 — manifold 위 존재·closing↔face 정렬·τ 게이트 assert, GPU plan 불요·단 torch/curobo import 라 컨테이너 안에서) · `--self-test`(고정 큐브 4 env — yaw 0/22.5/45° 포함) · 별도 curobo-datagen 컨테이너에서 ZMQ REQ 로 임의 cube/start plan(isaac 불요, ~40s/plan). diag=`/workspace/outputs/planner_diag.log`(host `./outputs` 마운트) — `[manifold]` cand 별 alpha·rho·wrist_roll·face_alpha·e_norm·e_tan·e_h·ok·selected 기록(선택 grasp 추적).
 
+## 정량 성능 & grasp 레버 (Phase D, sm-eval)
+
+`pickplace_sm sweep`(kinematic 도달) + `fail --auto`(물리 place) 로 측정한 DR 스폰영역
+성공률 사다리. **한 줄**: 88% → (R1R2R3R2') 95% → (pan축 spawn 가드) yaw0 100%/회귀0
+→ (worst-yaw rho-cap) yaw-random 99.62%; 잔여 0.38% = 대각 yaw×frontier parallel-jaw
+물리한계.
+
+| phase | 성공 (kind) |
+|---|---|
+| baseline yaw0 (구 spawn 187셀) | 165/187 = **88%** (base_arc 68%·bell 68%) |
+| +R1 R2 R3 yaw0 | 178/187 = **95%** (bell 68→100%) |
+| +pan축 spawn 가드 +R2' yaw0 (183셀) | 183/183 = **100%·회귀0** (base_arc 68→100%) |
+| +rho-cap yaw-random ×3 | 1300/1305 = **99.62%** |
+
+- pan축 spawn 좌표수정(마운트원점→pan축)이 phase3 서 base_arc 68→100% 를 견인(도달불가
+  -x corner 를 스폰영역서 배제, 187→183셀). R1R2R3 는 bell 을 100% 로.
+- **잔여 5 fail(yaw-random) = 큐브 45° 대각 yaw**(|Δψ|≈43-45°)의 parallel-jaw 물리한계.
+  RHO_CAP squeeze 물리표: cap 3/8/13/18 **전부 FAIL**(wrist 안전대 ↔ face 정렬 트레이드오프
+  양단 실패) → RHO_CAP=12 가 현행 최선. 완화하려면 **옵션2**(대각-yaw DR reject, 임계 40°→
+  전체 yaw 11% 손실) 또는 **옵션3**(corner grasp 재설계) — 미결(사용자 판단 대기).
+- 산출물: `scratch/2026-07-20-sweep/`(3-way JSON·map PNG·grasp_fail_diagyaw.mp4).
+
 ## robot 시작 자세
 
 `env_cfg.scene.robot.init_state.joint_pos`를 아래로 override하고 `reset_robot_joints` jitter를 0으로 →

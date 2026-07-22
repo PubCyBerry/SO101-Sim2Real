@@ -25,7 +25,7 @@ SO-ARM101 6축 로봇 팔 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬�
 
 - 시뮬 env 는 **2층 상속 사다리**(leisaac Workshop 이식): base `so101_base_env_cfg.py`(`SO101TeleopEnvCfg` — 로봇+cube_desk USD+조명+slew 액션+6D joint obs+sim/physx+teleop-device 배선, 태스크 중립 substrate) → leaf `tasks/pick_cube/`(`PickCubeEnvCfg(SO101TeleopEnvCfg)` — 큐브/그릇/contact 센서/subtask obs/종료/DR). 등록 env 6개: `SimToReal-SO101-Teleop-v0`(base substrate) + `SimToReal-SO101-PickCube-{v0,DR-v0,DRBase-v0,Eval-v0,DR-Eval-v0}`. **DR-off 가 기본**(v0=고정 실측배치·순간 성공; `-DR`=큐브 scatter+arc+물리·시각 DR; `-Eval`=디바운스 성공 종료). datagen 은 `-DR`, closed-loop eval 은 `-Eval` 사용. RL 커리큘럼·보상기 제거(inference/teleop/데이터만). **큐브 배치 DR = 2모드**(pink IK sweep+isaac 물리검증으로 확정, `_make_randomize_cubes` 팩토리): **full**(`-DR`)=좌우대칭 **종모양**(grasp 물리검증 넓은쪽 대칭, `_CUBE_SCATTER_BELL`) · **base**(`-DRBase`)=nominal 주변 좁은 사각형(`_CUBE_BASE_*`). 양모드 공통: 로봇암 제외박스(`_CUBE_ARM_EXCLUDE`) + 그릇 겹침금지(min_bowl_sep) + base발치 제외(min_base_sep). 상세=`docs/PINK_IK_PICKPLACE.md`.
 - 그리퍼 codec = **affine 전용** (feature [0,100] ↔ sim joint [-10°,100°]); offset 제거됨 (절대 joint target, `use_default_offset=False`). 단일 소스 = `src/so101_contract/feature_codec.py`.
-- **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim teleop(`teleop_se3_agent.py`, `--record_format lerobot_v3`; cross-machine = `so101leader_remote` 로 Windows leader→ZMQ→Linux sim). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). cuRobo batch 생성기는 제거됨.
+- **데이터 생성**: ① 실기기 LeRobot `record`(Windows) + sim teleop(`teleop_se3_agent.py`, `--record_format lerobot_v3`; cross-machine = `so101leader_remote` 로 Windows leader→ZMQ→Linux sim). ② **State Machine datagen**(`scripts/datagen/record_state_machine.py`, isaac-sim `datagen` 모드) — SM 이 8D IK pose 생성 → IsaacLab DLS IK 풀이 → solved joint target(degree, joint-space)을 LeRobot v3 로 기록(VLA/real 호환). leisaac 에서 vendor(아래 `datagen/`). GPU isaac-sim 런타임 검증 진행 중(grasp waypoint·IK body_name·dof order). ③ **cuRobo pick-place SM**(`scripts/cuRobo/`, 2-proc ZMQ: `curobo_batch_planner.py` planner ↔ `pickplace_sm.py` executor) — collision-free 궤적 batch 생성 + DR 스폰영역 정량 sweep(yaw-random 99.62%; 잔여 = 큐브 45° 대각 yaw parallel-jaw 물리한계). 상세=`scripts/cuRobo/README.md`.
 
 ## 환경 사양
 
@@ -297,7 +297,7 @@ ad-hoc 작업으로 코드가 산발하지 않도록:
 SO-101 은 팔 5축(+그리퍼)이라 임의 6-DOF pose 를 만족 못 한다. **position 우선·orientation best-effort**:
 
 - 새 IK 경로 추가 시 orientation 을 hard constraint 로 넣지 말 것 (position-only).
-- MoveIt·cuMotion·cuRobo·Lula·RMPFlow·follow-target IK 테스트 스크립트 제거됨.
+- MoveIt·cuMotion·Lula·RMPFlow·follow-target IK 테스트 스크립트 제거됨. (cuRobo 는 `scripts/cuRobo/` pick-place SM 플래너로 복귀 — position-only 아닌 reachable-manifold 후보 IK.)
 
 ### sim 진입 스크립트 AppLauncher 인자 필터
 
