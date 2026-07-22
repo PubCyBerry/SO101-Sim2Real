@@ -87,6 +87,8 @@ _p_random.add_argument("--record_every", type=int, default=1, help="N step 마�
 _p_fail = _sub.add_parser("fail", parents=[_common], help="sweep 결과의 fail 좌표만 재현")
 _p_fail.add_argument("--results", required=True,
                      help="sweep JSON 경로. place/plan-fail 셀 좌표만 batch 로 로드")
+_p_fail.add_argument("--auto", action="store_true",
+                     help="키 입력 없이 전 fail batch 자동 재현 + planned/placed 집계(headless)")
 
 _p_sweep = _sub.add_parser("sweep", parents=[_common], help="스폰영역 grid+boundary 정량 평가")
 _p_sweep.add_argument("--nx", type=int, default=15, help="interior grid x 해상도")
@@ -440,7 +442,8 @@ def main():
     poller.register(sock, zmq.POLLIN)
     print(f"[sm] planner {args.planner}", flush=True)
 
-    interactive = args.mode == "fail" or (args.mode == "random" and args.auto_trials == 0)
+    interactive = (args.mode == "fail" and not getattr(args, "auto", False)) \
+        or (args.mode == "random" and args.auto_trials == 0)
     key = _key_listener() if interactive else None
     layout = None
     last_manip = {}
@@ -648,6 +651,31 @@ def main():
         fails.sort(key=lambda c: (c["y"], c["x"]))
         Nf = env.num_envs
         fbatches = [fails[i:i + Nf] for i in range(0, len(fails), Nf)] or [[]]
+
+        if args.auto:  # headless: 전 batch 재현 + planned/placed 집계(sweep 루프 미러, 키 無)
+            tot = t_pl = t_ok = 0
+            for bi, batch in enumerate(fbatches):
+                if not simulation_app.is_running() or not batch:
+                    break
+                padded = batch + [batch[0]] * (Nf - len(batch))
+                seed = args.seed + bi
+                _reset_to_targets([(c["x"], c["y"]) for c in padded], [0.0] * Nf, seed)
+                status, _ = _manipulate(plan_seed=seed)
+                if status == "closed":
+                    break
+                planned = last_manip.get("planned", [False] * Nf)
+                placed = last_manip.get("placed", [False] * Nf)
+                for i, c in enumerate(batch):  # 실 셀만(패딩 제외)
+                    pl = bool(planned[i]) if i < len(planned) else False
+                    ok = pl and (bool(placed[i]) if i < len(placed) else False)
+                    tot += 1; t_pl += int(pl); t_ok += int(ok)
+                    print(f"[fail-auto] ({c['x']:+.3f},{c['y']:+.3f}) {c['kind']:12s} "
+                          f"planned={pl} placed={ok} fails={c.get('fails')}", flush=True)
+                print(f"[fail-auto] batch {bi + 1}/{len(fbatches)} cumulative "
+                      f"planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
+            print(f"[fail-auto] DONE planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
+            return
+
         fb = {"i": 0}
 
         def _load_fail(advance):
