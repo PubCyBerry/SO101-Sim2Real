@@ -27,8 +27,14 @@ CUBE_ARM_EXCLUDE: tuple[float, float, float, float] = (-0.09, 0.04, -0.045, 0.15
 # 배치 거리 제약 (Cube1 40mm) — env_cfg._make_randomize_cubes 인자와 동일 소스.
 BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.265)  # bowl default (env-local)
 MIN_BOWL_SEP: float = 0.14
-MIN_BASE_SEP: float = 0.135
-BASE_XY: tuple[float, float] = (0.0, 0.0)  # robot base (env-local)
+BASE_XY: tuple[float, float] = (0.0, 0.0)  # robot base_link 마운트 원점 (env-local) — plot 마커/meta
+# ★min-reach 가드 중심 = shoulder_pan 축(팔 실제 회전중심), 마운트 원점 아님.
+# URDF so_arm101 shoulder_pan origin (0.0388,0,0.0624 rel base_link) 를 USD→env 프레임
+# (Rz90+BASE_T, env=Rz180·base_link) 변환 → 축이 마운트원점서 -x 2.1cm·+y 2.3cm 어긋남.
+# 마운트원점 기준 가드는 -x 근접 corner 를 도달불가인데도 통과(예: env(-0.092,0.107) 은
+# 마운트거리 0.141>0.135 통과하나 pan축거리 0.109=IK 도달불가) → 재-sweep 실패 근본원인.
+PAN_AXIS_XY: tuple[float, float] = (-0.021, 0.023)
+MIN_BASE_SEP: float = 0.123  # pan축 기준 min-reach r (Phase D R1R2R3 도달경계로 확정 예정)
 
 
 def bell_halfwidth(y: float) -> float:
@@ -57,7 +63,7 @@ def in_spawn_area(x: float, y: float) -> bool:
     bx, by = BOWL_CENTER_XY
     if (x - bx) ** 2 + (y - by) ** 2 < MIN_BOWL_SEP ** 2:
         return False
-    ax, ay = BASE_XY
+    ax, ay = PAN_AXIS_XY   # ★min-reach 는 pan축(팔 회전중심) 기준 — 마운트원점(BASE_XY) 아님
     if (x - ax) ** 2 + (y - ay) ** 2 < MIN_BASE_SEP ** 2:
         return False
     return True
@@ -80,7 +86,7 @@ def sweep_targets(nx: int = 15, ny: int = 8, boundary_n: int = 20,
     """
     xlo, xhi = CUBE_SCATTER_X_RANGE
     ylo, yhi = CUBE_SCATTER_Y_RANGE
-    bx, by = BASE_XY
+    bx, by = PAN_AXIS_XY   # base_arc 경계 = pan축 min-reach 원호(마운트원점 아님)
     wbx, wby = BOWL_CENTER_XY
     boundary: list[tuple[float, float, str]] = []
 
