@@ -4395,6 +4395,26 @@ lockstep 스캔 후 **동질 batch rescue**(`_plan_pregrasp_batch`): 미해결 e
 ### 확인 방법
 `--self-test` 4/4 `SELFTEST_OK`(env0/env2 가 `rescue_envs=2` 경유, diag `[manifold] rescue … ok=True`).
 
+## cuRobo yaw-random에서 planner는 성공하지만 대각 grasp가 lift 전에 빠짐 (face-center chord miss)
+
+### 현상
+54-sphere collision 모델에서 planner는 전 셀 성공하지만 yaw-zero가 182/183, yaw-random이 1298/1305로 감소한다. 실패 큐브는 bowl로 가다 떨어지는 것이 아니라 grasp 직후에도 초기 높이 부근에 남는다.
+
+### 오류 메시지
+```
+[sm] env...: plan=ok placed=False
+[fail-auto] ... rho=-12.0 face=-31.7 ... max_z≈initial_z
+```
+
+### 원인
+worst-yaw wrist 보호를 위해 `rho`를 ±12°로 cap하면 closing 축과 cube face normal이 약 30–33° 어긋난다. fixed jaw를 face center에 놓은 상태로 그대로 닫으면 jaw chord가 cube center를 약 12mm 비껴 moving jaw가 반대편 모서리를 밀어내므로, 계획·충돌 검사는 성공해도 큐브가 squirt되어 lift되지 않는다. opening 90/100 확대는 6/8·5/8로 해결되지 않았고, rho cap 18°는 8/8이나 64-env 계획 시간이 과도하게 증가했다.
+
+### 해결 방법
+`cand_pose_manifold`에서 face tangent `t̂`와 closing 축 `c`를 이용해 `CUBE_HALF·dot(c,t̂)/dot(c,n̂)` chord-center shift를 계산하고, 절반만 적용하는 `CHORD_CENTER_RATIO=0.5`를 pad target에 더한다. wrist 안전대는 `RHO_CAP=12°`로 유지한다. gripper 폐합 후 lift 전 `GRASP_HOLD_STEPS=5` 정지 hold도 추가해 접촉을 안정화한다. `fail --auto`는 sweep에 기록된 실제 yaw를 재현하고 max cube z/final pose를 출력하도록 보강한다.
+
+### 확인 방법
+기존 실패 8건을 reset/plan seed 0·1·2로 재현하면 24/24 성공. 54-sphere, 64-env, 실패 셀 재시도 없는 full sweep에서 yaw-zero 183/183, yaw-random seed 0/1/2 각각 435/435(합계 1305/1305), planner도 전부 성공. 산출물은 `scratch/2026-07-22-curobo-sm-model54-final/`.
+
 ## multi-env robot color DR 이 렌더에 안 나옴 (전 로봇 동색 = author 색, 런타임 material 편집 무반영)
 
 ### 현상

@@ -267,14 +267,19 @@ def edit_existing_robot(args):
 
     print(f"Loaded robot with {builder.num_spheres} spheres")
 
-    # Refit specific link if requested
+    # Refit specific link(s) if requested
     if args.refit_link:
-        print(f"\nRefitting spheres for link: {args.refit_link}")
-        new_spheres = builder.refit_link_spheres(
-            args.refit_link,
-            sphere_density=args.sphere_density,
-        )
-        print(f"Fitted {len(new_spheres)} spheres to {args.refit_link}")
+        for link in args.refit_link:
+            print(f"\nRefitting spheres for link: {link}")
+            new_spheres = builder.refit_link_spheres(
+                link,
+                num_spheres=args.num_spheres,
+                sphere_density=args.sphere_density,
+                coverage_weight=args.coverage_weight,
+                protrusion_weight=args.protrusion_weight,
+                compute_metrics=args.compute_metrics,
+            )
+            print(f"Fitted {len(new_spheres)} spheres to {link}")
 
     # Add collision ignores if requested
     if args.add_collision_ignore:
@@ -386,7 +391,8 @@ def test():
             clip_link=None,
             num_collision_samples=100,
             no_prune=False,
-            refit_link=refit_link,
+            refit_link=[refit_link],
+            num_spheres=None,
             add_collision_ignore=None,
             recompute_collisions=False,
             visualize=False,
@@ -415,6 +421,7 @@ def test():
             num_collision_samples=100,
             no_prune=False,
             refit_link=None,
+            num_spheres=None,
             add_collision_ignore=[link_names[0], link_names[1]] if len(link_names) > 1 else None,
             recompute_collisions=True,
             visualize=False,
@@ -534,7 +541,14 @@ def main():
     parser.add_argument(
         "--refit-link",
         type=str,
-        help="Refit spheres for specific link (edit mode)",
+        action="append",
+        help="Refit spheres for specific link (edit mode, repeatable)",
+    )
+    parser.add_argument(
+        "--num-spheres",
+        type=int,
+        default=None,
+        help="Explicit sphere count per refit link (default: auto from density)",
     )
     parser.add_argument(
         "--add-collision-ignore",

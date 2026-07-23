@@ -103,12 +103,16 @@ ALPHA_SCAN_DEG = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -
                   30.0, -30.0, 35.0, -35.0, 40.0, -40.0, 45.0, -45.0, 50.0, -50.0]
 TAU_MAX_DEG = 10.0  # 결합 게이트 상한(knobs.tau_max_deg 로 조정) — pink 기본과 동일
 # ★worst-yaw wrist-cap: |Δψ| 큰 셀서 auto ρ=-Δψ/cosα 가 |ρ| 크면 wrist_roll 을 위험대로 밀어
-# grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL). |ρ|
-# 를 이 값으로 제한 → wrist 안전대. 대가=closing 축 face 미스얼라인(~30°)이나 jaw 가 큐브보다
-# 넓어 관용(물리 확인: face_angle -29.7°서도 PASS). monotonic: relax 만(wrist 절대 안 키움).
+# grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL).
+# 54-sphere 모델 targeted replay(8건): cap 12/14/16/18° = 5/6/7/8 성공. 다만 18°는
+# 64-env 첫 planning만 약 17분이 걸려 기본값으로 부적합했다. 기본 12°를 유지하고
+# `rho_cap_deg` knob으로만 A/B한다. diagonal grasp miss는 아래 chord-center 로 보완한다.
 # 정상(|auto ρ|≤이값) 셀 무영향 = face 정렬 보존.
 RHO_CAP_DEG = 12.0
 RHO_CAP_RAD = math.radians(RHO_CAP_DEG)
+# rho cap 셀의 face-center chord miss 보정. baseline 실패 8건을 reset/plan seed 0/1/2로
+# 반복한 결과 ratio=0은 5/8, ratio=0.5는 24/24 성공. 완전 보정보다 여유를 둔 반 보정을 사용.
+CHORD_CENTER_RATIO = 0.5
 # ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
 # 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
 # per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
@@ -144,6 +148,7 @@ PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24   # r≤R0→MIN · r≥R1→MAX (사이 �
 GRIP_OPEN, GRIP_CLOSE = 75.0, 5.0  # open 75=straddle 마진(60 은 tangential 3mm 오차로 squirt)
 GRIP_INIT = 0.0     # ⑥ retreat 끝 복원값 = SM init(-10°=feature 0)
 CLOSE_STEPS = 5     # ② grasp 폐합 ramp 프레임
+GRASP_HOLD_STEPS = 5  # 폐합 직후 정지: 접촉 안정화 후 lift(즉시 lift 시 드문 slip/squirt 방지)
 OPEN_STEPS = 10     # ⑤ release 개방 ramp 프레임(정지 상태 투하)
 SETTLE_STEPS = 5    # ⑤ release 전 그릇 상공 정지 hold 프레임
 
@@ -309,7 +314,8 @@ def _grip(arm_deg, grip):
     return np.hstack([arm_deg, g])
 
 
-def cand_pose_manifold(xyz, faces, alpha_deg, tau):
+def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
+                       chord_center_ratio=CHORD_CENTER_RATIO):
     """(pan,α,ρ) manifold 위 full TCP pose 1개 — 구성상 5-DOF 도달 가능(상수 블록 §manifold).
 
     ψ_face = 수평 face normal 방위(90° 대칭이라 어느 face 든 Δψ 동일 → faces[0] 사용).
@@ -332,8 +338,8 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau):
     for _ in range(5):
         dpsi = wrap90(psi - (pan + math.pi / 2.0))
         raw_rho = -dpsi / math.cos(a)
-        capped = abs(raw_rho) > RHO_CAP_RAD   # ★worst-yaw wrist-cap: |ρ| 제한(상수 블록)
-        rho = (max(-RHO_CAP_RAD, min(RHO_CAP_RAD, raw_rho)) if capped
+        capped = abs(raw_rho) > rho_cap_rad   # ★worst-yaw wrist-cap: |ρ| 제한(상수/knob)
+        rho = (max(-rho_cap_rad, min(rho_cap_rad, raw_rho)) if capped
                else raw_rho + rho_corr)
         pan_R = pan  # 이 반복의 R/tcp 구축에 쓴 pan — meta 는 이 값(갱신 전)을 기록해야 정합
         R = _rz(pan_R) @ _ry(-a) @ R_TOPDOWN @ _rz(rho) @ TCP_TWIST
@@ -344,7 +350,16 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau):
         if not capped:  # capped 셀은 의도적 미스얼라인 — 정렬 feedback 안 함
             resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
             rho_corr += resid / math.cos(a)
-        pad_target = cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n_face
+        # closing 축이 face normal과 어긋나면 face-center에서 시작한 jaw chord가 cube center를
+        # 비켜 moving jaw가 모서리를 밀어낸다. face tangent 방향으로 h*tan(theta)만큼 옮겨
+        # closing chord를 cube center 쪽으로 통과시킨다(ratio=1 완전 보정, knob으로 A/B).
+        closing = R[:, 0]
+        face_tangent = np.array([-n_face[1], n_face[0], 0.0], dtype=np.float64)
+        c_normal = max(1e-6, float(np.dot(closing, n_face)))
+        tangent_shift = (float(chord_center_ratio) * CUBE_HALF
+                         * float(np.dot(closing, face_tangent)) / c_normal)
+        pad_target = (cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n_face
+                      + tangent_shift * face_tangent)
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
     if abs(dpsi) * abs(math.tan(a)) > tau:
@@ -358,6 +373,7 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau):
         "alpha_deg": float(alpha_deg),
         "rho_deg": math.degrees(rho),
         "rho_capped": bool(capped),  # worst-yaw wrist-cap 트리거 여부(프리뷰)
+        "chord_shift_mm": float(tangent_shift * 1000.0),
         "dpsi_deg": math.degrees(dpsi),
         "pan_deg": math.degrees(pan_R),
         "face_label": face_label,
@@ -681,6 +697,8 @@ class PickPlacePlanner:
     def _manifold_candidates(self, xyz, faces, knobs=None):
         """(pan,α,ρ) 후보 목록 — ALPHA_SCAN_DEG 순서(|α| 오름차순 ± interleave)가 곧 우선순위."""
         kn = knobs or {}
+        rho_cap_rad = math.radians(float(kn.get("rho_cap_deg", RHO_CAP_DEG)))
+        chord_center_ratio = float(kn.get("chord_center_ratio", CHORD_CENTER_RATIO))
         pan_r = math.hypot(float(xyz[0]) - PAN_AXIS_XY[0], float(xyz[1]) - PAN_AXIS_XY[1])
         # R2: reach-adaptive τ (D2) — 근<0.16·원>0.22 극단서 0→1 램프로 τ 10°→최대 25° 완화.
         # correct-frame 실패셀 r_pan: NEAR 0.11·FAR 0.24~0.28. FK 게이트가 grasp 품질을
@@ -691,7 +709,10 @@ class PickPlacePlanner:
         tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)) + min(1.0, reach_edge) * 15.0)
         cands = []
         for a_deg in ALPHA_SCAN_DEG:
-            cand = cand_pose_manifold(xyz, faces, a_deg, tau)
+            cand = cand_pose_manifold(
+                xyz, faces, a_deg, tau, rho_cap_rad=rho_cap_rad,
+                chord_center_ratio=chord_center_ratio,
+            )
             if cand is None:
                 continue
             cand[2]["pan_radius"] = float(pan_r)
@@ -1234,12 +1255,14 @@ class PickPlacePlanner:
         a, de, li, tr, rt = (np.rad2deg(phases[k]) for k in
                              ("approach", "grasp", "lift", "transit", "retreat"))
         close_hold = np.repeat(de[-1:], CLOSE_STEPS, 0)    # grasp: 정지 상태서 폐합
+        grasp_hold = np.repeat(de[-1:], GRASP_HOLD_STEPS, 0)  # 폐합 접촉 안정화 후 lift
         settle_hold = np.repeat(tr[-1:], SETTLE_STEPS, 0)  # 그릇 상공서 짧게 정지(안정)
         open_hold = np.repeat(tr[-1:], OPEN_STEPS, 0)      # release: 그릇 상공(transit)서 개방
         seq = [
             _grip(a, np.linspace(GRIP_INIT, g_open, len(a))),        # ① approach + gripper 개방(접근하며)
             _grip(de, g_open),                                       # ② grasp descend
             _grip(close_hold, np.linspace(g_open, g_close, CLOSE_STEPS)),  #   grasp close
+            _grip(grasp_hold, g_close),                              #   grasp settle (hold)
             _grip(li, g_close),                                      # ③ lift
             _grip(tr, g_close),                                      # ④ transit
             _grip(settle_hold, g_close),                            #   settle over bowl (hold)

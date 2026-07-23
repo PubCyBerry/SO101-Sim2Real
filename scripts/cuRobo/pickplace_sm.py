@@ -549,17 +549,24 @@ def main():
             per_env.append(rows)
         tgt = np.stack(per_env, axis=1)  # (T, N, 6)
         success = None
+        cube_asset = env.scene[CUBE]
+        max_cube_z = (cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]).clone()
         for step_rows in tgt:
             k = _poll_key(key)
             if k in ("N", "R"):              # cancel remaining actions → next reset command
                 return "abort", k
             action = torch.as_tensor(step_rows, device=env.device, dtype=torch.float32)
             _obs, _rew, term, trunc, _info = _step(env, action, recorder)
+            cube_z = cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+            max_cube_z = torch.maximum(max_cube_z, cube_z)
             if bool(term.any()) or bool(trunc.any()):
                 success = _cubes_in_bowl(env)  # read terminal state before env auto-resets
                 break
         if success is None:
             success = _cubes_in_bowl(env)
+        final_cube_xyz = cube_asset.data.root_pos_w[:, :3] - env.scene.env_origins
+        last_manip["max_cube_z"] = [float(v) for v in max_cube_z.tolist()]
+        last_manip["final_cube_xyz"] = [[float(v) for v in row] for row in final_cube_xyz.tolist()]
         last_manip["placed"] = [bool(v) for v in success]
         n_placed = sum(1 for i, ok in enumerate(success) if planned[i] and ok)
         for i, (p, ok) in enumerate(zip(planned, success)):
@@ -653,25 +660,50 @@ def main():
         fbatches = [fails[i:i + Nf] for i in range(0, len(fails), Nf)] or [[]]
 
         if args.auto:  # headless: 전 batch 재현 + planned/placed 집계(sweep 루프 미러, 키 無)
+            # 최신 sweep 는 실패 당시 yaw/seed 를 fails[] 에 기록한다. 셀당 실패가 여러 번이면
+            # 각각을 독립 케이스로 재현하고, 구형 결과처럼 상세가 없을 때만 yaw=0 으로 폴백한다.
+            cases = []
+            for cell in fails:
+                records = [f for f in cell.get("fails", []) if isinstance(f, dict)]
+                if records:
+                    cases.extend({"cell": cell, "failure": f} for f in records)
+                else:
+                    cases.append({"cell": cell, "failure": {}})
+            case_batches = [cases[i:i + Nf] for i in range(0, len(cases), Nf)] or [[]]
             tot = t_pl = t_ok = 0
-            for bi, batch in enumerate(fbatches):
+            for bi, batch in enumerate(case_batches):
                 if not simulation_app.is_running() or not batch:
                     break
                 padded = batch + [batch[0]] * (Nf - len(batch))
                 seed = args.seed + bi
-                _reset_to_targets([(c["x"], c["y"]) for c in padded], [0.0] * Nf, seed)
+                _reset_to_targets(
+                    [(case["cell"]["x"], case["cell"]["y"]) for case in padded],
+                    [math.radians(float(case["failure"].get("yaw_deg", 0.0))) for case in padded],
+                    seed,
+                )
                 status, _ = _manipulate(plan_seed=seed)
                 if status == "closed":
                     break
                 planned = last_manip.get("planned", [False] * Nf)
                 placed = last_manip.get("placed", [False] * Nf)
-                for i, c in enumerate(batch):  # 실 셀만(패딩 제외)
+                diags = last_manip.get("diagnostics", [])
+                max_z = last_manip.get("max_cube_z", [])
+                final_xyz = last_manip.get("final_cube_xyz", [])
+                for i, case in enumerate(batch):  # 실 케이스만(패딩 제외)
+                    c, failure = case["cell"], case["failure"]
                     pl = bool(planned[i]) if i < len(planned) else False
                     ok = pl and (bool(placed[i]) if i < len(placed) else False)
+                    cand = (diags[i].get("candidate") or {}) if i < len(diags) else {}
+                    fk = cand.get("fk_face_error", {})
                     tot += 1; t_pl += int(pl); t_ok += int(ok)
                     print(f"[fail-auto] ({c['x']:+.3f},{c['y']:+.3f}) {c['kind']:12s} "
-                          f"planned={pl} placed={ok} fails={c.get('fails')}", flush=True)
-                print(f"[fail-auto] batch {bi + 1}/{len(fbatches)} cumulative "
+                          f"yaw={float(failure.get('yaw_deg', 0.0)):+.2f} "
+                          f"source_seed={failure.get('plan_seed')} planned={pl} placed={ok} "
+                          f"alpha={cand.get('alpha_deg')} rho={cand.get('rho_deg')} "
+                          f"face={fk.get('face_angle')} h={fk.get('h')} t={fk.get('t')} "
+                          f"max_z={max_z[i] if i < len(max_z) else None} "
+                          f"final={final_xyz[i] if i < len(final_xyz) else None}", flush=True)
+                print(f"[fail-auto] batch {bi + 1}/{len(case_batches)} cumulative "
                       f"planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
             print(f"[fail-auto] DONE planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
             return
@@ -770,8 +802,18 @@ def main():
                     for i, (x, y, kind) in enumerate(real):
                         pl = bool(planned[i]) if i < len(planned) else False
                         ok = pl and (bool(placed[i]) if i < len(placed) else False)
-                        fail = (diags[i].get("fail")
-                                if not ok and i < len(diags) and isinstance(diags[i], dict) else None)
+                        fail = None
+                        if not ok:
+                            fail = {
+                                "type": "place" if pl else "plan",
+                                "trial": int(trial),
+                                "chunk": int(ci),
+                                "env": int(i),
+                                "yaw_deg": float(math.degrees(yaws[i])),
+                                "plan_seed": int(seed),
+                            }
+                            if i < len(diags) and isinstance(diags[i], dict) and diags[i].get("fail"):
+                                fail["diagnostic"] = diags[i]["fail"]
                         _record_cell(x, y, kind, pl, ok, fail)
                     done = sum(v["n"] for v in cells.values())
                     placed_tot = sum(v["n_placed"] for v in cells.values())

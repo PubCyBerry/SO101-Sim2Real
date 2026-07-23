@@ -13,6 +13,7 @@ SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시�
 
 - [아키텍처 — 2-머신](#아키텍처--2-머신)
 - [실행 경로](#실행-경로)
+- [현재 PickCube 환경·에셋·cuRobo 평가](#현재-pickcube-환경에셋curobo-평가)
 - [환경 요구사항](#환경-요구사항)
 - [사전 설치 확인](#사전-설치-확인)
 - [공통 준비](#공통-준비)
@@ -70,6 +71,113 @@ flowchart LR
 | **sim 수동 teleop** (보조) | Linux (host uv) | `uv run scripts/.../teleop_se3_agent.py` | Isaac Lab 로컬 teleop · USD 씬 author |
 
 > **추론 백엔드는 1개**: `policy-server`(gRPC). 실기기 policy-client(Windows)와 sim vla-ros(Linux)가 같은 서버에 접속한다.
+
+---
+
+## 현재 PickCube 환경·에셋·cuRobo 평가
+
+현재 정량평가 기준 환경은 `SimToReal-SO101-PickCube-DR-v0`이다. 한 환경에 SO-101 follower,
+40 mm `Cube1` 한 개, 그릇 한 개, 책상과 top/wrist/front 카메라가 있으며, 큐브를 집어 그릇에
+놓는 과정을 Isaac Sim 물리로 판정한다.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/pics/cube_desk/current_pickcube_top.png" alt="현재 Isaac Sim PickCube 환경 top camera"></td>
+    <td width="50%"><img src="docs/pics/cube_desk/큐브와%20그릇.jpg" alt="실물 큐브와 그릇"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>현재 Isaac Sim 장면: Cube1 한 개·그릇·SO-101, 매트 없음</sub></td>
+    <td align="center"><sub>실물 에셋 원형: 40/50 mm 펠트 큐브와 플라스틱 그릇</sub></td>
+  </tr>
+</table>
+
+### 등록 환경
+
+| Gym ID | 큐브/그릇 배치 | 성공 종료 | 주 용도 |
+|---|---|---|---|
+| `SimToReal-SO101-Teleop-v0` | 태스크 오브젝트 없음 | 없음 | 로봇·책상·조명 base substrate |
+| `SimToReal-SO101-PickCube-v0` | 고정 실측 배치 | 순간 판정 | 결정적 teleop·datagen |
+| `SimToReal-SO101-PickCube-DR-v0` | **full DR** 종형 큐브 영역 + 그릇 arc | 순간 판정 | 데이터 다양화·cuRobo sweep |
+| `SimToReal-SO101-PickCube-DRBase-v0` | nominal 근처 좁은 사각형 | 순간 판정 | 제한 영역 DR |
+| `SimToReal-SO101-PickCube-Eval-v0` | 고정 실측 배치 | 15-step 디바운스 | 재현성 closed-loop 평가 |
+| `SimToReal-SO101-PickCube-DR-Eval-v0` | full DR | 15-step 디바운스 | DR closed-loop 평가 |
+
+### 에셋 형상과 치수
+
+| 에셋 | 현재 형상·치수 | 물리/충돌 표현 |
+|---|---|---|
+| **SO-101 follower** | `shoulder_pan/lift`·`elbow_flex`·`wrist_flex/roll` 5축 + gripper 1축. URDF 주요 관절 원점 간 거리 약 **116 / 135 / 64 mm**, gripper-frame offset 약 **98 mm** | Isaac용 mesh collider와 cuRobo용 **54-sphere / 9-link** 근사 |
+| **Cube1/2** | 한 변 **40 mm**, 35 g, corner radius 8.8 mm인 펠트 rounded box. 현재 task는 **Cube1 한 개**만 활성 | visual과 같은 rounded mesh의 `convexHull` |
+| **Cube3/4** | 한 변 **50 mm**, 55 g, corner radius 11 mm. 에셋/단일 사양에는 유지되지만 현재 scene에는 미배치 | `convexHull` |
+| **그릇** | 회전체 곡면 bowl, 상단 **Ø150 mm**, 바닥 **Ø65 mm**, 높이 **70 mm**, 벽 4 mm, 외부 base 5 mm + cavity floor 3 mm, 250 g | 오목한 내부를 보존한 watertight mesh + `convexDecomposition` |
+| **책상** | **1,600 × 800 × 25 mm**, 상판 높이 705 mm. 현재 scene은 desk mat 없음 | 상판 static box collider |
+| **카메라** | top · wrist · front RGB 3-view | static camera cfg, 렌더 시 `--enable_cameras` 필요 |
+
+cuRobo는 삼각 mesh를 직접 충돌검사하지 않고 아래 54개 sphere로 근사한다. 링크별 개수는
+base 9 · shoulder 6 · upper arm 8 · lower arm 10 · wrist 5 · gripper 6 · moving jaw 7 · camera mount 3이다.
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/pics/cuRobo/so101_base.png" alt="SO-101 visual mesh"></td>
+    <td width="33%"><img src="docs/pics/cuRobo/so101_collision_model.png" alt="SO-101 54 sphere collision model"></td>
+    <td width="33%"><img src="docs/pics/cuRobo/so101_overlay.png" alt="SO-101 mesh and collision sphere overlay"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>visual mesh</sub></td>
+    <td align="center"><sub>54-sphere collision model</sub></td>
+    <td align="center"><sub>mesh/sphere overlay</sub></td>
+  </tr>
+</table>
+
+### DR 큐브 스폰 영역
+
+full DR은 env-local `x ∈ [-0.24, 0.24] m`, `y ∈ [0.06, 0.26] m`의 좌우대칭 종형 영역이다.
+종의 x 반너비는 `(y, half-width) = (0.06,0.24), (0.14,0.24), (0.18,0.20),
+(0.22,0.16), (0.26,0.08)` m를 선형 보간한다. 이 외곽에서 다음 영역을 제외한다.
+
+| 제외/제약 | 값 |
+|---|---|
+| 로봇암 제외 박스 | `x=[-0.09, 0.04]`, `y=[-0.045, 0.155]` m |
+| 그릇 이격 | 중심 `(-0.22, 0.265)` m에서 **140 mm** 이상 |
+| base 최소 도달거리 | shoulder-pan 축 `(-0.021, 0.023)` m에서 **123 mm** 이상 |
+| 큐브 간 최소거리 | **60 mm** |
+| DRBase 사각형 | `x=[-0.14, 0.06]`, `y=[0.205, 0.305]` m; 나머지 제약은 동일 |
+
+큐브는 full orientation으로 랜덤화하고, 그릇은 반경 0.44 m 원호에서 -4°~+8°로 움직인다.
+DR 환경은 여기에 조명·카메라 focal·로봇 색과 큐브 마찰/질량 randomization을 더한다.
+
+![DR 스폰 영역과 yaw-zero 183-cell 결과](docs/pics/cuRobo/model54_yaw_zero_spawn_map.png)
+
+### cuRobo state machine 정량평가 — 54-sphere 최종
+
+`assets/robots/so101.yml`의 **현재 54-sphere 모델**만 사용해 처음부터 재실행한 결과다.
+모든 실행은 `num_envs=64`, 실패 셀 재시도 없음, planning 성공과 Isaac 물리 place 성공을
+각각 집계했다. 이전 collision-sphere 모델의 중간 결과와 targeted failure replay는 아래 최종 집계에서 제외했다.
+
+| yaw 조건 | seed | 셀 × trial | planning | place | 성공률 | 경과시간 |
+|---|---:|---:|---:|---:|---:|---:|
+| zero | 0 | 183 × 1 | 183/183 | **183/183** | **100.00%** | 17m 56s |
+| random | 0 | 145 × 3 | 435/435 | **435/435** | **100.00%** | 49m 30s |
+| random | 1 | 145 × 3 | 435/435 | **435/435** | **100.00%** | 49m 57s |
+| random | 2 | 145 × 3 | 435/435 | **435/435** | **100.00%** | 51m 16s |
+| **random 합계** | 0–2 | 145 × 9 | 1305/1305 | **1305/1305** | **100.00%** | 2h 30m 43s |
+
+![54-sphere cuRobo 최종 성공률](docs/pics/cuRobo/model54_final_success_rates.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/pics/cuRobo/model54_yaw_zero_spawn_map.png" alt="yaw-zero spawn sweep map"></td>
+    <td width="50%"><img src="docs/pics/cuRobo/model54_yaw_random_seed0_spawn_map.png" alt="yaw-random seed0 spawn sweep map"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>yaw-zero: 183/183, 경계 108/108</sub></td>
+    <td align="center"><sub>yaw-random seed 0: 435/435 (145셀 × 3회)</sub></td>
+  </tr>
+</table>
+
+64-env 실행의 실측 peak VRAM은 **34,110 MiB / 48,935 MiB**였고 OOM이나 48/32-env fallback은 없었다.
+grasp manifold, chord-center 보정, 5-frame contact hold와 재현 명령은
+[`scripts/cuRobo/README.md`](scripts/cuRobo/README.md)에 정리돼 있다.
 
 ---
 
