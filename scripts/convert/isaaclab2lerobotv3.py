@@ -1,245 +1,147 @@
-"""Isaac Lab HDF5 dataset → LeRobot v3 변환 (host-only fallback).
+"""IsaacLab HDF5(datagen record) → LeRobot Dataset v3 변환 — **env-free**.
 
-**Fallback Converter**: in-container LeRobot v3 recorder 의존성이 없을 때 사용.
-HDF5 → LeRobot v3 형식 변환. AppLauncher 부팅이 필요하므로 host 에서만 실행:
+``pickplace_sm.py --record_hdf5`` 가 기록한 캐노니컬 키를 그대로 읽는다:
 
-  uv run --group isaac python scripts/convert/isaaclab2lerobotv3.py \\
-    --task_name SimToReal-SO101-PickCube-v0 \\
-    --repo_id my-dataset \\
-    --hdf5_root ./datasets
+- ``data/demo_N/obs_x/joint_pos``            (T, 6)  절대 radian, SO101 순서 (obs_t)
+- ``data/demo_N/obs_x/images/{top,wrist,front}`` (T, H, W, 3) uint8
+- ``data/demo_N/applied_target``             (T, 6)  적용 joint target radian (action_t)
+- demo attrs: ``success``(bool) · ``num_samples`` · ``seed``
 
-**주의**: 이 스크립트는 end-to-end 테스트되지 않은 best-effort fallback 이다.
-in-container recorder(scripts/datagen/record_state_machine.py) 를 우선한다.
+백엔드 = 기존 :class:`LeRobotV3DatasetWriter` (``record_state_machine``·``--record_lerobot``
+직기록과 **동일 writer = 동일 스키마 계약**: h264 video·so_follower·FPS 30). lerobot 패키지도
+Isaac Sim 도 불요 — h5py lazy slice 라 에피소드 통째 GPU/RAM 로드 없음. 단위 변환은
+``so101_contract.feature_codec`` 단일 소스(radian → PolicyFeature: arm degree + gripper [0,100]).
 
-Dependencies:
-  lerobot==0.4.2
-  numpy==1.26.0
-  torch>=2.7
-  isaaclab>=2.3.2
-  (pyproject.toml 의 isaac 그룹 참조)
+에피소드 머리(2 s pre-roll)·꼬리(1 s post-hold)는 녹화 시점에 이미 규격이므로 기본
+``--skip_frames 0``. 실패(success=False)·최소길이 미달 demo 는 스킵. HF 업로드는 별도
+``scripts/data/upload_to_huggingface.py``.
+
+실행:
+
+  python scripts/convert/isaaclab2lerobotv3.py \\
+      --hdf5_files datasets/pick_cube_sm.hdf5 --output_dir datasets/pick_cube_sm_v3
+
+검증: ``python scripts/contract/validate_lerobot_schema.py <output_dir>``
 """
 
+from __future__ import annotations
+
 import argparse
-import os
+import importlib.util
+import sys
+import types
 from pathlib import Path
 
-from isaaclab.app import AppLauncher
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from tqdm import tqdm
+import h5py
+import numpy as np
 
-# 로컬 helper 모듈 (leisaac vendor)
-from _lerobot_features import (
-    LeRobotDatasetCfg,
-    build_feature_from_env,
+_SRC = Path(__file__).resolve().parents[2] / "src"
+sys.path.insert(0, str(_SRC))
+
+from so101_contract.feature_codec import (  # noqa: E402
+    CAMERA_KEYS,
+    sim_joint_radians_to_policy_feature as to_lerobot_units,
 )
 
-# 로컬 utility
-from sim_to_real.utils.env_utils import get_task_type
 
-# Parse arguments
-parser = argparse.ArgumentParser(description="Isaac Lab HDF5 → LeRobot Dataset v3 변환 (host fallback).")
-parser.add_argument("--task_name", type=str, default=None, help="환경 ID (e.g., SimToReal-SO101-PickCube-v0).")
-parser.add_argument(
-    "--task_type",
-    type=str,
-    default=None,
-    help="teleop device 타입 (keyboard/gamepad/so101leader). 미설정 시 task_name 에서 자동 추론.",
-)
-parser.add_argument(
-    "--repo_id",
-    type=str,
-    default="so101_sim_pick_cube",
-    help="LeRobot Hub 저장소 ID.",
-)
-parser.add_argument(
-    "--fps",
-    type=int,
-    default=30,
-    help="프레임/초.",
-)
-parser.add_argument(
-    "--hdf5_root",
-    type=str,
-    default="./datasets",
-    help="HDF5 파일 루트 디렉터리.",
-)
-parser.add_argument(
-    "--hdf5_files",
-    type=str,
-    default=None,
-    help="HDF5 파일 목록(쉼표 구분). 미설정 시 hdf5_root/dataset.hdf5 사용.",
-)
-parser.add_argument(
-    "--task_description",
-    type=str,
-    default=None,
-    help="작업 설명. 미설정 시 환경 기본값.",
-)
-parser.add_argument(
-    "--push_to_hub",
-    action="store_true",
-    help="변환 후 Hugging Face Hub 에 업로드.",
-)
+def _load_writer_cls():
+    """``sim_to_real`` 패키지 __init__(gym 등록 → isaaclab import) 우회 파일 로드.
 
-# Append AppLauncher 인자
-AppLauncher.add_app_launcher_args(parser)
-
-# Parse
-args_cli = parser.parse_args()
-
-# AppLauncher 기본값
-default_args = {
-    "headless": True,
-    "enable_cameras": True,
-}
-app_launcher_args = vars(args_cli)
-app_launcher_args.update(default_args)
-
-# Launch Isaac Sim
-app_launcher = AppLauncher(app_launcher_args)
-simulation_app = app_launcher.app
-
-
-# AppLauncher 부팅 이후의 import (ABI 호환성)
-import gymnasium as gym
-import torch
-from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
-from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
-from isaaclab_tasks.utils import parse_env_cfg
-
-
-def split_episode(episode: EpisodeData, num_frames: int) -> list[EpisodeData]:
-    """에피소드를 frame 단위로 분할."""
-
-    def slice_at_index(data, idx: int):
-        """nested 구조에서 idx 번째 프레임 추출."""
-        if isinstance(data, dict):
-            return {k: slice_at_index(v, idx) for k, v in data.items()}
-        if isinstance(data, torch.Tensor):
-            safe_idx = idx if idx < data.shape[0] else 0
-            return [data[safe_idx]]
-        return data
-
-    full_data = episode.data
-    sub_episodes: list[EpisodeData] = []
-    for idx in range(num_frames):
-        sub_episode = EpisodeData()
-        sub_episode.data = slice_at_index(full_data, idx)
-        sub_episodes.append(sub_episode)
-
-    return sub_episodes
-
-
-def add_episode(
-    dataset: LeRobotDataset,
-    episode: EpisodeData,
-    env: ManagerBasedRLEnv | DirectRLEnv,
-    dataset_cfg: LeRobotDatasetCfg,
-    task: str,
-) -> bool:
-    """성공 에피소드를 dataset 에 추가.
-
-    Args:
-        dataset: LeRobotDataset 객체.
-        episode: 변환할 EpisodeData.
-        env: 환경(frame 메타 생성용).
-        dataset_cfg: LeRobotDatasetCfg.
-        task: 작업 설명 문자열.
-
-    Returns:
-        True if added, False if skipped (프레임 수 < 10).
+    cube_specs 의 importlib 파일로드 패턴 — 부모 패키지를 stub 으로 선등록한 뒤
+    lerobot_units → lerobot_recorder 순서로 파일을 직접 exec 한다(so101_contract 만 의존).
     """
-    all_data = episode.data
-    num_frames = all_data["actions"].shape[0]
-    if num_frames < 10:
-        print(f"Episode {episode.env_id} has {num_frames} frames (< 10), skipped.")
+    for pkg in ("sim_to_real", "sim_to_real.data"):
+        if pkg not in sys.modules:
+            sys.modules[pkg] = types.ModuleType(pkg)
+
+    def _load(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    data_dir = _SRC / "sim_to_real" / "data"
+    _load("sim_to_real.data.lerobot_units", data_dir / "lerobot_units.py")
+    rec = _load("sim_to_real.data.lerobot_recorder", data_dir / "lerobot_recorder.py")
+    return rec.LeRobotV3DatasetWriter
+
+
+def _demo_sort_key(name: str):
+    """demo_10 이 demo_2 앞에 오는 사전순 함정 회피 — 숫자 기준 정렬."""
+    try:
+        return (0, int(name.rsplit("_", 1)[-1]))
+    except ValueError:
+        return (1, name)
+
+
+def convert_demo(writer, demo: h5py.Group, skip_frames: int, min_frames: int) -> bool:
+    """demo group 1개 → writer 에피소드 버퍼(스트리밍). 유효하지 않으면 False (스킵)."""
+    try:
+        target = demo["applied_target"]
+        joint_pos = demo["obs_x/joint_pos"]
+        images = {key: demo[f"obs_x/images/{key}"] for key in CAMERA_KEYS}
+    except KeyError as e:
+        print(f"  누락 키 {e} — 스킵 (datagen record 형식 아님)")
         return False
 
-    episode_list = split_episode(episode, num_frames)
+    # pre/post-step 훅 차이로 stream 길이가 ±1 어긋날 수 있음 → 공통 길이
+    n = min(len(target), len(joint_pos), *(len(v) for v in images.values()))
+    if n - skip_frames < min_frames:
+        print(f"  프레임 {n} < 최소 {min_frames + skip_frames} — 스킵")
+        return False
 
-    # 첫 5 프레임 스킵 (안정화)
-    for frame_index in tqdm(range(5, num_frames), desc="Processing each frame"):
-        frame = env.cfg.build_lerobot_frame(episode_list[frame_index], dataset_cfg)
-        if task is not None:
-            frame["task"] = task
-        dataset.add_frame(frame=frame)
-
+    for t in range(skip_frames, n):
+        writer.add_frame(
+            to_lerobot_units(np.asarray(target[t], dtype=np.float64)),
+            to_lerobot_units(np.asarray(joint_pos[t], dtype=np.float64)),
+            {key: np.asarray(images[key][t]) for key in CAMERA_KEYS},
+        )
     return True
 
 
-def convert_isaaclab_to_lerobot():
-    """IsaacLab HDF5 → LeRobot v3 변환 메인 로직."""
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="IsaacLab HDF5(datagen record) → LeRobot v3 (env-free, LeRobotV3DatasetWriter).")
+    parser.add_argument("--hdf5_files", required=True, help="HDF5 파일 경로(쉼표 구분 복수 가능).")
+    parser.add_argument("--output_dir", required=True, help="LeRobot v3 출력 디렉터리.")
+    parser.add_argument("--task", default="pick up the cube and place it in the bowl",
+                        help="LeRobot task 문자열(계약 canonical 기본값).")
+    parser.add_argument("--skip_frames", type=int, default=0,
+                        help="에피소드 선두 절삭 프레임 수(녹화가 규격이라 기본 0).")
+    parser.add_argument("--min_frames", type=int, default=10, help="최소 프레임 미달 demo 스킵.")
+    parser.add_argument("--include_failed", action="store_true",
+                        help="success=False demo 도 포함(기본은 성공만).")
+    parser.add_argument("--overwrite", action="store_true", help="기존 output_dir 삭제 후 재생성.")
+    args = parser.parse_args()
 
-    # 환경 설정 및 load
-    env_cfg = parse_env_cfg(args_cli.task_name, device=args_cli.device, num_envs=1)
-    task_type = get_task_type(args_cli.task_name, args_cli.task_type)
-    env_cfg.use_teleop_device(task_type)
+    writer_cls = _load_writer_cls()
+    writer = writer_cls(args.output_dir, overwrite=args.overwrite,
+                        enable_videos=True, robot_type="so_follower")
 
-    env: ManagerBasedRLEnv | DirectRLEnv = gym.make(args_cli.task_name, cfg=env_cfg).unwrapped
+    n_saved = 0
+    files = [p.strip() for p in args.hdf5_files.split(",") if p.strip()]
+    for file_i, path in enumerate(files, 1):
+        print(f"[{file_i}/{len(files)}] {path}")
+        with h5py.File(path, "r") as h5:
+            data = h5["data"]
+            for name in sorted(data.keys(), key=_demo_sort_key):
+                demo = data[name]
+                success = bool(demo.attrs.get("success", False))
+                if not success and not args.include_failed:
+                    print(f"  {name}: success=False — 스킵")
+                    continue
+                print(f"  {name}: success={success}")
+                if convert_demo(writer, demo, args.skip_frames, args.min_frames):
+                    writer.commit_episode(success=True, task_name=args.task)
+                    n_saved += 1
+                    print(f"  → episode {n_saved} 저장")
+                else:
+                    writer.commit_episode(success=False, task_name=args.task)  # 버퍼 폐기
 
-    # LeRobot dataset 설정
-    dataset_cfg = LeRobotDatasetCfg(
-        repo_id=args_cli.repo_id,
-        fps=args_cli.fps,
-        robot_type=env_cfg.robot_name,
-    )
-    dataset_cfg.features = build_feature_from_env(env, dataset_cfg)
-
-    # LeRobot dataset 생성
-    dataset = LeRobotDataset.create(
-        repo_id=dataset_cfg.repo_id,
-        fps=dataset_cfg.fps,
-        robot_type=dataset_cfg.robot_type,
-        features=dataset_cfg.features,
-    )
-
-    # HDF5 파일 목록 결정
-    if args_cli.hdf5_files is None:
-        hdf5_files_list = [os.path.join(args_cli.hdf5_root, "dataset.hdf5")]
-    else:
-        hdf5_files_list = [
-            os.path.join(args_cli.hdf5_root, f.strip()) if not os.path.isabs(f.strip()) else f.strip()
-            for f in args_cli.hdf5_files.split(",")
-        ]
-
-    # HDF5 → LeRobot 변환
-    now_episode_index = 0
-    for hdf5_id, hdf5_file in enumerate(hdf5_files_list):
-        print(f"[{hdf5_id + 1}/{len(hdf5_files_list)}] Processing: {hdf5_file}")
-
-        dataset_file_handler = HDF5DatasetFileHandler()
-        dataset_file_handler.open(hdf5_file)
-
-        episode_names = dataset_file_handler.get_episode_names()
-        print(f"Found {len(episode_names)} episodes: {episode_names}")
-
-        for episode_name in tqdm(episode_names, desc="Converting episodes"):
-            episode = dataset_file_handler.load_episode(episode_name, device=args_cli.device)
-
-            if not episode.success:
-                print(f"Episode {episode_name} not successful, skipped.")
-                continue
-
-            valid = add_episode(dataset, episode, env, dataset_cfg, args_cli.task_description)
-            if valid:
-                now_episode_index += 1
-                dataset.save_episode()
-                print(f"Episode {now_episode_index} saved successfully.")
-            else:
-                dataset.clear_episode_buffer()
-
-        dataset_file_handler.close()
-
-    # Finalize dataset
-    dataset.finalize()
-
-    if args_cli.push_to_hub:
-        print("Pushing dataset to Hugging Face Hub...")
-        dataset.push_to_hub()
-
-    print(f"✓ Conversion complete: {now_episode_index} episodes saved to {args_cli.repo_id}")
-    env.close()
+    summary = writer.finalize(args.task)
+    print(f"완료: {n_saved} 에피소드 → {summary['output_dir']}")
 
 
 if __name__ == "__main__":
-    convert_isaaclab_to_lerobot()
+    main()

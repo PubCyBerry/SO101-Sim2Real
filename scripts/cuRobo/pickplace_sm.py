@@ -21,6 +21,11 @@ success is judged per env. Viewer camera follows env 0.
 ## 서브커맨드 (mode)
 
     random  — 통상 랜덤 DR 배치. 인터랙티브(livestream 키) 또는 --auto_trials N 자동.
+              +--record_hdf5 PATH = leisaac 방식 IsaacLab HDF5 녹화(auto 전용,
+              --enable_cameras 필수; 에피소드 = 정지 2s→pick-place→init 복귀→정지 1s,
+              termination 자동 종료·multi-env env당 1 demo). README §record 모드.
+              +--record_lerobot DIR = LeRobot v3 직기록(leisaac --use_lerobot_recorder
+              동형, single-env·성공만·스트리밍 — LeRobotV3DatasetWriter 백엔드).
     fail    — sweep 결과(--results)의 place/plan-fail 셀 좌표만 재현(인터랙티브).
     sweep   — DR 스폰영역 전체 grid+boundary 정량 평가 → JSON(--out). 자동/headless.
 
@@ -83,6 +88,22 @@ _p_random.add_argument("--summary_dir", default=None,
                        help="auto-trial summary.json 디렉터리(기본 record_viewport_dir 또는 scratch)")
 _p_random.add_argument("--record_fps", type=int, default=30, help="viewport MP4 FPS")
 _p_random.add_argument("--record_every", type=int, default=1, help="N step 마다 1 프레임 기록")
+_p_random.add_argument("--record_hdf5", default=None,
+                       help="IsaacLab HDF5 데이터셋 경로(datagen record 모드). --auto_trials>0 + "
+                            "--enable_cameras 필수. 에피소드 = [정지 preroll_s] 이동 pick-place "
+                            "init 복귀 [정지 posthold_s] 자동 종료(termination)")
+_p_random.add_argument("--record_lerobot", default=None,
+                       help="LeRobot v3 직기록 디렉터리(leisaac --use_lerobot_recorder 동형, "
+                            "LeRobotV3DatasetWriter 스트리밍·성공만 저장). **single-env 전용** "
+                            "(--num_envs 1) + --auto_trials + --enable_cameras. "
+                            "⚠ 기존 디렉터리는 덮어씀(overwrite)")
+_p_random.add_argument("--task_description",
+                       default="pick up the cube and place it in the bowl",
+                       help="record_lerobot: LeRobot task 문자열(계약 canonical 기본값)")
+_p_random.add_argument("--preroll_s", type=float, default=2.0,
+                       help="record: 이동 시작 전 정지 구간(초)")
+_p_random.add_argument("--posthold_s", type=float, default=1.0,
+                       help="record: init 복귀 후 정지 유지(초) — 종료 term 의 hold 길이")
 
 _p_fail = _sub.add_parser("fail", parents=[_common], help="sweep 결과의 fail 좌표만 재현")
 _p_fail.add_argument("--results", required=True,
@@ -128,12 +149,29 @@ import sim_to_real  # noqa: F401,E402  (gym.register side effect)
 from isaaclab.utils.math import (  # noqa: E402
     euler_xyz_from_quat, quat_from_euler_xyz, quat_mul, subtract_frame_transforms,
 )
+from isaaclab.managers import DatasetExportMode, SceneEntityCfg  # noqa: E402
+from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_sim_joint_radians  # noqa: E402
+from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCfg  # noqa: E402
 from sim_to_real.tasks.pick_cube import spawn_area as SA  # noqa: E402
+from sim_to_real.tasks.pick_cube.mdp import terminations as pc_term  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import remove_pick_cube_cameras  # noqa: E402
 
 CUBE, BOWL = "Cube1", "Bowl"  # pick_cube leaf scene entity names (single cube + bowl)
+
+
+def _force_done_term(env):
+    """record 모드 전용 driver-제어 종료 — env._force_done_mask 를 그대로 반환.
+
+    plan-fail env(이동 없음 → returned_home 미발화)를 트라이얼 끝에 강제 종료해
+    auto-reset(새 DR 레이아웃 + episode_length_buf 리셋)시키는 용도. 드라이버가 mask 를
+    세팅하고 1 step 후 해제한다.
+    """
+    mask = getattr(env, "_force_done_mask", None)
+    if mask is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return mask
 FIXED_INNER_CENTER = np.array([0.0215, 0.0147, 0.0463], dtype=np.float64)  # fixed-jaw pad center (tcp-frame)
 PAD_LOW_OFF = 0.075  # tcp → fixed-jaw tip approach 거리 (진단 로그용)
 
@@ -399,16 +437,32 @@ def _sweep_summary(cells, n_targets):
 
 
 def _build_env():
-    """pick_cube env 를 SM 규약대로 생성한다(카메라 제거·init 자세 고정·조기종료 해제·뷰포트)."""
+    """pick_cube env 를 SM 규약대로 생성한다(카메라 제거·init 자세 고정·조기종료 해제·뷰포트).
+
+    ``--record_hdf5`` 면 leisaac 방식 datagen record 로 전환: 카메라·시각 DR 유지 +
+    IsaacLab RecorderManager 배선 + 에피소드 규격 termination(자동 종료·success attr).
+    """
+    record_hdf5 = getattr(args, "record_hdf5", None)
+    record_lerobot = getattr(args, "record_lerobot", None)
+    if record_hdf5 and record_lerobot:
+        raise SystemExit("--record_hdf5 와 --record_lerobot 은 동시 사용 불가 (하나만)")
+    record = record_hdf5 or record_lerobot
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
-    remove_pick_cube_cameras(env_cfg)  # SM plans on state only → skip camera spawn/render
-    # SM 은 렌더 없는 state-only → 시각 DR 제거 + 표준 physics 복원. -DR 은 robot-color(Replicator)
-    # 용으로 replicate_physics=False + robot-color/lights/focal 이벤트를 켜는데, 이는 렌더가 있어야
-    # 의미 있고 headless 에선 physx view(get_dof_velocities)를 깨뜨린다. datagen(카메라 경로)은 유지.
-    env_cfg.scene.replicate_physics = True
-    for _ev in ("randomize_robot_color", "randomize_lights", "randomize_camera_focal"):
-        if hasattr(env_cfg.events, _ev):
-            setattr(env_cfg.events, _ev, None)
+    if record:
+        # 카메라 = 기록 대상이므로 유지. AppLauncher 렌더 파이프라인 필수.
+        if not getattr(args, "enable_cameras", False):
+            raise SystemExit("--record_hdf5/--record_lerobot requires --enable_cameras")
+        if record_lerobot and args.num_envs != 1:
+            raise SystemExit("--record_lerobot 은 --num_envs 1 전용 (multi-env 는 --record_hdf5)")
+    else:
+        remove_pick_cube_cameras(env_cfg)  # SM plans on state only → skip camera spawn/render
+        # SM 은 렌더 없는 state-only → 시각 DR 제거 + 표준 physics 복원. -DR 은 robot-color(Replicator)
+        # 용으로 replicate_physics=False + robot-color/lights/focal 이벤트를 켜는데, 이는 렌더가 있어야
+        # 의미 있고 headless 에선 physx view(get_dof_velocities)를 깨뜨린다. datagen(카메라 경로)은 유지.
+        env_cfg.scene.replicate_physics = True
+        for _ev in ("randomize_robot_color", "randomize_lights", "randomize_camera_focal"):
+            if hasattr(env_cfg.events, _ev):
+                setattr(env_cfg.events, _ev, None)
     # Robot spawns AT the start pose from frame 0 (no neutral→init transient), reset jitter zeroed.
     env_cfg.scene.robot.init_state.joint_pos = dict(INIT_RAD)
     if hasattr(env_cfg.events, "reset_robot_joints"):
@@ -419,6 +473,33 @@ def _build_env():
     for _term in ("success", "cube_lost"):
         if hasattr(env_cfg.terminations, _term):
             setattr(env_cfg.terminations, _term, None)
+    if record:
+        # 에피소드 규격 종료: 이동 후 init 복귀 + posthold_s 연속 정지 → auto-reset → export.
+        # success(placed_and_returned) 는 같은 스텝 발화 — stock record_pre_reset 이 attr 로 기록.
+        step_hz = 1.0 / (env_cfg.sim.dt * env_cfg.decimation)
+        hold_steps = max(1, int(round(args.posthold_s * step_hz)))
+        env_cfg.terminations.episode_done = DoneTerm(
+            func=pc_term.returned_home_after_motion, params={"hold_steps": hold_steps})
+        env_cfg.terminations.success = DoneTerm(
+            func=pc_term.placed_and_returned,
+            params={"cube_cfg": SceneEntityCfg(CUBE), "bowl_cfg": SceneEntityCfg(BOWL),
+                    "bowl_tol": args.bowl_tol, "hold_steps": hold_steps})
+        env_cfg.terminations.force_done = DoneTerm(func=_force_done_term)
+        if record_hdf5:
+            # leisaac 방식 recorder: stock RecorderManager (multi-env = env당 demo_N 분리) + datagen term.
+            out = Path(args.record_hdf5)
+            env_cfg.recorders = SO101DatagenRecorderManagerCfg()
+            env_cfg.recorders.dataset_export_dir_path = str(out.parent)
+            env_cfg.recorders.dataset_filename = out.stem
+            env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_ALL  # 실패도 저장(attr 구분)
+            env_cfg.recorders.export_in_close = False  # close 시 잔여(꼬리 쓰레기) 버퍼 export 금지
+        else:
+            # record_lerobot: stock term 만(활성 term ≥1 이어야 success attr 경로가 돎).
+            # EXPORT_NONE = env 생성 시 stock manager 가 파일을 만들지 않게. 이후 main() 이
+            # SO101LeRobotRecorderManager 로 교체(leisaac use_lerobot_recorder 동형).
+            from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
+            env_cfg.recorders = ActionStateRecorderManagerCfg()
+            env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_NONE
     env_cfg.viewer.origin_type = "env"  # env-relative camera (env0 = world origin here)
     env_cfg.viewer.env_index = 0
     env_cfg.viewer.eye = tuple(args.cam_eye)
@@ -429,6 +510,16 @@ def _build_env():
 
 def main():
     env = _build_env()
+    if getattr(args, "record_lerobot", None):
+        # leisaac use_lerobot_recorder 동형: stock manager 를 v3 직기록 manager 로 교체.
+        from sim_to_real.data.lerobot_recorder import LeRobotV3DatasetWriter
+        from sim_to_real.data.lerobot_recorder_manager import SO101LeRobotRecorderManager
+        writer = LeRobotV3DatasetWriter(args.record_lerobot, overwrite=True,
+                                        enable_videos=True, robot_type="so_follower")
+        del env.recorder_manager
+        env.recorder_manager = SO101LeRobotRecorderManager(
+            env.cfg.recorders, env, writer, args.task_description)
+        print(f"[sm] record_lerobot → {args.record_lerobot}", flush=True)
     print(f"[sm] mode={args.mode} env={args.task} action_dim={env.action_space.shape} "
           f"device={env.device}", flush=True)
     robot = env.scene["robot"]
@@ -489,12 +580,11 @@ def main():
         for _ in range(args.settle):
             _step(env, hold)
 
-    def _manipulate(recorder=None, plan_seed=None):
-        """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
+    def _plan_batch(plan_seed=None):
+        """batch plan 요청 + lockstep 텐서 조립. _manipulate/_manipulate_record 공용.
 
-        → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
-        ("done", (n_attempt, n_placed)). plan-fail env 는 init hold(실패 처리),
-        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다."""
+        → (status, plan): "closed"(소켓/앱 종료) · "allfail"(전 env plan 실패) ·
+        "ok" + {"planned": [bool×N], "tgt": (T,N,6) np}. last_manip 갱신."""
         nonlocal last_manip
         cubes, bowls = _cubes_bowls_in_base(env)
         starts = [robot.data.joint_pos[i][so101_idx].tolist() for i in range(env.num_envs)]
@@ -504,8 +594,8 @@ def main():
             req_knobs.setdefault("seed", int(plan_seed))
         if req_knobs:
             req["knobs"] = req_knobs
-        _manipulate.request_i = getattr(_manipulate, "request_i", 0) + 1
-        request_i = _manipulate.request_i
+        _plan_batch.request_i = getattr(_plan_batch, "request_i", 0) + 1
+        request_i = _plan_batch.request_i
         print(f"[sm] send plan_request #{request_i}: envs={env.num_envs} "
               f"cube0={_fmt_vec(cubes[0][:3])} bowl0={_fmt_vec(bowls[0])}", flush=True)
         sock.send_string(json.dumps(req))
@@ -530,7 +620,7 @@ def main():
             print(f"[sm] plan FAIL (all {env.num_envs} envs)", flush=True)
             last_manip["planned"] = [False] * env.num_envs
             last_manip["placed"] = [False] * env.num_envs
-            return "done", (env.num_envs, 0)
+            return "allfail", None
         planned = [t is not None for t in trajs]
         n_steps = max(len(t) for t in trajs if t is not None)
         last_manip["planned"] = [bool(v) for v in planned]
@@ -548,6 +638,20 @@ def main():
                 rows = np.concatenate([rows, np.tile(rows[-1:], (n_steps - len(rows), 1))])
             per_env.append(rows)
         tgt = np.stack(per_env, axis=1)  # (T, N, 6)
+        return "ok", {"planned": planned, "tgt": tgt}
+
+    def _manipulate(recorder=None, plan_seed=None):
+        """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
+
+        → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
+        ("done", (n_attempt, n_placed)). plan-fail env 는 init hold(실패 처리),
+        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다."""
+        status, plan = _plan_batch(plan_seed)
+        if status == "closed":
+            return "closed", None
+        if status == "allfail":
+            return "done", (env.num_envs, 0)
+        planned, tgt = plan["planned"], plan["tgt"]
         success = None
         cube_asset = env.scene[CUBE]
         max_cube_z = (cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]).clone()
@@ -573,9 +677,109 @@ def main():
             print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(ok)}", flush=True)
         return "done", (env.num_envs, n_placed)
 
+    # ══ record 모드 (--record_hdf5): termination-driven 에피소드 + RecorderManager ═══
+    def _force_reset_envs(ids):
+        """이동 없던 env 를 force_done term 으로 1-step 강제 종료 — auto-reset 이 새 DR
+        레이아웃과 episode_length_buf 리셋을 제공한다(time_out 대기·수동 reset 불필요)."""
+        mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        mask[ids] = True
+        env._force_done_mask = mask
+        _step(env, hold)
+        env._force_done_mask = None
+
+    def _manipulate_record(preroll_steps):
+        """record 트라이얼 1회: plan(step 없음=미기록) → 버퍼 폐기+initial_state →
+        pre-roll 정지 → 궤적 replay → 전 env 종료 대기(auto-reset=export). → (status, val)."""
+        rm = env.recorder_manager
+        tm = env.termination_manager
+        status, plan = _plan_batch()
+        if status == "closed":
+            return "closed", None
+        # 기록 시작점 — settle/직전 트라이얼 꼬리/cold-start 프레임 폐기 후 initial_state 재기록
+        # (settle 뒤 스냅샷이라 stock post-reset 시점보다 실제 시작 상태에 더 정확).
+        rm.reset()
+        rm.add_to_episodes("initial_state", env.scene.get_state(is_relative=True))
+        if status == "allfail":
+            _force_reset_envs(list(range(env.num_envs)))  # 1-프레임 잔여는 변환기 최소길이 필터가 제거
+            return "done", (env.num_envs, 0)
+        planned, tgt = plan["planned"], plan["tgt"]
+        planned_t = torch.tensor(planned, dtype=torch.bool, device=env.device)
+        done = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        placed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+        def _step_track(action):
+            nonlocal done, placed
+            _o, _r, term, trunc, _i = _step(env, action)
+            placed = placed | tm.get_term("success")  # 종료 스텝에 발화한 값(auto-reset 전) 누적
+            done = done | term | trunc
+
+        for _ in range(preroll_steps):   # 정지 pre-roll — moved 래치 False 라 종료 미발화
+            _step_track(hold)
+        for step_rows in tgt:            # 이동 → pick-place → retreat(init 복귀) → init hold
+            _step_track(torch.as_tensor(step_rows, device=env.device, dtype=torch.float32))
+        guard = 0
+        while not bool((done | ~planned_t).all()) and simulation_app.is_running():
+            _step_track(hold)            # posthold 종료 대기 (안전망 = time_out 30 s)
+            guard += 1
+            if guard > 1200:
+                print("[sm] record: 종료 대기 초과(1200 steps) — time_out 에 위임", flush=True)
+                break
+        fail_ids = [i for i, p in enumerate(planned) if not p]
+        if fail_ids:
+            rm.reset(fail_ids)           # 이동 없던 버퍼 폐기 후 강제 종료(새 레이아웃)
+            _force_reset_envs(fail_ids)
+        last_manip["placed"] = [bool(v) for v in placed.tolist()]
+        n_placed = int((placed & planned_t).sum().item())
+        for i, p in enumerate(planned):
+            print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(placed[i])} "
+                  f"done={bool(done[i])}", flush=True)
+        return "done", (env.num_envs, n_placed)
+
+    def _run_random_auto_record():
+        """record 자동 루프 — 트라이얼 경계 = termination auto-reset(export). env.reset 은 최초 1회만."""
+        preroll_steps = max(0, int(round(args.preroll_s / env.step_dt)))
+        summary_dir = args.summary_dir or "/workspace/scratch/curobo-auto-trials"
+        record_out = args.record_hdf5 or args.record_lerobot
+        print(f"[sm] record={record_out} auto_trials={args.auto_trials} "
+              f"preroll={preroll_steps} steps posthold={args.posthold_s}s", flush=True)
+        env.reset()                      # 초기 DR 레이아웃 — 이후 경계는 auto-reset
+        trials = []
+        try:
+            for trial_i in range(1, args.auto_trials + 1):
+                if not simulation_app.is_running():
+                    break
+                for _ in range(args.settle):   # 레이아웃 안정(다음 rm.reset 이 폐기)
+                    _step(env, hold)
+                status, val = _manipulate_record(preroll_steps)
+                n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
+                trials.append({"trial": trial_i, "status": status,
+                               "n_attempt": int(n_attempt), "n_placed": int(n_placed),
+                               **last_manip})
+                print(f"[sm] record trial {trial_i}/{args.auto_trials}: status={status} "
+                      f"placed={n_placed}/{n_attempt}", flush=True)
+                if status == "closed":
+                    break
+        finally:
+            summary = {
+                "task": args.task, "num_envs": args.num_envs, "base_seed": args.seed,
+                "record_hdf5": args.record_hdf5, "record_lerobot": args.record_lerobot,
+                "preroll_s": args.preroll_s, "posthold_s": args.posthold_s, "trials": trials,
+            }
+            summary_path = Path(summary_dir) / "summary.json"
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            with summary_path.open("w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+            print(f"[sm] record summary → {summary_path}", flush=True)
+            env.close()                  # recorder/HDF5 파일 정상 close (export_in_close=False)
+
     # ══ mode: random ═════════════════════════════════════════════════════════════
     def run_random():
-        if args.auto_trials > 0:
+        if getattr(args, "record_hdf5", None) or getattr(args, "record_lerobot", None):
+            if args.auto_trials <= 0:
+                raise SystemExit("--record_hdf5/--record_lerobot 은 --auto_trials N(자동 모드) 필수 — "
+                                 "인터랙티브는 에피소드 규격(2s pre-roll) 보장 불가")
+            _run_random_auto_record()
+        elif args.auto_trials > 0:
             _run_random_auto()
         else:
             _run_random_interactive()

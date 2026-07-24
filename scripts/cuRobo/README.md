@@ -59,7 +59,48 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
     --out /workspace/outputs/curobo_sweep/sweep_results.json
 #   시각화(host): uv run --no-sync python scripts/cuRobo/plot_sweep.py \
 #                   --results outputs/curobo_sweep/sweep_results.json
+
+# record — IsaacLab HDF5 데이터 녹화(random --auto_trials 전용, leisaac 방식 RecorderManager)
+docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
+    python /workspace/scripts/cuRobo/pickplace_sm.py random \
+    --task SimToReal-SO101-PickCube-DR-v0 --num_envs 4 --auto_trials 25 \
+    --headless --enable_cameras --record_hdf5 /workspace/datasets/pick_cube_sm.hdf5
+#   변환(Isaac·lerobot 불요): python scripts/convert/isaaclab2lerobotv3.py \
+#     --hdf5_files datasets/pick_cube_sm.hdf5 --output_dir datasets/pick_cube_sm_v3
+
+# record — LeRobot v3 직기록(leisaac --use_lerobot_recorder 동형, single-env 전용·성공만 저장)
+docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
+    python /workspace/scripts/cuRobo/pickplace_sm.py random \
+    --task SimToReal-SO101-PickCube-DR-v0 --num_envs 1 --auto_trials 25 \
+    --headless --enable_cameras --record_lerobot /workspace/datasets/pick_cube_sm_v3
 ```
+
+## record 모드 (`--record_hdf5` / `--record_lerobot`)
+
+`random --auto_trials N` 에서만 동작. 두 백엔드는 에피소드 규격·종료 term 공유:
+
+| | `--record_hdf5` | `--record_lerobot` |
+|---|---|---|
+| 포맷 | IsaacLab HDF5 (사후 `isaaclab2lerobotv3.py` 로 v3 변환) | LeRobot v3 즉시 (`LeRobotV3DatasetWriter`, 변환 불필요) |
+| multi-env | ✅ env당 1 demo(`data/demo_N`) | ❌ `--num_envs 1` 전용 (leisaac 동형 제약) |
+| 저장 범위 | 실패도 저장(`success` attr 로 구분) | **성공 에피소드만** (실패 버퍼 폐기) |
+| 메모리 | 에피소드 동안 이미지 GPU 누적 (~1.2 GB/env/15 s) | step 마다 CPU 스트리밍 (GPU 누적 없음) |
+| 보존 정보 | 전체 씬 state(`states`·`initial_state`, replay/재라벨 가능) | frame(action/state/3-cam)만 |
+| 구현 | stock RecorderManager + `DatagenRecorderTerm` | `SO101LeRobotRecorderManager`(`src/sim_to_real/data/lerobot_recorder_manager.py`) |
+
+⚠ `--record_lerobot` 은 기존 출력 디렉터리를 **덮어쓴다**(overwrite, `record_state_machine` 규약).
+
+- **에피소드 규격**: `[정지 2 s(--preroll_s)] → 이동 → pick-place → init 복귀 → [정지 1 s(--posthold_s)] → 자동 종료`.
+  종료는 termination term(`returned_home_after_motion`)이 발화 → env auto-reset 순간
+  RecorderManager 가 HDF5 로 export. `success` attr = `placed_and_returned`(복귀+그릇 안).
+- **플래닝/cold-start 대기 미포함**: plan ZMQ 블록 중엔 env.step 이 없어 기록 자체가 없고,
+  settle·직전 트라이얼 꼬리 프레임은 pre-roll 직전 `recorder_manager.reset()` 이 폐기한다.
+- **HDF5 내용**: `obs_x/joint_pos`(절대 rad·SO101 순서) · `obs_x/images/{top,wrist,front}`(uint8) ·
+  `applied_target`(slew 통과 적용 target) + stock(initial_state/states/actions/obs/processed_actions).
+- **용량/메모리**: 3-cam 640×480 uint8 @30 Hz ≈ 2.8 MB/frame/env — 15 s 에피소드 ≈ 1.2 GB/env 가
+  auto-reset 까지 GPU 에 누적된다. `--num_envs 4~8` 권장.
+- 트라이얼 단위 seed 재현은 없음(run 전체 `--seed` 1회, 이후 연속 RNG 스트림).
+- 변환은 `scripts/convert/isaaclab2lerobotv3.py`(env-free, success demo 만) → LeRobot v3.
 
 - **키보드**(random·fail, `--livestream` 필수, WebRTC 클라이언트 입력): **N**·**R**·**B** — 위 각 모드 주석.
   R/N 은 manipulation 중에도 = 진행 동작 취소 + 리셋. Ctrl-C·창 닫기로 종료.
