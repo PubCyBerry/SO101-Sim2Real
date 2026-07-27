@@ -171,6 +171,20 @@ def _pre_back(cube):
     return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
 
 
+def _descend_tstar(pre_tcp_z, zaz, cube):
+    """pre-grasp → grasp 하강 거리(approach 축 t, m). table clamp 포함.
+
+    ★게이트(``_grasp_geometry``)와 실행(``plan_pickplace_batch`` ②)이 **같은 값**을 써야 한다 —
+    갈리는 순간 FK 게이트는 실제로 실행되지 않을 자세를 통과시킨다. 그래서 공식은 이 함수 하나뿐.
+    table 은 world obstacle 이 아니라(로봇이 상판 위에 장착 → 전 plan start-collision) 이 clamp 가
+    대신한다: pad 최저점(tcp + PAD_LOW_OFF·ẑ)이 TABLE_TOP+TABLE_MARGIN 아래로 못 내려간다.
+    """
+    tstar = _pre_back(cube)
+    if zaz < -1e-3:  # 하강 중일 때만 clamp 의미 있음
+        tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pre_tcp_z)) / zaz - PAD_LOW_OFF)
+    return tstar
+
+
 def _bowl_ring(bx, by):
     """오목 그릇 rim → hollow octagon ring(BOWL_RING_N× cuboid) dict{name:{dims,pose}}.
     각 box = 다각형 '변'(local-x=radial, quat=Rz(θ)), 배치 반경 RC → 내부 hole+상단 open.
@@ -598,11 +612,8 @@ class PickPlacePlanner:
         quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
         xax, yax, zax = self._quat_axes(quat)  # x=closing, z=approach
         cc = np.array(cube[:3])
-        # descend = pre 서 _pre_back(=pad-at-face-center 조준 backoff, r 적응) 하강, table clamp 동일
-        tstar = _pre_back(cube); zaz = float(zax[2])
-        if zaz < -1e-3:  # 하강 중 — pad 최저점이 table+margin 아래로 못 가게 clamp
-            tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pos[2])) / zaz - PAD_LOW_OFF)
-        grasp_tcp = pos + tstar * zax
+        # descend = 실행 phase ② 와 **같은 함수**로 계산(_descend_tstar 단일 공식)
+        grasp_tcp = pos + _descend_tstar(pos[2], float(zax[2]), cube) * zax
         dx, dy, dz = FIXED_INNER_CENTER
         fixed_inner = grasp_tcp + dx * xax + dy * yax + dz * zax   # FK 실측 pad center(world)
         n_face = np.array(face_normal, dtype=np.float64) if face_normal is not None else xax
@@ -765,6 +776,30 @@ class PickPlacePlanner:
             f"t_ok={abs(fe['t']) <= E_TANGENT_MAX} h_ok={abs(fe['h']) <= E_HEIGHT_MAX}")
         return ok, diag
 
+    @staticmethod
+    def _bias_adjusted_goal(p_i, meta, diag):
+        """clearance(e_normal)만 어긋난 후보 → 실측 오차만큼 pad 조준을 face 쪽으로 민 goal.
+
+        원거리 IK undershoot 는 방향이 일정해(실측 e_norm 5.8~8.5 mm) 1회 bias 보정으로 살아난다.
+        다른 게이트(tangent/height/face_angle/wrist)가 깨진 후보는 **자세 자체가 틀린** 것이라
+        보정 대상이 아니다. 이미 보정된 후보는 재보정하지 않는다(후보 증식 상한 = 2×).
+
+        → (p_adj, meta_adj) 또는 None. batch pass loop·rescue 양쪽이 같은 규칙을 쓴다
+          (예전엔 rescue 에만 있어서 "batch 에서 굶었는가"가 성공 여부를 갈랐다).
+        """
+        if meta.get("aim_corrected_mm") is not None:
+            return None
+        fe = diag.get("fk_face_error", {})
+        if not (abs(fe.get("t", 1.0)) <= E_TANGENT_MAX
+                and abs(fe.get("h", 1.0)) <= E_HEIGHT_MAX
+                and abs(fe.get("face_angle", 90.0)) <= SIMPLE_FACE_GATE_MAX_DEG
+                and abs(diag.get("wrist_delta_deg", 999.0)) <= WRIST_ROLL_DELTA_LIMIT_DEG):
+            return None
+        err = fe.get("n", 0.0) - FIXED_JAW_CLEAR_TARGET
+        n_hat = np.asarray(meta["face_normal"], dtype=np.float64)
+        p_adj = np.asarray(p_i, dtype=np.float64) - err * n_hat
+        return p_adj, {**meta, "aim_corrected_mm": float(err * 1000.0)}
+
     def _wrist_delta_ok(self, q, start):
         wr_idx = self.p.joint_names.index("wrist_roll")
         qpos = q.position.detach()
@@ -797,6 +832,9 @@ class PickPlacePlanner:
         """
         n_env = len(cubes)
         kn = knobs or {}
+        # ⚠ knobs.seed 는 **진단 라벨 전용**이다. cuRobo v0.8 `reset_seed()` 는 인자를 받지 않아
+        #   planner 해를 외부 seed 로 흔들 수 없다(= planning 은 입력에 대해 결정적). SM 은 더 이상
+        #   이 knob 을 보내지 않는다 — 옛 sweep JSON 재현용으로 받기만 한다.
         seed = kn.get("seed")
         max_attempts = 4       # R1: 2→4 (attempt 마다 Halton seed 전진=다양성, D1)
         rescue_attempts = 6    # R1: 동질 rescue batch 는 더 넓게(6) — 굶긴 원거리 row 구제
@@ -807,7 +845,6 @@ class PickPlacePlanner:
             cands = self._manifold_candidates(cube, faces, kn)
             per_env.append(list(cands[:self.max_goalset]))
 
-        max_pass = max((len(c) for c in per_env), default=0)
         trajs = [None] * n_env
         ends = [JointState.from_position(starts.position[i: i + 1].detach().clone(),
                                          joint_names=self.p.joint_names)
@@ -820,7 +857,12 @@ class PickPlacePlanner:
         ok_mask = [False] * n_env
         plan_ms = 0.0
         plan_calls = 0
-        for pass_idx in range(max_pass):
+        # pass 수는 후보 수에 따라 자란다: clearance 만 어긋난 후보는 bias 보정본을 **같은 env 의
+        # 후보 목록 뒤에 덧붙여** 다음 pass(어차피 도는 batch)에 태운다 → 추가 plan 호출 0.
+        # (rescue 전용이던 보정을 batch 경로에도 동일 규칙으로 적용 — B4)
+        pass_idx = -1
+        while True:
+            pass_idx += 1
             active = [i for i in range(n_env) if not ok_mask[i] and pass_idx < len(per_env[i])]
             if not active:
                 break
@@ -877,6 +919,11 @@ class PickPlacePlanner:
                     trajs[i] = traj
                     ends[i] = end
                     ok_mask[i] = True
+                else:
+                    adj = self._bias_adjusted_goal(pos[i], meta, diag)
+                    if adj is not None:  # clearance 만 어긋남 → 보정본을 뒤 pass 후보로 추가
+                        p_adj, meta_adj = adj
+                        per_env[i].append((p_adj, quat[i], meta_adj))
             if all(ok_mask):
                 break
 
@@ -928,20 +975,12 @@ class PickPlacePlanner:
                 ok, diag = self._gate_candidate(
                     end, start_row, cubes[i], cube_quats[i], meta, cand_idx,
                     len(per_env[i]), seed_i, rescue=True)
-                fe = diag.get("fk_face_error", {})
-                if (not ok
-                        and abs(fe.get("t", 1.0)) <= E_TANGENT_MAX
-                        and abs(fe.get("h", 1.0)) <= E_HEIGHT_MAX
-                        and abs(fe.get("face_angle", 90.0)) <= SIMPLE_FACE_GATE_MAX_DEG
-                        and abs(diag.get("wrist_delta_deg", 999.0)) <= WRIST_ROLL_DELTA_LIMIT_DEG):
-                    # clearance 만 깨짐 = 원거리 IK undershoot(실측 e_norm 5.8~8.5mm, 방향 일정)
-                    # → 실측 오차만큼 pad 조준을 face 쪽으로 이동해 1회 재시도(bias correction).
-                    err = fe.get("n", 0.0) - FIXED_JAW_CLEAR_TARGET
-                    n_hat = np.asarray(meta["face_normal"], dtype=np.float64)
-                    p_adj = np.asarray(p_i, dtype=np.float64) - err * n_hat
+                adj = None if ok else self._bias_adjusted_goal(p_i, meta, diag)
+                if adj is not None:
+                    # rescue 는 어차피 env 단위 순차라 즉시 재시도가 싸다(batch 경로는 뒤 pass 에 태움).
+                    p_adj, meta_adj = adj
                     traj2, end2 = _dup_plan(p_adj, q_i)
                     if traj2 is not None:
-                        meta_adj = {**meta, "aim_corrected_mm": float(err * 1000.0)}
                         ok2, diag2 = self._gate_candidate(
                             end2, start_row, cubes[i], cube_quats[i], meta_adj,
                             cand_idx, len(per_env[i]), seed_i, rescue=True)
@@ -1139,34 +1178,44 @@ class PickPlacePlanner:
             cubes, face_sets, cube_quats, starts, kn)
         profile.update(pre_prof)
 
-        # ② GRASP descend.
+        # ② GRASP descend + ③ LIFT.
+        # knob 으로 큐브 obstacle 을 끄면 **이 구간에서만** 꺼져야 한다 → finally 복원.
+        # (옛 코드는 끄기만 하고 안 켜서 이후 phase·다음 요청까지 상태가 샜다. approach 경로는
+        #  이미 같은 try/finally 규약을 쓴다 — 두 경로를 맞춘다.)
         if cube_off_pick_contact:
             self._set_cube_obstacle_enabled(False, n_env)
-        app, aq, zaxes = self._ee_pose_axis_batch(q_pre)
-        gpos, tstars = [], []
-        for i, (cube, zax) in enumerate(zip(cubes, zaxes)):
-            tstar = _pre_back(cube)
-            zaz = float(zax[2])
-            if zaz < -1e-3:
-                tstar_cap = (TABLE_TOP + TABLE_MARGIN - float(app[i, 2])) / zaz - PAD_LOW_OFF
-                tstar = min(tstar, tstar_cap)
-            tstars.append(tstar)
-            gpos.append(app[i] + tstar * zax)
-        t0 = time.perf_counter()
-        desc_planned = self._plan_to_batch(self._pose_batch(np.asarray(gpos), aq), q_pre, n_env, linear=True)
-        profile["grasp_plan_ms"] = (time.perf_counter() - t0) * 1000.0
-        q_grasp, grasp_ok = self._merge_phase_ends(desc_planned, q_pre, pre_ok)
+        try:
+            app, aq, zaxes = self._ee_pose_axis_batch(q_pre)
+            gpos, tstars = [], []
+            for i, (cube, zax) in enumerate(zip(cubes, zaxes)):
+                tstar = _descend_tstar(app[i, 2], float(zax[2]), cube)  # 게이트와 동일 공식
+                tstars.append(tstar)
+                gpos.append(app[i] + tstar * zax)
+            t0 = time.perf_counter()
+            desc_planned = self._plan_to_batch(self._pose_batch(np.asarray(gpos), aq), q_pre,
+                                               n_env, linear=True)
+            profile["grasp_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+            q_grasp, grasp_ok = self._merge_phase_ends(desc_planned, q_pre, pre_ok)
 
-        # ③ LIFT.
-        up = np.asarray([gpos[i] - min(tstars[i], LIFT_BACK) * zaxes[i] for i in range(n_env)])
-        t0 = time.perf_counter()
-        lift_planned = self._plan_to_batch(self._pose_batch(up, aq), q_grasp, n_env, linear=True)
-        profile["lift_plan_ms"] = (time.perf_counter() - t0) * 1000.0
-        q_lift, lift_ok = self._merge_phase_ends(lift_planned, q_grasp, grasp_ok)
+            up = np.asarray([gpos[i] - min(tstars[i], LIFT_BACK) * zaxes[i] for i in range(n_env)])
+            t0 = time.perf_counter()
+            lift_planned = self._plan_to_batch(self._pose_batch(up, aq), q_grasp, n_env, linear=True)
+            profile["lift_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+            q_lift, lift_ok = self._merge_phase_ends(lift_planned, q_grasp, grasp_ok)
+        finally:
+            if cube_off_pick_contact:
+                self._set_cube_obstacle_enabled(True, n_env)
 
         attached = False
+        attach_failed = False
         if any(lift_ok):
             attached = self._attach_cube(q_lift)
+            # attach 실패 = transit 을 "잡은 큐브 부피 없이" 계획한다는 뜻 → 조용히 넘기지 않는다.
+            attach_failed = not attached
+            if attach_failed:
+                print("[planner] ⚠ attach_cube FAILED — transit 이 큐브 부피 없이 계획됨"
+                      "(그릇 rim 스침 위험). diag: attach_failed=true", flush=True)
+                self._diag("[attach] FAILED — transit planned without grasped cube volume")
 
         # ④ TRANSIT: env별 bowl 상공 FK-bank goalset.
         fk_pos, fk_quat, _ = self._ee_pose_axis_batch(q_lift)
@@ -1215,9 +1264,17 @@ class PickPlacePlanner:
             diagnostics[i]["candidate"] = cand_diag[i]
             diagnostics[i]["approach_fail"] = cand_diag[i].get("fail") if cand_diag[i] else None
             diagnostics[i]["num_candidates"] = cand_diag[i].get("num_candidates", 0) if cand_diag[i] else 0
-            diagnostics[i]["fail"] = diagnostics[i]["approach_fail"]
+            # fail = **처음 실패한 phase**. 옛 코드는 approach 사유만 실었는데, grasp/lift/
+            # transit/retreat 에서 죽은 env 는 fail=None 이 돼 sweep 집계가 approach 로 편향됐다.
+            first_bad = next((name for name, good in phases.items() if not good), None)
+            diagnostics[i]["fail"] = (
+                (diagnostics[i]["approach_fail"] or "approach_plan_failed")
+                if first_bad == "approach"
+                else (f"{first_bad}_plan_failed" if first_bad else None))
+            diagnostics[i]["failed_phase"] = first_bad
             diagnostics[i]["phases"] = phases
             diagnostics[i]["attached"] = bool(attached)
+            diagnostics[i]["attach_failed"] = bool(attach_failed)
             diagnostics[i]["profile_ms"] = {k: float(v) for k, v in profile.items()}
             ok = all(phases.values())
             diagnostics[i]["ok"] = ok
