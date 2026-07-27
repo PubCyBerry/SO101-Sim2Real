@@ -66,6 +66,10 @@ _common.add_argument("--settle", type=int, default=5, help="physics steps to set
 _common.add_argument("--bowl_tol", type=float, default=0.06,
                      help="success = cube-center within this xy radius of bowl center (m)")
 _common.add_argument("--seed", type=int, default=0, help="base seed for reset/plan")
+_common.add_argument("--plan_timeout_s", type=float, default=900.0,
+                     help="planner 응답 대기 상한(초). 초과 시 해당 batch 를 plan-fail 로 기록하고 "
+                          "소켓 재연결 후 진행한다(planner 사망 시 headless sweep 무한 정지 방지). "
+                          "0 = 무제한")
 _common.add_argument("--planner_knobs_json", default=None,
                      help="JSON object forwarded to cuRobo planner request.knobs")
 _common.add_argument("--log_every", type=int, default=0,
@@ -135,6 +139,7 @@ simulation_app = app_launcher.app
 import faulthandler  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
+import time  # noqa: E402
 import traceback  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -440,19 +445,6 @@ def _restore_layout(env, layout):
         obj.write_root_velocity_to_sim(torch.zeros((env.num_envs, 6), device=env.device))
 
 
-# ══ planner request/reply ═════════════════════════════════════════════════════════
-def _recv_plan(sock, poller):
-    """Block for the planner reply while KEEPING the Kit app pumping — else the app freezes
-    during the (multi-second) plan and the WebRTC livestream stops accepting input. The
-    short 2 ms poll timeout keeps the wait render-bound (~30 FPS), not poll-bound. Returns
-    None if the window is closed."""
-    while not poller.poll(2):
-        if not simulation_app.is_running():
-            return None
-        simulation_app.update()
-    return json.loads(sock.recv())
-
-
 def _sweep_summary(cells, n_targets):
     """sweep 셀 집계 + 스폰영역 기하 메타 → plot_sweep 가 읽는 JSON dict."""
     return {
@@ -572,11 +564,11 @@ class PickPlaceSM:
         self.hold = torch.tensor(INIT_ACTION, device=env.device,
                                  dtype=torch.float32).repeat(env.num_envs, 1)  # (N,6) init hold
 
-        self.sock = zmq.Context().socket(zmq.REQ)
-        self.sock.connect(args.planner)
+        self.zmq_ctx = zmq.Context()
+        self.sock = None
         self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLIN)
-        print(f"[sm] planner {args.planner}", flush=True)
+        self._connect_planner()
+        print(f"[sm] planner {args.planner} (plan_timeout={args.plan_timeout_s}s)", flush=True)
 
         interactive = (args.mode == "fail" and not getattr(args, "auto", False)) \
             or (args.mode == "random" and args.auto_trials == 0)
@@ -587,6 +579,34 @@ class PickPlaceSM:
         self.planner_knobs = json.loads(args.planner_knobs_json) if args.planner_knobs_json else None
         if self.planner_knobs is not None and not isinstance(self.planner_knobs, dict):
             raise ValueError("--planner_knobs_json must decode to a JSON object")
+
+    # ── planner 소켓 ─────────────────────────────────────────────────────────────
+    def _connect_planner(self):
+        """REQ 소켓 (재)생성. REQ 는 send→recv 를 엄격히 번갈아야 해서, 응답을 못 받은 소켓은
+        재사용이 불가능하다 → 타임아웃 뒤에는 버리고 새로 만든다."""
+        if self.sock is not None:
+            self.poller.unregister(self.sock)
+            self.sock.close(linger=0)
+        self.sock = self.zmq_ctx.socket(zmq.REQ)
+        self.sock.connect(args.planner)
+        self.poller.register(self.sock, zmq.POLLIN)
+
+    def _recv_plan(self):
+        """planner 응답 대기 — Kit 앱을 계속 pump 하면서(안 그러면 plan 동안 앱이 얼고
+        WebRTC livestream 이 입력을 못 받는다). 2 ms poll 이라 대기는 render-bound(~30 FPS).
+
+        → ("ok", reply) · ("closed", None) 창 닫힘 · ("timeout", None) deadline 초과.
+        타임아웃이 없으면 planner 가 죽었을 때 headless sweep 이 **영원히** 멈춘다(무인 실행
+        최대 리스크). --plan_timeout_s 0 = 무제한(옛 동작).
+        """
+        t0 = time.monotonic()
+        while not self.poller.poll(2):
+            if not simulation_app.is_running():
+                return "closed", None
+            if args.plan_timeout_s > 0 and (time.monotonic() - t0) > args.plan_timeout_s:
+                return "timeout", None
+            simulation_app.update()
+        return "ok", json.loads(self.sock.recv())
 
     # ── 씬 조작 primitives ────────────────────────────────────────────────────────
     def reset(self, which, seed=None, recorder=None):
@@ -652,9 +672,20 @@ class PickPlaceSM:
         print(f"[sm] send plan_request #{request_i}: envs={env.num_envs} "
               f"cube0={_fmt_vec(cubes[0][:3])} bowl0={_fmt_vec(bowls[0])}", flush=True)
         self.sock.send_string(json.dumps(req))
-        rep = _recv_plan(self.sock, self.poller)
-        if rep is None:
+        status, rep = self._recv_plan()
+        if status == "closed":
             return "closed", None
+        if status == "timeout":
+            print(f"[sm] ⚠ planner TIMEOUT ({args.plan_timeout_s}s) — 요청 #{request_i} 포기, "
+                  f"소켓 재연결 후 다음 batch 로 진행 (planner 로그 확인)", flush=True)
+            self._connect_planner()
+            self.last_manip = {
+                "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
+                "planner_ok": False, "planner_err": "timeout", "diagnostics": [],
+                "planned": [False] * env.num_envs, "placed": [False] * env.num_envs,
+                "n_steps": 0,
+            }
+            return "allfail", None
         print(f"[sm] recv plan_reply #{request_i}: ok={bool(rep.get('ok'))}", flush=True)
         if not rep.get("ok"):
             print(f"[sm] planner ERROR: {rep.get('err')}", flush=True)

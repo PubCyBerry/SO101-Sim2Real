@@ -42,6 +42,7 @@ import json
 import math
 import tempfile
 import time
+import traceback
 
 import numpy as np
 import torch
@@ -1357,26 +1358,42 @@ def plan_batch(pl, req):
 
 
 def serve_loop(pl, sock):
+    """REQ/REP 서비스 루프.
+
+    ★불변식: **받은 요청에는 반드시 답한다.** REP 를 한 번 빠뜨리면 클라이언트(SM)는 영원히
+    블록된다 — 그래서 처리 전체를 try 로 감싸고 예외도 `{"ok":false,"err":...}` 로 응답한다.
+    (옛 코드는 plan 예외가 그대로 올라와 planner 프로세스가 죽고 SM 은 무한 대기했다.)
+    """
     request_i = 0
     while True:
-        req = json.loads(sock.recv())
-        cmd = req.get("cmd")
-        if cmd == "ping":
-            sock.send_string(json.dumps({"ok": True}))
-        elif cmd == "plan_pickplace":
-            request_i += 1
-            n_env = len(req.get("cubes") or [])
-            print(f"[planner] recv plan_pickplace #{request_i}: envs={n_env}", flush=True)
-            trajs, diagnostics = plan_batch(pl, req)
-            ok_count = sum(1 for t in trajs if t is not None)
-            fails = [d.get("fail") for d in diagnostics]
-            print(f"[planner] done plan_pickplace #{request_i}: planned={ok_count}/{n_env} "
-                  f"fails={fails}", flush=True)
-            sock.send_string(json.dumps({"ok": True, "trajectories": trajs, "diagnostics": diagnostics}))
-        elif cmd == "shutdown":
-            sock.send_string(json.dumps({"ok": True})); return
-        else:
-            sock.send_string(json.dumps({"ok": False, "err": f"unknown {cmd!r}"}))
+        raw = sock.recv()
+        stop = False
+        try:
+            req = json.loads(raw)
+            cmd = req.get("cmd")
+            if cmd == "ping":
+                rep = {"ok": True}
+            elif cmd == "plan_pickplace":
+                request_i += 1
+                n_env = len(req.get("cubes") or [])
+                print(f"[planner] recv plan_pickplace #{request_i}: envs={n_env}", flush=True)
+                trajs, diagnostics = plan_batch(pl, req)
+                ok_count = sum(1 for t in trajs if t is not None)
+                fails = [d.get("fail") for d in diagnostics]
+                print(f"[planner] done plan_pickplace #{request_i}: planned={ok_count}/{n_env} "
+                      f"fails={fails}", flush=True)
+                rep = {"ok": True, "trajectories": trajs, "diagnostics": diagnostics}
+            elif cmd == "shutdown":
+                rep, stop = {"ok": True}, True
+            else:
+                rep = {"ok": False, "err": f"unknown {cmd!r}"}
+        except Exception as exc:  # noqa: BLE001 — 어떤 예외든 응답은 나가야 한다
+            traceback.print_exc()
+            rep = {"ok": False, "err": f"{type(exc).__name__}: {exc}"}
+            PickPlacePlanner._diag(f"[serve] EXCEPTION {rep['err']}\n{traceback.format_exc()}")
+        sock.send_string(json.dumps(rep))
+        if stop:
+            return
 
 
 def self_check_geom():
