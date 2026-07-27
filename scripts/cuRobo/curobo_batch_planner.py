@@ -106,7 +106,9 @@ TCP_TWIST_RY = -0.0486795
 # wrist 를 base 쪽으로 당김(원거리 2R 해소), -α=반대(근거리 최소반경 해소).
 ALPHA_SCAN_DEG = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0,
                   30.0, -30.0, 35.0, -35.0, 40.0, -40.0, 45.0, -45.0, 50.0, -50.0]
-TAU_MAX_DEG = 10.0  # 결합 게이트 상한(knobs.tau_max_deg 로 조정) — pink 기본과 동일
+# 결합 게이트 |Δψ·tanα| 상한(knobs.tau_max_deg 로 조정). 전 도달구간 상수 —
+# 옛 reach-adaptive 램프(10°→25°)의 최대치를 그대로 상수화했다(_manifold_candidates 주석 참조).
+TAU_MAX_DEG = 25.0
 # ★worst-yaw wrist-cap: |Δψ| 큰 셀서 auto ρ=-Δψ/cosα 가 |ρ| 크면 wrist_roll 을 위험대로 밀어
 # grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL).
 # 54-sphere 모델 targeted replay(8건): cap 12/14/16/18° = 5/6/7/8 성공. 다만 18°는
@@ -121,6 +123,10 @@ CHORD_CENTER_RATIO = 0.5
 # ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
 # 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
 # per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
+# pan/ρ 고정점 수렴 판정. 옛 "5회 고정" 대체 — 반복 상한은 넉넉히 두고 실제 종료는 잔차로 본다
+# (근거리 셀은 감쇠진동 ~0.3/iter 라 5회면 대개 충분했지만, 못 붙는 케이스가 조용히 통과했다).
+PAN_FIXPOINT_TOL = 1e-4      # rad (≈0.006°) — pan 갱신량·closing 방위 잔차 공통 문턱
+PAN_FIXPOINT_MAX_ITER = 12
 SIMPLE_FACE_GATE_MAX_DEG = 40.0  # FK gate 안전망: solver XY face_angle 허용 절댓값
 WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
@@ -174,6 +180,32 @@ def _pre_back(cube):
     r = math.hypot(cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1])
     t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
     return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
+
+
+def _assert_pre_back_clears_cube(max_cube_half=0.025, clear=0.005):
+    """로드시 1-check: 최소 pre-back(PRE_BACK_MIN)이 **jaw tip 을 큐브 위로 띄우는가**.
+
+    ``_pre_back`` 의 r-램프는 도달거리별 planning 여유를 담은 실측 튜닝이지만, 그 존재 이유는
+    "pre-grasp 자세에서 fixed jaw tip 이 큐브 obstacle 위에 있어야 approach 를 jaw-collision ON
+    으로 계획할 수 있다"는 기하 조건이다. 그 조건은 **큐브 크기에 의존**하는데 램프 공식에는
+    큐브 크기가 안 들어간다 → 큐브를 키우면 조용히 조건이 깨진다.
+
+    pre 자세 jaw tip 고도 = tcp_tgt_z + (t − PAD_LOW_OFF)·cosα, tcp_tgt_z − cube_top
+    = FIXED_INNER_CENTER[2] − half (조준식에서 pad center 가 face center 높이에 오므로).
+    ⇒ 필요한 t ≥ PAD_LOW_OFF − (FIXED_INNER_CENTER[2] − half − clear)/cosα.
+    cosα ≤ 1 이라 α=0(top-down)이 최악 — 그 값으로 검사한다.
+
+    ponytail: 램프를 이 유도식으로 **대체**하지 않는다. 실측상 필요치(≈59 mm @50 mm 큐브)가
+    PRE_BACK_MIN(60 mm)보다 작아 램프가 이미 조건을 만족하고, 램프는 그 위에 원거리 planning
+    여유까지 담고 있어 교체하면 근거 없는 회귀 위험만 산다. 조건이 깨지면 여기서 터뜨린다.
+    """
+    need = PAD_LOW_OFF - (FIXED_INNER_CENTER[2] - max_cube_half - clear)
+    assert PRE_BACK_MIN >= need, (
+        f"PRE_BACK_MIN {PRE_BACK_MIN:.3f}m < jaw-tip clearance 필요치 {need:.3f}m "
+        f"(cube half {max_cube_half}, clear {clear}) — pre-grasp 서 jaw 가 큐브에 박힌다")
+
+
+_assert_pre_back_clears_cube()
 
 
 def _descend_tstar(pre_tcp_z, zaz, cube):
@@ -352,9 +384,14 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
     pan = math.atan2(cc[1] - PAN_AXIS_XY[1], cc[0] - PAN_AXIS_XY[0])
     fic = np.array(FIXED_INNER_CENTER, dtype=np.float64)
     rho_corr = 0.0
-    # 5회: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 고정점이 감쇠진동(~0.3/iter)
-    # — 3회론 pan 오차 ~0.8° 잔존.
-    for _ in range(5):
+    # 고정점 반복: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 이 감쇠진동(~0.3/iter)한다.
+    # 옛 코드는 "5회" 고정이었다(3회면 ~0.8° 잔차라는 실측 근거) — 횟수 대신 **수렴 조건**으로
+    # 바꾼다: |Δpan| 이 PAN_FIXPOINT_TOL 아래로 떨어지면 멈추고, 상한 안에 못 들면 후보를 버린다
+    # (미수렴 후보를 그대로 쓰면 조용히 manifold 밖 pose 가 나간다).
+    converged = False
+    resid = 0.0
+    for _ in range(PAN_FIXPOINT_MAX_ITER):
+        pan_prev = pan
         dpsi = wrap90(psi - (pan + math.pi / 2.0))
         raw_rho = -dpsi / math.cos(a)
         capped = abs(raw_rho) > rho_cap_rad   # ★worst-yaw wrist-cap: |ρ| 제한(상수/knob)
@@ -366,6 +403,7 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         # ρ 잔차 feedback: -Δψ/cosα 는 1차 근사 + TCP twist 가 closing 수평방위를 α 비례로
         # 끌어당김(α=50° 서 ~1.7°) → 실측 closing 방위 잔차를 다음 반복 ρ 에 흡수(수렴 <0.1°).
         # d(closing_az)/dρ = -cosα 이므로 잔차 상쇄 부호는 +.
+        resid = 0.0
         if not capped:  # capped 셀은 의도적 미스얼라인 — 정렬 feedback 안 함
             resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
             rho_corr += resid / math.cos(a)
@@ -381,6 +419,12 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
                       + tangent_shift * face_tangent)
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
+        d_pan = math.atan2(math.sin(pan - pan_prev), math.cos(pan - pan_prev))
+        if abs(d_pan) < PAN_FIXPOINT_TOL and abs(resid) < PAN_FIXPOINT_TOL:
+            converged = True
+            break
+    if not converged:
+        return None   # 고정점 미수렴 → manifold 밖 pose 를 조용히 내보내지 않는다
     if abs(dpsi) * abs(math.tan(a)) > tau:
         return None
     pre_pos = tcp_tgt - _pre_back(xyz) * R[:, 2]
@@ -718,13 +762,14 @@ class PickPlacePlanner:
         rho_cap_rad = math.radians(float(kn.get("rho_cap_deg", RHO_CAP_DEG)))
         chord_center_ratio = float(kn.get("chord_center_ratio", CHORD_CENTER_RATIO))
         pan_r = math.hypot(float(xyz[0]) - PAN_AXIS_XY[0], float(xyz[1]) - PAN_AXIS_XY[1])
-        # R2: reach-adaptive τ (D2) — 근<0.16·원>0.22 극단서 0→1 램프로 τ 10°→최대 25° 완화.
-        # correct-frame 실패셀 r_pan: NEAR 0.11·FAR 0.24~0.28. FK 게이트가 grasp 품질을
-        # 독립보장하므로 τ 확대는 후보 수만 늘리고 나쁜 후보는 게이트가 거른다(안전).
-        # R2': far 0.24→0.22 — marginal far 셀(r=0.246, (0.168,0.180))이 0.24 에 겨우 걸려
-        # τ 미완화이던 것 보정. probe 검증 +1 회복·succ_far 54/54 무회귀.
-        reach_edge = max(0.0, (0.16 - pan_r) / 0.06, (pan_r - 0.22) / 0.06)
-        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)) + min(1.0, reach_edge) * 15.0)
+        # τ 는 상수다. 예전에는 도달반경 r 에 따라 10°→25° 로 여는 램프(R2/R2')를 썼는데,
+        # 그 임계값(0.16/0.22/0.06)은 실패한 **개별 셀**에 맞춰 옮겨진 값이었다(주석 이력에
+        # r=0.246 셀 하나 때문에 0.24→0.22 로 당긴 기록이 남아 있었다).
+        # 램프의 근거였던 "τ 를 열어도 안전하다"는 논리는 r 과 무관하다 — 나쁜 후보는 FK 게이트가
+        # 독립적으로 거르고, τ 는 후보 **수**만 늘린다. 그래서 전 구간 최대치로 고정한다.
+        # 우선순위(|α| 오름차순)는 그대로라 기존에 통과하던 셀의 선택 후보는 바뀌지 않고,
+        # 후보를 다 소진하던 셀에만 추가 시도가 생긴다.
+        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)))
         cands = []
         for a_deg in ALPHA_SCAN_DEG:
             cand = cand_pose_manifold(
