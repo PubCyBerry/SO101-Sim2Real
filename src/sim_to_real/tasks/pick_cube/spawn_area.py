@@ -25,6 +25,10 @@ CUBE_SCATTER_Y_RANGE: tuple[float, float] = (0.06, 0.26)
 # 로봇암 주변 제외 박스 (x0,x1,y0,y1) env-local — full·base 공통.
 CUBE_ARM_EXCLUDE: tuple[float, float, float, float] = (-0.09, 0.04, -0.045, 0.155)
 # 배치 거리 제약 (Cube1 40mm) — env_cfg._make_randomize_cubes 인자와 동일 소스.
+# ⚠ nominal(default) 그릇 좌표. sweep/plot 은 그릇을 nominal 고정(_reset_to_targets)이라 이게 맞다.
+#   단 runtime DR(randomize_cubes)은 **실제(post-DR) 그릇** 기준으로 rejection 하도록 고쳤으므로
+#   그릇이 arc DR 된 env 에선 in_spawn_area(nominal)와 발산한다(runtime 이 더 엄격). sweep=고정,
+#   runtime=실좌표. 상세=domain_randomization._randomize_cubes_scattered_fn docstring.
 BOWL_CENTER_XY: tuple[float, float] = (-0.22, 0.265)  # bowl default (env-local)
 MIN_BOWL_SEP: float = 0.14
 BASE_XY: tuple[float, float] = (0.0, 0.0)  # robot base_link 마운트 원점 (env-local) — plot 마커/meta

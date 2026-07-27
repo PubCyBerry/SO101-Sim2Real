@@ -213,9 +213,12 @@ def _randomize_cubes_scattered_fn(
     샘플하고, ``z_range`` 로 살짝 띄워 떨궈 random face 로 안착하게 한다. (face 가 매
     reset 마다 달라짐 — sim2real 다양성.)
 
-    bowl 의 DR 은 이 함수 실행 전(reset_scene → randomize_bowl 순서)에 완료되지
-    않으므로 bowl 기준점으로는 default_root_state 를 사용하고, min_bowl_sep 에
-    bowl arc 이동량(≈0.05 m)을 흡수할 여유를 두어야 한다.
+    bowl 기준점 = **실제(post-DR) 그릇 xy**. ``randomize_bowl`` 을 이 term 앞에 배치
+    (EventCfg 선언순서 = EventManager 적용순서)하고, ``write_root_pose_to_sim`` 이
+    ``root_pose_w`` 를 물리스텝 없이 즉시 갱신하므로 실제 그릇좌표를 읽어 rejection 한다.
+    (옛 방식=default_root_state[nominal] → 그릇 arc 이동으로 ``min_bowl_sep`` 불변식이
+    사후 파괴됨: cube-bowl 0.126<0.14 스폰 → transit 계획 실패. randomize_bowl 없는
+    config 면 root_pos_w == nominal 이라 무해.)
     """
     n = len(env_ids)
     if n == 0:
@@ -236,7 +239,9 @@ def _randomize_cubes_scattered_fn(
         bell_ws = torch.tensor([p[1] for p in bp], device=device, dtype=torch.float32)
 
     bowl_asset: RigidObject = env.scene[bowl_cfg.name]
-    bowl_default_xy = bowl_asset.data.default_root_state[env_ids, :2]  # (n, 2) env-local
+    # 실제(post-DR) 그릇 xy(env-local) — randomize_bowl 이 앞서 적용됨(EventCfg 선언순서).
+    # world(root_pos_w) − env_origin = env-local. randomize_bowl 없는 config 면 nominal 과 동일(무해).
+    bowl_xy = bowl_asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2]  # (n, 2)
 
     # robot base 최소 이격: base 발치(inner-reach)는 안전고도 접근 IK 가 없어
     # 어떤 컨트롤러도 수행 불가 — spawn 자체를 막는다.
@@ -313,7 +318,7 @@ def _randomize_cubes_scattered_fn(
                 ok0 = ok0 & ~in_box
 
             # 그릇 최소 거리 확인 (큐브 크기 대응 이격)
-            bxy = bowl_default_xy[idx]
+            bxy = bowl_xy[idx]
             ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq)
 
             # robot base 최소 거리 확인 (inner-reach spawn 금지)

@@ -552,11 +552,11 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
     ``PickCubeDRBaseEventCfg`` (nominal 주변 좁은 사각형).
     """
 
-    # full 모드: 좌우대칭 종모양 스폰 + 로봇암 제외 + 그릇/큐브/base 이격.
-    randomize_cubes = _make_randomize_cubes(
-        _CUBE_SCATTER_X_RANGE, _CUBE_SCATTER_Y_RANGE, _CUBE_SCATTER_BELL
-    )
-
+    # ★그릇 DR 을 큐브 배치보다 **먼저** 선언 = EventManager 가 먼저 적용(cfg.__dict__ 순서).
+    #   그래야 randomize_cubes 의 min_bowl_sep rejection 이 실제(post-DR) 그릇좌표를 본다.
+    #   순서 뒤집으면(옛 방식) cube 가 nominal 그릇 기준으로 배치된 뒤 그릇이 arc 이동 →
+    #   cube-bowl 이 사후 min_bowl_sep 미만이 돼 transit 계획이 실패한다(64 env 중 1개 재현).
+    #
     # 그릇 호(arc) 랜덤화 범위는 두 기하 제약으로 결정된다.
     #
     # 제약 A — 매트 왼쪽 경계(world x=-0.34):
@@ -570,6 +570,12 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
     #   Cube3 최악 위치 (-0.05, 0.235) 기준 임계 각도 풀면 9.48°.
     #   → 안전 여유 포함 오른쪽 한계 +8°
     randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
+
+    # full 모드: 좌우대칭 종모양 스폰 + 로봇암 제외 + 그릇/큐브/base 이격.
+    # (그릇 이격 = 위 randomize_bowl 적용 후의 **실제** 그릇 xy 기준 — 선언순서가 곧 적용순서.)
+    randomize_cubes = _make_randomize_cubes(
+        _CUBE_SCATTER_X_RANGE, _CUBE_SCATTER_Y_RANGE, _CUBE_SCATTER_BELL
+    )
 
     # 시각 DR(reset, sim2real): 라이트 밝기·색온도 + 카메라 focal + 로봇 plastic 색.
     # 카메라 리그 없으면 focal 은 no-op. shader 없으면 robot color 도 no-op.
