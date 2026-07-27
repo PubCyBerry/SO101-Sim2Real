@@ -154,6 +154,9 @@ from isaaclab.managers import DatasetExportMode, SceneEntityCfg  # noqa: E402
 from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_sim_joint_radians  # noqa: E402
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER  # noqa: E402
+from so101_contract.grasp_geometry import PAD_LOW_OFF  # noqa: E402
+from sim_to_real.utils.cube_specs import CUBE_HALF_EXTENTS  # noqa: E402
 from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCfg  # noqa: E402
 from sim_to_real.tasks.pick_cube import spawn_area as SA  # noqa: E402
 from sim_to_real.tasks.pick_cube.mdp import terminations as pc_term  # noqa: E402
@@ -173,8 +176,10 @@ def _force_done_term(env):
     if mask is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     return mask
-FIXED_INNER_CENTER = np.array([0.0215, 0.0147, 0.0463], dtype=np.float64)  # fixed-jaw pad center (tcp-frame)
-PAD_LOW_OFF = 0.075  # tcp → fixed-jaw tip approach 거리 (진단 로그용)
+# jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(planner 와 같은 값을 공유).
+FIXED_INNER_CENTER = np.array(_FIXED_INNER_CENTER, dtype=np.float64)  # 진단 로그용
+_REF_CUBE_HALF = 0.020    # --grasp_z 기본값이 튜닝된 기준 큐브 반변(40 mm)
+_CUBE_Z_DRIFT_TOL = 0.005  # 측정 z vs 유도 z 경고 문턱(m) — settle 잔진동보다 크게
 
 # record 트라이얼의 종료 대기 상한. 정상 경로는 posthold 뒤 termination 이 즉시 발화하므로
 # 여기까지 오면 이미 이상 상태 — env time_out(30 s) 에 넘기고 다음 트라이얼로 간다.
@@ -291,8 +296,17 @@ class ViewportVideoRecorder:
 def _cubes_bowls_in_base(env):
     """Per-env cube (6D) + bowl (xy) in each robot's base_link frame — the planner input
     (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
-    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]). z = fixed grasp height
-    (measured z is noisy at rest); planner extracts cube face normals directly from the quat."""
+    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]).
+    planner extracts cube face normals directly from the quat.
+
+    z 는 측정값이 아니라 **유도값**을 보낸다(안착 직후 측정 z 는 settle 잔진동으로 흔들린다).
+    유도 규칙 = ``--grasp_z``(40 mm 큐브 기준 튜닝값) + (실제 half − 기준 half) — 큐브 크기가
+    바뀌면 그만큼 따라 올라간다. 예전에는 크기와 무관한 상수라 50 mm 큐브에서 조준이 5 mm
+    어긋나도 **에러 없이 성공률만** 떨어졌다.
+    ponytail: 진짜 규칙은 `책상상판 + half` 다. 그 값은 --grasp_z 튜닝값과 1 cm 어긋나 있어
+    (GRASP_Z_OFF 와 얽힘) 지금 바꾸면 100% 기준선이 흔들린다 → 아래 drift 경고로 감시만 하고,
+    책상 높이/오프셋을 함께 재측정할 때 교체한다.
+    """
     robot = env.scene["robot"].data
     cp, cq = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
                                        env.scene[CUBE].data.root_pos_w,
@@ -300,10 +314,26 @@ def _cubes_bowls_in_base(env):
     wp, _ = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
                                       env.scene[BOWL].data.root_pos_w,
                                       env.scene[BOWL].data.root_quat_w)
-    cubes = [[cp[i, 0].item(), cp[i, 1].item(), args.grasp_z, *cq[i].tolist()]
+    cube_half = CUBE_HALF_EXTENTS[CUBE]
+    grasp_z = args.grasp_z + (cube_half - _REF_CUBE_HALF)
+    _warn_cube_z_drift(cp[:, 2], grasp_z)
+    cubes = [[cp[i, 0].item(), cp[i, 1].item(), grasp_z, *cq[i].tolist()]
              for i in range(env.num_envs)]
     bowls = [[wp[i, 0].item(), wp[i, 1].item()] for i in range(env.num_envs)]
-    return cubes, bowls
+    return cubes, bowls, cube_half
+
+
+def _warn_cube_z_drift(measured_z, assumed_z, tol=_CUBE_Z_DRIFT_TOL):
+    """측정 큐브 z 와 planner 로 보내는 유도 z 가 tol 이상 벌어지면 1회 경고.
+
+    책상 높이 변경·큐브 교체·안착 실패(굴러떨어짐/겹침) 같은 "조용히 조준만 틀어지는" 사고를
+    잡는 저비용 감시. 판정에는 개입하지 않는다(경고만) — 유도값이 여전히 진실 소스다.
+    """
+    dz = float((measured_z - assumed_z).abs().max().item())
+    if dz > tol and not getattr(_warn_cube_z_drift, "warned", False):
+        _warn_cube_z_drift.warned = True
+        print(f"[sm] ⚠ cube z drift {dz * 1000:.1f} mm (measured vs assumed {assumed_z:.4f}) "
+              f"— 책상 높이·큐브 크기·안착 상태 확인. grasp 조준이 그만큼 어긋난다", flush=True)
 
 
 def _cubes_in_bowl(env):
@@ -609,9 +639,12 @@ class PickPlaceSM:
           knob 으로 보내지 않는다(옛 `knobs.seed` 는 진단 문자열에만 쓰이던 no-op).
         """
         env = self.env
-        cubes, bowls = _cubes_bowls_in_base(env)
+        cubes, bowls, cube_half = _cubes_bowls_in_base(env)
         starts = [self.robot.data.joint_pos[i][self.so101_idx].tolist() for i in range(env.num_envs)]
-        req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts}
+        # cube_half = 큐브 기하가 pose 와 **함께** 실려 간다(cube_specs 단일 소스).
+        # planner 가 자체 상수로 40 mm 를 가정하던 것을 대체 — 크기 변경이 한 곳만 고치면 끝난다.
+        req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts,
+               "cube_half": float(cube_half)}
         if self.planner_knobs:
             req["knobs"] = dict(self.planner_knobs)
         self.request_i += 1

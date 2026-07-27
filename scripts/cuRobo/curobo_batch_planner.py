@@ -67,13 +67,17 @@ TABLE_TOP = 0.035 + BASE_T[2]   # 책상 상판 z (urdf 프레임)
 
 # ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
 PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face 선택 기준점(URDF)
-# fixed jaw pad 접촉면 center 의 tcp-frame 오프셋(gripper_link pad sphere centroid 실측).
-# pad 이 tcp 서 46mm 아래·15mm 옆 — tcp 조준 시 pad 이 face 서 크게 벗어나는(edge grip) 원인.
-FIXED_INNER_CENTER = (0.0215, 0.0147, 0.0463)  # (closing, lateral, jaw 아래방향) m
-PAD_LOW_OFF = 0.075   # tcp → 물리 pad 최저점(fixed jaw tip) approach축 거리 — so101.yml 실측
-                      # (tip -0.100 − tcp -0.025). moving jaw 는 12mm 얕음 → fixed 기준이 지배.
-CUBE_HALF = 0.020     # 큐브 반변(40mm) — face_center = cube_center + CUBE_HALF·closing_axis
-CUBE_DIMS = 0.05      # 큐브 obstacle/attach blob 한 변(m) — 보수적 최대값(cube_specs 40/50mm)
+# fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
+# 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF  # noqa: E402
+# 큐브 반변 — face_center = cube_center + half·closing_axis.
+# ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
+# 아래 상수는 그 필드가 없는 구버전 SM 요청용 폴백일 뿐이다.
+CUBE_HALF = 0.020
+# 큐브 obstacle/attach blob 한 변(m) — cube_specs 최대값(50 mm) 고정.
+# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어
+# 요청마다 못 바꾼다 → 보수적 최대값을 쓴다(40 mm 큐브면 살짝 뚱뚱한 박스로 계획).
+CUBE_DIMS = 0.05
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
 DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가
                       # 큐브 obstacle 과 모델상 겹침(짧은 wrist, 물리 접촉 없음=sphere 보수 근사)
@@ -329,7 +333,7 @@ def _grip(arm_deg, grip):
 
 
 def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
-                       chord_center_ratio=CHORD_CENTER_RATIO):
+                       chord_center_ratio=CHORD_CENTER_RATIO, cube_half=CUBE_HALF):
     """(pan,α,ρ) manifold 위 full TCP pose 1개 — 구성상 5-DOF 도달 가능(상수 블록 §manifold).
 
     ψ_face = 수평 face normal 방위(90° 대칭이라 어느 face 든 Δψ 동일 → faces[0] 사용).
@@ -370,9 +374,9 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         closing = R[:, 0]
         face_tangent = np.array([-n_face[1], n_face[0], 0.0], dtype=np.float64)
         c_normal = max(1e-6, float(np.dot(closing, n_face)))
-        tangent_shift = (float(chord_center_ratio) * CUBE_HALF
+        tangent_shift = (float(chord_center_ratio) * cube_half
                          * float(np.dot(closing, face_tangent)) / c_normal)
-        pad_target = (cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n_face
+        pad_target = (cc + (cube_half + FIXED_JAW_CLEAR_TARGET) * n_face
                       + tangent_shift * face_tangent)
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
@@ -412,6 +416,8 @@ class PickPlacePlanner:
         self.default_bowl_bl = bowl_bl
         self.max_batch_size = int(max_batch_size)
         self.max_goalset = max(K, len(ALPHA_SCAN_DEG))
+        # 요청마다 갱신되는 큐브 반변(cube_specs 단일 소스). 필드 없는 구버전 요청은 상수 폴백.
+        self.cube_half = CUBE_HALF
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
@@ -620,7 +626,7 @@ class PickPlacePlanner:
         n_face[2] = 0.0
         n_norm = np.linalg.norm(n_face)
         n_face = n_face / n_norm if n_norm > 1e-6 else xax
-        face_center = cc + CUBE_HALF * n_face                      # fixed jaw 가 닿는 실제 cube face 중심
+        face_center = cc + self.cube_half * n_face                 # fixed jaw 가 닿는 실제 cube face 중심
         t = np.cross(np.array([0.0, 0.0, 1.0]), n_face); tn = np.linalg.norm(t)
         t = t / tn if tn > 1e-6 else np.array([0.0, 1.0, 0.0])     # face-plane tangent(수평, ⊥ closing)
         fixed_tip = grasp_tcp + PAD_LOW_OFF * zax
@@ -722,7 +728,7 @@ class PickPlacePlanner:
         for a_deg in ALPHA_SCAN_DEG:
             cand = cand_pose_manifold(
                 xyz, faces, a_deg, tau, rho_cap_rad=rho_cap_rad,
-                chord_center_ratio=chord_center_ratio,
+                chord_center_ratio=chord_center_ratio, cube_half=self.cube_half,
             )
             if cand is None:
                 continue
@@ -1117,10 +1123,16 @@ class PickPlacePlanner:
         return self._joint_state_batch(torch.cat(rows, dim=0)), ok
 
     # ── main entry ──────────────────────────────────────────────────────────────
-    def plan_pickplace_batch(self, cube_bls, bowl_bls=None, starts_rad=None, knobs=None):
-        """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획."""
+    def plan_pickplace_batch(self, cube_bls, bowl_bls=None, starts_rad=None, knobs=None,
+                             cube_half=None):
+        """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획.
+
+        ``cube_half`` = 요청이 실어 보낸 큐브 반변(m, cube_specs 단일 소스). None 이면
+        구버전 SM 요청으로 보고 상수 ``CUBE_HALF``(40 mm) 로 폴백한다.
+        """
         n_env = len(cube_bls)
-        self._ensure_batch_size(n_env)
+        self._ensure_batch_size(n_env)   # ※ 배치 크기 변경 시 __init__ 재실행 → cube_half 재설정 후
+        self.cube_half = float(cube_half) if cube_half else CUBE_HALF
         kn = knobs or {}
         z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
@@ -1338,7 +1350,8 @@ def plan_batch(pl, req):
     bowl = req.get("bowl")
     starts = req.get("start")
     knobs = req.get("knobs")
-    trajs, diagnostics = pl.plan_pickplace_batch(cubes, bowl, starts, dict(knobs or {}))
+    trajs, diagnostics = pl.plan_pickplace_batch(cubes, bowl, starts, dict(knobs or {}),
+                                                 cube_half=req.get("cube_half"))
     out = [traj.tolist() if traj is not None else None for traj in trajs]
     return out, diagnostics
 
