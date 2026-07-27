@@ -5,9 +5,9 @@ description: Docker 로 cuRobo pick-place state machine 을 실행하고 VLA 학
 
 # cuRobo SM 실행·데이터셋 녹화 runbook
 
-2-proc 구조: **planner**(curobo-datagen 컨테이너, ZMQ REP :5599) ↔ **SM**(isaac-sim 컨테이너,
+2-proc 구조: planner(curobo-datagen 컨테이너, ZMQ REP :5599) ↔ SM(isaac-sim 컨테이너,
 IsaacLab env 실행 + 궤적 replay). 둘 다 `network_mode: host`. 설계 상세는
-`scripts/cuRobo/README.md` — 이 스킬은 실행 절차와 함정만 담는다.
+`scripts/cuRobo/README.md` 에 있고, 이 스킬은 실행 절차와 함정만 담는다.
 
 ## 0. 실행 전 점검 (필수)
 
@@ -32,7 +32,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name cur
 `[planner] ZMQ REP :5599` 로그가 뜬 뒤에 SM 을 실행한다(기동 ~1분, FK bank 로드).
 `--max_batch_size` 를 SM `--num_envs` 와 맞추면 batch 재초기화를 회피한다(기본 64 로도 동작).
 
-## 2. SM 실행 — 서브커맨드 3종
+## 2. SM 실행 (서브커맨드 3종)
 
 `pickplace_sm.py {random|fail|sweep}` (isaac-sim 컨테이너, 기동 2~4분):
 
@@ -57,12 +57,12 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 플래닝/cold-start 대기·settle 프레임은 기록에 포함되지 않는다.
 
 ```bash
-# A) IsaacLab HDF5 — multi-env, 실패도 저장(success attr 구분), 사후 변환 필요
+# A) IsaacLab HDF5: multi-env, 실패도 저장(success attr 구분), 사후 변환 필요
 ... pickplace_sm.py random --task SimToReal-SO101-PickCube-DR-v0 \
     --num_envs 4 --auto_trials 25 --headless --enable_cameras \
     --record_hdf5 /workspace/datasets/pick_cube_sm.hdf5
 
-# B) LeRobot v3 직기록 — single-env 전용, 성공만 저장, 변환 불필요
+# B) LeRobot v3 직기록: single-env 전용, 성공만 저장, 변환 불필요
 ... pickplace_sm.py random --task SimToReal-SO101-PickCube-DR-v0 \
     --num_envs 1 --auto_trials 25 --headless --enable_cameras \
     --record_lerobot /workspace/datasets/pick_cube_sm_v3
@@ -70,14 +70,14 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 
 | | A) `--record_hdf5` | B) `--record_lerobot` |
 |---|---|---|
-| multi-env | ✅ env 당 1 demo (`data/demo_N`) | ❌ `--num_envs 1` 강제 |
+| multi-env | 가능. env 당 1 demo (`data/demo_N`) | 불가. `--num_envs 1` 강제 |
 | 저장 범위 | 실패 포함(`success` attr) | 성공 에피소드만 |
 | 메모리 | 이미지 GPU 누적 ~1.2 GB/env/15 s | step 마다 CPU 스트리밍 |
 | 보존 | 전체 씬 state(replay·재라벨 가능) | frame(action/state/3-cam)만 |
 
 함정:
 - `--enable_cameras` 필수(없으면 즉시 에러). `--auto_trials 0`(인터랙티브)에선 녹화 불가.
-- `--record_lerobot` 은 기존 출력 디렉터리를 **덮어쓴다**.
+- `--record_lerobot` 은 기존 출력 디렉터리를 덮어쓴다.
 - 두 플래그 동시 사용 불가.
 - 트라이얼 단위 seed 재현 없음(run 전체 `--seed` 1회).
 - 산출물 경로는 컨테이너 기준 `/workspace/datasets` = 호스트 `./datasets` (compose 볼륨).
@@ -86,17 +86,17 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 ## 4. num_envs / 용량 가이드
 
 3-cam 640×480 uint8 @30 Hz ≈ 2.8 MB/frame/env. HDF5 경로는 auto-reset 까지 GPU 에 누적:
-15 s 에피소드 ≈ 1.2 GB/env → **`--num_envs 4~8` 권장**(48 GB GPU 기준, sim 자체 사용량 감안).
+15 s 에피소드 ≈ 1.2 GB/env 이라 `--num_envs 4~8` 을 권장한다(48 GB GPU 기준, sim 자체 사용량 감안).
 HDF5 파일은 gzip 후 대략 200 MB/에피소드.
 
-## 5. 변환 (HDF5 → LeRobot v3) — Isaac·lerobot 패키지 불요
+## 5. 변환 (HDF5 → LeRobot v3, Isaac·lerobot 패키지 불요)
 
 ```bash
 .venv/bin/python scripts/convert/isaaclab2lerobotv3.py \
     --hdf5_files datasets/pick_cube_sm.hdf5 --output_dir datasets/pick_cube_sm_v3 [--overwrite]
 ```
 
-success demo 만 변환(`--include_failed` 로 해제). 직기록과 **같은 writer** 를 쓰므로 스키마 동일.
+success demo 만 변환(`--include_failed` 로 해제). 직기록과 같은 writer 를 쓰므로 스키마 동일.
 HF 업로드는 `scripts/data/upload_to_huggingface.py`.
 
 ## 6. 검증 (녹화·변환 후 반드시)
@@ -129,8 +129,8 @@ planner exit 137 은 정상). 스모크 산출물은 `datasets/smoke_*` 네이�
 
 | 증상 | 원인/조치 |
 |---|---|
-| SM 이 plan 응답을 못 받음 | planner 미기동 또는 다른 SM 이 REP 점유 — §0 점검 |
+| SM 이 plan 응답을 못 받음 | planner 미기동 또는 다른 SM 이 REP 점유. §0 점검 |
 | `--record_* requires --enable_cameras` | AppLauncher 렌더 플래그 누락 |
 | livestream 검은 화면 | `.env` `LIVESTREAM=1`+`PUBLIC_IP` 미설정 (LAN IP 만 광고됨) |
-| 에피소드가 안 끝남(30 s 후 종료) | init 복귀 실패 → time_out 안전망. success=False 로 저장됨 — planner diag 확인 |
-| 변환 결과 스키마 FAIL | lerobot 패키지로 만든 데이터셋인지 확인 — 이 파이프라인은 자체 writer(h264/so_follower) 계약 |
+| 에피소드가 안 끝남(30 s 후 종료) | init 복귀 실패 → time_out 안전망. success=False 로 저장됨. planner diag 확인 |
+| 변환 결과 스키마 FAIL | lerobot 패키지로 만든 데이터셋인지 확인. 이 파이프라인은 자체 writer(h264/so_follower) 계약 |
