@@ -123,10 +123,10 @@ CHORD_CENTER_RATIO = 0.5
 # ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
 # 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
 # per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
-# pan/ρ 고정점 수렴 판정. 옛 "5회 고정" 대체 — 반복 상한은 넉넉히 두고 실제 종료는 잔차로 본다
-# (근거리 셀은 감쇠진동 ~0.3/iter 라 5회면 대개 충분했지만, 못 붙는 케이스가 조용히 통과했다).
-PAN_FIXPOINT_TOL = 1e-4      # rad (≈0.006°) — pan 갱신량·closing 방위 잔차 공통 문턱
-PAN_FIXPOINT_MAX_ITER = 12
+# pan/ρ 고정점 반복 횟수(실측 튜닝: 3회면 ~0.8° 잔차, 5회면 근거리도 수렴).
+# 등거리 face(yaw 45°) 셀은 face 선택이 번갈리는 limit cycle 이라 수렴 자체가 불가능하다 —
+# 그래서 수렴을 요구하지 않고 잔차만 meta(pan_resid_deg·closing_resid_deg)로 노출한다.
+PAN_FIXPOINT_ITER = 5
 SIMPLE_FACE_GATE_MAX_DEG = 40.0  # FK gate 안전망: solver XY face_angle 허용 절댓값
 WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
@@ -385,12 +385,14 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
     fic = np.array(FIXED_INNER_CENTER, dtype=np.float64)
     rho_corr = 0.0
     # 고정점 반복: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 이 감쇠진동(~0.3/iter)한다.
-    # 옛 코드는 "5회" 고정이었다(3회면 ~0.8° 잔차라는 실측 근거) — 횟수 대신 **수렴 조건**으로
-    # 바꾼다: |Δpan| 이 PAN_FIXPOINT_TOL 아래로 떨어지면 멈추고, 상한 안에 못 들면 후보를 버린다
-    # (미수렴 후보를 그대로 쓰면 조용히 manifold 밖 pose 가 나간다).
-    converged = False
+    # 반복 횟수는 실측 튜닝값 고정(PAN_FIXPOINT_ITER=5; 3회면 ~0.8° 잔차).
+    # ★수렴을 **강제하지 않는다**: cube yaw 45° 처럼 두 face 가 등거리인 셀은 face 선택이
+    #   매 반복 번갈려 limit cycle 이 된다(수렴 실패 시 후보를 버리게 했더니 근거리·yaw45 셀
+    #   후보가 전멸 — self_check_geom 이 잡았다). 대신 **잔차를 meta 에 남겨** 조용한
+    #   off-manifold 를 관측 가능하게만 만든다. 품질 판정은 FK 게이트가 독립적으로 한다.
+    d_pan = 0.0
     resid = 0.0
-    for _ in range(PAN_FIXPOINT_MAX_ITER):
+    for _ in range(PAN_FIXPOINT_ITER):
         pan_prev = pan
         dpsi = wrap90(psi - (pan + math.pi / 2.0))
         raw_rho = -dpsi / math.cos(a)
@@ -420,11 +422,6 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
         d_pan = math.atan2(math.sin(pan - pan_prev), math.cos(pan - pan_prev))
-        if abs(d_pan) < PAN_FIXPOINT_TOL and abs(resid) < PAN_FIXPOINT_TOL:
-            converged = True
-            break
-    if not converged:
-        return None   # 고정점 미수렴 → manifold 밖 pose 를 조용히 내보내지 않는다
     if abs(dpsi) * abs(math.tan(a)) > tau:
         return None
     pre_pos = tcp_tgt - _pre_back(xyz) * R[:, 2]
@@ -437,6 +434,9 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         "rho_deg": math.degrees(rho),
         "rho_capped": bool(capped),  # worst-yaw wrist-cap 트리거 여부(프리뷰)
         "chord_shift_mm": float(tangent_shift * 1000.0),
+        # 고정점 잔차 — 크면 후보가 manifold 에서 그만큼 벗어나 있다(진단용, 게이트 아님).
+        "pan_resid_deg": math.degrees(d_pan),
+        "closing_resid_deg": math.degrees(resid),
         "dpsi_deg": math.degrees(dpsi),
         "pan_deg": math.degrees(pan_R),
         "face_label": face_label,
