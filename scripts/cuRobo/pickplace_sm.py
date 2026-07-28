@@ -66,10 +66,15 @@ _common.add_argument("--settle", type=int, default=5, help="physics steps to set
 _common.add_argument("--bowl_tol", type=float, default=0.06,
                      help="success = cube-center within this xy radius of bowl center (m)")
 _common.add_argument("--seed", type=int, default=0, help="base seed for reset/plan")
+_common.add_argument("--plan_timeout_s", type=float, default=900.0,
+                     help="planner 응답 대기 상한(초). 초과 시 해당 batch 를 plan-fail 로 기록하고 "
+                          "소켓 재연결 후 진행한다(planner 사망 시 headless sweep 무한 정지 방지). "
+                          "0 = 무제한")
 _common.add_argument("--planner_knobs_json", default=None,
                      help="JSON object forwarded to cuRobo planner request.knobs")
-_common.add_argument("--log_every", type=int, default=1,
-                     help="print EE/cube state every N env steps. 0 = disable per-step logs")
+_common.add_argument("--log_every", type=int, default=0,
+                     help="print EE/cube state every N env steps. 0(기본) = 끔 — headless "
+                          "sweep 은 step 마다 3줄이 수십만 줄 stdout 이 돼 스텝률을 갉아먹는다")
 _common.add_argument("--cam_eye", type=float, nargs=3, default=[0.2, 0.8, 1.2],
                      help="viewport/livestream camera eye (env-relative)")
 _common.add_argument("--cam_target", type=float, nargs=3, default=[0.0, 0.1, 0.7],
@@ -134,6 +139,7 @@ simulation_app = app_launcher.app
 import faulthandler  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
+import time  # noqa: E402
 import traceback  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -153,6 +159,9 @@ from isaaclab.managers import DatasetExportMode, SceneEntityCfg  # noqa: E402
 from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_sim_joint_radians  # noqa: E402
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER  # noqa: E402
+from so101_contract.grasp_geometry import PAD_LOW_OFF  # noqa: E402
+from sim_to_real.utils.cube_specs import CUBE_HALF_EXTENTS  # noqa: E402
 from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCfg  # noqa: E402
 from sim_to_real.tasks.pick_cube import spawn_area as SA  # noqa: E402
 from sim_to_real.tasks.pick_cube.mdp import terminations as pc_term  # noqa: E402
@@ -172,8 +181,14 @@ def _force_done_term(env):
     if mask is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     return mask
-FIXED_INNER_CENTER = np.array([0.0215, 0.0147, 0.0463], dtype=np.float64)  # fixed-jaw pad center (tcp-frame)
-PAD_LOW_OFF = 0.075  # tcp → fixed-jaw tip approach 거리 (진단 로그용)
+# jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(planner 와 같은 값을 공유).
+FIXED_INNER_CENTER = np.array(_FIXED_INNER_CENTER, dtype=np.float64)  # 진단 로그용
+_REF_CUBE_HALF = 0.020    # --grasp_z 기본값이 튜닝된 기준 큐브 반변(40 mm)
+_CUBE_Z_DRIFT_TOL = 0.005  # 측정 z vs 유도 z 경고 문턱(m) — settle 잔진동보다 크게
+
+# record 트라이얼의 종료 대기 상한. 정상 경로는 posthold 뒤 termination 이 즉시 발화하므로
+# 여기까지 오면 이미 이상 상태 — env time_out(30 s) 에 넘기고 다음 트라이얼로 간다.
+_RECORD_DRAIN_MAX_STEPS = 1200
 
 # Robot start pose (degrees) — arm holds this while the cube settles, and it is the plan's
 # start joint state. wrist_roll -90 = top-down-tilt-ready; gripper -10° = feature 0 (open).
@@ -286,8 +301,17 @@ class ViewportVideoRecorder:
 def _cubes_bowls_in_base(env):
     """Per-env cube (6D) + bowl (xy) in each robot's base_link frame — the planner input
     (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
-    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]). z = fixed grasp height
-    (measured z is noisy at rest); planner extracts cube face normals directly from the quat."""
+    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]).
+    planner extracts cube face normals directly from the quat.
+
+    z 는 측정값이 아니라 **유도값**을 보낸다(안착 직후 측정 z 는 settle 잔진동으로 흔들린다).
+    유도 규칙 = ``--grasp_z``(40 mm 큐브 기준 튜닝값) + (실제 half − 기준 half) — 큐브 크기가
+    바뀌면 그만큼 따라 올라간다. 예전에는 크기와 무관한 상수라 50 mm 큐브에서 조준이 5 mm
+    어긋나도 **에러 없이 성공률만** 떨어졌다.
+    ponytail: 진짜 규칙은 `책상상판 + half` 다. 그 값은 --grasp_z 튜닝값과 1 cm 어긋나 있어
+    (GRASP_Z_OFF 와 얽힘) 지금 바꾸면 100% 기준선이 흔들린다 → 아래 drift 경고로 감시만 하고,
+    책상 높이/오프셋을 함께 재측정할 때 교체한다.
+    """
     robot = env.scene["robot"].data
     cp, cq = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
                                        env.scene[CUBE].data.root_pos_w,
@@ -295,10 +319,26 @@ def _cubes_bowls_in_base(env):
     wp, _ = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
                                       env.scene[BOWL].data.root_pos_w,
                                       env.scene[BOWL].data.root_quat_w)
-    cubes = [[cp[i, 0].item(), cp[i, 1].item(), args.grasp_z, *cq[i].tolist()]
+    cube_half = CUBE_HALF_EXTENTS[CUBE]
+    grasp_z = args.grasp_z + (cube_half - _REF_CUBE_HALF)
+    _warn_cube_z_drift(cp[:, 2], grasp_z)
+    cubes = [[cp[i, 0].item(), cp[i, 1].item(), grasp_z, *cq[i].tolist()]
              for i in range(env.num_envs)]
     bowls = [[wp[i, 0].item(), wp[i, 1].item()] for i in range(env.num_envs)]
-    return cubes, bowls
+    return cubes, bowls, cube_half
+
+
+def _warn_cube_z_drift(measured_z, assumed_z, tol=_CUBE_Z_DRIFT_TOL):
+    """측정 큐브 z 와 planner 로 보내는 유도 z 가 tol 이상 벌어지면 1회 경고.
+
+    책상 높이 변경·큐브 교체·안착 실패(굴러떨어짐/겹침) 같은 "조용히 조준만 틀어지는" 사고를
+    잡는 저비용 감시. 판정에는 개입하지 않는다(경고만) — 유도값이 여전히 진실 소스다.
+    """
+    dz = float((measured_z - assumed_z).abs().max().item())
+    if dz > tol and not getattr(_warn_cube_z_drift, "warned", False):
+        _warn_cube_z_drift.warned = True
+        print(f"[sm] ⚠ cube z drift {dz * 1000:.1f} mm (measured vs assumed {assumed_z:.4f}) "
+              f"— 책상 높이·큐브 크기·안착 상태 확인. grasp 조준이 그만큼 어긋난다", flush=True)
 
 
 def _cubes_in_bowl(env):
@@ -405,19 +445,6 @@ def _restore_layout(env, layout):
         obj.write_root_velocity_to_sim(torch.zeros((env.num_envs, 6), device=env.device))
 
 
-# ══ planner request/reply ═════════════════════════════════════════════════════════
-def _recv_plan(sock, poller):
-    """Block for the planner reply while KEEPING the Kit app pumping — else the app freezes
-    during the (multi-second) plan and the WebRTC livestream stops accepting input. The
-    short 2 ms poll timeout keeps the wait render-bound (~30 FPS), not poll-bound. Returns
-    None if the window is closed."""
-    while not poller.poll(2):
-        if not simulation_app.is_running():
-            return None
-        simulation_app.update()
-    return json.loads(sock.recv())
-
-
 def _sweep_summary(cells, n_targets):
     """sweep 셀 집계 + 스폰영역 기하 메타 → plot_sweep 가 읽는 JSON dict."""
     return {
@@ -508,59 +535,99 @@ def _build_env():
     return gym.make(args.task, cfg=env_cfg).unwrapped
 
 
-def main():
-    env = _build_env()
-    if getattr(args, "record_lerobot", None):
-        # leisaac use_lerobot_recorder 동형: stock manager 를 v3 직기록 manager 로 교체.
-        from sim_to_real.data.lerobot_recorder import LeRobotV3DatasetWriter
-        from sim_to_real.data.lerobot_recorder_manager import SO101LeRobotRecorderManager
-        writer = LeRobotV3DatasetWriter(args.record_lerobot, overwrite=True,
-                                        enable_videos=True, robot_type="so_follower")
-        del env.recorder_manager
-        env.recorder_manager = SO101LeRobotRecorderManager(
-            env.cfg.recorders, env, writer, args.task_description)
-        print(f"[sm] record_lerobot → {args.record_lerobot}", flush=True)
-    print(f"[sm] mode={args.mode} env={args.task} action_dim={env.action_space.shape} "
-          f"device={env.device}", flush=True)
-    robot = env.scene["robot"]
-    so101_idx = [robot.joint_names.index(j) for j in SO101_JOINT_ORDER]  # articulation → SO101 order
-    hold = torch.tensor(INIT_ACTION, device=env.device,
-                        dtype=torch.float32).repeat(env.num_envs, 1)  # (N,6) init hold
+class PickPlaceSM:
+    """env + planner 소켓 + 트라이얼 상태를 들고 있는 SM 본체.
 
-    sock = zmq.Context().socket(zmq.REQ)
-    sock.connect(args.planner)
-    poller = zmq.Poller()
-    poller.register(sock, zmq.POLLIN)
-    print(f"[sm] planner {args.planner}", flush=True)
+    모드 드라이버(``run_random``/``run_fail``/``run_sweep``)가 이 인스턴스를 받아 쓴다.
+    (예전에는 ``main()`` 안 15개 클로저 + ``nonlocal``/함수 attribute 로 흩어져 있었다 —
+    상태 소유자를 한 곳으로 모아 replay/판정 로직의 교차 오염을 구조적으로 막는다.)
+    """
 
-    interactive = (args.mode == "fail" and not getattr(args, "auto", False)) \
-        or (args.mode == "random" and args.auto_trials == 0)
-    key = _key_listener() if interactive else None
-    layout = None
-    last_manip = {}
-    planner_knobs = json.loads(args.planner_knobs_json) if args.planner_knobs_json else None
-    if planner_knobs is not None and not isinstance(planner_knobs, dict):
-        raise ValueError("--planner_knobs_json must decode to a JSON object")
+    def __init__(self):
+        self.env = _build_env()
+        env = self.env
+        if getattr(args, "record_lerobot", None):
+            # leisaac use_lerobot_recorder 동형: stock manager 를 v3 직기록 manager 로 교체.
+            from sim_to_real.data.lerobot_recorder import LeRobotV3DatasetWriter
+            from sim_to_real.data.lerobot_recorder_manager import SO101LeRobotRecorderManager
+            writer = LeRobotV3DatasetWriter(args.record_lerobot, overwrite=True,
+                                            enable_videos=True, robot_type="so_follower")
+            del env.recorder_manager
+            env.recorder_manager = SO101LeRobotRecorderManager(
+                env.cfg.recorders, env, writer, args.task_description)
+            print(f"[sm] record_lerobot → {args.record_lerobot}", flush=True)
+        print(f"[sm] mode={args.mode} env={args.task} action_dim={env.action_space.shape} "
+              f"device={env.device}", flush=True)
+        self.robot = env.scene["robot"]
+        # articulation → SO101 order
+        self.so101_idx = [self.robot.joint_names.index(j) for j in SO101_JOINT_ORDER]
+        self.hold = torch.tensor(INIT_ACTION, device=env.device,
+                                 dtype=torch.float32).repeat(env.num_envs, 1)  # (N,6) init hold
+
+        self.zmq_ctx = zmq.Context()
+        self.sock = None
+        self.poller = zmq.Poller()
+        self._connect_planner()
+        print(f"[sm] planner {args.planner} (plan_timeout={args.plan_timeout_s}s)", flush=True)
+
+        interactive = (args.mode == "fail" and not getattr(args, "auto", False)) \
+            or (args.mode == "random" and args.auto_trials == 0)
+        self.key = _key_listener() if interactive else None
+        self.layout = None
+        self.last_manip = {}
+        self.request_i = 0
+        self.planner_knobs = json.loads(args.planner_knobs_json) if args.planner_knobs_json else None
+        if self.planner_knobs is not None and not isinstance(self.planner_knobs, dict):
+            raise ValueError("--planner_knobs_json must decode to a JSON object")
+
+    # ── planner 소켓 ─────────────────────────────────────────────────────────────
+    def _connect_planner(self):
+        """REQ 소켓 (재)생성. REQ 는 send→recv 를 엄격히 번갈아야 해서, 응답을 못 받은 소켓은
+        재사용이 불가능하다 → 타임아웃 뒤에는 버리고 새로 만든다."""
+        if self.sock is not None:
+            self.poller.unregister(self.sock)
+            self.sock.close(linger=0)
+        self.sock = self.zmq_ctx.socket(zmq.REQ)
+        self.sock.connect(args.planner)
+        self.poller.register(self.sock, zmq.POLLIN)
+
+    def _recv_plan(self):
+        """planner 응답 대기 — Kit 앱을 계속 pump 하면서(안 그러면 plan 동안 앱이 얼고
+        WebRTC livestream 이 입력을 못 받는다). 2 ms poll 이라 대기는 render-bound(~30 FPS).
+
+        → ("ok", reply) · ("closed", None) 창 닫힘 · ("timeout", None) deadline 초과.
+        타임아웃이 없으면 planner 가 죽었을 때 headless sweep 이 **영원히** 멈춘다(무인 실행
+        최대 리스크). --plan_timeout_s 0 = 무제한(옛 동작).
+        """
+        t0 = time.monotonic()
+        while not self.poller.poll(2):
+            if not simulation_app.is_running():
+                return "closed", None
+            if args.plan_timeout_s > 0 and (time.monotonic() - t0) > args.plan_timeout_s:
+                return "timeout", None
+            simulation_app.update()
+        return "ok", json.loads(self.sock.recv())
 
     # ── 씬 조작 primitives ────────────────────────────────────────────────────────
-    def _reset(which, seed=None, recorder=None):
+    def reset(self, which, seed=None, recorder=None):
         """Scene reset: robot → init (env.reset), cube → NEW DR (N) or SAVED layout (R)."""
-        nonlocal layout
+        env = self.env
         if seed is None:
             env.reset()
         else:
             env.reset(seed=int(seed))
-        if which == "R" and layout is not None:
-            _restore_layout(env, layout)     # overwrite the fresh DR with the saved layout
-        for _ in range(args.settle):         # settle (hold init; zeros would drift the arm)
-            _step(env, hold, recorder)
+        if which == "R" and self.layout is not None:
+            _restore_layout(env, self.layout)  # overwrite the fresh DR with the saved layout
+        for _ in range(args.settle):           # settle (hold init; zeros would drift the arm)
+            _step(env, self.hold, recorder)
         if which == "N":
-            layout = _capture_layout(env)    # remember this new layout for a later R
+            self.layout = _capture_layout(env)  # remember this new layout for a later R
 
-    def _reset_to_targets(batch_xy, yaws_rad, seed):
+    def reset_to_targets(self, batch_xy, yaws_rad, seed):
         """env.reset(robot→init) 후 Cube1 을 batch_xy(env-local) 로, Bowl 을 nominal 고정으로
         덮어써 settle. DR 배치를 통제된 타깃으로 치환(bowl 고정 = 성공맵 교란 제거). fail/sweep 공용.
         batch_xy/yaws_rad 길이 = num_envs (부분 batch 는 호출 측에서 첫 타깃으로 패딩)."""
+        env = self.env
         env.reset(seed=int(seed))
         cube, bowl = env.scene[CUBE], env.scene[BOWL]
         origins = env.scene.env_origins
@@ -578,53 +645,73 @@ def main():
         bowl.write_root_pose_to_sim(torch.cat([bpos, bdef[:, 3:7]], dim=-1))
         bowl.write_root_velocity_to_sim(torch.zeros((env.num_envs, 6), device=env.device))
         for _ in range(args.settle):
-            _step(env, hold)
+            _step(env, self.hold)
 
-    def _plan_batch(plan_seed=None):
-        """batch plan 요청 + lockstep 텐서 조립. _manipulate/_manipulate_record 공용.
+    # ── planner ──────────────────────────────────────────────────────────────────
+    def plan_batch(self):
+        """batch plan 요청 + lockstep 텐서 조립. manipulate/manipulate_record 공용.
 
         → (status, plan): "closed"(소켓/앱 종료) · "allfail"(전 env plan 실패) ·
-        "ok" + {"planned": [bool×N], "tgt": (T,N,6) np}. last_manip 갱신."""
-        nonlocal last_manip
-        cubes, bowls = _cubes_bowls_in_base(env)
-        starts = [robot.data.joint_pos[i][so101_idx].tolist() for i in range(env.num_envs)]
-        req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts}
-        req_knobs = dict(planner_knobs or {})
-        if plan_seed is not None:
-            req_knobs.setdefault("seed", int(plan_seed))
-        if req_knobs:
-            req["knobs"] = req_knobs
-        _plan_batch.request_i = getattr(_plan_batch, "request_i", 0) + 1
-        request_i = _plan_batch.request_i
+        "ok" + {"planned": [bool×N], "tgt": (T,N,6) np}. last_manip 갱신.
+
+        ※ planner 는 결정적이다(cuRobo v0.8 `reset_seed()` 는 인자를 받지 않아 요청 seed 로
+          해를 흔들 수 없다) — 같은 (cube, bowl, start) 는 항상 같은 궤적. 그래서 seed 는
+          knob 으로 보내지 않는다(옛 `knobs.seed` 는 진단 문자열에만 쓰이던 no-op).
+        """
+        env = self.env
+        cubes, bowls, cube_half = _cubes_bowls_in_base(env)
+        starts = [self.robot.data.joint_pos[i][self.so101_idx].tolist() for i in range(env.num_envs)]
+        # cube_half = 큐브 기하가 pose 와 **함께** 실려 간다(cube_specs 단일 소스).
+        # planner 가 자체 상수로 40 mm 를 가정하던 것을 대체 — 크기 변경이 한 곳만 고치면 끝난다.
+        req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts,
+               "cube_half": float(cube_half)}
+        if self.planner_knobs:
+            req["knobs"] = dict(self.planner_knobs)
+        self.request_i += 1
+        request_i = self.request_i
         print(f"[sm] send plan_request #{request_i}: envs={env.num_envs} "
               f"cube0={_fmt_vec(cubes[0][:3])} bowl0={_fmt_vec(bowls[0])}", flush=True)
-        sock.send_string(json.dumps(req))
-        rep = _recv_plan(sock, poller)
-        if rep is None:
+        self.sock.send_string(json.dumps(req))
+        status, rep = self._recv_plan()
+        if status == "closed":
             return "closed", None
+        if status == "timeout":
+            print(f"[sm] ⚠ planner TIMEOUT ({args.plan_timeout_s}s) — 요청 #{request_i} 포기, "
+                  f"소켓 재연결 후 다음 batch 로 진행 (planner 로그 확인)", flush=True)
+            self._connect_planner()
+            self.last_manip = {
+                "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
+                "planner_ok": False, "planner_err": "timeout", "diagnostics": [],
+                "planned": [False] * env.num_envs, "placed": [False] * env.num_envs,
+                "n_steps": 0,
+            }
+            return "allfail", None
         print(f"[sm] recv plan_reply #{request_i}: ok={bool(rep.get('ok'))}", flush=True)
+        if not rep.get("ok"):
+            print(f"[sm] planner ERROR: {rep.get('err')}", flush=True)
         trajs = rep.get("trajectories") if rep.get("ok") else None
-        last_manip = {
+        self.last_manip = {
             "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
             "planner_ok": bool(rep.get("ok")),
+            "planner_err": rep.get("err"),
             "diagnostics": rep.get("diagnostics", []),
             "planned": [],
             "placed": [],
             "n_steps": 0,
         }
-        for i, diag in enumerate(last_manip["diagnostics"]):
+        for i, diag in enumerate(self.last_manip["diagnostics"]):
             print(f"[sm]   diag env{i}: ok={diag.get('ok')} fail={diag.get('fail')} "
                   f"phases={diag.get('phases')} candidates={diag.get('num_candidates')}",
                   flush=True)
         if not trajs or all(t is None for t in trajs):
             print(f"[sm] plan FAIL (all {env.num_envs} envs)", flush=True)
-            last_manip["planned"] = [False] * env.num_envs
-            last_manip["placed"] = [False] * env.num_envs
+            self.last_manip["planned"] = [False] * env.num_envs
+            self.last_manip["placed"] = [False] * env.num_envs
             return "allfail", None
         planned = [t is not None for t in trajs]
         n_steps = max(len(t) for t in trajs if t is not None)
-        last_manip["planned"] = [bool(v) for v in planned]
-        last_manip["n_steps"] = int(n_steps)
+        self.last_manip["planned"] = [bool(v) for v in planned]
+        self.last_manip["n_steps"] = int(n_steps)
         # planner row = (arm deg ×5, gripper feature) → sim joint radians (SO101 order).
         # plan-fail env 는 init hold, 짧은 궤적은 last-row 패딩 → (T, N, 6) lockstep 텐서.
         per_env = []
@@ -640,23 +727,26 @@ def main():
         tgt = np.stack(per_env, axis=1)  # (T, N, 6)
         return "ok", {"planned": planned, "tgt": tgt}
 
-    def _manipulate(recorder=None, plan_seed=None):
+    # ── replay ───────────────────────────────────────────────────────────────────
+    def manipulate(self, recorder=None):
         """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
 
         → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
         ("done", (n_attempt, n_placed)). plan-fail env 는 init hold(실패 처리),
-        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다."""
-        status, plan = _plan_batch(plan_seed)
+        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다.
+        """
+        env = self.env
+        status, plan = self.plan_batch()
         if status == "closed":
             return "closed", None
         if status == "allfail":
             return "done", (env.num_envs, 0)
         planned, tgt = plan["planned"], plan["tgt"]
-        success = None
         cube_asset = env.scene[CUBE]
         max_cube_z = (cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]).clone()
+        truncated = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         for step_rows in tgt:
-            k = _poll_key(key)
+            k = _poll_key(self.key)
             if k in ("N", "R"):              # cancel remaining actions → next reset command
                 return "abort", k
             action = torch.as_tensor(step_rows, device=env.device, dtype=torch.float32)
@@ -664,35 +754,47 @@ def main():
             cube_z = cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
             max_cube_z = torch.maximum(max_cube_z, cube_z)
             if bool(term.any()) or bool(trunc.any()):
-                success = _cubes_in_bowl(env)  # read terminal state before env auto-resets
+                # ⚠ replay 도중 종료 = 궤적이 에피소드 예산(time_out 900 step)을 넘겼다는 뜻.
+                #   IsaacLab 은 env.step **안에서** auto-reset 하므로(manager_based_rl_env :216)
+                #   종료 env 의 씬 상태는 이미 새 레이아웃이라 성공 판정이 불가능하다.
+                #   옛 코드는 여기서 조용히 break 하고 post-reset 상태로 전 env 를 판정했다
+                #   (한 env 종료가 나머지 env 궤적까지 잘라먹는 교차 오염) → 크게 알리고
+                #   종료 env 만 판정 불가(False)로 표시한다.
+                truncated = term | trunc
+                print(f"[sm] ⚠ replay truncated by termination: envs={truncated.tolist()} "
+                      f"— 궤적이 time_out 예산을 초과했다. 해당 env 는 판정 불가(False)로 처리",
+                      flush=True)
                 break
-        if success is None:
-            success = _cubes_in_bowl(env)
+        success = torch.as_tensor(_cubes_in_bowl(env), device=env.device, dtype=torch.bool)
+        success = success & ~truncated
         final_cube_xyz = cube_asset.data.root_pos_w[:, :3] - env.scene.env_origins
-        last_manip["max_cube_z"] = [float(v) for v in max_cube_z.tolist()]
-        last_manip["final_cube_xyz"] = [[float(v) for v in row] for row in final_cube_xyz.tolist()]
-        last_manip["placed"] = [bool(v) for v in success]
-        n_placed = sum(1 for i, ok in enumerate(success) if planned[i] and ok)
-        for i, (p, ok) in enumerate(zip(planned, success)):
+        self.last_manip["max_cube_z"] = [float(v) for v in max_cube_z.tolist()]
+        self.last_manip["final_cube_xyz"] = [[float(v) for v in row] for row in final_cube_xyz.tolist()]
+        self.last_manip["truncated"] = [bool(v) for v in truncated.tolist()]
+        self.last_manip["placed"] = [bool(v) for v in success.tolist()]
+        n_placed = sum(1 for i, ok in enumerate(success.tolist()) if planned[i] and ok)
+        for i, (p, ok) in enumerate(zip(planned, success.tolist())):
             print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(ok)}", flush=True)
         return "done", (env.num_envs, n_placed)
 
     # ══ record 모드 (--record_hdf5): termination-driven 에피소드 + RecorderManager ═══
-    def _force_reset_envs(ids):
+    def force_reset_envs(self, ids):
         """이동 없던 env 를 force_done term 으로 1-step 강제 종료 — auto-reset 이 새 DR
         레이아웃과 episode_length_buf 리셋을 제공한다(time_out 대기·수동 reset 불필요)."""
+        env = self.env
         mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         mask[ids] = True
         env._force_done_mask = mask
-        _step(env, hold)
+        _step(env, self.hold)
         env._force_done_mask = None
 
-    def _manipulate_record(preroll_steps):
+    def manipulate_record(self, preroll_steps):
         """record 트라이얼 1회: plan(step 없음=미기록) → 버퍼 폐기+initial_state →
         pre-roll 정지 → 궤적 replay → 전 env 종료 대기(auto-reset=export). → (status, val)."""
+        env = self.env
         rm = env.recorder_manager
         tm = env.termination_manager
-        status, plan = _plan_batch()
+        status, plan = self.plan_batch()
         if status == "closed":
             return "closed", None
         # 기록 시작점 — settle/직전 트라이얼 꼬리/cold-start 프레임 폐기 후 initial_state 재기록
@@ -700,7 +802,7 @@ def main():
         rm.reset()
         rm.add_to_episodes("initial_state", env.scene.get_state(is_relative=True))
         if status == "allfail":
-            _force_reset_envs(list(range(env.num_envs)))  # 1-프레임 잔여는 변환기 최소길이 필터가 제거
+            self.force_reset_envs(list(range(env.num_envs)))  # 1-프레임 잔여는 변환기 최소길이 필터가 제거
             return "done", (env.num_envs, 0)
         planned, tgt = plan["planned"], plan["tgt"]
         planned_t = torch.tensor(planned, dtype=torch.bool, device=env.device)
@@ -710,330 +812,349 @@ def main():
         def _step_track(action):
             nonlocal done, placed
             _o, _r, term, trunc, _i = _step(env, action)
-            placed = placed | tm.get_term("success")  # 종료 스텝에 발화한 값(auto-reset 전) 누적
+            # TerminationManager 캐시는 auto-reset **전에** 계산된 값이라 종료 스텝에도 유효하다
+            # (씬 상태는 이미 리셋됨 → 씬에서 읽으면 안 된다).
+            placed = placed | tm.get_term("success")
             done = done | term | trunc
 
         for _ in range(preroll_steps):   # 정지 pre-roll — moved 래치 False 라 종료 미발화
-            _step_track(hold)
+            _step_track(self.hold)
         for step_rows in tgt:            # 이동 → pick-place → retreat(init 복귀) → init hold
             _step_track(torch.as_tensor(step_rows, device=env.device, dtype=torch.float32))
         guard = 0
         while not bool((done | ~planned_t).all()) and simulation_app.is_running():
-            _step_track(hold)            # posthold 종료 대기 (안전망 = time_out 30 s)
+            _step_track(self.hold)       # posthold 종료 대기 (안전망 = time_out 30 s)
             guard += 1
-            if guard > 1200:
-                print("[sm] record: 종료 대기 초과(1200 steps) — time_out 에 위임", flush=True)
+            if guard > _RECORD_DRAIN_MAX_STEPS:
+                print(f"[sm] record: 종료 대기 초과({_RECORD_DRAIN_MAX_STEPS} steps) — "
+                      f"time_out 에 위임", flush=True)
                 break
         fail_ids = [i for i, p in enumerate(planned) if not p]
         if fail_ids:
             rm.reset(fail_ids)           # 이동 없던 버퍼 폐기 후 강제 종료(새 레이아웃)
-            _force_reset_envs(fail_ids)
-        last_manip["placed"] = [bool(v) for v in placed.tolist()]
+            self.force_reset_envs(fail_ids)
+        self.last_manip["placed"] = [bool(v) for v in placed.tolist()]
         n_placed = int((placed & planned_t).sum().item())
         for i, p in enumerate(planned):
             print(f"[sm]   env{i}: plan={'ok' if p else 'FAIL'} placed={bool(placed[i])} "
                   f"done={bool(done[i])}", flush=True)
         return "done", (env.num_envs, n_placed)
 
-    def _run_random_auto_record():
-        """record 자동 루프 — 트라이얼 경계 = termination auto-reset(export). env.reset 은 최초 1회만."""
-        preroll_steps = max(0, int(round(args.preroll_s / env.step_dt)))
-        summary_dir = args.summary_dir or "/workspace/scratch/curobo-auto-trials"
-        record_out = args.record_hdf5 or args.record_lerobot
-        print(f"[sm] record={record_out} auto_trials={args.auto_trials} "
-              f"preroll={preroll_steps} steps posthold={args.posthold_s}s", flush=True)
-        env.reset()                      # 초기 DR 레이아웃 — 이후 경계는 auto-reset
-        trials = []
-        try:
-            for trial_i in range(1, args.auto_trials + 1):
-                if not simulation_app.is_running():
-                    break
-                for _ in range(args.settle):   # 레이아웃 안정(다음 rm.reset 이 폐기)
-                    _step(env, hold)
-                status, val = _manipulate_record(preroll_steps)
-                n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
-                trials.append({"trial": trial_i, "status": status,
-                               "n_attempt": int(n_attempt), "n_placed": int(n_placed),
-                               **last_manip})
-                print(f"[sm] record trial {trial_i}/{args.auto_trials}: status={status} "
-                      f"placed={n_placed}/{n_attempt}", flush=True)
-                if status == "closed":
-                    break
-        finally:
-            summary = {
-                "task": args.task, "num_envs": args.num_envs, "base_seed": args.seed,
-                "record_hdf5": args.record_hdf5, "record_lerobot": args.record_lerobot,
-                "preroll_s": args.preroll_s, "posthold_s": args.posthold_s, "trials": trials,
-            }
-            summary_path = Path(summary_dir) / "summary.json"
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            with summary_path.open("w", encoding="utf-8") as f:
-                json.dump(summary, f, indent=2)
-            print(f"[sm] record summary → {summary_path}", flush=True)
-            env.close()                  # recorder/HDF5 파일 정상 close (export_in_close=False)
 
-    # ══ mode: random ═════════════════════════════════════════════════════════════
-    def run_random():
-        if getattr(args, "record_hdf5", None) or getattr(args, "record_lerobot", None):
-            if args.auto_trials <= 0:
-                raise SystemExit("--record_hdf5/--record_lerobot 은 --auto_trials N(자동 모드) 필수 — "
-                                 "인터랙티브는 에피소드 규격(2s pre-roll) 보장 불가")
-            _run_random_auto_record()
-        elif args.auto_trials > 0:
-            _run_random_auto()
-        else:
-            _run_random_interactive()
+# ══ mode: random ═════════════════════════════════════════════════════════════════
+def run_random(sm):
+    if getattr(args, "record_hdf5", None) or getattr(args, "record_lerobot", None):
+        if args.auto_trials <= 0:
+            raise SystemExit("--record_hdf5/--record_lerobot 은 --auto_trials N(자동 모드) 필수 — "
+                             "인터랙티브는 에피소드 규격(2s pre-roll) 보장 불가")
+        _run_random_auto_record(sm)
+    elif args.auto_trials > 0:
+        _run_random_auto(sm)
+    else:
+        _run_random_interactive(sm)
 
-    def _run_random_auto():
-        """키 입력 없이 랜덤 DR trial 을 --auto_trials 회 실행 + (선택) viewport MP4 기록."""
-        record_dir = args.record_viewport_dir
-        if record_dir is not None and record_dir.lower() in {"", "none", "off", "false", "0"}:
-            record_dir = None
-        summary_dir = args.summary_dir or record_dir or "/workspace/scratch/curobo-auto-trials"
-        recorder = ViewportVideoRecorder(record_dir, fps=args.record_fps, every=args.record_every)
-        trials = []
-        print(f"[sm] auto_trials={args.auto_trials} seed={args.seed} "
-              f"record_dir={record_dir} summary_dir={summary_dir}", flush=True)
-        try:
-            for trial_i in range(1, args.auto_trials + 1):
-                if not simulation_app.is_running():
-                    break
-                trial_seed = int(args.seed + trial_i - 1)
-                video_path = recorder.start(trial_i) if recorder.enabled else None
-                print(f"[sm] auto trial {trial_i}/{args.auto_trials} seed={trial_seed}", flush=True)
-                status, val = "unknown", None
-                try:
-                    _reset("N", seed=trial_seed, recorder=recorder)
-                    status, val = _manipulate(recorder=recorder, plan_seed=trial_seed)
-                finally:
-                    recorder.close()
-                n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
-                trials.append({
-                    "trial": trial_i, "seed": trial_seed, "status": status, "video": video_path,
-                    "n_attempt": int(n_attempt), "n_placed": int(n_placed), **last_manip,
-                })
-                print(f"[sm] auto trial {trial_i}: status={status} placed={n_placed}/{n_attempt} "
-                      f"video={video_path}", flush=True)
-                if status == "closed":
-                    break
-        finally:
-            summary = {
-                "task": args.task, "num_envs": args.num_envs, "base_seed": args.seed,
-                "record_fps": args.record_fps, "record_every": args.record_every,
-                "viewport_render_product": getattr(recorder, "render_product_path", None),
-                "trials": trials,
-            }
-            summary_path = Path(summary_dir) / "summary.json"
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            with summary_path.open("w", encoding="utf-8") as f:
-                json.dump(summary, f, indent=2)
-            print(f"[sm] auto summary → {summary_path}", flush=True)
 
-    def _run_random_interactive():
-        """livestream 키: N=새 DR · R=같은 레이아웃 · B=plan+manipulate."""
-        _reset("N")  # initial scene = new DR layout
-        print(f"[sm] ready — B=plan+manipulate · N=new layout · R=same layout "
-              f"(livestream keys, {env.num_envs} envs)", flush=True)
-        n_ok = n_run = 0
-        while simulation_app.is_running():
-            k = _wait_key(key)
-            if k is None:
-                break                            # window closed
-            if k in ("N", "R"):
-                _reset(k)
-                print(f"[sm] reset ({k})", flush=True)
-                continue
-            status, val = _manipulate()          # k == "B"
+def _run_random_auto_record(sm):
+    """record 자동 루프 — 트라이얼 경계 = termination auto-reset(export). env.reset 은 최초 1회만."""
+    env = sm.env
+    preroll_steps = max(0, int(round(args.preroll_s / env.step_dt)))
+    summary_dir = args.summary_dir or "/workspace/scratch/curobo-auto-trials"
+    record_out = args.record_hdf5 or args.record_lerobot
+    print(f"[sm] record={record_out} auto_trials={args.auto_trials} "
+          f"preroll={preroll_steps} steps posthold={args.posthold_s}s", flush=True)
+    env.reset()                      # 초기 DR 레이아웃 — 이후 경계는 auto-reset
+    trials = []
+    try:
+        for trial_i in range(1, args.auto_trials + 1):
+            if not simulation_app.is_running():
+                break
+            for _ in range(args.settle):   # 레이아웃 안정(다음 rm.reset 이 폐기)
+                _step(env, sm.hold)
+            status, val = sm.manipulate_record(preroll_steps)
+            n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
+            trials.append({"trial": trial_i, "status": status,
+                           "n_attempt": int(n_attempt), "n_placed": int(n_placed),
+                           **sm.last_manip})
+            print(f"[sm] record trial {trial_i}/{args.auto_trials}: status={status} "
+                  f"placed={n_placed}/{n_attempt}", flush=True)
             if status == "closed":
                 break
-            if status == "abort":                # R/N mid-run → cancel + reset robot pose + scene
-                _reset(val)
-                print(f"[sm] ABORT → reset ({val})", flush=True)
-                continue
-            n_attempt, n_placed = val
-            n_run += n_attempt
-            n_ok += n_placed
-            print(f"[sm] manipulate {n_placed}/{n_attempt} ({n_ok}/{n_run} placed total)", flush=True)
+    finally:
+        summary = {
+            "task": args.task, "num_envs": args.num_envs, "base_seed": args.seed,
+            "record_hdf5": args.record_hdf5, "record_lerobot": args.record_lerobot,
+            "preroll_s": args.preroll_s, "posthold_s": args.posthold_s, "trials": trials,
+        }
+        summary_path = Path(summary_dir) / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[sm] record summary → {summary_path}", flush=True)
+        env.close()                  # recorder/HDF5 파일 정상 close (export_in_close=False)
 
-    # ══ mode: fail — sweep 결과의 fail 좌표만 재현(인터랙티브) ══════════════════════
-    def run_fail():
-        fdata = json.loads(Path(args.results).read_text(encoding="utf-8"))
-        fails = [c for c in fdata["cells"] if c["n_placed"] < c["n"]]  # place+plan fail 전부
-        fails.sort(key=lambda c: (c["y"], c["x"]))
-        Nf = env.num_envs
-        fbatches = [fails[i:i + Nf] for i in range(0, len(fails), Nf)] or [[]]
 
-        if args.auto:  # headless: 전 batch 재현 + planned/placed 집계(sweep 루프 미러, 키 無)
-            # 최신 sweep 는 실패 당시 yaw/seed 를 fails[] 에 기록한다. 셀당 실패가 여러 번이면
-            # 각각을 독립 케이스로 재현하고, 구형 결과처럼 상세가 없을 때만 yaw=0 으로 폴백한다.
-            cases = []
-            for cell in fails:
-                records = [f for f in cell.get("fails", []) if isinstance(f, dict)]
-                if records:
-                    cases.extend({"cell": cell, "failure": f} for f in records)
-                else:
-                    cases.append({"cell": cell, "failure": {}})
-            case_batches = [cases[i:i + Nf] for i in range(0, len(cases), Nf)] or [[]]
-            tot = t_pl = t_ok = 0
-            for bi, batch in enumerate(case_batches):
-                if not simulation_app.is_running() or not batch:
+def _run_random_auto(sm):
+    """키 입력 없이 랜덤 DR trial 을 --auto_trials 회 실행 + (선택) viewport MP4 기록."""
+    env = sm.env
+    record_dir = args.record_viewport_dir
+    if record_dir is not None and record_dir.lower() in {"", "none", "off", "false", "0"}:
+        record_dir = None
+    summary_dir = args.summary_dir or record_dir or "/workspace/scratch/curobo-auto-trials"
+    recorder = ViewportVideoRecorder(record_dir, fps=args.record_fps, every=args.record_every)
+    trials = []
+    print(f"[sm] auto_trials={args.auto_trials} seed={args.seed} "
+          f"record_dir={record_dir} summary_dir={summary_dir}", flush=True)
+    try:
+        for trial_i in range(1, args.auto_trials + 1):
+            if not simulation_app.is_running():
+                break
+            trial_seed = int(args.seed + trial_i - 1)
+            video_path = recorder.start(trial_i) if recorder.enabled else None
+            print(f"[sm] auto trial {trial_i}/{args.auto_trials} seed={trial_seed}", flush=True)
+            status, val = "unknown", None
+            try:
+                sm.reset("N", seed=trial_seed, recorder=recorder)
+                status, val = sm.manipulate(recorder=recorder)
+            finally:
+                recorder.close()
+            n_attempt, n_placed = val if status == "done" else (env.num_envs, 0)
+            trials.append({
+                "trial": trial_i, "seed": trial_seed, "status": status, "video": video_path,
+                "n_attempt": int(n_attempt), "n_placed": int(n_placed), **sm.last_manip,
+            })
+            print(f"[sm] auto trial {trial_i}: status={status} placed={n_placed}/{n_attempt} "
+                  f"video={video_path}", flush=True)
+            if status == "closed":
+                break
+    finally:
+        summary = {
+            "task": args.task, "num_envs": args.num_envs, "base_seed": args.seed,
+            "record_fps": args.record_fps, "record_every": args.record_every,
+            "viewport_render_product": getattr(recorder, "render_product_path", None),
+            "trials": trials,
+        }
+        summary_path = Path(summary_dir) / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[sm] auto summary → {summary_path}", flush=True)
+
+
+def _run_random_interactive(sm):
+    """livestream 키: N=새 DR · R=같은 레이아웃 · B=plan+manipulate."""
+    env = sm.env
+    sm.reset("N")  # initial scene = new DR layout
+    print(f"[sm] ready — B=plan+manipulate · N=new layout · R=same layout "
+          f"(livestream keys, {env.num_envs} envs)", flush=True)
+    n_ok = n_run = 0
+    while simulation_app.is_running():
+        k = _wait_key(sm.key)
+        if k is None:
+            break                            # window closed
+        if k in ("N", "R"):
+            sm.reset(k)
+            print(f"[sm] reset ({k})", flush=True)
+            continue
+        status, val = sm.manipulate()        # k == "B"
+        if status == "closed":
+            break
+        if status == "abort":                # R/N mid-run → cancel + reset robot pose + scene
+            sm.reset(val)
+            print(f"[sm] ABORT → reset ({val})", flush=True)
+            continue
+        n_attempt, n_placed = val
+        n_run += n_attempt
+        n_ok += n_placed
+        print(f"[sm] manipulate {n_placed}/{n_attempt} ({n_ok}/{n_run} placed total)", flush=True)
+
+
+# ══ mode: fail — sweep 결과의 fail 좌표만 재현(인터랙티브) ══════════════════════════
+def run_fail(sm):
+    env = sm.env
+    fdata = json.loads(Path(args.results).read_text(encoding="utf-8"))
+    fails = [c for c in fdata["cells"] if c["n_placed"] < c["n"]]  # place+plan fail 전부
+    fails.sort(key=lambda c: (c["y"], c["x"]))
+    Nf = env.num_envs
+    fbatches = [fails[i:i + Nf] for i in range(0, len(fails), Nf)] or [[]]
+
+    if args.auto:  # headless: 전 batch 재현 + planned/placed 집계(sweep 루프 미러, 키 無)
+        # 최신 sweep 는 실패 당시 yaw/seed 를 fails[] 에 기록한다. 셀당 실패가 여러 번이면
+        # 각각을 독립 케이스로 재현하고, 구형 결과처럼 상세가 없을 때만 yaw=0 으로 폴백한다.
+        cases = []
+        for cell in fails:
+            records = [f for f in cell.get("fails", []) if isinstance(f, dict)]
+            if records:
+                cases.extend({"cell": cell, "failure": f} for f in records)
+            else:
+                cases.append({"cell": cell, "failure": {}})
+        case_batches = [cases[i:i + Nf] for i in range(0, len(cases), Nf)] or [[]]
+        tot = t_pl = t_ok = 0
+        for bi, batch in enumerate(case_batches):
+            if not simulation_app.is_running() or not batch:
+                break
+            padded = batch + [batch[0]] * (Nf - len(batch))
+            seed = args.seed + bi
+            sm.reset_to_targets(
+                [(case["cell"]["x"], case["cell"]["y"]) for case in padded],
+                [math.radians(float(case["failure"].get("yaw_deg", 0.0))) for case in padded],
+                seed,
+            )
+            status, _ = sm.manipulate()
+            if status == "closed":
+                break
+            planned = sm.last_manip.get("planned", [False] * Nf)
+            placed = sm.last_manip.get("placed", [False] * Nf)
+            diags = sm.last_manip.get("diagnostics", [])
+            max_z = sm.last_manip.get("max_cube_z", [])
+            final_xyz = sm.last_manip.get("final_cube_xyz", [])
+            for i, case in enumerate(batch):  # 실 케이스만(패딩 제외)
+                c, failure = case["cell"], case["failure"]
+                pl = bool(planned[i]) if i < len(planned) else False
+                ok = pl and (bool(placed[i]) if i < len(placed) else False)
+                cand = (diags[i].get("candidate") or {}) if i < len(diags) else {}
+                fk = cand.get("fk_face_error", {})
+                tot += 1; t_pl += int(pl); t_ok += int(ok)
+                print(f"[fail-auto] ({c['x']:+.3f},{c['y']:+.3f}) {c['kind']:12s} "
+                      f"yaw={float(failure.get('yaw_deg', 0.0)):+.2f} "
+                      f"source_seed={failure.get('scene_seed', failure.get('plan_seed'))} "
+                      f"planned={pl} placed={ok} "
+                      f"alpha={cand.get('alpha_deg')} rho={cand.get('rho_deg')} "
+                      f"face={fk.get('face_angle')} h={fk.get('h')} t={fk.get('t')} "
+                      f"max_z={max_z[i] if i < len(max_z) else None} "
+                      f"final={final_xyz[i] if i < len(final_xyz) else None}", flush=True)
+            print(f"[fail-auto] batch {bi + 1}/{len(case_batches)} cumulative "
+                  f"planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
+        print(f"[fail-auto] DONE planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
+        return
+
+    fb = {"i": 0}
+
+    def _load_fail(advance):
+        if advance:
+            fb["i"] = (fb["i"] + 1) % len(fbatches)
+        real = list(fbatches[fb["i"]])
+        if not real:
+            print("[fail] fail 셀 없음(전부 성공)", flush=True)
+            return
+        padded = real + [real[0]] * (Nf - len(real))  # 남는 env 는 첫 fail 좌표 복제
+        sm.reset_to_targets([(c["x"], c["y"]) for c in padded], [0.0] * Nf, args.seed + fb["i"])
+        print(f"[fail] batch {fb['i'] + 1}/{len(fbatches)} — {len(real)} fail 좌표:", flush=True)
+        for c in real:
+            typ = "plan-fail " if c["n_planned"] == 0 else "place-fail"
+            print(f"[fail]   ({c['x']:+.3f}, {c['y']:+.3f})  {c['kind']:12s} {typ} "
+                  f"fails={c.get('fails')}", flush=True)
+
+    _load_fail(advance=False)
+    print(f"[sm] FAIL-REPLAY ready — N=다음 batch · R=같은 batch · B=plan+run "
+          f"({len(fails)} fail cells, {len(fbatches)} batches, {Nf} envs)", flush=True)
+    while simulation_app.is_running():
+        k = _wait_key(sm.key)
+        if k is None:
+            break
+        if k == "N":
+            _load_fail(advance=True)
+            continue
+        if k == "R":
+            _load_fail(advance=False)
+            continue
+        status, val = sm.manipulate()        # B
+        if status == "closed":
+            break
+        if status == "abort":
+            _load_fail(advance=(val == "N"))
+            continue
+        n_attempt, n_placed = val
+        print(f"[sm] manipulate {n_placed}/{n_attempt}", flush=True)
+
+
+# ══ mode: sweep — 스폰영역 grid+boundary 정량 평가 → JSON ═══════════════════════════
+def run_sweep(sm):
+    env = sm.env
+    targets_all = SA.sweep_targets(args.nx, args.ny, args.boundary_n)
+    N = env.num_envs
+    yaw_mode = str(args.yaw).strip().lower()
+    rng = np.random.default_rng(args.seed)
+    cells = {}
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    chunks = [targets_all[i:i + N] for i in range(0, len(targets_all), N)]
+    n_bnd = sum(1 for _, _, k in targets_all if k != "interior")
+    print(f"[sweep] targets={len(targets_all)} (boundary={n_bnd}) chunks={len(chunks)} "
+          f"num_envs={N} trials={args.trials} yaw={args.yaw} out={out_path}", flush=True)
+
+    def _record_cell(x, y, kind, planned, placed, fail):
+        ckey = f"{round(x, 4)}_{round(y, 4)}_{kind}"
+        c = cells.setdefault(ckey, {"x": float(x), "y": float(y), "kind": kind,
+                                    "n": 0, "n_planned": 0, "n_placed": 0, "fails": []})
+        c["n"] += 1
+        c["n_planned"] += int(planned)
+        c["n_placed"] += int(placed)
+        if fail:
+            c["fails"].append(fail)
+
+    counter = 0
+    try:
+        for trial in range(args.trials):
+            for ci, chunk in enumerate(chunks):
+                if not simulation_app.is_running():
                     break
-                padded = batch + [batch[0]] * (Nf - len(batch))
-                seed = args.seed + bi
-                _reset_to_targets(
-                    [(case["cell"]["x"], case["cell"]["y"]) for case in padded],
-                    [math.radians(float(case["failure"].get("yaw_deg", 0.0))) for case in padded],
-                    seed,
-                )
-                status, _ = _manipulate(plan_seed=seed)
+                real = list(chunk)
+                batch = real + [real[0]] * (N - len(real))       # 부분 chunk 패딩
+                if yaw_mode == "random":
+                    yaws = [float(rng.uniform(0.0, 2.0 * math.pi)) for _ in batch]
+                else:
+                    yaws = [math.radians(float(args.yaw))] * N
+                seed = int(args.seed + counter)
+                counter += 1
+                try:
+                    sm.reset_to_targets(batch, yaws, seed)
+                    status, _val = sm.manipulate()
+                except Exception:  # 한 chunk 예외로 전체 sweep 죽지 않게(+traceback 노출)
+                    print(f"[sweep] chunk {ci + 1} EXCEPTION — cells 를 error 처리:", flush=True)
+                    traceback.print_exc()
+                    for x, y, kind in real:
+                        _record_cell(x, y, kind, planned=False, placed=False, fail="exception")
+                    continue
                 if status == "closed":
                     break
-                planned = last_manip.get("planned", [False] * Nf)
-                placed = last_manip.get("placed", [False] * Nf)
-                diags = last_manip.get("diagnostics", [])
-                max_z = last_manip.get("max_cube_z", [])
-                final_xyz = last_manip.get("final_cube_xyz", [])
-                for i, case in enumerate(batch):  # 실 케이스만(패딩 제외)
-                    c, failure = case["cell"], case["failure"]
+                planned = sm.last_manip.get("planned", [False] * N)
+                placed = sm.last_manip.get("placed", [False] * N)
+                diags = sm.last_manip.get("diagnostics", [])
+                for i, (x, y, kind) in enumerate(real):
                     pl = bool(planned[i]) if i < len(planned) else False
                     ok = pl and (bool(placed[i]) if i < len(placed) else False)
-                    cand = (diags[i].get("candidate") or {}) if i < len(diags) else {}
-                    fk = cand.get("fk_face_error", {})
-                    tot += 1; t_pl += int(pl); t_ok += int(ok)
-                    print(f"[fail-auto] ({c['x']:+.3f},{c['y']:+.3f}) {c['kind']:12s} "
-                          f"yaw={float(failure.get('yaw_deg', 0.0)):+.2f} "
-                          f"source_seed={failure.get('plan_seed')} planned={pl} placed={ok} "
-                          f"alpha={cand.get('alpha_deg')} rho={cand.get('rho_deg')} "
-                          f"face={fk.get('face_angle')} h={fk.get('h')} t={fk.get('t')} "
-                          f"max_z={max_z[i] if i < len(max_z) else None} "
-                          f"final={final_xyz[i] if i < len(final_xyz) else None}", flush=True)
-                print(f"[fail-auto] batch {bi + 1}/{len(case_batches)} cumulative "
-                      f"planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
-            print(f"[fail-auto] DONE planned={t_pl}/{tot} placed={t_ok}/{tot}", flush=True)
-            return
-
-        fb = {"i": 0}
-
-        def _load_fail(advance):
-            if advance:
-                fb["i"] = (fb["i"] + 1) % len(fbatches)
-            real = list(fbatches[fb["i"]])
-            if not real:
-                print("[fail] fail 셀 없음(전부 성공)", flush=True)
-                return
-            padded = real + [real[0]] * (Nf - len(real))  # 남는 env 는 첫 fail 좌표 복제
-            _reset_to_targets([(c["x"], c["y"]) for c in padded], [0.0] * Nf, args.seed + fb["i"])
-            print(f"[fail] batch {fb['i'] + 1}/{len(fbatches)} — {len(real)} fail 좌표:", flush=True)
-            for c in real:
-                typ = "plan-fail " if c["n_planned"] == 0 else "place-fail"
-                print(f"[fail]   ({c['x']:+.3f}, {c['y']:+.3f})  {c['kind']:12s} {typ} "
-                      f"fails={c.get('fails')}", flush=True)
-
-        _load_fail(advance=False)
-        print(f"[sm] FAIL-REPLAY ready — N=다음 batch · R=같은 batch · B=plan+run "
-              f"({len(fails)} fail cells, {len(fbatches)} batches, {Nf} envs)", flush=True)
-        while simulation_app.is_running():
-            k = _wait_key(key)
-            if k is None:
-                break
-            if k == "N":
-                _load_fail(advance=True)
-                continue
-            if k == "R":
-                _load_fail(advance=False)
-                continue
-            status, val = _manipulate()          # B
-            if status == "closed":
-                break
-            if status == "abort":
-                _load_fail(advance=(val == "N"))
-                continue
-            n_attempt, n_placed = val
-            print(f"[sm] manipulate {n_placed}/{n_attempt}", flush=True)
-
-    # ══ mode: sweep — 스폰영역 grid+boundary 정량 평가 → JSON ═══════════════════════
-    def run_sweep():
-        targets_all = SA.sweep_targets(args.nx, args.ny, args.boundary_n)
-        N = env.num_envs
-        yaw_mode = str(args.yaw).strip().lower()
-        rng = np.random.default_rng(args.seed)
-        cells = {}
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        chunks = [targets_all[i:i + N] for i in range(0, len(targets_all), N)]
-        n_bnd = sum(1 for _, _, k in targets_all if k != "interior")
-        print(f"[sweep] targets={len(targets_all)} (boundary={n_bnd}) chunks={len(chunks)} "
-              f"num_envs={N} trials={args.trials} yaw={args.yaw} out={out_path}", flush=True)
-
-        def _record_cell(x, y, kind, planned, placed, fail):
-            ckey = f"{round(x, 4)}_{round(y, 4)}_{kind}"
-            c = cells.setdefault(ckey, {"x": float(x), "y": float(y), "kind": kind,
-                                        "n": 0, "n_planned": 0, "n_placed": 0, "fails": []})
-            c["n"] += 1
-            c["n_planned"] += int(planned)
-            c["n_placed"] += int(placed)
-            if fail:
-                c["fails"].append(fail)
-
-        counter = 0
-        try:
-            for trial in range(args.trials):
-                for ci, chunk in enumerate(chunks):
-                    if not simulation_app.is_running():
-                        break
-                    real = list(chunk)
-                    batch = real + [real[0]] * (N - len(real))       # 부분 chunk 패딩
-                    if yaw_mode == "random":
-                        yaws = [float(rng.uniform(0.0, 2.0 * math.pi)) for _ in batch]
-                    else:
-                        yaws = [math.radians(float(args.yaw))] * N
-                    seed = int(args.seed + counter)
-                    counter += 1
-                    try:
-                        _reset_to_targets(batch, yaws, seed)
-                        status, _val = _manipulate(plan_seed=seed)
-                    except Exception:  # 한 chunk 예외로 전체 sweep 죽지 않게(+traceback 노출)
-                        print(f"[sweep] chunk {ci + 1} EXCEPTION — cells 를 error 처리:", flush=True)
-                        traceback.print_exc()
-                        for x, y, kind in real:
-                            _record_cell(x, y, kind, planned=False, placed=False, fail="exception")
-                        continue
-                    if status == "closed":
-                        break
-                    planned = last_manip.get("planned", [False] * N)
-                    placed = last_manip.get("placed", [False] * N)
-                    diags = last_manip.get("diagnostics", [])
-                    for i, (x, y, kind) in enumerate(real):
-                        pl = bool(planned[i]) if i < len(planned) else False
-                        ok = pl and (bool(placed[i]) if i < len(placed) else False)
-                        fail = None
-                        if not ok:
-                            fail = {
-                                "type": "place" if pl else "plan",
-                                "trial": int(trial),
-                                "chunk": int(ci),
-                                "env": int(i),
-                                "yaw_deg": float(math.degrees(yaws[i])),
-                                "plan_seed": int(seed),
-                            }
-                            if i < len(diags) and isinstance(diags[i], dict) and diags[i].get("fail"):
-                                fail["diagnostic"] = diags[i]["fail"]
-                        _record_cell(x, y, kind, pl, ok, fail)
-                    done = sum(v["n"] for v in cells.values())
-                    placed_tot = sum(v["n_placed"] for v in cells.values())
-                    print(f"[sweep] trial {trial} chunk {ci + 1}/{len(chunks)} "
-                          f"→ cumulative placed {placed_tot}/{done}", flush=True)
-                    with out_path.open("w", encoding="utf-8") as fp:  # 증분 저장(중단 안전)
-                        json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
-        finally:
-            with out_path.open("w", encoding="utf-8") as fp:
-                json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
-            print(f"[sweep] done → {out_path}", flush=True)
-
-    try:
-        {"random": run_random, "fail": run_fail, "sweep": run_sweep}[args.mode]()
+                    fail = None
+                    if not ok:
+                        fail = {
+                            "type": "place" if pl else "plan",
+                            "trial": int(trial),
+                            "chunk": int(ci),
+                            "env": int(i),
+                            "yaw_deg": float(math.degrees(yaws[i])),
+                            # 씬(reset) seed. planner 는 결정적이라 plan seed 는 존재하지 않는다.
+                            "scene_seed": int(seed),
+                        }
+                        if i < len(diags) and isinstance(diags[i], dict) and diags[i].get("fail"):
+                            fail["diagnostic"] = diags[i]["fail"]
+                    _record_cell(x, y, kind, pl, ok, fail)
+                done = sum(v["n"] for v in cells.values())
+                placed_tot = sum(v["n_placed"] for v in cells.values())
+                print(f"[sweep] trial {trial} chunk {ci + 1}/{len(chunks)} "
+                      f"→ cumulative placed {placed_tot}/{done}", flush=True)
+                with out_path.open("w", encoding="utf-8") as fp:  # 증분 저장(중단 안전)
+                    json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
     finally:
-        env.close()
+        with out_path.open("w", encoding="utf-8") as fp:
+            json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
+        print(f"[sweep] done → {out_path}", flush=True)
+
+
+def main():
+    sm = PickPlaceSM()
+    try:
+        {"random": run_random, "fail": run_fail, "sweep": run_sweep}[args.mode](sm)
+    finally:
+        sm.env.close()
         simulation_app.close()
 
 

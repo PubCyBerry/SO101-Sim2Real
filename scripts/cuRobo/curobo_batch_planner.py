@@ -42,6 +42,7 @@ import json
 import math
 import tempfile
 import time
+import traceback
 
 import numpy as np
 import torch
@@ -67,13 +68,17 @@ TABLE_TOP = 0.035 + BASE_T[2]   # 책상 상판 z (urdf 프레임)
 
 # ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
 PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face 선택 기준점(URDF)
-# fixed jaw pad 접촉면 center 의 tcp-frame 오프셋(gripper_link pad sphere centroid 실측).
-# pad 이 tcp 서 46mm 아래·15mm 옆 — tcp 조준 시 pad 이 face 서 크게 벗어나는(edge grip) 원인.
-FIXED_INNER_CENTER = (0.0215, 0.0147, 0.0463)  # (closing, lateral, jaw 아래방향) m
-PAD_LOW_OFF = 0.075   # tcp → 물리 pad 최저점(fixed jaw tip) approach축 거리 — so101.yml 실측
-                      # (tip -0.100 − tcp -0.025). moving jaw 는 12mm 얕음 → fixed 기준이 지배.
-CUBE_HALF = 0.020     # 큐브 반변(40mm) — face_center = cube_center + CUBE_HALF·closing_axis
-CUBE_DIMS = 0.05      # 큐브 obstacle/attach blob 한 변(m) — 보수적 최대값(cube_specs 40/50mm)
+# fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
+# 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF  # noqa: E402
+# 큐브 반변 — face_center = cube_center + half·closing_axis.
+# ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
+# 아래 상수는 그 필드가 없는 구버전 SM 요청용 폴백일 뿐이다.
+CUBE_HALF = 0.020
+# 큐브 obstacle/attach blob 한 변(m) — cube_specs 최대값(50 mm) 고정.
+# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어
+# 요청마다 못 바꾼다 → 보수적 최대값을 쓴다(40 mm 큐브면 살짝 뚱뚱한 박스로 계획).
+CUBE_DIMS = 0.05
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
 DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가
                       # 큐브 obstacle 과 모델상 겹침(짧은 wrist, 물리 접촉 없음=sphere 보수 근사)
@@ -101,7 +106,9 @@ TCP_TWIST_RY = -0.0486795
 # wrist 를 base 쪽으로 당김(원거리 2R 해소), -α=반대(근거리 최소반경 해소).
 ALPHA_SCAN_DEG = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0,
                   30.0, -30.0, 35.0, -35.0, 40.0, -40.0, 45.0, -45.0, 50.0, -50.0]
-TAU_MAX_DEG = 10.0  # 결합 게이트 상한(knobs.tau_max_deg 로 조정) — pink 기본과 동일
+# 결합 게이트 |Δψ·tanα| 상한(knobs.tau_max_deg 로 조정). 전 도달구간 상수 —
+# 옛 reach-adaptive 램프(10°→25°)의 최대치를 그대로 상수화했다(_manifold_candidates 주석 참조).
+TAU_MAX_DEG = 25.0
 # ★worst-yaw wrist-cap: |Δψ| 큰 셀서 auto ρ=-Δψ/cosα 가 |ρ| 크면 wrist_roll 을 위험대로 밀어
 # grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL).
 # 54-sphere 모델 targeted replay(8건): cap 12/14/16/18° = 5/6/7/8 성공. 다만 18°는
@@ -116,6 +123,10 @@ CHORD_CENTER_RATIO = 0.5
 # ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
 # 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
 # per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
+# pan/ρ 고정점 반복 횟수(실측 튜닝: 3회면 ~0.8° 잔차, 5회면 근거리도 수렴).
+# 등거리 face(yaw 45°) 셀은 face 선택이 번갈리는 limit cycle 이라 수렴 자체가 불가능하다 —
+# 그래서 수렴을 요구하지 않고 잔차만 meta(pan_resid_deg·closing_resid_deg)로 노출한다.
+PAN_FIXPOINT_ITER = 5
 SIMPLE_FACE_GATE_MAX_DEG = 40.0  # FK gate 안전망: solver XY face_angle 허용 절댓값
 WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
@@ -169,6 +180,46 @@ def _pre_back(cube):
     r = math.hypot(cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1])
     t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
     return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
+
+
+def _assert_pre_back_clears_cube(max_cube_half=0.025, clear=0.005):
+    """로드시 1-check: 최소 pre-back(PRE_BACK_MIN)이 **jaw tip 을 큐브 위로 띄우는가**.
+
+    ``_pre_back`` 의 r-램프는 도달거리별 planning 여유를 담은 실측 튜닝이지만, 그 존재 이유는
+    "pre-grasp 자세에서 fixed jaw tip 이 큐브 obstacle 위에 있어야 approach 를 jaw-collision ON
+    으로 계획할 수 있다"는 기하 조건이다. 그 조건은 **큐브 크기에 의존**하는데 램프 공식에는
+    큐브 크기가 안 들어간다 → 큐브를 키우면 조용히 조건이 깨진다.
+
+    pre 자세 jaw tip 고도 = tcp_tgt_z + (t − PAD_LOW_OFF)·cosα, tcp_tgt_z − cube_top
+    = FIXED_INNER_CENTER[2] − half (조준식에서 pad center 가 face center 높이에 오므로).
+    ⇒ 필요한 t ≥ PAD_LOW_OFF − (FIXED_INNER_CENTER[2] − half − clear)/cosα.
+    cosα ≤ 1 이라 α=0(top-down)이 최악 — 그 값으로 검사한다.
+
+    ponytail: 램프를 이 유도식으로 **대체**하지 않는다. 실측상 필요치(≈59 mm @50 mm 큐브)가
+    PRE_BACK_MIN(60 mm)보다 작아 램프가 이미 조건을 만족하고, 램프는 그 위에 원거리 planning
+    여유까지 담고 있어 교체하면 근거 없는 회귀 위험만 산다. 조건이 깨지면 여기서 터뜨린다.
+    """
+    need = PAD_LOW_OFF - (FIXED_INNER_CENTER[2] - max_cube_half - clear)
+    assert PRE_BACK_MIN >= need, (
+        f"PRE_BACK_MIN {PRE_BACK_MIN:.3f}m < jaw-tip clearance 필요치 {need:.3f}m "
+        f"(cube half {max_cube_half}, clear {clear}) — pre-grasp 서 jaw 가 큐브에 박힌다")
+
+
+_assert_pre_back_clears_cube()
+
+
+def _descend_tstar(pre_tcp_z, zaz, cube):
+    """pre-grasp → grasp 하강 거리(approach 축 t, m). table clamp 포함.
+
+    ★게이트(``_grasp_geometry``)와 실행(``plan_pickplace_batch`` ②)이 **같은 값**을 써야 한다 —
+    갈리는 순간 FK 게이트는 실제로 실행되지 않을 자세를 통과시킨다. 그래서 공식은 이 함수 하나뿐.
+    table 은 world obstacle 이 아니라(로봇이 상판 위에 장착 → 전 plan start-collision) 이 clamp 가
+    대신한다: pad 최저점(tcp + PAD_LOW_OFF·ẑ)이 TABLE_TOP+TABLE_MARGIN 아래로 못 내려간다.
+    """
+    tstar = _pre_back(cube)
+    if zaz < -1e-3:  # 하강 중일 때만 clamp 의미 있음
+        tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pre_tcp_z)) / zaz - PAD_LOW_OFF)
+    return tstar
 
 
 def _bowl_ring(bx, by):
@@ -315,7 +366,7 @@ def _grip(arm_deg, grip):
 
 
 def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
-                       chord_center_ratio=CHORD_CENTER_RATIO):
+                       chord_center_ratio=CHORD_CENTER_RATIO, cube_half=CUBE_HALF):
     """(pan,α,ρ) manifold 위 full TCP pose 1개 — 구성상 5-DOF 도달 가능(상수 블록 §manifold).
 
     ψ_face = 수평 face normal 방위(90° 대칭이라 어느 face 든 Δψ 동일 → faces[0] 사용).
@@ -333,9 +384,16 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
     pan = math.atan2(cc[1] - PAN_AXIS_XY[1], cc[0] - PAN_AXIS_XY[0])
     fic = np.array(FIXED_INNER_CENTER, dtype=np.float64)
     rho_corr = 0.0
-    # 5회: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 고정점이 감쇠진동(~0.3/iter)
-    # — 3회론 pan 오차 ~0.8° 잔존.
-    for _ in range(5):
+    # 고정점 반복: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 이 감쇠진동(~0.3/iter)한다.
+    # 반복 횟수는 실측 튜닝값 고정(PAN_FIXPOINT_ITER=5; 3회면 ~0.8° 잔차).
+    # ★수렴을 **강제하지 않는다**: cube yaw 45° 처럼 두 face 가 등거리인 셀은 face 선택이
+    #   매 반복 번갈려 limit cycle 이 된다(수렴 실패 시 후보를 버리게 했더니 근거리·yaw45 셀
+    #   후보가 전멸 — self_check_geom 이 잡았다). 대신 **잔차를 meta 에 남겨** 조용한
+    #   off-manifold 를 관측 가능하게만 만든다. 품질 판정은 FK 게이트가 독립적으로 한다.
+    d_pan = 0.0
+    resid = 0.0
+    for _ in range(PAN_FIXPOINT_ITER):
+        pan_prev = pan
         dpsi = wrap90(psi - (pan + math.pi / 2.0))
         raw_rho = -dpsi / math.cos(a)
         capped = abs(raw_rho) > rho_cap_rad   # ★worst-yaw wrist-cap: |ρ| 제한(상수/knob)
@@ -347,6 +405,7 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         # ρ 잔차 feedback: -Δψ/cosα 는 1차 근사 + TCP twist 가 closing 수평방위를 α 비례로
         # 끌어당김(α=50° 서 ~1.7°) → 실측 closing 방위 잔차를 다음 반복 ρ 에 흡수(수렴 <0.1°).
         # d(closing_az)/dρ = -cosα 이므로 잔차 상쇄 부호는 +.
+        resid = 0.0
         if not capped:  # capped 셀은 의도적 미스얼라인 — 정렬 feedback 안 함
             resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
             rho_corr += resid / math.cos(a)
@@ -356,12 +415,13 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         closing = R[:, 0]
         face_tangent = np.array([-n_face[1], n_face[0], 0.0], dtype=np.float64)
         c_normal = max(1e-6, float(np.dot(closing, n_face)))
-        tangent_shift = (float(chord_center_ratio) * CUBE_HALF
+        tangent_shift = (float(chord_center_ratio) * cube_half
                          * float(np.dot(closing, face_tangent)) / c_normal)
-        pad_target = (cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n_face
+        pad_target = (cc + (cube_half + FIXED_JAW_CLEAR_TARGET) * n_face
                       + tangent_shift * face_tangent)
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
+        d_pan = math.atan2(math.sin(pan - pan_prev), math.cos(pan - pan_prev))
     if abs(dpsi) * abs(math.tan(a)) > tau:
         return None
     pre_pos = tcp_tgt - _pre_back(xyz) * R[:, 2]
@@ -374,6 +434,9 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
         "rho_deg": math.degrees(rho),
         "rho_capped": bool(capped),  # worst-yaw wrist-cap 트리거 여부(프리뷰)
         "chord_shift_mm": float(tangent_shift * 1000.0),
+        # 고정점 잔차 — 크면 후보가 manifold 에서 그만큼 벗어나 있다(진단용, 게이트 아님).
+        "pan_resid_deg": math.degrees(d_pan),
+        "closing_resid_deg": math.degrees(resid),
         "dpsi_deg": math.degrees(dpsi),
         "pan_deg": math.degrees(pan_R),
         "face_label": face_label,
@@ -398,6 +461,8 @@ class PickPlacePlanner:
         self.default_bowl_bl = bowl_bl
         self.max_batch_size = int(max_batch_size)
         self.max_goalset = max(K, len(ALPHA_SCAN_DEG))
+        # 요청마다 갱신되는 큐브 반변(cube_specs 단일 소스). 필드 없는 구버전 요청은 상수 폴백.
+        self.cube_half = CUBE_HALF
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
@@ -598,18 +663,15 @@ class PickPlacePlanner:
         quat = tp.quaternion.detach().view(-1).cpu().numpy()[:4]
         xax, yax, zax = self._quat_axes(quat)  # x=closing, z=approach
         cc = np.array(cube[:3])
-        # descend = pre 서 _pre_back(=pad-at-face-center 조준 backoff, r 적응) 하강, table clamp 동일
-        tstar = _pre_back(cube); zaz = float(zax[2])
-        if zaz < -1e-3:  # 하강 중 — pad 최저점이 table+margin 아래로 못 가게 clamp
-            tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pos[2])) / zaz - PAD_LOW_OFF)
-        grasp_tcp = pos + tstar * zax
+        # descend = 실행 phase ② 와 **같은 함수**로 계산(_descend_tstar 단일 공식)
+        grasp_tcp = pos + _descend_tstar(pos[2], float(zax[2]), cube) * zax
         dx, dy, dz = FIXED_INNER_CENTER
         fixed_inner = grasp_tcp + dx * xax + dy * yax + dz * zax   # FK 실측 pad center(world)
         n_face = np.array(face_normal, dtype=np.float64) if face_normal is not None else xax
         n_face[2] = 0.0
         n_norm = np.linalg.norm(n_face)
         n_face = n_face / n_norm if n_norm > 1e-6 else xax
-        face_center = cc + CUBE_HALF * n_face                      # fixed jaw 가 닿는 실제 cube face 중심
+        face_center = cc + self.cube_half * n_face                 # fixed jaw 가 닿는 실제 cube face 중심
         t = np.cross(np.array([0.0, 0.0, 1.0]), n_face); tn = np.linalg.norm(t)
         t = t / tn if tn > 1e-6 else np.array([0.0, 1.0, 0.0])     # face-plane tangent(수평, ⊥ closing)
         fixed_tip = grasp_tcp + PAD_LOW_OFF * zax
@@ -700,18 +762,19 @@ class PickPlacePlanner:
         rho_cap_rad = math.radians(float(kn.get("rho_cap_deg", RHO_CAP_DEG)))
         chord_center_ratio = float(kn.get("chord_center_ratio", CHORD_CENTER_RATIO))
         pan_r = math.hypot(float(xyz[0]) - PAN_AXIS_XY[0], float(xyz[1]) - PAN_AXIS_XY[1])
-        # R2: reach-adaptive τ (D2) — 근<0.16·원>0.22 극단서 0→1 램프로 τ 10°→최대 25° 완화.
-        # correct-frame 실패셀 r_pan: NEAR 0.11·FAR 0.24~0.28. FK 게이트가 grasp 품질을
-        # 독립보장하므로 τ 확대는 후보 수만 늘리고 나쁜 후보는 게이트가 거른다(안전).
-        # R2': far 0.24→0.22 — marginal far 셀(r=0.246, (0.168,0.180))이 0.24 에 겨우 걸려
-        # τ 미완화이던 것 보정. probe 검증 +1 회복·succ_far 54/54 무회귀.
-        reach_edge = max(0.0, (0.16 - pan_r) / 0.06, (pan_r - 0.22) / 0.06)
-        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)) + min(1.0, reach_edge) * 15.0)
+        # τ 는 상수다. 예전에는 도달반경 r 에 따라 10°→25° 로 여는 램프(R2/R2')를 썼는데,
+        # 그 임계값(0.16/0.22/0.06)은 실패한 **개별 셀**에 맞춰 옮겨진 값이었다(주석 이력에
+        # r=0.246 셀 하나 때문에 0.24→0.22 로 당긴 기록이 남아 있었다).
+        # 램프의 근거였던 "τ 를 열어도 안전하다"는 논리는 r 과 무관하다 — 나쁜 후보는 FK 게이트가
+        # 독립적으로 거르고, τ 는 후보 **수**만 늘린다. 그래서 전 구간 최대치로 고정한다.
+        # 우선순위(|α| 오름차순)는 그대로라 기존에 통과하던 셀의 선택 후보는 바뀌지 않고,
+        # 후보를 다 소진하던 셀에만 추가 시도가 생긴다.
+        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)))
         cands = []
         for a_deg in ALPHA_SCAN_DEG:
             cand = cand_pose_manifold(
                 xyz, faces, a_deg, tau, rho_cap_rad=rho_cap_rad,
-                chord_center_ratio=chord_center_ratio,
+                chord_center_ratio=chord_center_ratio, cube_half=self.cube_half,
             )
             if cand is None:
                 continue
@@ -736,6 +799,9 @@ class PickPlacePlanner:
         score = self._candidate_score(fe, meta, wr_delta)
         diag = {**meta,
                 "candidate_index": int(cand_idx),
+                # top-level 에도 둔다 — 소비자(plan_pickplace_batch·SM 로그)가 여기서 읽는데
+                # selection 하위에만 있어 성공 env 는 늘 `candidates=0` 으로 찍혔다.
+                "num_candidates": int(n_cands),
                 "score": list(score),
                 "wrist_roll_deg": math.degrees(wr),
                 "wrist_delta_deg": math.degrees(wr_delta),
@@ -764,6 +830,30 @@ class PickPlacePlanner:
             f"clear_ok={FIXED_JAW_CLEAR_MIN <= fe['n'] <= FIXED_JAW_CLEAR_MAX} "
             f"t_ok={abs(fe['t']) <= E_TANGENT_MAX} h_ok={abs(fe['h']) <= E_HEIGHT_MAX}")
         return ok, diag
+
+    @staticmethod
+    def _bias_adjusted_goal(p_i, meta, diag):
+        """clearance(e_normal)만 어긋난 후보 → 실측 오차만큼 pad 조준을 face 쪽으로 민 goal.
+
+        원거리 IK undershoot 는 방향이 일정해(실측 e_norm 5.8~8.5 mm) 1회 bias 보정으로 살아난다.
+        다른 게이트(tangent/height/face_angle/wrist)가 깨진 후보는 **자세 자체가 틀린** 것이라
+        보정 대상이 아니다. 이미 보정된 후보는 재보정하지 않는다(후보 증식 상한 = 2×).
+
+        → (p_adj, meta_adj) 또는 None. batch pass loop·rescue 양쪽이 같은 규칙을 쓴다
+          (예전엔 rescue 에만 있어서 "batch 에서 굶었는가"가 성공 여부를 갈랐다).
+        """
+        if meta.get("aim_corrected_mm") is not None:
+            return None
+        fe = diag.get("fk_face_error", {})
+        if not (abs(fe.get("t", 1.0)) <= E_TANGENT_MAX
+                and abs(fe.get("h", 1.0)) <= E_HEIGHT_MAX
+                and abs(fe.get("face_angle", 90.0)) <= SIMPLE_FACE_GATE_MAX_DEG
+                and abs(diag.get("wrist_delta_deg", 999.0)) <= WRIST_ROLL_DELTA_LIMIT_DEG):
+            return None
+        err = fe.get("n", 0.0) - FIXED_JAW_CLEAR_TARGET
+        n_hat = np.asarray(meta["face_normal"], dtype=np.float64)
+        p_adj = np.asarray(p_i, dtype=np.float64) - err * n_hat
+        return p_adj, {**meta, "aim_corrected_mm": float(err * 1000.0)}
 
     def _wrist_delta_ok(self, q, start):
         wr_idx = self.p.joint_names.index("wrist_roll")
@@ -797,6 +887,9 @@ class PickPlacePlanner:
         """
         n_env = len(cubes)
         kn = knobs or {}
+        # ⚠ knobs.seed 는 **진단 라벨 전용**이다. cuRobo v0.8 `reset_seed()` 는 인자를 받지 않아
+        #   planner 해를 외부 seed 로 흔들 수 없다(= planning 은 입력에 대해 결정적). SM 은 더 이상
+        #   이 knob 을 보내지 않는다 — 옛 sweep JSON 재현용으로 받기만 한다.
         seed = kn.get("seed")
         max_attempts = 4       # R1: 2→4 (attempt 마다 Halton seed 전진=다양성, D1)
         rescue_attempts = 6    # R1: 동질 rescue batch 는 더 넓게(6) — 굶긴 원거리 row 구제
@@ -807,7 +900,6 @@ class PickPlacePlanner:
             cands = self._manifold_candidates(cube, faces, kn)
             per_env.append(list(cands[:self.max_goalset]))
 
-        max_pass = max((len(c) for c in per_env), default=0)
         trajs = [None] * n_env
         ends = [JointState.from_position(starts.position[i: i + 1].detach().clone(),
                                          joint_names=self.p.joint_names)
@@ -820,7 +912,12 @@ class PickPlacePlanner:
         ok_mask = [False] * n_env
         plan_ms = 0.0
         plan_calls = 0
-        for pass_idx in range(max_pass):
+        # pass 수는 후보 수에 따라 자란다: clearance 만 어긋난 후보는 bias 보정본을 **같은 env 의
+        # 후보 목록 뒤에 덧붙여** 다음 pass(어차피 도는 batch)에 태운다 → 추가 plan 호출 0.
+        # (rescue 전용이던 보정을 batch 경로에도 동일 규칙으로 적용 — B4)
+        pass_idx = -1
+        while True:
+            pass_idx += 1
             active = [i for i in range(n_env) if not ok_mask[i] and pass_idx < len(per_env[i])]
             if not active:
                 break
@@ -877,6 +974,11 @@ class PickPlacePlanner:
                     trajs[i] = traj
                     ends[i] = end
                     ok_mask[i] = True
+                else:
+                    adj = self._bias_adjusted_goal(pos[i], meta, diag)
+                    if adj is not None:  # clearance 만 어긋남 → 보정본을 뒤 pass 후보로 추가
+                        p_adj, meta_adj = adj
+                        per_env[i].append((p_adj, quat[i], meta_adj))
             if all(ok_mask):
                 break
 
@@ -928,20 +1030,12 @@ class PickPlacePlanner:
                 ok, diag = self._gate_candidate(
                     end, start_row, cubes[i], cube_quats[i], meta, cand_idx,
                     len(per_env[i]), seed_i, rescue=True)
-                fe = diag.get("fk_face_error", {})
-                if (not ok
-                        and abs(fe.get("t", 1.0)) <= E_TANGENT_MAX
-                        and abs(fe.get("h", 1.0)) <= E_HEIGHT_MAX
-                        and abs(fe.get("face_angle", 90.0)) <= SIMPLE_FACE_GATE_MAX_DEG
-                        and abs(diag.get("wrist_delta_deg", 999.0)) <= WRIST_ROLL_DELTA_LIMIT_DEG):
-                    # clearance 만 깨짐 = 원거리 IK undershoot(실측 e_norm 5.8~8.5mm, 방향 일정)
-                    # → 실측 오차만큼 pad 조준을 face 쪽으로 이동해 1회 재시도(bias correction).
-                    err = fe.get("n", 0.0) - FIXED_JAW_CLEAR_TARGET
-                    n_hat = np.asarray(meta["face_normal"], dtype=np.float64)
-                    p_adj = np.asarray(p_i, dtype=np.float64) - err * n_hat
+                adj = None if ok else self._bias_adjusted_goal(p_i, meta, diag)
+                if adj is not None:
+                    # rescue 는 어차피 env 단위 순차라 즉시 재시도가 싸다(batch 경로는 뒤 pass 에 태움).
+                    p_adj, meta_adj = adj
                     traj2, end2 = _dup_plan(p_adj, q_i)
                     if traj2 is not None:
-                        meta_adj = {**meta, "aim_corrected_mm": float(err * 1000.0)}
                         ok2, diag2 = self._gate_candidate(
                             end2, start_row, cubes[i], cube_quats[i], meta_adj,
                             cand_idx, len(per_env[i]), seed_i, rescue=True)
@@ -1078,10 +1172,16 @@ class PickPlacePlanner:
         return self._joint_state_batch(torch.cat(rows, dim=0)), ok
 
     # ── main entry ──────────────────────────────────────────────────────────────
-    def plan_pickplace_batch(self, cube_bls, bowl_bls=None, starts_rad=None, knobs=None):
-        """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획."""
+    def plan_pickplace_batch(self, cube_bls, bowl_bls=None, starts_rad=None, knobs=None,
+                             cube_half=None):
+        """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획.
+
+        ``cube_half`` = 요청이 실어 보낸 큐브 반변(m, cube_specs 단일 소스). None 이면
+        구버전 SM 요청으로 보고 상수 ``CUBE_HALF``(40 mm) 로 폴백한다.
+        """
         n_env = len(cube_bls)
-        self._ensure_batch_size(n_env)
+        self._ensure_batch_size(n_env)   # ※ 배치 크기 변경 시 __init__ 재실행 → cube_half 재설정 후
+        self.cube_half = float(cube_half) if cube_half else CUBE_HALF
         kn = knobs or {}
         z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
@@ -1139,34 +1239,44 @@ class PickPlacePlanner:
             cubes, face_sets, cube_quats, starts, kn)
         profile.update(pre_prof)
 
-        # ② GRASP descend.
+        # ② GRASP descend + ③ LIFT.
+        # knob 으로 큐브 obstacle 을 끄면 **이 구간에서만** 꺼져야 한다 → finally 복원.
+        # (옛 코드는 끄기만 하고 안 켜서 이후 phase·다음 요청까지 상태가 샜다. approach 경로는
+        #  이미 같은 try/finally 규약을 쓴다 — 두 경로를 맞춘다.)
         if cube_off_pick_contact:
             self._set_cube_obstacle_enabled(False, n_env)
-        app, aq, zaxes = self._ee_pose_axis_batch(q_pre)
-        gpos, tstars = [], []
-        for i, (cube, zax) in enumerate(zip(cubes, zaxes)):
-            tstar = _pre_back(cube)
-            zaz = float(zax[2])
-            if zaz < -1e-3:
-                tstar_cap = (TABLE_TOP + TABLE_MARGIN - float(app[i, 2])) / zaz - PAD_LOW_OFF
-                tstar = min(tstar, tstar_cap)
-            tstars.append(tstar)
-            gpos.append(app[i] + tstar * zax)
-        t0 = time.perf_counter()
-        desc_planned = self._plan_to_batch(self._pose_batch(np.asarray(gpos), aq), q_pre, n_env, linear=True)
-        profile["grasp_plan_ms"] = (time.perf_counter() - t0) * 1000.0
-        q_grasp, grasp_ok = self._merge_phase_ends(desc_planned, q_pre, pre_ok)
+        try:
+            app, aq, zaxes = self._ee_pose_axis_batch(q_pre)
+            gpos, tstars = [], []
+            for i, (cube, zax) in enumerate(zip(cubes, zaxes)):
+                tstar = _descend_tstar(app[i, 2], float(zax[2]), cube)  # 게이트와 동일 공식
+                tstars.append(tstar)
+                gpos.append(app[i] + tstar * zax)
+            t0 = time.perf_counter()
+            desc_planned = self._plan_to_batch(self._pose_batch(np.asarray(gpos), aq), q_pre,
+                                               n_env, linear=True)
+            profile["grasp_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+            q_grasp, grasp_ok = self._merge_phase_ends(desc_planned, q_pre, pre_ok)
 
-        # ③ LIFT.
-        up = np.asarray([gpos[i] - min(tstars[i], LIFT_BACK) * zaxes[i] for i in range(n_env)])
-        t0 = time.perf_counter()
-        lift_planned = self._plan_to_batch(self._pose_batch(up, aq), q_grasp, n_env, linear=True)
-        profile["lift_plan_ms"] = (time.perf_counter() - t0) * 1000.0
-        q_lift, lift_ok = self._merge_phase_ends(lift_planned, q_grasp, grasp_ok)
+            up = np.asarray([gpos[i] - min(tstars[i], LIFT_BACK) * zaxes[i] for i in range(n_env)])
+            t0 = time.perf_counter()
+            lift_planned = self._plan_to_batch(self._pose_batch(up, aq), q_grasp, n_env, linear=True)
+            profile["lift_plan_ms"] = (time.perf_counter() - t0) * 1000.0
+            q_lift, lift_ok = self._merge_phase_ends(lift_planned, q_grasp, grasp_ok)
+        finally:
+            if cube_off_pick_contact:
+                self._set_cube_obstacle_enabled(True, n_env)
 
         attached = False
+        attach_failed = False
         if any(lift_ok):
             attached = self._attach_cube(q_lift)
+            # attach 실패 = transit 을 "잡은 큐브 부피 없이" 계획한다는 뜻 → 조용히 넘기지 않는다.
+            attach_failed = not attached
+            if attach_failed:
+                print("[planner] ⚠ attach_cube FAILED — transit 이 큐브 부피 없이 계획됨"
+                      "(그릇 rim 스침 위험). diag: attach_failed=true", flush=True)
+                self._diag("[attach] FAILED — transit planned without grasped cube volume")
 
         # ④ TRANSIT: env별 bowl 상공 FK-bank goalset.
         fk_pos, fk_quat, _ = self._ee_pose_axis_batch(q_lift)
@@ -1215,9 +1325,17 @@ class PickPlacePlanner:
             diagnostics[i]["candidate"] = cand_diag[i]
             diagnostics[i]["approach_fail"] = cand_diag[i].get("fail") if cand_diag[i] else None
             diagnostics[i]["num_candidates"] = cand_diag[i].get("num_candidates", 0) if cand_diag[i] else 0
-            diagnostics[i]["fail"] = diagnostics[i]["approach_fail"]
+            # fail = **처음 실패한 phase**. 옛 코드는 approach 사유만 실었는데, grasp/lift/
+            # transit/retreat 에서 죽은 env 는 fail=None 이 돼 sweep 집계가 approach 로 편향됐다.
+            first_bad = next((name for name, good in phases.items() if not good), None)
+            diagnostics[i]["fail"] = (
+                (diagnostics[i]["approach_fail"] or "approach_plan_failed")
+                if first_bad == "approach"
+                else (f"{first_bad}_plan_failed" if first_bad else None))
+            diagnostics[i]["failed_phase"] = first_bad
             diagnostics[i]["phases"] = phases
             diagnostics[i]["attached"] = bool(attached)
+            diagnostics[i]["attach_failed"] = bool(attach_failed)
             diagnostics[i]["profile_ms"] = {k: float(v) for k, v in profile.items()}
             ok = all(phases.values())
             diagnostics[i]["ok"] = ok
@@ -1281,32 +1399,49 @@ def plan_batch(pl, req):
     bowl = req.get("bowl")
     starts = req.get("start")
     knobs = req.get("knobs")
-    trajs, diagnostics = pl.plan_pickplace_batch(cubes, bowl, starts, dict(knobs or {}))
+    trajs, diagnostics = pl.plan_pickplace_batch(cubes, bowl, starts, dict(knobs or {}),
+                                                 cube_half=req.get("cube_half"))
     out = [traj.tolist() if traj is not None else None for traj in trajs]
     return out, diagnostics
 
 
 def serve_loop(pl, sock):
+    """REQ/REP 서비스 루프.
+
+    ★불변식: **받은 요청에는 반드시 답한다.** REP 를 한 번 빠뜨리면 클라이언트(SM)는 영원히
+    블록된다 — 그래서 처리 전체를 try 로 감싸고 예외도 `{"ok":false,"err":...}` 로 응답한다.
+    (옛 코드는 plan 예외가 그대로 올라와 planner 프로세스가 죽고 SM 은 무한 대기했다.)
+    """
     request_i = 0
     while True:
-        req = json.loads(sock.recv())
-        cmd = req.get("cmd")
-        if cmd == "ping":
-            sock.send_string(json.dumps({"ok": True}))
-        elif cmd == "plan_pickplace":
-            request_i += 1
-            n_env = len(req.get("cubes") or [])
-            print(f"[planner] recv plan_pickplace #{request_i}: envs={n_env}", flush=True)
-            trajs, diagnostics = plan_batch(pl, req)
-            ok_count = sum(1 for t in trajs if t is not None)
-            fails = [d.get("fail") for d in diagnostics]
-            print(f"[planner] done plan_pickplace #{request_i}: planned={ok_count}/{n_env} "
-                  f"fails={fails}", flush=True)
-            sock.send_string(json.dumps({"ok": True, "trajectories": trajs, "diagnostics": diagnostics}))
-        elif cmd == "shutdown":
-            sock.send_string(json.dumps({"ok": True})); return
-        else:
-            sock.send_string(json.dumps({"ok": False, "err": f"unknown {cmd!r}"}))
+        raw = sock.recv()
+        stop = False
+        try:
+            req = json.loads(raw)
+            cmd = req.get("cmd")
+            if cmd == "ping":
+                rep = {"ok": True}
+            elif cmd == "plan_pickplace":
+                request_i += 1
+                n_env = len(req.get("cubes") or [])
+                print(f"[planner] recv plan_pickplace #{request_i}: envs={n_env}", flush=True)
+                trajs, diagnostics = plan_batch(pl, req)
+                ok_count = sum(1 for t in trajs if t is not None)
+                fails = [d.get("fail") for d in diagnostics]
+                print(f"[planner] done plan_pickplace #{request_i}: planned={ok_count}/{n_env} "
+                      f"fails={fails}", flush=True)
+                rep = {"ok": True, "trajectories": trajs, "diagnostics": diagnostics}
+            elif cmd == "shutdown":
+                rep, stop = {"ok": True}, True
+            else:
+                rep = {"ok": False, "err": f"unknown {cmd!r}"}
+        except Exception as exc:  # noqa: BLE001 — 어떤 예외든 응답은 나가야 한다
+            traceback.print_exc()
+            rep = {"ok": False, "err": f"{type(exc).__name__}: {exc}"}
+            PickPlacePlanner._diag(f"[serve] EXCEPTION {rep['err']}\n{traceback.format_exc()}")
+        sock.send_string(json.dumps(rep))
+        if stop:
+            return
 
 
 def self_check_geom():
