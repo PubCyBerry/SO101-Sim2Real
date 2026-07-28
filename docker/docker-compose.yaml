@@ -212,7 +212,9 @@ services:
     # 컨테이너 경로는 사용자 검증 `docker run nvcr.io/nvidia/isaac-lab:2.3.2` 마운트와 동일.
     #   - kit/cache             : Kit 셰이더·익스텐션 캐시 (부팅 속도)
     #   - .cache/ov, GLCache    : Omniverse·GL 캐시
-    #   - .nv/ComputeCache      : GPU 커널 컴파일 캐시
+    #   - .nv/ComputeCache      : CUDA 드라이버 JIT 캐시 (PTX→SASS)
+    #   - .cache/warp           : warp 커널 JIT 캐시 (IsaacLab·cuRobo). ※ ComputeCache 와 별개 —
+    #                             안 걸면 run --rm 마다 재컴파일(planner 첫 plan +7 s 실측)
     #   - .cache/pip            : pip 캐시
     #   - .nvidia-omniverse/logs, ov/data, Documents : 로그·레이어·문서
     # 프로젝트 코드(bind-mount, 실시간 편집): /workspace/src(우리 패키지=PYTHONPATH),
@@ -224,6 +226,7 @@ services:
       - isaac_lab_cache_pip:/root/.cache/pip:rw
       - isaac_lab_cache_gl:/root/.cache/nvidia/GLCache:rw
       - isaac_lab_cache_compute:/root/.nv/ComputeCache:rw
+      - isaac_lab_cache_warp:/root/.cache/warp:rw
       - isaac_lab_logs:/root/.nvidia-omniverse/logs:rw
       - isaac_lab_data:/root/.local/share/ov/data:rw
       - isaac_lab_docs:/root/Documents:rw
@@ -319,6 +322,7 @@ services:
       - isaac_lab_cache_pip:/root/.cache/pip:rw
       - isaac_lab_cache_gl:/root/.cache/nvidia/GLCache:rw
       - isaac_lab_cache_compute:/root/.nv/ComputeCache:rw
+      - isaac_lab_cache_warp:/root/.cache/warp:rw
       - isaac_lab_logs:/root/.nvidia-omniverse/logs:rw
       - isaac_lab_data:/root/.local/share/ov/data:rw
       - isaac_lab_docs:/root/Documents:rw
@@ -364,6 +368,10 @@ volumes:
     name: isaac_lab_cache_gl
   isaac_lab_cache_compute:
     name: isaac_lab_cache_compute
+  # warp 커널 JIT 캐시. 경로에 warp 버전이 들어가(/root/.cache/warp/<ver>) 업그레이드는 자동 분리 —
+  # 드라이버·GPU 아키텍처를 바꿨을 때만 `docker volume rm isaac_lab_cache_warp` 로 비운다.
+  isaac_lab_cache_warp:
+    name: isaac_lab_cache_warp
   isaac_lab_logs:
     name: isaac_lab_logs
   isaac_lab_data:
