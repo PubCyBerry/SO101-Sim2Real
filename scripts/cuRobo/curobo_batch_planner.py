@@ -799,6 +799,9 @@ class PickPlacePlanner:
         score = self._candidate_score(fe, meta, wr_delta)
         diag = {**meta,
                 "candidate_index": int(cand_idx),
+                # top-level 에도 둔다 — 소비자(plan_pickplace_batch·SM 로그)가 여기서 읽는데
+                # selection 하위에만 있어 성공 env 는 늘 `candidates=0` 으로 찍혔다.
+                "num_candidates": int(n_cands),
                 "score": list(score),
                 "wrist_roll_deg": math.degrees(wr),
                 "wrist_delta_deg": math.degrees(wr_delta),
