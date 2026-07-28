@@ -103,6 +103,127 @@ flowchart LR
     I --> R["Absolute joint command"]
 ```
 
+<details>
+<summary><strong>학습·추론 좌표계 설정 (action representation 4 mode × EEF pose format 3종)</strong></summary>
+
+#### 1. 좌표계(mode) 4종
+
+| mode | dataset 저장 | 학습 processor | client 경계 |
+|---|---|---|---|
+| `joint_absolute` | joint-space **absolute** state/action | 변환 없음(canonical 정규화만) | IK **없음**. canonical joint command 직행 |
+| `joint_relative` | joint-space **absolute** state/action | chunk 전체를 현재 state 기준 topology-aware Δq로 변환 | IK **없음**. postprocessor가 absolute joint 복원 후 직행 |
+| `eef_absolute` | EEF-space **absolute** state/action | 변환 없음(canonical 정규화만) | full chunk → **sequential bounded IK** |
+| `eef_relative` | EEF-space **absolute** state/action | chunk 전체를 `T_rel = inv(T_state) @ T_action`로 변환 | full chunk를 `T_state @ T_rel`로 복원 후 **sequential bounded IK** |
+
+- **dataset은 어떤 mode에서도 그 space의 absolute 값만 저장한다.** relative는 학습
+  preprocessor가 만들고 추론 postprocessor가 되돌리는 **runtime 변환**이다.
+- relative 변환의 기준 state는 chunk 전체가 **동일한 current observation** 하나다
+  (프레임 간 temporal delta가 아니다).
+
+#### 2. EEF pose format 3종 (mode가 `eef_*`일 때만)
+
+| 값 | 구성 | 차원 |
+|---|---|---|
+| `xyz_rot6d_rows` (**project profile 기본값**) | `xyz(3)` + 회전행렬 **첫 두 row**(6) + gripper(1) | 10D |
+| `xyz_quaternion_wxyz` | `xyz(3)` + quaternion **wxyz 순서**(4) + gripper(1) | 8D |
+| `xyz_rpy` | `xyz(3)` + roll/pitch/yaw(3) + gripper(1) | 7D |
+
+`xyz_rot6d_rows`는 **`env/<profile>.env` 세 profile이 그렇게 설정돼 있다는 뜻**이며 코드의
+암묵 기본값이 아니다. `eef_*` mode에서는 pose format을 **항상 명시**해야 한다.
+
+`joint_absolute`/`joint_relative`에서는 pose format을 **반드시 비운다**(빈 문자열).
+값을 넣으면 config 단계에서 거부된다.
+
+#### 3. 현재 profile 기본값
+
+`env/act.env` · `env/smolvla.env` · `env/groot_n17.env` 세 profile 모두 동일:
+
+```text
+ACTION_REPRESENTATION_MODE=eef_relative
+ACTION_REPRESENTATION_POSE_FORMAT=xyz_rot6d_rows
+ACTION_REPRESENTATION_STATS_FILE=meta/action_representation_stats.json
+```
+
+overlap aggregation은 `latest_only`(EEF/Rot6D 벡터 평균 금지).
+
+#### 4. 학습 시 설정
+
+`env/<profile>.env`의 세 변수를 바꾸면 그 profile의 기본 좌표계가 바뀐다. 학습만
+따로 덮어쓰려면 `TRAIN_ACTION_REPRESENTATION_MODE` / `TRAIN_ACTION_REPRESENTATION_POSE_FORMAT`
+을 쓴다 — **`TRAIN_*`가 `ACTION_*`보다 우선**한다.
+
+```bash
+# profile 기본값(eef_relative + xyz_rot6d_rows)으로 학습
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  policy-server train
+
+# 일회성 override — quaternion EEF-relative로 학습 (-e 로 container env 주입)
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e TRAIN_ACTION_REPRESENTATION_MODE=eef_relative \
+  -e TRAIN_ACTION_REPRESENTATION_POSE_FORMAT=xyz_quaternion_wxyz \
+  -e ACTION_REPRESENTATION_STATS_FILE=meta/action_representation_stats.json \
+  policy-server train
+
+# 일회성 override — joint fallback으로 학습 (pose format은 빈 문자열)
+# ACTION_REPRESENTATION_POSE_FORMAT 도 함께 비워야 한다. policy-entrypoint.sh 의
+# `${TRAIN_...:-${ACTION_...}}` colon-dash fallback 때문에, 이걸 안 비우면 profile 의
+# xyz_rot6d_rows 가 joint mode 로 새어 들어와 config 단계에서 거부된다.
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e TRAIN_ACTION_REPRESENTATION_MODE=joint_absolute \
+  -e TRAIN_ACTION_REPRESENTATION_POSE_FORMAT= \
+  -e ACTION_REPRESENTATION_POSE_FORMAT= \
+  -e ACTION_REPRESENTATION_STATS_FILE=meta/action_representation_stats.json \
+  policy-server train
+```
+
+`ACTION_REPRESENTATION_STATS_FILE`이 가리키는 artifact에 해당 mode/format/horizon의
+stats profile이 **미리 생성돼 있어야** 한다(아래 §데이터 준비와 학습 2단계).
+
+#### 5. 추론 시 설정
+
+추론 좌표계의 **유일한 source of truth는 checkpoint 안의 `action_representation.json`
+manifest**다. 환경변수는 override가 아니라 **optional assertion**이다.
+
+| `ACTION_REPRESENTATION_MODE` / `POSE_FORMAT` | 동작 |
+|---|---|
+| 비움 | manifest 값을 그대로 수용 |
+| manifest와 동일 | 검증 통과 |
+| manifest와 불일치 | **motor/sim command를 내기 전에 기동 실패**(fail-fast) |
+
+checkpoint 선택은 `POLICY_REPO_ID`(local dir 또는 HF repo id)로 한다.
+
+```bash
+# ① policy-server — checkpoint manifest가 좌표계를 결정. 환경변수는 assertion용
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml up policy-server
+
+# 좌표계를 명시적으로 확인하고 싶을 때만 assertion을 건다
+POLICY_PROFILE=act docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
+  -e ACTION_REPRESENTATION_MODE=eef_relative \
+  -e ACTION_REPRESENTATION_POSE_FORMAT=xyz_rot6d_rows \
+  policy-server policy-server
+
+# ② sim 폐루프 — vla-ros client. 좌표계는 서버 checkpoint manifest에서 유도된다
+docker compose --env-file .env -f docker/docker-compose.yaml up policy-server isaac-sim vla-ros
+
+# ③ Windows 실기기 — manifest로 client 종류(EEF FK/IK vs joint 경계)를 자동 분기
+scripts/real/lerobot.sh policy-client
+```
+
+- 실기기 client는 preflight로 `assert_checkpoint_representation.py --emit client_kind`를
+  실행해 manifest에서 client를 고르고, chunk overlap은 `--aggregate_fn_name=latest_only`로
+  고정한다. **EEF/Rot6D에 `weighted_average`를 쓰지 않는다** — 회전 표현을 elementwise
+  평균하면 유효한 SE(3)가 아니게 된다. overlap 병합은 IK 이후 joint queue에서만 한다.
+- EEF mode에서 실기기 motor command는 `EEF_IK_REAL_VALIDATED=true`일 때만 나간다
+  (자세한 gate 범위는 §검증과 rollout).
+
+> **주의 — absolute dataset을 relative로 덮어쓰지 말 것.**
+> LeRobot v3 dataset에는 언제나 해당 space의 **absolute** state/action만 저장한다.
+> relative 값을 미리 계산해 dataset에 덮어써 저장하면 stats fingerprint·manifest·
+> postprocessor 복원 기준이 전부 어긋나 이중 변환이 발생한다. 변환은 학습
+> preprocessor와 추론 postprocessor에서만 일어난다.
+
+</details>
+
 ### 데이터 준비와 학습
 
 ```bash
