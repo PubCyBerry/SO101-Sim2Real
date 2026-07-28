@@ -64,6 +64,20 @@ class DatagenRecorderTermCfg(RecorderTermCfg):
 
 @configclass
 class SO101DatagenRecorderManagerCfg(ActionStateRecorderManagerCfg):
-    """stock 5종(initial_state/states/actions/obs/processed_actions) + datagen term."""
+    """datagen term + stock 중 실제로 쓰이는 2종만.
+
+    stock 5종 가운데 ``states``·``obs``·``processed_actions`` 는 **읽는 코드가 저장소에 없다**
+    (변환기 ``scripts/convert/isaaclab2lerobotv3.py`` 는 ``applied_target``·``obs_x/joint_pos``·
+    ``obs_x/images/*`` + attrs ``success`` 만 소비한다). 매 스텝 전체 씬 state 를 GPU 에서 복제해
+    쌓기만 하므로 끈다 — ``RecorderManager._prepare_terms`` 가 ``None`` term 을 건너뛴다.
+
+    남기는 2종:
+    - ``record_initial_state`` — 씬 재현용. reset 당 1회라 무게 없음.
+    - ``record_pre_step_actions`` — ``HDF5DatasetFileHandler.write_episode`` 가 demo attrs
+      ``num_samples`` 를 ``episode.data["actions"]`` 길이로 잡는다. 끄면 0 이 된다(6 float/step).
+    """
 
     record_datagen = DatagenRecorderTermCfg()
+    record_post_step_states: RecorderTermCfg | None = None
+    record_pre_step_flat_policy_observations: RecorderTermCfg | None = None
+    record_post_step_processed_actions: RecorderTermCfg | None = None
