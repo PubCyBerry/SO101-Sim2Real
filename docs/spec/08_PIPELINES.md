@@ -321,7 +321,7 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 | multi-env | ✓ env 당 1 demo | ✗ **`--num_envs 1` 전용** |
 | 저장 범위 | 실패 포함(`success` attr) | **성공만** |
 | 기존 디렉터리 | append 계열 | **덮어씀**(`overwrite=True`) |
-| 메모리 | 에피소드 동안 host RAM 에 누적 (~1 GiB/env/에피소드) | step 마다 CPU 스트리밍 |
+| 메모리 | 에피소드 동안 **VRAM** 누적 (~1 GiB/env/에피소드) — 8 env ≈ 45 GB 피크 | step 마다 CPU 스트리밍 |
 | 압축 | `lzf` + frame-chunk (`hdf5_compression.hdf5_handler`) | LeRobot v3 비디오 인코딩 |
 
 **HDF5 키** = `obs_x/joint_pos` · `obs_x/images/{top,wrist,front}` · `applied_target`

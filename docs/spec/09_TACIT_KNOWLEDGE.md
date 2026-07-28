@@ -573,12 +573,38 @@ IsaacLab 기본은 gzip(4)이고, export 는 `RecorderManager.export_episodes` �
 
 속도 vs 디스크 트레이드오프일 뿐 **값 계약과 무관**하다(전 프리셋 왕복 배열 동일).
 
-### 13.3 녹화 버퍼는 VRAM 에 쌓였다
+### 13.3 녹화 버퍼는 VRAM 에 쌓인다 — 그런데 CPU 로 내리면 더 느리다
 
 `EpisodeData.add` 가 `value.clone()` 으로 device 를 보존해, recorder term 이 GPU 텐서를
 돌려주면 이미지가 에피소드 내내 VRAM 에 쌓이고 export 직전 `torch.stack` 이 피크를 2배로
-만든다. 999 MiB/env/에피소드 → 이게 `--num_envs` 상한을 결정했다.
-`DatagenRecorderTerm` 이 `.cpu()` 로 내려 host RAM 으로 옮긴다.
+만든다(999 MiB/env/에피소드).
+
+`DatagenRecorderTerm.record_pre_step` 에서 `.cpu()` 로 미리 내려 host RAM 으로 옮기는 안을
+실측 A/B 했다 (num_envs=8, 양쪽 8/8 성공·HDF5 키 동일):
+
+| | `.cpu()` 적용 | `.cpu()` 없음 (채택) |
+|---|---|---|
+| plan | 47.5 s | 45.6 s |
+| replay | **76.5 s** | **25.9 s** |
+| export | 28.0 s | 31.0 s |
+| 트라이얼 | 165.1 s | **117.3 s** |
+| 에피소드당 | 20.6 s | **14.7 s** |
+| VRAM 피크 | 34.4 GB | 45.0 GB |
+
+`.cpu()` 비용은 대역폭(8 env × 21 MiB/step @30 Hz = 634 MB/s)이 아니라 **스텝마다 렌더
+파이프라인을 드레인시키는 동기화**다. env 가 늘수록 커진다 — 2-env 에선 +26%, 8-env 에선
+**+41%**. 그래서 채택하지 않았다.
+
+**대신 VRAM 이 실질 `--num_envs` 상한이다** (48.9 GB 카드 기준):
+
+| num_envs | VRAM 피크 | 에피소드당 |
+|---|---|---|
+| 2 | ~36 GB | 25.8 s |
+| 8 | 45.0 GB (92%) | 14.7 s ← 사실상 상한 |
+| 16 | OOM 예상 | — |
+
+**더 높은 `--num_envs` 가 필요하거나 GPU 를 학습과 공유할 때만** `DatagenRecorderTerm` 의
+반환 텐서에 `.cpu()` 를 붙인다(한 줄). VRAM −10.6 GB 를 replay +41% 로 산다.
 
 ### 13.4 `use_cuda_graph=False` 는 필수다 — 다시 켜지 말 것
 

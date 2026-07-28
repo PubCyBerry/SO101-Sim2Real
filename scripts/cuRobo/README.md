@@ -90,7 +90,7 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 | 포맷 | IsaacLab HDF5 (사후 `isaaclab2lerobotv3.py` 로 v3 변환) | LeRobot v3 즉시 (`LeRobotV3DatasetWriter`, 변환 불필요) |
 | multi-env | ✅ env당 1 demo(`data/demo_N`) | ❌ `--num_envs 1` 전용 (leisaac 동형 제약) |
 | 저장 범위 | 실패도 저장(`success` attr 로 구분) | **성공 에피소드만** (실패 버퍼 폐기) |
-| 메모리 | 에피소드 동안 host RAM 누적 (~1 GiB/env/에피소드) | step 마다 CPU 스트리밍 |
+| 메모리 | 에피소드 동안 **VRAM** 누적 (~1 GiB/env/에피소드) | step 마다 CPU 스트리밍 |
 | 압축 | `lzf` + frame-chunk (`hdf5_compression.hdf5_handler`) | LeRobot v3 비디오 인코딩 |
 | 보존 정보 | frame + `initial_state`·`actions` | frame(action/state/3-cam)만 |
 | 구현 | stock RecorderManager + `DatagenRecorderTerm` | `SO101LeRobotRecorderManager`(`src/sim_to_real/data/lerobot_recorder_manager.py`) |
@@ -106,7 +106,9 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
   `applied_target`(slew 통과 적용 target) + `initial_state`·`actions`. stock `states`·`obs`·
   `processed_actions` 는 읽는 코드가 없어 꺼져 있다(`actions` 는 `num_samples` attr 산출용으로 유지).
 - **용량/메모리**: 3-cam 640×480 uint8 @30 Hz ≈ 2.64 MiB/frame/env — 379-step 에피소드 원본
-  ≈ 999 MiB/env 가 auto-reset 까지 **host RAM** 에 누적된다(GPU 아님).
+  ≈ 999 MiB/env 가 auto-reset 까지 **VRAM** 에 누적된다. 48.9 GB 카드 기준 실측 피크 =
+  2 env ~36 GB · **8 env 45.0 GB(92%, 사실상 상한)**. 더 키우려면 recorder term 에 `.cpu()` 를
+  붙인다 — replay 가 8 env 에서 +41% 느려지는 대가다(`09_TACIT_KNOWLEDGE.md` §13.3).
 - **압축**: `lzf` + 프레임 단위 청크. export 는 env 순차 blocking 이라 `--num_envs` 에 비례해
   심 루프를 세운다 — 실측 gzip(4) 10.8 s/demo → lzf 3.7 s/demo, 디스크는 2배.
   프리셋 표·선택 근거 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.

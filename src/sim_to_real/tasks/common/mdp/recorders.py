@@ -39,12 +39,13 @@ class DatagenRecorderTerm(RecorderTerm):
         )
         self._action_idx = [arm._joint_names.index(j) for j in SO101_JOINT_ORDER]
 
-    # ⚠ 반환 텐서는 전부 CPU 로 내린다. RecorderManager 는 이걸 `value.clone()` 해서 에피소드
-    #   내내 리스트에 쌓고(EpisodeData.add), export 직전 torch.stack 으로 합친다 — device 를
-    #   보존하므로 GPU 로 두면 **이미지가 VRAM 에 누적**된다(3-cam 640×480 = 2.64 MiB/step/env,
-    #   379-step 에피소드면 999 MiB/env + stack 순간 2배). 그 VRAM 이 --num_envs 상한을 만든다.
-    #   D2H 는 export 때 어차피 일어나던 전송을 스텝마다 분산시키는 것뿐이다(30 Hz × 2.64 MiB
-    #   = 79 MB/s, PCIe 대비 무시).
+    # ⚠ 반환 텐서는 **GPU 에 둔다.** RecorderManager 가 `value.clone()` 으로 device 를 보존해
+    #   에피소드 내내 쌓으므로(EpisodeData.add) 이미지가 VRAM 에 누적되는 건 맞다
+    #   (3-cam 640×480 = 2.64 MiB/step/env → 379-step 에피소드면 999 MiB/env).
+    #   여기서 `.cpu()` 로 미리 내리면 VRAM 은 num_envs=8 기준 45.0 → 34.4 GB 로 줄지만,
+    #   스텝마다 렌더 파이프라인을 드레인시키는 **동기화** 비용이 붙어 replay 가 8-env 에서
+    #   25.9 → 76.5 s (3×) 로 뛴다. 실측 결과 트라이얼 117.3 → 165.1 s (+41%) 라 철회했다.
+    #   → VRAM 상한과 복구 방법 = docs/spec/09_TACIT_KNOWLEDGE.md §13.3.
 
     def record_pre_step(self):
         if self._joint_idx is None:
@@ -52,15 +53,15 @@ class DatagenRecorderTerm(RecorderTerm):
         robot = self._env.scene["robot"]
         images = self._env.obs_buf["images"]  # {top,wrist,front}: (N,H,W,3) uint8 — obs_t
         return "obs_x", {
-            "joint_pos": robot.data.joint_pos[:, self._joint_idx].cpu(),
-            "images": {k: v.cpu() for k, v in images.items()},
+            "joint_pos": robot.data.joint_pos[:, self._joint_idx],
+            "images": dict(images),
         }
 
     def record_post_step(self):
         if self._action_idx is None:
             self._resolve_indices()
         arm = self._env.action_manager.get_term("arm")
-        return "applied_target", arm.processed_actions[:, self._action_idx].cpu()
+        return "applied_target", arm.processed_actions[:, self._action_idx]
 
 
 @configclass
