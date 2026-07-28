@@ -156,7 +156,7 @@ base/bowl/exclude 경계 셀을 항상 포함한다(`spawn_area.sweep_targets`).
 
 **grasp 물리** — **bounded shallow-preload**(stall-press 대체): descend 를 물리 pad 최저점(tcp+`PAD_LOW_OFF`·ẑ, `PAD_LOW_OFF`=0.075=so101.yml 실측 fixed jaw tip drop) 이 `TABLE_TOP+TABLE_MARGIN`(4mm→실제 ≥2mm, IK/tilt 잔차 보상) 아래로 못 가게 `tstar` clamp → **책상 무접촉**. **table 은 world obstacle 로 넣지 않음**(로봇이 책상 위 장착→base 구가 상판 안=전 plan start-collision) — clamp 로 대체.
 
-**place = release-above-bowl**: 깊은 linear 하강(bowl disable)은 pad 가 동적 bowl 을 밀어냄 → 제거. transit 이 큐브를 그릇 위(`TRANSIT_Z`=0.25, rim clearance +8.7mm)로 옮기면 `SETTLE_STEPS` hold 후 개방(그릇 안 낙하). 드롭 XY 는 그릇 중심서 base 쪽으로 `BOWL_PULL`(0.03) 당김(near-rim 착지, 사용자 "드롭 너무 멀다"). bowl obstacle 상시 on + `_place_bowl_obstacle` 로 실 그릇좌표 매요청 동기화.
+**place = release-above-bowl**: 깊은 linear 하강(bowl disable)은 pad 가 동적 bowl 을 밀어냄 → 제거. transit 이 큐브를 그릇 위(`TRANSIT_Z`=0.21 — ring keep-out 이 rim 을 스스로 피해 0.25 서 인하)로 옮기면 `SETTLE_STEPS` hold 후 개방(그릇 안 낙하). 드롭 XY 는 그릇 중심서 base 쪽으로 `BOWL_PULL`(0.03) 당김(near-rim 착지, 사용자 "드롭 너무 멀다"). bowl obstacle 상시 on + `_place_bowl_obstacle` 로 실 그릇좌표 매요청 동기화.
 
 **gripper**: approach 동안 init(feature0)→open ramp(접근 전 급개방 방지) · 폐합 뒤 `GRASP_HOLD_STEPS=5` 정지 hold로 접촉을 안정화한 후 lift · release 후 retreat 서 다시 init 복원.
 

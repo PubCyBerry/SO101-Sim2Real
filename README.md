@@ -77,236 +77,12 @@ flowchart LR
 
 ## LeRobot v0.6.0 소스 분석 (참고 구현)
 
-분석 기준은 `ref_repos/lerobot`의 **v0.6.0**, commit
-[`30da8e6`](https://github.com/huggingface/lerobot/tree/30da8e687a6dfc617fcd94afc367ac7071c376ce)이다.
-이 clone은 다음 버전 설계를 검토하기 위한 참고용이며, 현재 실행 스택은 위 표의
-Windows LeRobot 0.4.4 / Linux policy-server LeRobot 0.5.1을 그대로 사용한다.
+`ref_repos/lerobot` v0.6.0(commit [`30da8e6`](https://github.com/huggingface/lerobot/tree/30da8e687a6dfc617fcd94afc367ac7071c376ce))
+소스를 읽고 정리한 **다음 버전 설계 검토용 참고 자료**다 — train 파이프라인·policy별 분기·
+async inference gRPC 계약·지원 범위. 현재 실행 스택(0.4.4 / 0.5.1)은 그대로다.
 
-<details>
-<summary><strong>lerobot-train 처리 파이프라인과 VLA별 분기</strong></summary>
-
-`lerobot-train`은 모든 policy가 공유하는 **학습 orchestration**이고, 실제 입력 변환·모델·loss·optimizer는
-policy별로 분기된다. 따라서 “모든 policy가 같은 train processor를 쓴다”가 아니라,
-**공통 runner가 policy별 `PolicyProcessorPipeline`을 호출한다**가 정확하다.
-
-```mermaid
-flowchart TD
-    CLI["Train config"] --> DS["Dataset + chunk sampling"]
-    DS --> P["Policy load"]
-    P --> PP["Processor factory"]
-    PP --> F{"policy config type"}
-    F --> P1["ACT / SmolVLA / π"]
-    F --> P2["GR00T N1.7"]
-    F --> P3["Other VLA"]
-    P1 --> DL["DataLoader"]
-    P2 --> DL
-    P3 --> DL
-    DL --> PRE["Preprocess batch"]
-    PRE --> FW["Forward + loss"]
-    FW --> BW["Backward"]
-    BW --> CLIP["Gradient clip"]
-    CLIP --> OPT["Optimizer step"]
-    OPT --> SCH["Scheduler step"]
-    SCH --> OUT["Log / eval / checkpoint"]
-    OUT --> SAVE["Save model + processors"]
-```
-
-공통 흐름의 실제 분기점은 다음과 같다.
-
-| 단계 | 공통 처리 | policy별로 달라지는 부분 |
-|---|---|---|
-| dataset | LeRobot dataset 로드, episode-aware sampling | `action_delta_indices`·`observation_delta_indices`가 chunk/history 길이를 결정 |
-| policy 생성 | dataset metadata에서 feature schema 추론 | `get_policy_class()`가 모델 class를 선택하고 pretrained/fresh-init 경로 분기 |
-| batch 전처리 | 매 step `preprocessor(batch)` 호출 | rename·normalization·tokenization·padding·frame 변환·relative action 순서가 서로 다름 |
-| 학습 update | `forward → backward → clip → optimizer.step → scheduler.step` | 각 policy의 `forward()`가 architecture와 loss를, config가 optimizer/scheduler preset을 정의 |
-| 후처리 | offline train loss 계산에는 사용하지 않음 | `postprocessor`는 env eval/추론에서 action decode·unnormalize·absolute 복원에 사용 |
-| 저장/재개 | checkpoint와 train state 저장 | processor 두 개도 JSON으로 함께 저장하며, pretrained 재개 시 저장된 pipeline을 복원 |
-
-VLA별 processor 차이는 아래와 같다. 모든 행 앞에는 feature rename과 필요 시 batch dimension 추가,
-끝에는 device 이동이 공통으로 붙는다.
-
-| `--policy.type` | 학습 preprocessor의 핵심 순서 | 추론 postprocessor | 내장 relative-action flag |
-|---|---|---|---|
-| `pi0` | task newline/PaliGemma tokenize → **absolute→relative(선택)** → normalize | unnormalize → **relative→absolute(선택)** | `use_relative_actions` |
-| `pi0_fast` | **absolute→relative(선택)** → normalize → state/language 준비 → text tokenizer + action tokenizer | unnormalize → **relative→absolute(선택)** | `use_relative_actions` |
-| `pi05` | **absolute→relative(선택)** → normalize → state token 준비 → PaliGemma tokenize | unnormalize → **relative→absolute(선택)** | `use_relative_actions` |
-| `groot` | LeRobot 입력을 video/state/action/language/embodiment로 pack → N1.7 VLM encode. checkpoint modality config와 horizon별 stats를 사용 | N1.7 action decode·unnormalize. native `xyz+rot6d` EEF-relative는 SE(3)로 absolute pose 복원 | `use_relative_actions`; native N1.7 경로 우선, generic fallback 존재 |
-| `smolvla` | task newline → VLM tokenizer → normalize | unnormalize | 없음 |
-| `xvla` | text tokenize → image float/ImageNet normalize → domain ID 추가 → dataset normalize | unnormalize | 없음 |
-| `eo1` | normalize → conversation template → Qwen processor | unnormalize | 없음 |
-| `molmoact2` | joint sign/offset frame 변환 → gripper-mask normalize/clamp → image/state/language/setup/control token pack | action clamp → masked unnormalize → joint frame 역변환 | 없음 |
-| `wall_x` | Qwen 계열 task formatting → normalize | unnormalize | 없음 |
-| `evo1` | state/action 차원 padding → normalize | unnormalize → action 차원 복원·선택적 gripper 이진화 | 없음 |
-
-> **Relative action 주의**: v0.6.0의 공용 `RelativeActionsProcessorStep`은 같은 index의
-> `observation.state`를 action chunk 전체에서 단순히 빼고, 후처리에서 다시 더한다
-> (`relative = action - state`). 즉 joint/EEF라는 좌표 의미를 해석하거나 SE(3) pose composition을
-> 수행하지 않는다. EEF의 `rpy`, quaternion, Rot6D에 이 step을 그대로 쓰면 회전의 진짜 상대 pose가
-> 아니라 **표현 벡터의 성분별 차이**가 된다. 단, GR00T N1.7 전용 decoder에는 checkpoint가
-> `type=eef`, `format=xyz+rot6d`로 선언한 native relative action을
-> `T_abs = T_state @ T_rel`로 복원하는 별도 `relative_eef_to_absolute()` 경로가 있다.
-> 반대 방향의 범용 absolute EEF→relative 변환을 ACT·SmolVLA까지 제공하는 것은 아니므로,
-> SO101의 공통 EEF-relative 입력은 `T_rel = inv(T_state) @ T_action`을 계산하는 별도 processor가
-> 필요하다.
-
-이 프로젝트의 세 학습 대상만 보면 ACT와 SmolVLA에는 v0.6.0 내장 relative flag가 없고,
-GR00T N1.7에만 전용 지원이 있다. 세 모델에 동일한 EEF-relative 계약을 적용하려면 dataset을
-미리 relative로 덮어쓰기보다 공통 custom pre/post processor를 policy pipeline에 삽입하고,
-그 processor 설정과 relative-action 통계를 checkpoint에 함께 저장하는 설계가 적합하다.
-
-소스 근거:
-[`lerobot_train.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/scripts/lerobot_train.py) ·
-[`datasets/factory.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/datasets/factory.py) ·
-[`policies/factory.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/policies/factory.py) ·
-[`relative_action_processor.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/processor/relative_action_processor.py)
-
-</details>
-
-<details>
-<summary><strong>LeRobot v0.6.0이 지원하는 VLA 목록</strong></summary>
-
-upstream README가 **VLA Models**로 분류하고 `lerobot-train --policy.type=...` 및 policy factory에서
-선택 가능한 모델은 다음 10개다.
-
-| 모델 | `--policy.type` | policy class | 전용 processor factory |
-|---|---|---|---|
-| π0 (Pi0) | `pi0` | `PI0Policy` | `make_pi0_pre_post_processors` |
-| π0-FAST (Pi0Fast) | `pi0_fast` | `PI0FastPolicy` | `make_pi0_fast_pre_post_processors` |
-| π0.5 (Pi05) | `pi05` | `PI05Policy` | `make_pi05_pre_post_processors` |
-| GR00T N1.7 | `groot` | `GrootPolicy` | `make_groot_pre_post_processors` |
-| SmolVLA | `smolvla` | `SmolVLAPolicy` | `make_smolvla_pre_post_processors` |
-| XVLA | `xvla` | `XVLAPolicy` | `make_xvla_pre_post_processors` |
-| EO-1 | `eo1` | `EO1Policy` | `make_eo1_pre_post_processors` |
-| MolmoAct2 | `molmoact2` | `MolmoAct2Policy` | `make_molmoact2_pre_post_processors` |
-| WALL-OSS | `wall_x` | `WallXPolicy` | `make_wall_x_pre_post_processors` |
-| EVO1 | `evo1` | `Evo1Policy` | `make_evo1_pre_post_processors` |
-
-- **ACT는 지원되지만 VLA가 아니다.** upstream에서는 `act`를 Imitation Learning으로 분류한다.
-- **GR00T는 N1.7만 지원한다.** v0.6.0은 N1.5 config/checkpoint를 명시적으로 거부하며, N1.5가
-  필요하면 LeRobot 0.5.1을 사용하라는 오류를 낸다.
-- VLA-JEPA·LingBot-VA·FastWAM은 이름에 VLA가 포함되거나 VLA backbone을 사용하지만 upstream
-  README 분류상 **World Models**라서 위 VLA 10개 목록에서는 제외했다.
-- registry에는 Diffusion, VQ-BeT, MultiTask DiT, TDMPC, Gaussian Actor 같은 비-VLA policy와
-  third-party `lerobot_policy_*` plugin 확장 경로도 별도로 존재한다.
-
-소스 근거:
-[`README — SoTA Models`](https://github.com/huggingface/lerobot/tree/v0.6.0#sota-models) ·
-[`policies/__init__.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/policies/__init__.py) ·
-[`policies/factory.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/policies/factory.py)
-
-</details>
-
-<details>
-<summary><strong>async policy-server ↔ robot-client 추론 파이프라인</strong></summary>
-
-v0.6.0의 async inference는 Python `asyncio`나 비동기 gRPC stub이 아니다.
-**동기 gRPC RPC, client의 control/receiver 두 thread, server의 observation queue**를 조합해
-action 실행과 다음 chunk 추론을 겹친 구조다. server는 기동 직후 모델이 없는 빈 container이고,
-client handshake가 policy와 checkpoint를 선택한다.
-
-```mermaid
-sequenceDiagram
-    participant R as Robot
-    participant C as RobotClient
-    participant S as PolicyServer
-
-    C->>S: Ready
-    C->>S: PolicySetup
-    S->>S: Load model
-    S->>S: Load processors
-
-    par Control thread
-        C->>R: Execute queued action
-        R-->>C: Capture observation
-        C->>S: SendObservations
-    and Receiver thread
-        C->>S: GetActions
-        S->>S: Preprocess
-        S->>S: Predict chunk
-        S->>S: Postprocess
-        S-->>C: TimedAction chunk
-        C->>C: Merge action queue
-    end
-```
-
-### gRPC 계약
-
-| RPC | 방향·형태 | payload와 역할 |
-|---|---|---|
-| `Ready` | unary → unary | 새 client가 server의 observation queue와 predicted timestep set을 초기화 |
-| `SendPolicyInstructions` | unary → unary | pickle `RemotePolicyConfig`: policy type, checkpoint 경로, robot feature schema, device, `actions_per_chunk` 전달. server가 model과 checkpoint의 pre/post processor를 로드 |
-| `SendObservations` | client-streaming → unary | pickle `TimedObservation`을 2 MiB 조각으로 전송. 연속 관측 stream 하나가 아니라 **관측 한 건마다 호출하는 blocking RPC** |
-| `GetActions` | unary → unary polling | server가 observation을 기다려 추론한 뒤 pickle `list[TimedAction]` 반환. timeout이면 빈 response |
-
-### 실행 순서
-
-1. `RobotClient.__init__()`이 로봇을 연결하고 hardware observation schema를 LeRobot feature schema로 만든다.
-2. `Ready → SendPolicyInstructions` handshake 후 server는 `get_policy_class(...).from_pretrained(...)`로
-   model을 로드하고, 같은 checkpoint에서 `make_pre_post_processors(...)`를 복원한다.
-3. client main thread는 `fps` 주기로 action queue에서 한 action을 꺼내 `robot.send_action()`을 호출한다.
-   queue 비율이 `queue_size / action_chunk_size <= chunk_size_threshold`가 되면 새 관측을 보낸다.
-4. server의 observation queue는 `maxsize=1`이다. 새 관측이 오는데 queue가 차 있으면 이전 것을
-   버리므로, 밀릴 때 backlog를 처리하지 않고 **가장 최신 관측**으로 교체한다.
-5. receiver thread의 `GetActions`가 관측 하나를 가져와
-   `raw robot obs → LeRobot obs → preprocessor → policy.predict_action_chunk()`를 실행한다.
-   결과는 `actions_per_chunk`까지만 자르고 postprocessor를 적용한 뒤 CPU `TimedAction`으로 만든다.
-6. client는 이미 실행한 timestep 이하의 stale action을 버리고, 기존 queue와 새 chunk가 겹치는
-   timestep은 `aggregate_fn`으로 결합한다. 기본 `weighted_average`는
-   `0.3 × old + 0.7 × new`이다.
-7. 현재 chunk가 완전히 소진되기 전에 다음 추론이 진행되므로 정상 튜닝 상태에서는 robot이
-   inference를 기다리는 idle frame을 줄일 수 있다. queue가 실제로 비면 fallback action은 없으며,
-   새 chunk가 올 때까지 추가 command를 보내지 않는다.
-
-### 핵심 파라미터
-
-| 파라미터 | v0.6.0 source 기본값 | 의미 |
-|---|---:|---|
-| client/server `fps` | 30 / 30 | client control 주기와 server가 `TimedAction`에 부여하는 timestep 간격. 양쪽을 동일하게 유지 |
-| `actions_per_chunk` | 필수 | policy 출력 중 네트워크로 돌려줄 길이. policy의 `chunk_size` 이하여야 함 |
-| `chunk_size_threshold` | 0.5 | queue가 최대 수신 chunk의 이 비율 이하일 때 새 관측 송신. 높을수록 빠른 재계획·많은 overlap/RPC |
-| `aggregate_fn_name` | `weighted_average` | overlap action 결합. `latest_only`, `average`, `conservative`도 지원 |
-| `obs_queue_timeout` | 2 s | `GetActions`가 server observation을 기다리는 최대 시간 |
-| `inference_latency` | 1/30 s | server `GetActions` 호출의 최소 목표 간격. 실제 추론이 더 느리면 추가 sleep 없음 |
-
-> upstream async 문서 표에는 `chunk_size_threshold` 기본값이 0.7로 적힌 곳이 있지만,
-> v0.6.0의 `RobotClientConfig` 실제 기본값과 예제 명령은 **0.5**다.
-
-### 지원 범위와 주의점
-
-- async server의 source allowlist는
-  `act`, `smolvla`, `diffusion`, `tdmpc`, `vqbet`, `pi0`, `pi05`, `groot`의 **8개**다.
-  위의 전체 VLA 10개와 같지 않으며 `pi0_fast`, XVLA, EO-1, MolmoAct2, WALL-OSS, EVO1은 빠져 있다.
-  이 프로젝트 대상 ACT·SmolVLA·GR00T N1.7은 모두 allowlist에 포함된다.
-- camera key는 checkpoint의 `policy.config.image_features`와 맞아야 한다. `RemotePolicyConfig`에는
-  `rename_map`이 있지만 stock `RobotClientConfig` CLI에는 이를 노출하는 field가 없어, key가 다르면
-  client 쪽 schema를 맞추거나 별도 client wrapper가 필요하다.
-- 관측 중복 필터는 image를 비교하지 않고 `observation.state`의 L2 distance만 본다
-  (`atol=1`). joint가 아닌 EEF state로 바꾸면 단위와 차원이 달라지므로 threshold도 함께 재설계해야 한다.
-- stock server는 action chunk를 postprocessor에 한 번에 넣지 않고 `(B, action_dim)`으로 한 step씩
-  호출한다. 반면 GR00T N1.7의 native relative decoder는 horizon별 stats와 기준 pose 때문에
-  `(B, T, action_dim)` 전체를 요구하고 single-step decode를 명시적으로 거부한다. 따라서
-  **v0.6.0 stock async 경로 그대로는 native GR00T EEF-relative chunk와 호환되지 않는다.**
-  GR00T 및 공통 EEF-relative processor를 적용할 때는 server가 chunk 전체를 한 번에 postprocess하도록
-  수정하고, 해당 processor를 학습 checkpoint에 저장해야 한다.
-- transport는 `grpc.insecure_channel`이고 policy config·observation·action에 Python pickle을 사용한다.
-  인증·TLS·payload 검증이 없으므로 인터넷에 직접 노출하면 안 된다. client/server를 같은 신뢰
-  boundary에 두고 방화벽, VPN 또는 SSH tunnel을 사용한다.
-- server instance에는 session ID가 없고 `Ready`가 전역 queue를 초기화한다. 여러 client가 동시에
-  접속하면 서로 model/session 상태를 덮어쓸 수 있어 사실상 **server 하나당 active client 하나** 구조다.
-
-이 프로젝트에서는 실기기가 stock `RobotClient` 계열을 사용하고, sim은
-`vla_policy_node`가 같은 gRPC/pickle 계약을 구현하되 ROS observation과 자체 `deque`·inference
-thread를 사용한다. `policy-server-affine`은 server의 관측 enqueue 전과 action chunk 생성 후에
-joint-frame affine 변환을 추가하며, policy의 checkpoint processor 바깥에서 동작한다.
-
-소스 근거:
-[`robot_client.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/async_inference/robot_client.py) ·
-[`policy_server.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/async_inference/policy_server.py) ·
-[`configs.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/async_inference/configs.py) ·
-[`services.proto`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/transport/services.proto) ·
-[`async.mdx`](https://github.com/huggingface/lerobot/blob/v0.6.0/docs/source/async.mdx)
-
-</details>
+> 전문 = [`docs/LEROBOT_V060_ANALYSIS.md`](docs/LEROBOT_V060_ANALYSIS.md) ·
+> **이 저장소가 실제로 쓰는** gRPC 계약 = [`docs/spec/07_INTERFACES.md §8`](docs/spec/07_INTERFACES.md)
 
 ---
 
@@ -329,28 +105,34 @@ joint-frame affine 변환을 추가하며, policy의 checkpoint processor 바깥
 
 ### 등록 환경
 
-| Gym ID | 큐브/그릇 배치 | 성공 종료 | 주 용도 |
-|---|---|---|---|
-| `SimToReal-SO101-Teleop-v0` | 태스크 오브젝트 없음 | 없음 | 로봇·책상·조명 base substrate |
-| `SimToReal-SO101-PickCube-v0` | 고정 실측 배치 | 순간 판정 | 결정적 teleop·datagen |
-| `SimToReal-SO101-PickCube-DR-v0` | **full DR** 종형 큐브 영역 + 그릇 arc | 순간 판정 | 데이터 다양화·cuRobo sweep |
-| `SimToReal-SO101-PickCube-DRBase-v0` | nominal 근처 좁은 사각형 | 순간 판정 | 제한 영역 DR |
-| `SimToReal-SO101-PickCube-Eval-v0` | 고정 실측 배치 | 15-step 디바운스 | 재현성 closed-loop 평가 |
-| `SimToReal-SO101-PickCube-DR-Eval-v0` | full DR | 15-step 디바운스 | DR closed-loop 평가 |
+Gym 환경 6종 — base substrate 1개 + PickCube 5변형(DR-off 기본 · full/base DR · Eval 디바운스).
+
+| Gym ID | 한 줄 |
+|---|---|
+| `SimToReal-SO101-Teleop-v0` | 로봇·책상·조명 base substrate (태스크 없음) |
+| `SimToReal-SO101-PickCube-v0` | **기본** — 고정 실측 배치, 결정적 |
+| `SimToReal-SO101-PickCube-DR-v0` | full DR — datagen·cuRobo sweep |
+| `SimToReal-SO101-PickCube-DRBase-v0` | 좁은 사각형 DR |
+| `SimToReal-SO101-PickCube-Eval-v0` | 디바운스 성공 — 재현성 최고 평가 |
+| `SimToReal-SO101-PickCube-DR-Eval-v0` | DR + 디바운스 |
+
+> 관측·액션·씬·DR 의 **계약 수준 수치 전체**(obs shape, actuator gain, 스폰 영역 상수, 상수 대장)
+> = [`docs/spec/03_ENV_SPEC.md`](docs/spec/03_ENV_SPEC.md)
 
 ### 에셋 형상과 치수
 
-| 에셋 | 현재 형상·치수 | 물리/충돌 표현 |
-|---|---|---|
-| **SO-101 follower** | `shoulder_pan/lift`·`elbow_flex`·`wrist_flex/roll` 5축 + gripper 1축. URDF 주요 관절 원점 간 거리 약 **116 / 135 / 64 mm**, gripper-frame offset 약 **98 mm** | Isaac용 mesh collider와 cuRobo용 **54-sphere / 9-link** 근사 |
-| **Cube1/2** | 한 변 **40 mm**, 35 g, corner radius 8.8 mm인 펠트 rounded box. 현재 task는 **Cube1 한 개**만 활성 | visual과 같은 rounded mesh의 `convexHull` |
-| **Cube3/4** | 한 변 **50 mm**, 55 g, corner radius 11 mm. 에셋/단일 사양에는 유지되지만 현재 scene에는 미배치 | `convexHull` |
-| **그릇** | 회전체 곡면 bowl, 상단 **Ø150 mm**, 바닥 **Ø65 mm**, 높이 **70 mm**, 벽 4 mm, 외부 base 5 mm + cavity floor 3 mm, 250 g | 오목한 내부를 보존한 watertight mesh + `convexDecomposition` |
-| **책상** | **1,600 × 800 × 25 mm**, 상판 높이 705 mm. 현재 scene은 desk mat 없음 | 상판 static box collider |
-| **카메라** | top · wrist · front RGB 3-view | static camera cfg, 렌더 시 `--enable_cameras` 필요 |
+| 에셋 | 요약 |
+|---|---|
+| **SO-101 follower** | 팔 5축 + gripper 1축. Isaac mesh collider + cuRobo **54-sphere / 9-link** 근사 |
+| **큐브** | Cube1/2 = 40 mm·35 g, Cube3/4 = 50 mm·55 g 펠트 rounded box. **현재 task 는 Cube1 한 개만 활성**. 충돌 = `convexHull` |
+| **그릇** | 상단 Ø150 · 바닥 Ø65 · 높이 70 mm, 250 g. 오목 내부 보존 watertight mesh + `convexDecomposition` |
+| **책상** | 1,600 × 800 × 25 mm, 상판 높이 **705 mm** |
+| **카메라** | top · wrist · front RGB 3-view (640×480). 렌더 시 `--enable_cameras` 필요 |
 
-cuRobo는 삼각 mesh를 직접 충돌검사하지 않고 아래 54개 sphere로 근사한다. 링크별 개수는
-base 9 · shoulder 6 · upper arm 8 · lower arm 10 · wrist 5 · gripper 6 · moving jaw 7 · camera mount 3이다.
+> 전체 치수·물리 상수·충돌 근사 규약 = [`docs/spec/03_ENV_SPEC.md §9`](docs/spec/03_ENV_SPEC.md) ·
+> 왜 큐브가 SDF 가 아니라 convexHull 인가 = [`docs/spec/09_TACIT_KNOWLEDGE.md §2`](docs/spec/09_TACIT_KNOWLEDGE.md)
+
+cuRobo 는 삼각 mesh 를 직접 충돌검사하지 않고 54개 sphere 로 근사한다.
 
 <table>
   <tr>
@@ -367,20 +149,16 @@ base 9 · shoulder 6 · upper arm 8 · lower arm 10 · wrist 5 · gripper 6 · m
 
 ### DR 큐브 스폰 영역
 
-full DR은 env-local `x ∈ [-0.24, 0.24] m`, `y ∈ [0.06, 0.26] m`의 좌우대칭 종형 영역이다.
-종의 x 반너비는 `(y, half-width) = (0.06,0.24), (0.14,0.24), (0.18,0.20),
-(0.22,0.16), (0.26,0.08)` m를 선형 보간한다. 이 외곽에서 다음 영역을 제외한다.
+full DR 은 env-local 좌우대칭 **종형(bell)** 영역에서 큐브를 스폰하고, 로봇암 제외 박스 ·
+그릇 이격 · **shoulder-pan 축 기준** 최소 도달거리로 잘라낸다. 그릇은 반경 0.44 m 원호에서
+−4°~+8° 로 움직이며, 조명·카메라 focal·로봇 색·큐브 마찰/질량 randomization 이 추가된다.
 
-| 제외/제약 | 값 |
-|---|---|
-| 로봇암 제외 박스 | `x=[-0.09, 0.04]`, `y=[-0.045, 0.155]` m |
-| 그릇 이격 | 중심 `(-0.22, 0.265)` m에서 **140 mm** 이상 |
-| base 최소 도달거리 | shoulder-pan 축 `(-0.021, 0.023)` m에서 **123 mm** 이상 |
-| 큐브 간 최소거리 | **60 mm** |
-| DRBase 사각형 | `x=[-0.14, 0.06]`, `y=[0.205, 0.305]` m; 나머지 제약은 동일 |
+기하의 **단일 소스**는 `src/sim_to_real/tasks/pick_cube/spawn_area.py` 다 — env cfg · sweep ·
+plot 세 곳이 이 모듈을 공유한다.
 
-큐브는 full orientation으로 랜덤화하고, 그릇은 반경 0.44 m 원호에서 -4°~+8°로 움직인다.
-DR 환경은 여기에 조명·카메라 focal·로봇 색과 큐브 마찰/질량 randomization을 더한다.
+> 상수 전체 = [`docs/spec/03_ENV_SPEC.md §11`](docs/spec/03_ENV_SPEC.md) ·
+> 왜 마운트 원점이 아니라 pan 축 기준인가 =
+> [`docs/spec/09_TACIT_KNOWLEDGE.md §3.1`](docs/spec/09_TACIT_KNOWLEDGE.md)
 
 ![DR 스폰 영역과 yaw-zero 183-cell 결과](docs/pics/cuRobo/model54_yaw_zero_spawn_map.png)
 
@@ -441,18 +219,17 @@ grasp manifold, chord-center 보정, 5-frame contact hold와 재현 명령은
 
 ### 핵심 의존성
 
-버전은 `pyproject.toml` 에 고정. **ABI 호환성 핀이라 임의 `uv lock --upgrade` 금지.**
-
 | 패키지 | 버전 | 위치 |
 |---|---|---|
-| Python | 3.11 | (필수) |
-| torch | 2.7.0+cu128 | (공용) |
+| Python | 3.11 (호스트) / 3.12 (policy 이미지) | |
+| torch | 2.7.0+cu128 | 공용 |
 | lerobot | 0.4.4 | 실기기 native uv (`teleop`+`async`) |
-| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 (Dockerfile.policy 독립 핀) |
-| isaacsim | 5.1.0 `[all,extscache]` | `isaac` 그룹 |
-| isaaclab | 2.3.2 `[all,isaacsim]` | `isaac` (직접 의존, 외부 래퍼 제거) |
+| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 |
+| isaacsim / isaaclab | 5.1.0 / 2.3.2 | `isaac` 그룹 |
 
-ABI 핀: `numpy==1.26.0` / `pyarrow<19` / `datasets<4.7` / `h5py<3.16` / `torch==2.7.0+cu128` / `torchcodec<0.6` / `packaging<26` / `setuptools<82`. 이유는 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 와 `AGENTS.md` 참고.
+> ⚠ **ABI 호환성 핀이라 임의 `uv lock --upgrade` 금지.** 핀 8종·이유·"어기면" 전체 =
+> [`docs/spec/06_RUNTIME_SPEC.md §7`](docs/spec/06_RUNTIME_SPEC.md) ·
+> 증상별 대응 = [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 
 ---
 
@@ -488,19 +265,19 @@ uv run wandb login          # 선택
 cp .env.example .env
 ```
 
-| 블록 | 변수 (발췌) |
+먼저 채워야 하는 것은 세 가지다.
+
+| 변수 | 내용 |
 |---|---|
-| §0 시크릿 | `HF_TOKEN` `HF_USER` `WANDB_API_KEY` |
-| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n15/act) — 활성 모델 1줄 선택 |
-| §2 하드웨어 | `TELEOP_PORT` `ROBOT_PORT` `ROBOT_ID` `TELEOP_ID` (Windows=COM, Docker=`/dev/ttyACM*`) |
-| §3 카메라 | `ENABLED_CAMERAS` `*_CAM_PORT` `CAM_WIDTH/HEIGHT/FPS` |
-| §4 데이터 | `SINGLE_TASK` `HF_DATASET_REPO_ID` `NUM_EPISODES` `RECORD_FPS` |
-| §5 학습 | `BATCH_SIZE` `TRAIN_STEPS` `OUTPUT_DIR` (Linux 서버) |
-| §6 추론 서버 | `POLICY_SERVER_HOST/PORT` `INFERENCE_LATENCY` `OBS_QUEUE_TIMEOUT` (Linux 서버) |
-| §7 추론 클라이언트 | `POLICY_SERVER_ADDRESS` `TASK` `ACTIONS_PER_CHUNK` (실기기) |
+| `HF_TOKEN` · `HF_USER` | Hub 인증 (§0) |
+| **`POLICY_PROFILE`** | 활성 모델 1줄 선택 — `smolvla` \| `groot_n15` \| `act` (§1) |
+| `TELEOP_PORT` · `ROBOT_PORT` | 실기기 직렬 포트 (§2, Windows=COM) |
 
 - **Linux (Docker)**: compose 가 `--env-file .env` + `env/${POLICY_PROFILE}.env` 로 컨테이너에 주입.
 - **Windows (native uv)**: 자동 로드 안 됨 → 셸에서 직접 로드: `set -a; source .env; set +a`.
+
+> 9섹션 **69변수 전체**(이름·기본값·소비 서비스)와 모델 프로필 차이표 =
+> [`docs/spec/06_RUNTIME_SPEC.md §5, §6`](docs/spec/06_RUNTIME_SPEC.md)
 
 ---
 
@@ -582,7 +359,7 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-S
 
 | 경로 | 내용 |
 |---|---|
-| `docs/` | 문서 허브 (`pics/` 이미지, `videos/` 동영상) |
+| `docs/` | 문서 허브. **`SPEC.md` + `spec/` = 시스템 명세서 정본** (`pics/` 이미지, `videos/` 동영상) |
 | `datasets/` | LeRobot v3 데이터셋 |
 | `outputs/` | 모델 체크포인트·학습 산출물 |
 | `logs/` | 런타임 로그 (`.gitignore`) |
@@ -600,8 +377,12 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-S
 
 | 문서 | 내용 |
 |---|---|
-| [`AGENTS.md`](AGENTS.md) | 내부 구조·규칙·자주 쓰는 명령 (개발자용) |
+| [**`docs/SPEC.md`**](docs/SPEC.md) | **시스템 명세서 정본** (as-built) — env·I/O 계약·데이터 스키마·런타임·인터페이스·파이프라인·암묵지 9종 |
+| [`AGENTS.md`](AGENTS.md) | 이 저장소에서 작업하는 규칙 (배치 규약·운영 규칙) |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 |
+| [`docs/PINK_IK_PICKPLACE.md`](docs/PINK_IK_PICKPLACE.md) | pink IK pick-place SM 설계·회고 (⚠ §5·§8 스테일 — `docs/spec/08_PIPELINES.md` §6 참조) |
+| [`docs/SIM_REAL_REPLAY_CALIBRATION.md`](docs/SIM_REAL_REPLAY_CALIBRATION.md) | 실기기 → sim replay calibration 진단 서사 |
+| [`scripts/cuRobo/README.md`](scripts/cuRobo/README.md) | cuRobo 2-proc pick-place SM 실행법 |
 
 ---
 

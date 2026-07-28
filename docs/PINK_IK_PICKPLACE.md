@@ -142,6 +142,9 @@ pink 는 **미분 IK**(differential IK)를 QP 로 푼다. 관절 속도를 반�
 
 ## 5. State Machine — waypoint 시퀀스
 
+> ⚠ **스테일**: 이 절은 현행 코드와 다르다(retreat 제거 등). 현행 시퀀스 = `docs/spec/08_PIPELINES.md` §6 ·
+> 불일치 = `docs/spec/09_TACIT_KNOWLEDGE.md` §9 INC-05.
+
 7 waypoint + home. 각 waypoint 를 **1회 IK** 로 관절각화하고, 순차적으로 **smoothstep joint-space
 보간**(폐루프 IK 아님)으로 이동한다.
 
@@ -271,6 +274,9 @@ _tick() @ 30Hz
 ---
 
 ## 8. 파라미터 (튜닝 노브)
+
+> ⚠ **스테일**: 기본값 일부가 코드와 다르고(`--ori-cost` 0.5 ≠ 1.0) 인자 6개가 누락돼 있다.
+> 현행 = `docs/spec/08_PIPELINES.md` §6 · 불일치 = `docs/spec/09_TACIT_KNOWLEDGE.md` §9 INC-06.
 
 기본값은 실 trajectory 역산값. `PINK_ARGS="..."` 로 주입.
 
