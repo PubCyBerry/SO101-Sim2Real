@@ -1,34 +1,28 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Dockerfile.policy — LeRobot 0.5.1 Async Inference Policy Server (SmolVLA / GR00T-N1.5)
-# Base  : nvidia/cuda:12.8.0-devel-ubuntu24.04  ← devel: NVCC 포함 (flash-attn 소스 빌드)
-# Python: 3.12 (managed by uv)  ← 0.5.1 requires-python=">=3.12"
-# Deps  : lerobot[smolvla,async]==0.5.1 + GR00T 의존성 + flash-attn
+# Dockerfile.policy — LeRobot 0.6.0 Async Inference Policy Server
+#                     (ACT / SmolVLA / GR00T-N1.7)
+# Base  : nvidia/cuda:12.8.0-devel-ubuntu24.04
+# Python: 3.12 (managed by uv)  ← 0.6.0 requires-python=">=3.12"
+# Deps  : lerobot[smolvla,async,groot]==0.6.0
 #         ※ pyproject.toml override-dependencies 미사용 (uv pip install 직접 명세)
 #
 # ■ pyproject.toml override-dependencies 미사용 이유
 #   pyproject.toml 의 [tool.uv.override-dependencies] 는 Isaac Sim 5.1 호환용 핀
 #   (numpy==1.26.0, pyarrow<19, datasets<4.7.0) 을 포함한다.
-#   lerobot 0.5.1 은 numpy>=2.0.0 을 요구하므로 이 override 와 충돌 →
+#   lerobot 0.6.0 은 numpy>=2.0.0 을 요구하므로 이 override 와 충돌 →
 #   uv sync 대신 uv pip install 로 직접 명세해 pyproject.toml override 를 우회한다.
 #   호스트 Isaac 환경 (uv sync --group isaac, Python 3.11) 은 기존 override 그대로 유지.
 #
 # ■ teleop 이미지와의 차이
-#   - Python 3.11 → 3.12 (lerobot 0.5.1 요구)
+#   - Python 3.11 → 3.12 (lerobot 0.6.0 요구)
 #   - uv sync → uv pip install (Isaac override 우회)
-#   - lerobot 0.4.x → 0.5.1 / transformers==5.3.0
-#   - numpy 1.26 → 2.x (lerobot 0.5.1 요구)
+#   - lerobot 0.4.x → 0.6.0 / transformers>=5.4,<5.6
+#   - numpy 1.26 → 2.x (lerobot 0.6.0 요구)
 #   - 직렬/USB 툴체인(libevdev, libusb, udev) 제거 → 순수 추론 서버
 #
-# ■ flash-attn 소스 빌드 전략
-#   - devel 베이스 이미지 사용 → NVCC 포함, 소스 빌드 가능
-#   - TORCH_CUDA_ARCH_LIST="8.6 9.0 12.0" (RTX A4000 / H100 / RTX PRO 5000 Blackwell)
-#   - lerobot 0.5.1: flash-attn>=2.5.9,<3.0.0
-#   - MAX_JOBS=8 로 병렬 컴파일 (128 GB RAM 기준; OOM 시 4로 낮출 것)
-#   - 최종 app 스테이지는 runtime 이미지로 복귀 → 이미지 크기 최소화
-#
 # ■ torch 버전 전략
-#   lerobot 0.5.1 호환 범위: torch>=2.7,<2.11.0 / torchvision>=0.22,<0.26
+#   lerobot 0.6.0 호환 범위: torch>=2.7,<2.12 / torchvision>=0.22,<0.27
 #   cu128 인덱스에서 사용 가능한 최신 버전을 uv 가 자동 선택.
 #
 # ■ 레이어 캐시 설계
@@ -37,14 +31,13 @@
 #   Stage uv        : uv 바이너리            → 거의 변경 없음
 #   Stage python    : Python 3.12 + venv    → Python 버전 변경 시만
 #   Stage torch     : torch / torchvision   → PyTorch 버전 변경 시만
-#   Stage policy    : lerobot + flash-attn  → 패키지 변경 시만
+#   Stage policy    : lerobot + EEF patch  → 패키지 변경 시만
 #   Stage app       : 클린 CUDA runtime     → 자주 변경 (~400 MB 절감)
 # =============================================================================
 
 # ── Stage 1: System dependencies ─────────────────────────────────────────────
 # teleop 이미지의 apt 목록에서 USB / serial / speech 패키지를 제외한 minimal 셋.
 # OpenCV / ffmpeg 는 lerobot 패키지가 import 단계에서 의존하므로 유지.
-# devel 이미지 사용 이유: NVCC 포함 → flash-attn 소스 빌드 가능.
 # 최종 app 스테이지는 runtime 이미지로 복귀해 이미지 크기를 최소화한다.
 FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS base
 
@@ -54,9 +47,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ── 빌드 전용 패키지만 설치 (런타임 패키지는 app 스테이지에서 별도 설치) ──────────
 # app 스테이지는 이 base 를 상속하지 않으므로 컴파일에 필요한 패키지만 설치.
 # 런타임 전용(ffmpeg, libsm6, libgl1 등)을 제외해 빌드 캐시를 경량화.
-# flash-attn 빌드가 필요할 때는 build-essential + python3-dev 가 여기 있으면 된다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # 빌드 핵심 도구 (sdist fallback 및 향후 flash-attn 대비; curl 불필요)
+        # 빌드 핵심 도구 (sdist fallback 대비; curl 불필요)
         build-essential \
         git \
         ca-certificates \
@@ -80,7 +72,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv --version
 
 # ── Stage 3: Python 3.12 + virtual-env ───────────────────────────────────────
-# lerobot 0.5.1 requires-python = ">=3.12" (PR #3023)
+# lerobot 0.6.0 requires-python = ">=3.12"
 FROM uv-installer AS python-setup
 
 ENV VIRTUAL_ENV=/opt/venv \
@@ -99,7 +91,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:$PATH"
 
 # ── Stage 4: torch / torchvision ─────────────────────────────────────────────
 # pyproject.toml 미복사 — Isaac override 의존 없이 cu128 인덱스에서 직접 설치.
-# lerobot 0.5.1 호환 범위: torch>=2.7,<2.11.0 / torchvision>=0.22.0,<0.26.0
+# lerobot 0.6.0 호환 범위: torch>=2.7,<2.12.0 / torchvision>=0.22.0,<0.27.0
 # uv 가 cu128 인덱스에서 사용 가능한 최신 버전을 자동 선택한다.
 FROM python-setup AS torch-layer
 
@@ -108,73 +100,28 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     && UV_HTTP_TIMEOUT=600 \
        UV_CONCURRENT_DOWNLOADS=2 \
        uv pip install \
-           "torch>=2.7.0,<2.11.0" \
-           "torchvision>=0.22.0,<0.26.0" \
+           "torch>=2.7.0,<2.12.0" \
+           "torchvision>=0.22.0,<0.27.0" \
            --index-url "https://download.pytorch.org/whl/cu128"
 
 
-# ── Stage 5: lerobot 0.5.1 + GR00T 의존성 (flash-attn 소스 빌드 포함) ────────
+# ── Stage 5: LeRobot 0.6.0 + ACT/SmolVLA/GR00T-N1.7 ──────────────────────────
 # pyproject.toml 의 override-dependencies (numpy==1.26.0 등) 를 우회하기 위해
 # uv sync 대신 uv pip install 로 직접 명세한다.
-#
-# 설치 구성:
-#   lerobot[smolvla,async]==0.5.1
-#     smolvla extra → transformers==5.3.0, num2words, accelerate>=1.10, safetensors
-#     async extra   → grpcio==1.73.1, protobuf>=6.31.1,<6.32.0, matplotlib
-#   GR00T-N1.5 보조 패키지 (lerobot[groot] 를 풀어쓴 것, flash-attn 별도 설치)
-#   flash-attn>=2.5.9,<3.0.0 (--no-build-isolation, NVCC 필요)
-#
-# flash-attn 빌드 환경변수:
-#   TORCH_CUDA_ARCH_LIST: sm_86(RTX A4000) / sm_90(H100) / sm_120(Blackwell)
-#   MAX_JOBS: 128 GB RAM 기준 8 권장. OOM 발생 시 4로 낮출 것.
+# GR00T-N1.7은 flash-attn이 없으면 공식 SDPA fallback을 사용한다.
 FROM torch-layer AS policy-deps
 
-# ── lerobot 0.5.1 (smolvla + async) ─────────────────────────────────────────
-# numpy>=2.0.0 등 lerobot 0.5.1 의존성이 Isaac override 없이 정상 해소된다.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     ulimit -Sn 65536 \
     && UV_HTTP_TIMEOUT=600 \
        UV_CONCURRENT_DOWNLOADS=2 \
        uv pip install \
-           "lerobot[smolvla,async]==0.5.1"
+           "lerobot[smolvla,async,groot]==0.6.0"
 
-# ── GR00T-N1.5 보조 패키지 ───────────────────────────────────────────────────
-# decord: x86_64 Linux 전용 바이너리만 존재.
-# ninja: flash-attn C++ 빌드 가속.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    ulimit -Sn 65536 \
-    && UV_HTTP_TIMEOUT=600 \
-       UV_CONCURRENT_DOWNLOADS=2 \
-       uv pip install \
-           "peft>=0.18.0,<1.0.0" \
-           "diffusers>=0.27.2,<0.36.0" \
-           "dm-tree>=0.1.8,<1.0.0" \
-           "timm>=1.0.0,<1.1.0" \
-           "decord>=0.6.0,<1.0.0" \
-           "ninja>=1.11.1,<2.0.0"
-
-# ── flash-attn 소스 빌드 ─────────────────────────────────────────────────────
-# torch 가 이미 venv 에 설치된 상태에서 --no-build-isolation 으로 빌드.
-# flash-attn 2.x 의 공식 sm_120 화이트리스트 미포함 →
-#   TORCH_CUDA_ARCH_LIST 로 강제 지정 (커뮤니티 검증 완료).
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    ulimit -Sn 65536 \
-    && TORCH_CUDA_ARCH_LIST="8.6 9.0 12.0" \
-       MAX_JOBS=8 \
-       UV_HTTP_TIMEOUT=600 \
-       uv pip install \
-           --no-build-isolation \
-           "flash-attn>=2.5.9,<3.0.0"
-
-# ── LeRobot 0.5.1 GR00T compatibility patches ───────────────────────────────
-# transformers 5.3 + torch 2.10 조합에서 LeRobot 0.5.1 의 GR00T wrapper 가 네 지점에서
-# 즉시 실패한다(Beta meta tensor validation / all_tied_weights_keys 미정의 / Eagle
-# processor return_tensors 누락 / sample_time meta tensor). upstream 반영 전까지
-# 설치된 site-packages 를 최소 수정한다. 패치 본문·근거는 별도 파일로 분리:
-#   docker/groot_compat_patch.py  (멱등, 형태가 다르면 RuntimeError 로 빌드 중단=버전 트립와이어)
-# (0.5.2 기준: #1·#4 는 upstream 반영됨. lerobot/transformers 업그레이드 시 재검토할 것.)
-COPY docker/groot_compat_patch.py /tmp/groot_compat_patch.py
-RUN python /tmp/groot_compat_patch.py && rm /tmp/groot_compat_patch.py
+# v0.6.0 source 형태를 tripwire로 확인한 뒤 공통 EEF-relative processor hook 적용.
+COPY docker/lerobot_v060_eef_relative_patch.py /tmp/lerobot_v060_eef_relative_patch.py
+RUN python /tmp/lerobot_v060_eef_relative_patch.py \
+    && rm /tmp/lerobot_v060_eef_relative_patch.py
 
 
 # ── Stage 6: Slim runtime (이미지 크기 최적화) ──────────────────────────────
@@ -182,8 +129,18 @@ RUN python /tmp/groot_compat_patch.py && rm /tmp/groot_compat_patch.py
 # Dockerfile.lerobot 과 동일한 slim 전략 — USB/serial/speech 패키지는 정책 서버에 불필요.
 FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS app
 
+ARG LEROBOT_GIT_COMMIT=30da8e687a6dfc617fcd94afc367ac7071c376ce
+ARG SO101_PROJECT_GIT_COMMIT=cc246eaabd42a99f499a1f1011b396dfec9563b4
+
 ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=Asia/Seoul
+    TZ=Asia/Seoul \
+    LEROBOT_RUNTIME_VERSION=0.6.0 \
+    LEROBOT_GIT_COMMIT=${LEROBOT_GIT_COMMIT} \
+    SO101_PROJECT_GIT_COMMIT=${SO101_PROJECT_GIT_COMMIT}
+
+LABEL org.opencontainers.image.version="lerobot-0.6.0-eef-relative" \
+      org.opencontainers.image.revision="${SO101_PROJECT_GIT_COMMIT}" \
+      io.lerobot.git.commit="${LEROBOT_GIT_COMMIT}"
 
 # 런타임 전용 패키지 (빌드 도구 없음):
 #   libssl3 / libffi8          : uv managed CPython 동적 링크 (ssl / ctypes 모듈)
@@ -216,6 +173,8 @@ COPY --from=policy-deps /root/.local/share/uv/python /root/.local/share/uv/pytho
 
 # 정책 서버 전용 진입점 (prepare-model / policy-server / info / bash / python).
 COPY docker/policy-entrypoint.sh /usr/local/bin/entrypoint.sh
+# runtime bind mount가 없어도 checkpoint processor를 복원할 수 있는 contract fallback.
+COPY src/so101_contract /opt/so101_contract/so101_contract
 
 # HF_HOME: /workspace/.cache/huggingface (lerobot 서비스와 동일 명명 볼륨 공유)
 #   non-root UID 로 실행 시 /root 를 traverse 못하므로 /workspace 하위로 이동.
@@ -227,6 +186,7 @@ ENV VIRTUAL_ENV=/opt/venv \
     PYTHONDONTWRITEBYTECODE=0 \
     PYTHONNOUSERSITE=1 \
     PYTHONUTF8=1 \
+    PYTHONPATH="/workspace/src:/opt/so101_contract" \
     HF_HOME=/workspace/.cache/huggingface
 
 # 모든 설정을 하나의 RUN 으로 통합 → 이미지 레이어 수 감소:
