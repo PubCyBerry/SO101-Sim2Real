@@ -95,6 +95,11 @@ parser.add_argument("--eval_warmup", type=float, default=25.0,
 parser.add_argument("--eval_out", default="outputs/vla_eval.json",
                     help="eval 결과 JSON 경로(REPO_ROOT 상대).")
 parser.add_argument(
+    "--eval_model",
+    default="",
+    help="eval JSON에 기록할 checkpoint/HF repo 식별자. 비우면 POLICY_REPO_ID env를 사용.",
+)
+parser.add_argument(
     "--eval_bowl_kinematic",
     action="store_true",
     help="평가 A/B: bowl을 kinematic rigid body로 고정한다. 시각·충돌·DR pose는 유지하고 "
@@ -1286,7 +1291,7 @@ def main() -> None:
             avg_placed = sum(e["n_final"] for e in episodes) / n_ep
             ever_rate = sum(e["n_ever"] for e in episodes) / (n_ep * n_active)
             summary = {
-                "model": "taehunkim/so101_smolvla_sim_pick_cube",
+                "model": args.eval_model or os.getenv("POLICY_REPO_ID", "unknown"),
                 "n_episodes": n_ep, "n_active_cubes": n_active,
                 "eval_seconds": args.eval_seconds, "eval_settle": args.eval_settle,
                 "eval_bowl_kinematic": bool(args.eval_bowl_kinematic),

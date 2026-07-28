@@ -1,4 +1,4 @@
-"""LeRobot 0.4.4 RobotClient와 같은 action chunk queue semantics."""
+"""LeRobot async RobotClient와 호환되는 action chunk queue semantics."""
 
 from __future__ import annotations
 

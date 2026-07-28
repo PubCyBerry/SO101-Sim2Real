@@ -30,6 +30,8 @@ set -euo pipefail
 # ── 레포 루트로 이동 (이 스크립트 = <root>/scripts/real/lerobot.sh) ──
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+UV_REAL=(uv run --project "${REPO_ROOT}/scripts/real")
 
 # ── .env (+ 활성 프로필) 로드 ──
 [ -f .env ] || { echo "[lerobot.sh] .env 없음: $REPO_ROOT/.env" >&2; exit 1; }
@@ -74,27 +76,27 @@ run() {
 
 case "$MODE" in
   find-port)
-    run uv run --active lerobot-find-port "$@"
+    run "${UV_REAL[@]}" lerobot-find-port "$@"
     ;;
 
   setup-motors)
-    run uv run --active lerobot-setup-motors "${TARGET_ARGS[@]}" "$@"
+    run "${UV_REAL[@]}" lerobot-setup-motors "${TARGET_ARGS[@]}" "$@"
     ;;
 
   calibrate)
-    run uv run --active lerobot-calibrate "${TARGET_ARGS[@]}" "$@"
+    run "${UV_REAL[@]}" lerobot-calibrate "${TARGET_ARGS[@]}" "$@"
     ;;
 
   teleop)
     # shellcheck disable=SC2086
-    run uv run --active lerobot-teleoperate \
+    run "${UV_REAL[@]}" lerobot-teleoperate \
       "${ROBOT_COMMON[@]}" "${TELEOP_COMMON[@]}" "${CAMERA_ARGS[@]}" \
       ${TELEOP_EXTRA_ARGS:-} "$@"
     ;;
 
   record)
     # shellcheck disable=SC2086
-    run uv run --active lerobot-record \
+    run "${UV_REAL[@]}" lerobot-record \
       "${ROBOT_COMMON[@]}" "${TELEOP_COMMON[@]}" "${CAMERA_ARGS[@]}" \
       --dataset.repo_id="${HF_DATASET_REPO_ID}" \
       --dataset.single_task="${SINGLE_TASK}" \
@@ -108,7 +110,7 @@ case "$MODE" in
 
   replay)
     # shellcheck disable=SC2086
-    run uv run --active lerobot-replay \
+    run "${UV_REAL[@]}" lerobot-replay \
       "${ROBOT_COMMON[@]}" \
       --dataset.repo_id="${HF_DATASET_REPO_ID}" \
       --dataset.episode="${EPISODE_INDEX}" \
@@ -116,16 +118,34 @@ case "$MODE" in
     ;;
 
   policy-client)
+    # schema v2 preflight — client dispatch는 **checkpoint manifest**가 결정한다.
+    # ACTION_REPRESENTATION_MODE 는 (있으면) assertion으로만 쓰이고 override가 아니다.
+    # 두 joint mode도 여기서 resolve+assert를 통과해야 robot 객체가 만들어진다.
+    # run() 은 exec 하므로 preflight 는 직접 호출한다.
+    echo "+ preflight: assert_checkpoint_representation --emit client_kind" >&2
+    if ! SO101_CLIENT_KIND="$("${UV_REAL[@]}" python scripts/inference/assert_checkpoint_representation.py \
+      --checkpoint "${POLICY_REPO_ID}" --from-env --skip-kinematics --emit client_kind)"; then
+      echo "checkpoint action representation preflight failed (migrate legacy checkpoints first)" >&2
+      exit 1
+    fi
+    echo "[action-representation] resolved client_kind=${SO101_CLIENT_KIND} (manifest-driven)"
+    # 4 mode 모두 representation-aware client 를 쓴다.
+    #   EEF  : FK/IK adapter + router(IK 1회)
+    #   joint: canonical joint feature 경계 + router(IK 0회) — stock client 가 아니다.
     # shellcheck disable=SC2086
-    run uv run --active python -m lerobot.async_inference.robot_client \
+    run "${UV_REAL[@]}" python scripts/inference/eef_robot_client.py \
       --server_address="${POLICY_SERVER_ADDRESS}" \
       --policy_type="${POLICY_TYPE}" \
+      --pretrained_name_or_path="${POLICY_REPO_ID}" \
+      --policy_device="${DEVICE:-cuda}" \
       --task="${TASK}" \
       --actions_per_chunk="${ACTIONS_PER_CHUNK}" \
       --chunk_size_threshold="${CHUNK_SIZE_THRESHOLD}" \
-      --aggregate_fn_name="${AGGREGATE_FN_NAME}" \
+      --aggregate_fn_name=latest_only \
       --client_device="${CLIENT_DEVICE}" \
-      "${ROBOT_COMMON[@]}" \
+      --real_hardware_ik_validated="${EEF_IK_REAL_VALIDATED:-false}" \
+      --eef_metrics_log="${EEF_REAL_METRICS_LOG:-}" \
+      "${ROBOT_COMMON[@]}" "${CAMERA_ARGS[@]}" \
       ${POLICY_CLIENT_EXTRA_ARGS:-} "$@"
     ;;
 
@@ -137,6 +157,8 @@ case "$MODE" in
     echo "CALIBRATE_TARGET= ${CALIBRATE_TARGET:-robot}"
     echo "ENABLED_CAMERAS = ${ENABLED_CAMERAS:-}"
     echo "POLICY_TYPE     = ${POLICY_TYPE:-}"
+    echo "ACTION_REPRESENTATION_MODE = ${ACTION_REPRESENTATION_MODE:-<manifest>}"
+    echo "EEF_IK_REAL_VALIDATED = ${EEF_IK_REAL_VALIDATED:-false}"
     echo "ACTIONS_PER_CHUNK = ${ACTIONS_PER_CHUNK:-}"
     echo "POLICY_SERVER_ADDRESS = ${POLICY_SERVER_ADDRESS:-}"
     echo "HF_DATASET_REPO_ID = ${HF_DATASET_REPO_ID:-}"
@@ -144,7 +166,7 @@ case "$MODE" in
     ;;
 
   raw)
-    run uv run --active "$@"
+    run "${UV_REAL[@]}" "$@"
     ;;
 
   help|-h|--help|"")
