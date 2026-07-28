@@ -38,6 +38,7 @@ self-check (h5py 만 있으면 됨 — Isaac 불요)::
 from __future__ import annotations
 
 import contextlib
+import time
 
 import h5py
 
@@ -98,8 +99,12 @@ def hdf5_handler(preset: str) -> type:
         compression_preset = preset
 
         def write_episode(self, episode, demo_id=None):
+            # export 는 env 순차 blocking 이라 트라이얼 벽시간의 큰 축이다. 에피소드당 한 줄이면
+            # 압축 프리셋을 바꿨을 때 효과를 로그만 보고 판정할 수 있다.
+            t0 = time.perf_counter()
             with forced_compression(preset):
                 super().write_episode(episode, demo_id)
+            print(f"[export] demo {time.perf_counter() - t0:.2f}s (compression={preset})", flush=True)
 
     _Handler.__name__ = f"HDF5DatasetFileHandler_{preset}"
     return _Handler
