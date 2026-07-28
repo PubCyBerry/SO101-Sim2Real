@@ -38,21 +38,28 @@ class DatagenRecorderTerm(RecorderTerm):
         )
         self._action_idx = [arm._joint_names.index(j) for j in SO101_JOINT_ORDER]
 
+    # ⚠ 반환 텐서는 전부 CPU 로 내린다. RecorderManager 는 이걸 `value.clone()` 해서 에피소드
+    #   내내 리스트에 쌓고(EpisodeData.add), export 직전 torch.stack 으로 합친다 — device 를
+    #   보존하므로 GPU 로 두면 **이미지가 VRAM 에 누적**된다(3-cam 640×480 = 2.64 MiB/step/env,
+    #   379-step 에피소드면 999 MiB/env + stack 순간 2배). 그 VRAM 이 --num_envs 상한을 만든다.
+    #   D2H 는 export 때 어차피 일어나던 전송을 스텝마다 분산시키는 것뿐이다(30 Hz × 2.64 MiB
+    #   = 79 MB/s, PCIe 대비 무시).
+
     def record_pre_step(self):
         if self._joint_idx is None:
             self._resolve_indices()
         robot = self._env.scene["robot"]
         images = self._env.obs_buf["images"]  # {top,wrist,front}: (N,H,W,3) uint8 — obs_t
         return "obs_x", {
-            "joint_pos": robot.data.joint_pos[:, self._joint_idx],
-            "images": dict(images),
+            "joint_pos": robot.data.joint_pos[:, self._joint_idx].cpu(),
+            "images": {k: v.cpu() for k, v in images.items()},
         }
 
     def record_post_step(self):
         if self._action_idx is None:
             self._resolve_indices()
         arm = self._env.action_manager.get_term("arm")
-        return "applied_target", arm.processed_actions[:, self._action_idx]
+        return "applied_target", arm.processed_actions[:, self._action_idx].cpu()
 
 
 @configclass
