@@ -321,7 +321,17 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 | multi-env | ✓ env 당 1 demo | ✗ **`--num_envs 1` 전용** |
 | 저장 범위 | 실패 포함(`success` attr) | **성공만** |
 | 기존 디렉터리 | append 계열 | **덮어씀**(`overwrite=True`) |
-| 메모리 | 에피소드 동안 이미지 누적 (~1.2 GB/env/15 s) | step 마다 CPU 스트리밍 |
+| 메모리 | 에피소드 동안 host RAM 에 누적 (~1 GiB/env/에피소드) | step 마다 CPU 스트리밍 |
+| 압축 | `lzf` + frame-chunk (`hdf5_compression.hdf5_handler`) | LeRobot v3 비디오 인코딩 |
+
+**HDF5 키** = `obs_x/joint_pos` · `obs_x/images/{top,wrist,front}` · `applied_target`
+(변환기가 소비) + `actions` · `initial_state`. stock `states`·`obs`·`processed_actions` 는
+읽는 코드가 없어 꺼져 있다(`SO101DatagenRecorderManagerCfg`). `actions` 는 demo attrs
+`num_samples` 산출에 필요해 남긴다.
+
+**압축**: IsaacLab 기본 gzip(4) 대신 `lzf` + 프레임 단위 청크. export 가 env 순차 blocking
+이라 `--num_envs` 에 비례해 심 루프를 세우는 구간이다 — 실측 10.8 → 3.7 s/demo, 디스크는 2배.
+프리셋 표와 선택 근거 = `09_TACIT_KNOWLEDGE.md` §11.
 
 **공통 요구**: `--auto_trials N > 0` · `--enable_cameras` (없으면 SystemExit).
 

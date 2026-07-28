@@ -531,6 +531,80 @@ env prim 을 lexicographic 정렬하면 `env_10 < env_2` 라 10 env 이상에서
 
 ---
 
+## 13. cuRobo SM 녹화 성능 — 무엇이 병목이고 무엇이 아닌가
+
+2026-07-28 GPU 실측(RTX PRO 5000 Blackwell 48 GB, `--num_envs 2`, 379 step/ep, 2/2 성공).
+**추정이 아니라 계측값이다.** 최적화 방향을 잘못 잡지 않도록 남긴다.
+
+### 13.1 트라이얼 예산 — planner 는 병목이 아니다
+
+| 구간 | 시간 | 비중 |
+|---|---|---|
+| Isaac 부팅 13.0 s · planner init 6.0 s | — | 1회성 |
+| plan | 3.0 s | 5% |
+| replay + preroll + posthold | 22.8 s | 37% |
+| export (gzip) | 21.6 s (10.8/demo) | 35% |
+
+실제 DR 스폰에서 plan 은 `candidate_passes=1` 로 첫 후보가 바로 풀린다(approach 871 ms).
+**합성 부하로 재면 안 된다** — 격자 좌표 + yaw 45/60/75 를 강제하면 `passes=29`, plan 50 s 가
+나와 approach 가 96% 인 것처럼 보인다. 실분포에서는 5 phase 가 균등하다
+(approach 871 / transit 653 / retreat 496 / grasp 489 / lift 460 ms).
+
+replay 는 379 step / 22.8 s = **16.6 step/s = 0.55× 실시간**(카메라 3대 640×480 렌더 bound).
+카메라 해상도는 계약이라 못 줄인다 — 유일한 레버는 `--num_envs` 증가(타일드 렌더 상각)다.
+
+### 13.2 왜 lzf + frame-chunk 인가
+
+IsaacLab 기본은 gzip(4)이고, export 는 `RecorderManager.export_episodes` 가 **env 순차**로
+돌며 심 루프를 세운다. 실제 렌더 프레임(원본 999 MiB/demo) 측정:
+
+| 설정 | MiB/s | 압축률 | s/demo | 1000 ep 디스크 |
+|---|---|---|---|---|
+| gzip(4) auto-chunk (IsaacLab 기본) | 123 | 6.56 | 8.13 | 152 GB |
+| gzip(1) auto-chunk | 158 | 5.50 | 6.31 | 182 GB |
+| lzf auto-chunk | 198 | 3.70 | 5.04 | 270 GB |
+| **lzf frame-chunk (채택)** | **359** | **3.26** | **2.79** | **306 GB** |
+| none frame-chunk | 2066 | 1.00 | 0.48 | 999 GB |
+
+**청크를 프레임 단위로 바꾸면 압축률이 떨어진다**(6.56 → 4.75). h5py 자동 청크
+`(24,60,80,1)` 가 24 프레임에 걸쳐 타일을 인터리브해 **정적 배경의 시간축 중복**을 잡기
+때문이다. lzf 는 그 이득이 작고 속도가 압도적이라 frame-chunk 와 짝지었다. "자동 청크가
+멍청하다"고 오해하지 말 것 — gzip 을 쓸 거면 auto-chunk 를 유지해야 한다.
+
+속도 vs 디스크 트레이드오프일 뿐 **값 계약과 무관**하다(전 프리셋 왕복 배열 동일).
+
+### 13.3 녹화 버퍼는 VRAM 에 쌓였다
+
+`EpisodeData.add` 가 `value.clone()` 으로 device 를 보존해, recorder term 이 GPU 텐서를
+돌려주면 이미지가 에피소드 내내 VRAM 에 쌓이고 export 직전 `torch.stack` 이 피크를 2배로
+만든다. 999 MiB/env/에피소드 → 이게 `--num_envs` 상한을 결정했다.
+`DatagenRecorderTerm` 이 `.cpu()` 로 내려 host RAM 으로 옮긴다.
+
+### 13.4 `use_cuda_graph=False` 는 필수다 — 다시 켜지 말 것
+
+`curobo_batch_planner.PickPlacePlanner` 의 `use_cuda_graph=False` 는 놓친 최적화가 아니다.
+`curobo.runtime.cuda_graph_reset = True` 로 게이트를 열고 `use_cuda_graph=True` + 
+`warmup(enable_graph=True)` 로 A/B 한 결과:
+
+| 요청 | 현행 | cuda graph |
+|---|---|---|
+| #1 | 50.8 s · 4/4 | 9.6 s · 4/4 (궤적 동일) |
+| #2 | 45.7 s · 4/4 | 8.0 s · 4/4 (궤적 동일) |
+| #3 | 53.1 s · **4/4** | 6.5 s · **1/4 회귀** |
+| #4 | 50.3 s · 4/4 | **`CUDA error: an illegal instruction was encountered`** |
+
+5–7× 빠르지만 3번째 요청에서 해를 잃고 4번째에서 프로세스가 죽는다. `_plan_to_batch` 가
+plan 사이에 `update_tool_pose_criteria`/`disable_link_collision` 을 토글하고
+`_ensure_batch_size` 가 solver 를 destroy 하는 구조와 graph 재캡처가 맞지 않는 것으로 보인다.
+
+### 13.5 warp 캐시는 ComputeCache 와 다르다
+
+`/root/.nv/ComputeCache` 는 CUDA 드라이버의 PTX→SASS JIT 캐시이고, warp 커널 캐시는
+`/root/.cache/warp/<ver>` 다. 후자를 안 걸면 `run --rm` 마다 재컴파일 —
+planner 첫 plan 이 58.0 s(cold) vs 50.8 s(warm). 볼륨·무효화 절차 = `06_RUNTIME_SPEC.md §3.2`.
+
+---
+
 ## 참조
 
 - 상수의 현재 값 → `03_ENV_SPEC.md §12` 상수 대장

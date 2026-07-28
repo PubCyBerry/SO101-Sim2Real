@@ -17,6 +17,7 @@ from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManager
 from isaaclab.managers.recorder_manager import RecorderTerm, RecorderTermCfg
 from isaaclab.utils import configclass
 
+from sim_to_real.data.hdf5_compression import hdf5_handler
 from so101_contract.feature_codec import SO101_JOINT_ORDER
 
 
@@ -83,6 +84,10 @@ class SO101DatagenRecorderManagerCfg(ActionStateRecorderManagerCfg):
     - ``record_pre_step_actions`` — ``HDF5DatasetFileHandler.write_episode`` 가 demo attrs
       ``num_samples`` 를 ``episode.data["actions"]`` 길이로 잡는다. 끄면 0 이 된다(6 float/step).
     """
+
+    # gzip(4, IsaacLab 기본) → lzf + frame-chunk. export 10.8 → 3.7 s/demo 실측, 디스크는 2배.
+    # 되돌리려면 "gzip" 으로 바꾸면 된다(프리셋 표 = hdf5_compression 모듈 docstring).
+    dataset_file_handler_class_type: type = hdf5_handler("lzf")
 
     record_datagen = DatagenRecorderTermCfg()
     record_post_step_states: RecorderTermCfg | None = None

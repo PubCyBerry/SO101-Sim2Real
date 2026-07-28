@@ -90,8 +90,9 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 | 포맷 | IsaacLab HDF5 (사후 `isaaclab2lerobotv3.py` 로 v3 변환) | LeRobot v3 즉시 (`LeRobotV3DatasetWriter`, 변환 불필요) |
 | multi-env | ✅ env당 1 demo(`data/demo_N`) | ❌ `--num_envs 1` 전용 (leisaac 동형 제약) |
 | 저장 범위 | 실패도 저장(`success` attr 로 구분) | **성공 에피소드만** (실패 버퍼 폐기) |
-| 메모리 | 에피소드 동안 이미지 GPU 누적 (~1.2 GB/env/15 s) | step 마다 CPU 스트리밍 (GPU 누적 없음) |
-| 보존 정보 | 전체 씬 state(`states`·`initial_state`, replay/재라벨 가능) | frame(action/state/3-cam)만 |
+| 메모리 | 에피소드 동안 host RAM 누적 (~1 GiB/env/에피소드) | step 마다 CPU 스트리밍 |
+| 압축 | `lzf` + frame-chunk (`hdf5_compression.hdf5_handler`) | LeRobot v3 비디오 인코딩 |
+| 보존 정보 | frame + `initial_state`·`actions` | frame(action/state/3-cam)만 |
 | 구현 | stock RecorderManager + `DatagenRecorderTerm` | `SO101LeRobotRecorderManager`(`src/sim_to_real/data/lerobot_recorder_manager.py`) |
 
 ⚠ `--record_lerobot` 은 기존 출력 디렉터리를 **덮어쓴다**(overwrite, `record_state_machine` 규약).
@@ -102,9 +103,13 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 - **플래닝/cold-start 대기 미포함**: plan ZMQ 블록 중엔 env.step 이 없어 기록 자체가 없고,
   settle·직전 트라이얼 꼬리 프레임은 pre-roll 직전 `recorder_manager.reset()` 이 폐기한다.
 - **HDF5 내용**: `obs_x/joint_pos`(절대 rad·SO101 순서) · `obs_x/images/{top,wrist,front}`(uint8) ·
-  `applied_target`(slew 통과 적용 target) + stock(initial_state/states/actions/obs/processed_actions).
-- **용량/메모리**: 3-cam 640×480 uint8 @30 Hz ≈ 2.8 MB/frame/env — 15 s 에피소드 ≈ 1.2 GB/env 가
-  auto-reset 까지 GPU 에 누적된다. `--num_envs 4~8` 권장.
+  `applied_target`(slew 통과 적용 target) + `initial_state`·`actions`. stock `states`·`obs`·
+  `processed_actions` 는 읽는 코드가 없어 꺼져 있다(`actions` 는 `num_samples` attr 산출용으로 유지).
+- **용량/메모리**: 3-cam 640×480 uint8 @30 Hz ≈ 2.64 MiB/frame/env — 379-step 에피소드 원본
+  ≈ 999 MiB/env 가 auto-reset 까지 **host RAM** 에 누적된다(GPU 아님).
+- **압축**: `lzf` + 프레임 단위 청크. export 는 env 순차 blocking 이라 `--num_envs` 에 비례해
+  심 루프를 세운다 — 실측 gzip(4) 10.8 s/demo → lzf 3.7 s/demo, 디스크는 2배.
+  프리셋 표·선택 근거 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.
 - 트라이얼 단위 seed 재현은 없음(run 전체 `--seed` 1회, 이후 연속 RNG 스트림).
 - 변환은 `scripts/convert/isaaclab2lerobotv3.py`(env-free, success demo 만) → LeRobot v3.
 
