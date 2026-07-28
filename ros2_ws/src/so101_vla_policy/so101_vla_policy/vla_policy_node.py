@@ -1,8 +1,9 @@
 """SO-101 VLA 추론 ROS 2 노드.
 
 Isaac Sim bridge(`run_cube_desk_ros_bridge.py`)가 publish 하는 관측을 받아 LeRobot
-async-inference `policy-server`(gRPC, SmolVLA/ACT)로 추론하고 6관절 joint target 을
-publish 한다.
+async-inference `policy-server`(gRPC, SmolVLA/ACT/GR00T)로 추론한다. joint mode는
+6관절 target을 그대로 쓰고, EEF-relative mode는 server가 복원한 absolute EEF chunk를
+공통 bounded sequential IK adapter로 변환한 뒤 joint target을 publish한다.
 
 구독:
   /isaac_joint_states                 sensor_msgs/JointState  (6관절, rad)
@@ -56,8 +57,19 @@ from so101_vla_policy.units import (  # noqa: E402
     LEROBOT_FEATURES,
     SO101_JOINT_ORDER,
     clamp_joint_rad,
-    from_lerobot_units,
-    to_lerobot_units,
+)
+from so101_contract.eef_ik import IKConfig  # noqa: E402
+from so101_contract.action_routing import ActionRepresentationRouter  # noqa: E402
+from so101_contract.inference_startup import (  # noqa: E402
+    build_router,
+    format_startup_log,
+    observation_to_manifest_format,
+    plan_inference_startup,
+)
+from so101_contract.joint_feature_codec import sim_publish_command  # noqa: E402
+from so101_contract.eef_policy_io import (  # noqa: E402
+    EEFPlatformAdapterConfig,
+    SO101EEFPolicyIO,
 )
 
 _CAMERA_TOPICS = {
@@ -98,7 +110,7 @@ class PolicyServerSession:
         self._rt_report_every = 10
 
         # ⚠ rename 은 **클라가 직접 적용**(features·obs 키를 policy 키로) → server rename_map 은 비움.
-        # 이유: 0.5.1 server 는 raw_observation_to_observation 의 resize 에서
+        # 이유: v0.6.0 server는 raw_observation_to_observation의 resize에서
         # policy.config.image_features[key] 를 lerobot_features 키로 조회하는데, 이 단계는
         # preprocessor rename(rename_map) **이전**이다. 따라서 lerobot_features 이미지 키가
         # 모델 config 키(SmolVLA=camera1/2/3)와 일치해야 KeyError 가 안 난다.
@@ -210,6 +222,90 @@ class VlaPolicyNode(Node):
         # use_default_offset=False 로 action = 절대 joint target. sim·실기기 동일,
         # rad-space offset 없음(LeIsaac 순수 affine 동형).
         self._gripper_idx = list(SO101_JOINT_ORDER).index("gripper")
+        self.action_representation_mode = (
+            pe("action_representation_mode", "ACTION_REPRESENTATION_MODE", "") or None
+        )
+        # schema v2 4-mode. representation 값은 **선택적 assertion**이며(비어 있으면
+        # manifest 수용) legacy alias "absolute"는 v2 runtime에서 받지 않는다.
+        _V2_MODES = {"joint_absolute", "joint_relative", "eef_absolute", "eef_relative"}
+        if not self.action_representation_mode:
+            self.action_representation_mode = None
+        elif self.action_representation_mode not in _V2_MODES:
+            raise ValueError(
+                "ACTION_REPRESENTATION_MODE must be empty (accept the manifest) or one of "
+                f"{sorted(_V2_MODES)}, got {self.action_representation_mode!r}"
+            )
+        self.action_representation_pose_format = (
+            pe("action_representation_pose_format", "ACTION_REPRESENTATION_POSE_FORMAT", "")
+            or None
+        )
+        self._checkpoint_contract = None
+        self._router: ActionRepresentationRouter | None = None
+        self._eef_adapter: SO101EEFPolicyIO | None = None
+        self._ik_consecutive_failures = 0
+        self._ik_failure_limit = int(
+            p("ik_failure_limit", 0).value or os.getenv("EEF_IK_FAILURE_LIMIT") or 3
+        )
+        self._ik_aborted = False
+        # schema v2 startup plan을 **먼저** 세운다. manifest resolve → assertion →
+        # (EEF면) manifest kinematics 절 ↔ URDF/YAML hash 검증까지 끝난 뒤에야
+        # adapter/router/feature schema를 만든다. v1 deployment validator는 호출하지 않는다.
+        urdf_path = pe(
+            "eef_urdf_path",
+            "EEF_URDF_PATH",
+            "/workspace/assets/robots/urdf/so_arm101.urdf",
+        )
+        robot_yaml_path = pe(
+            "eef_robot_yaml_path",
+            "EEF_ROBOT_YAML_PATH",
+            "/workspace/assets/robots/so101.yml",
+        )
+        self._startup_plan = plan_inference_startup(
+            pretrained,
+            mode=self.action_representation_mode,
+            pose_format=self.action_representation_pose_format,
+            policy_type=policy_type,
+            revision=os.getenv("POLICY_REVISION") or None,
+            local_files_only=os.getenv("HF_HUB_OFFLINE", "0") == "1",
+            urdf_path=urdf_path,
+            robot_yaml_path=robot_yaml_path,
+        )
+        self._checkpoint_contract = self._startup_plan.contract
+        # 생략된 assertion은 manifest에서 유도한다(override 아님).
+        self.action_representation_mode = self._startup_plan.mode
+        self.action_representation_pose_format = self._startup_plan.pose_format
+
+        if self._startup_plan.requires_ik:
+            self._eef_adapter = SO101EEFPolicyIO.from_files(
+                self._startup_plan.urdf_path,
+                self._startup_plan.robot_yaml_path,
+                ik_config=IKConfig(
+                    position_weight=float(os.getenv("EEF_IK_POSITION_WEIGHT", "1.0")),
+                    orientation_weight=float(os.getenv("EEF_IK_ORIENTATION_WEIGHT", "0.15")),
+                    damping=float(os.getenv("EEF_IK_DAMPING", "0.001")),
+                    max_iterations=int(os.getenv("EEF_IK_MAX_ITERATIONS", "80")),
+                    position_tolerance_m=float(
+                        os.getenv("EEF_IK_POSITION_TOLERANCE_M", "0.0005")
+                    ),
+                    orientation_tolerance_rad=float(
+                        os.getenv("EEF_IK_ORIENTATION_TOLERANCE_RAD", "0.01")
+                    ),
+                ),
+                config=EEFPlatformAdapterConfig(
+                    max_arm_step_rad=self.arm_target_max_velocity / max(self.fps, 1),
+                    max_gripper_step_rad=self.gripper_target_max_velocity / max(self.fps, 1),
+                ),
+            )
+        self._router = build_router(
+            self._startup_plan,
+            policy_io=self._eef_adapter,
+            adapter_config=EEFPlatformAdapterConfig(
+                max_arm_step_rad=self.arm_target_max_velocity / max(self.fps, 1),
+                max_gripper_step_rad=self.gripper_target_max_velocity / max(self.fps, 1),
+            ),
+        )
+        self.get_logger().info(f"[action-representation] {self._checkpoint_contract.summary()}")
+        self.get_logger().info(f"[startup] {format_startup_log(self._startup_plan)}")
 
         if "${" in (pretrained or ""):
             self.get_logger().warn(
@@ -220,7 +316,8 @@ class VlaPolicyNode(Node):
         # rename 을 클라에서 적용: features 이미지 키 + obs 이미지 키를 policy 키로 만든다.
         # rename_map(dataset feat key → policy feat key), 예 observation.images.top→...camera1.
         # self._cam_obs_key[cam] = obs dict 에 넣을 bare 키(camera1 또는 top).
-        lerobot_features = {"observation.state": dict(LEROBOT_FEATURES["observation.state"])}
+        # observation schema는 manifest가 진실이다(pose format별 10D/8D/7D, joint 6D).
+        lerobot_features = {"observation.state": self._startup_plan.state_feature()}
         self._cam_obs_key: dict[str, str] = {}
         for cam in CAMERA_KEYS:
             ds_key = f"observation.images.{cam}"
@@ -251,6 +348,32 @@ class VlaPolicyNode(Node):
         self._inference_future_generation = 0
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vla-infer")
         self._last_target_rad: np.ndarray | None = None
+        self._eef_metrics = {
+            "inference_requests": 0,
+            "chunks_received": 0,
+            "empty_chunks": 0,
+            "stale_chunks": 0,
+            "invalid_chunks": 0,
+            "ik_failures": 0,
+            "replans": 0,
+            "aborts": 0,
+            "queue_starvation_ticks": 0,
+            "commands_published": 0,
+            "ik_steps": 0,
+            "ik_iterations_total": 0,
+            "ik_iterations_max": 0,
+            "position_residual_max_m": 0.0,
+            "orientation_residual_max_rad": 0.0,
+            "queue_depth_max": 0,
+        }
+        self._eef_metrics_fh = None
+        metrics_path = os.getenv("VLA_EEF_METRICS_LOG", "").strip()
+        if self._eef_adapter is not None and metrics_path:
+            try:
+                self._eef_metrics_fh = open(metrics_path, "w", buffering=1)
+                print(f"[vla] EEF METRICS LOG → {metrics_path}", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[vla] EEF METRICS LOG 열기 실패: {exc}", flush=True)
         self._target_max_step = np.full(
             len(SO101_JOINT_ORDER),
             self.arm_target_max_velocity / max(self.fps, 1),
@@ -281,6 +404,10 @@ class VlaPolicyNode(Node):
         self.get_logger().info(
             f"VLA node up. obs={self.joint_states_topic}+cameras → cmd={self.joint_commands_topic}, "
             f"task={self.task_instruction!r}, fps={self.fps}"
+        )
+        self.get_logger().info(
+            f"action representation={self.action_representation_mode}"
+            + (" (absolute EEF → sequential IK → sim joint)" if self._eef_adapter else "")
         )
         if self.vla_reset_file:
             self.get_logger().info(f"episode reset token file: {self.vla_reset_file}")
@@ -332,6 +459,8 @@ class VlaPolicyNode(Node):
         self._joint_rad = None
         self._images.clear()
         self._last_target_rad = None
+        self._ik_consecutive_failures = 0
+        self._ik_aborted = False
         self.get_logger().info(f"episode reset token={token}: action queue/timestep/obs cache cleared")
         return True
 
@@ -344,20 +473,116 @@ class VlaPolicyNode(Node):
         try:
             timed_actions = future.result()
         except Exception as exc:  # noqa: BLE001
+            self._eef_metrics["invalid_chunks"] += int(self._router is not None)
             self.get_logger().warn(f"policy-server inference 실패: {exc}", throttle_duration_sec=5.0)
             return
         if generation != self._inference_generation:
+            self._eef_metrics["stale_chunks"] += int(self._router is not None)
             return
         if not timed_actions:
+            self._eef_metrics["empty_chunks"] += int(self._router is not None)
             self.get_logger().warn("policy-server 빈 chunk (timeout)", throttle_duration_sec=5.0)
             return
+        if self._router is not None:
+            self._eef_metrics["chunks_received"] += 1
+            future_actions = [
+                action
+                for action in sorted(timed_actions, key=lambda item: int(item.get_timestep()))
+                if int(action.get_timestep()) >= self._timestep
+            ]
+            if not future_actions:
+                self._eef_metrics["stale_chunks"] += 1
+                return
+            try:
+                absolute_eef_chunk = np.stack(
+                    [
+                        action.get_action().detach().cpu().numpy().astype(np.float32)
+                        for action in future_actions
+                    ]
+                )
+                conversion = self._router.route(
+                    absolute_eef_chunk,
+                    np.asarray(self._joint_rad, dtype=np.float32),
+                    platform="sim",
+                )
+            except (TypeError, ValueError) as exc:
+                self._eef_metrics["invalid_chunks"] += 1
+                self._record_eef_failure(f"invalid_chunk:{exc}", None, ik_failure=False)
+                return
+            if not conversion.success or conversion.platform_actions is None:
+                self._record_eef_failure(conversion.reason, conversion.failed_index)
+                return
+            self._ik_consecutive_failures = 0
+            if conversion.ik is not None:
+                for step in conversion.ik.steps:
+                    self._eef_metrics["ik_steps"] += 1
+                    self._eef_metrics["ik_iterations_total"] += int(step.iterations)
+                    self._eef_metrics["ik_iterations_max"] = max(
+                        self._eef_metrics["ik_iterations_max"],
+                        int(step.iterations),
+                    )
+                    self._eef_metrics["position_residual_max_m"] = max(
+                        self._eef_metrics["position_residual_max_m"],
+                        float(step.position_residual_m),
+                    )
+                    self._eef_metrics["orientation_residual_max_rad"] = max(
+                        self._eef_metrics["orientation_residual_max_rad"],
+                        float(step.orientation_residual_rad),
+                    )
+            timed_actions = list(zip(future_actions, conversion.platform_actions))
+
         merged = {ts: act for ts, act in self._queue}
-        for ta in timed_actions:
-            ts = int(ta.get_timestep())
-            if ts < self._timestep:
-                continue
-            merged[ts] = ta.get_action().detach().cpu().numpy().astype(np.float32)
+        if self._router is not None:
+            for timed_action, joint_radians in timed_actions:
+                merged[int(timed_action.get_timestep())] = np.asarray(
+                    joint_radians,
+                    dtype=np.float32,
+                )
+        else:
+            for ta in timed_actions:
+                ts = int(ta.get_timestep())
+                if ts < self._timestep:
+                    continue
+                merged[ts] = ta.get_action().detach().cpu().numpy().astype(np.float32)
         self._queue = deque(sorted(merged.items(), key=lambda kv: kv[0]))
+        if self._router is not None:
+            self._eef_metrics["queue_depth_max"] = max(
+                self._eef_metrics["queue_depth_max"],
+                len(self._queue),
+            )
+
+    def _record_eef_failure(
+        self,
+        reason: str,
+        failed_index: int | None,
+        *,
+        ik_failure: bool = True,
+    ) -> None:
+        self._eef_metrics["ik_failures"] += int(ik_failure)
+        self._eef_metrics["replans"] += 1
+        self._ik_consecutive_failures += 1
+        self._queue.clear()
+        self.get_logger().error(
+            "EEF IK chunk 폐기·hold·replan: "
+            f"reason={reason}, failed_index={failed_index}, "
+            f"consecutive={self._ik_consecutive_failures}/{self._ik_failure_limit}"
+        )
+        if self._ik_consecutive_failures >= self._ik_failure_limit:
+            self._ik_aborted = True
+            self._eef_metrics["aborts"] += 1
+            self.get_logger().error("EEF IK 연속 실패 한계 초과: episode command 중단")
+        self._write_eef_metrics("ik_failure")
+
+    def _write_eef_metrics(self, event: str) -> None:
+        if self._eef_metrics_fh is None:
+            return
+        payload = {
+            "event": event,
+            "time": time.time(),
+            "timestep": self._timestep,
+            **self._eef_metrics,
+        }
+        self._eef_metrics_fh.write(json.dumps(payload) + "\n")
 
     def _start_inference(self) -> None:
         if self._inference_future is not None:
@@ -366,13 +591,28 @@ class VlaPolicyNode(Node):
         raw_obs = self._build_raw_obs()
         timestep = self._timestep
         self._inference_future_generation = generation
+        if self._eef_adapter is not None:
+            self._eef_metrics["inference_requests"] += 1
         self._inference_future = self._inference_executor.submit(
             self.session.predict_chunk, raw_obs, timestep
         )
 
     def _build_raw_obs(self) -> dict:
-        state_lerobot = to_lerobot_units(self._joint_rad)
-        obs: dict = {name: float(state_lerobot[i]) for i, name in enumerate(JOINT_FEATURE_NAMES)}
+        # observation 값/이름 모두 manifest 계약을 따른다.
+        #   EEF mode : FK → manifest pose format(10D/8D/7D)
+        #   joint mode: canonical arm radian + gripper policy feature(6D)
+        # legacy to_lerobot_units(arm degree)는 schema v2에서 쓰지 않는다.
+        if self._eef_adapter is not None:
+            state_lerobot = observation_to_manifest_format(
+                self._startup_plan,
+                self._eef_adapter.observation_from_sim(self._joint_rad),
+            )
+        else:
+            state_lerobot = self._startup_plan.observation_feature_from_canonical_joint_state(
+                self._joint_rad
+            )
+        state_names = self._startup_plan.state_names
+        obs: dict = {name: float(state_lerobot[i]) for i, name in enumerate(state_names)}
         for cam in CAMERA_KEYS:
             # bare obs 키 = policy 이미지 키(camera1/2/3 또는 top/wrist/front) — features 와 정합.
             obs[self._cam_obs_key[cam]] = self._images[cam]
@@ -385,15 +625,20 @@ class VlaPolicyNode(Node):
         if not self._ready():
             return
         self._merge_finished_inference()
+        if self._ik_aborted:
+            return
         if len(self._queue) <= self._refill_floor and self._inference_future is None:
             self._start_inference()
 
         if not self._queue:
+            if self._eef_adapter is not None:
+                self._eef_metrics["queue_starvation_ticks"] += 1
             return
-        ts, action_lerobot = self._queue.popleft()
+        ts, action_command = self._queue.popleft()
         self._timestep = ts + 1
-        raw_rad = from_lerobot_units(action_lerobot)
-        desired_rad = clamp_joint_rad(raw_rad)
+        # queue에는 router가 만든 **canonical sim radian** platform command만 들어간다
+        # (4 mode 공통). 공용 helper가 clamp만 적용하고 codec 2차 변환은 하지 않는다.
+        desired_rad = sim_publish_command(action_command)
         if self.command_slew_limit:
             if self._last_target_rad is None:
                 self._last_target_rad = np.asarray(self._joint_rad, dtype=np.float32).copy()
@@ -412,16 +657,35 @@ class VlaPolicyNode(Node):
         msg.name = list(SO101_JOINT_ORDER)
         msg.position = [float(v) for v in target_rad]
         self.cmd_pub.publish(msg)
+        if self._eef_adapter is not None:
+            self._eef_metrics["commands_published"] += 1
+            if self._eef_metrics["commands_published"] % 100 == 0:
+                self._write_eef_metrics("periodic")
 
         if self._traj_fh is not None:
-            state_lerobot = to_lerobot_units(self._joint_rad)
+            state_lerobot = self._startup_plan.observation_feature_from_canonical_joint_state(
+                self._joint_rad
+            ) if not self._startup_plan.contract.spec.is_eef else observation_to_manifest_format(
+                self._startup_plan,
+                self._eef_adapter.observation_from_sim(self._joint_rad),
+            )
             self._traj_fh.write(json.dumps({
                 "t": time.time(), "ts": int(ts),
                 "state": [float(v) for v in state_lerobot],   # 모델이 본 현재 관절(피드백)
-                "action": [float(v) for v in action_lerobot],  # 모델이 낸 target(보정 전)
+                "action": [float(v) for v in action_command],
+                "action_space": (
+                    "canonical_joint_radian_after_eef_ik"
+                    if self._eef_adapter is not None
+                    else "policy_joint_feature"
+                ),
             }) + "\n")
 
     def destroy_node(self) -> bool:
+        if self._eef_adapter is not None:
+            self._write_eef_metrics("final")
+            self.get_logger().info(f"EEF rollout metrics: {self._eef_metrics}")
+        if self._eef_metrics_fh is not None:
+            self._eef_metrics_fh.close()
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self.session.close()
         return super().destroy_node()

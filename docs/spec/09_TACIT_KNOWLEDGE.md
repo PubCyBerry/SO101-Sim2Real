@@ -319,13 +319,20 @@ gripper 를 2.5 로 낮춘 이유는 별개다 — 닫을 때 명령 속도를 �
 - nvcc 는 불필요(NVRTC JIT)
 - **앵커**: `docker/Dockerfile.cuRobo`
 
-### 7.3 `groot_compat_patch.py` 는 삭제 금지 · 트립와이어
+### 7.3 `lerobot_v060_eef_relative_patch.py` 는 삭제 금지 · 트립와이어
 
-- **결정**: `lerobot[smolvla,async]==0.5.1` 설치 직후 1회 실행. transformers 5.3 + torch 2.10
-  에서 LeRobot 0.5.1 GR00T-N1.5 wrapper 가 깨지는 4지점을 site-packages 에서 멱등 패치.
-- **어기면**: GR00T-N1.5 추론·학습 불가. 대상 코드 형태가 다르면 `RuntimeError` 로 빌드를
-  중단한다 — **lerobot·transformers 업그레이드 시 이 패치부터 점검**하라는 신호다.
-- **앵커**: `docker/groot_compat_patch.py`
+- **결정**: `lerobot[smolvla,async,groot]==0.6.0` 설치 직후 1회 실행. PyPI LeRobot 0.6.0
+  source 에 공통 SE(3) processor, train/checkpoint manifest, full-chunk sync/async hook 을
+  site-packages 에서 **멱등** 적용한다.
+- **어기면**: 세 정책(ACT·SmolVLA·GR00T-N1.7) 어느 것도 schema v2 manifest 를 만들지 못하고
+  full-chunk postprocess 계약이 깨진다. 예상 upstream source 형태가 다르면 빌드를 중단한다
+  — **lerobot·transformers 업그레이드 시 이 패치부터 점검**하라는 신호다.
+- **앵커**: `docker/lerobot_v060_eef_relative_patch.py` · 계약 정본
+  `docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`
+
+> **legacy**: `docker/groot_compat_patch.py` 는 LeRobot 0.5.1 + GR00T-N1.5 재현용 자료다.
+> transformers 5.3 + torch 2.10 에서 0.5.1 의 N1.5 wrapper 가 깨지는 4지점을 패치했다.
+> **현재 `Dockerfile.policy` 는 실행하지 않는다.** 이력 보존을 위해 삭제하지 않는다.
 
 ### 7.4 ABI 핀 — `uv lock --upgrade` 금지
 
@@ -512,7 +519,8 @@ env prim 을 lexicographic 정렬하면 `env_10 < env_2` 라 10 env 이상에서
 | RL 보상·커리큘럼 (`PickCubeRewardsCfg` = 빈 stub) | VLA-only 리팩토링. env 는 추론·데이터 기판으로 축소 |
 | MoveIt · cuMotion · Lula · RMPFlow · follow-target IK | 5-DOF pose-goal 한계와 유지비. cuRobo 로 수렴 |
 | `policy-server-rtc` 모드 | 백엔드 스크립트(`policy_server_rtc.py`)가 이 branch 에 없어 entrypoint 에서 제거. 재도입 시 스크립트 + 모드를 함께 복원 |
-| GR00T-N1.7 컨테이너·bridge·`groot_n17.env` | Cosmos-Reason2 backbone + transformers 4.57 ↔ 5.3 충돌로 lerobot 0.5.1 네이티브 불가. N1.5 로 통일 |
+| GR00T-N1.7 **전용 컨테이너·bridge** | 별도 서비스가 불필요해졌다. LeRobot 0.6.0 이 N1.7 을 네이티브 `groot` policy 로 지원해 policy-server 안에서 ACT/SmolVLA 와 같은 경로로 학습·추론한다 (`env/groot_n17.env`) |
+| GR00T-**N1.5** 경로 (`env/groot_n15.env`) | LeRobot v0.6.0 이 N1.5 config/checkpoint 를 명시적으로 거부한다(N1.5 는 0.5.1 을 쓰라는 오류). 프로필을 `groot_n17` 로 대체 |
 | leisaac 런타임 의존 | 유용한 코드만 `src/sim_to_real/`·`src/so101_contract/` 로 vendor. leisaac import 0건 |
 | `lerobot` Docker 서비스 + WSL ROS 스택 | 실기기는 Windows native uv 로 전환 |
 | 그리퍼 offset(31.75 배수) | 절대 joint target 으로 통일 (§4.4) |

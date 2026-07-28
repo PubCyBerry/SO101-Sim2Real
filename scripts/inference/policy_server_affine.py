@@ -18,8 +18,6 @@ frame 정의: sim = policy-feature(sim 학습공간, feature_codec) · real = re
 `policy_server.serve()` 를 AffineAdapterServer 로만 대체(host/port/fps 등 인자·config 동일).
 """
 
-from __future__ import annotations
-
 import os
 import sys
 from concurrent import futures

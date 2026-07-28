@@ -18,12 +18,13 @@
 #   공용+teleop: uv sync --group teleop
 #   공용+dev   : uv sync --group dev
 #
-# ■ 실기기 native uv (Windows): uv sync --group teleop --group async
+# ■ 실기기 native uv (Windows): uv sync --project scripts/real
+#   실제 CLI도 `scripts/real/lerobot.sh`를 통해 전용 LeRobot 0.6.0 project에서 실행한다.
 # ■ Docker
 #   docker/Dockerfile.policy  (policy-server 이미지): pyproject.toml 과 독립.
-#     lerobot 0.5.1 (numpy>=2.0) 이 아래 override (numpy==1.26.0 등, Isaac 호환핀) 과
-#     충돌하므로 uv sync 대신 `uv pip install "lerobot[smolvla,async]==0.5.1"` 로 직접
-#     명세한다. 따라서 policy / async 그룹의 lerobot 버전은 Docker 빌드에 영향 없음.
+#     LeRobot 0.6.0 (numpy>=2.0) 이 아래 override (numpy==1.26.0 등, Isaac 호환핀) 와
+#     충돌하므로 uv sync 대신 필요한 extras를 `uv pip install`로 직접 명세한다.
+#     따라서 아래 policy/async 그룹은 production Docker/Windows 버전에 영향이 없다.
 # =============================================================================
 
 [build-system]
@@ -39,7 +40,7 @@ version     = "0.1.0"
 description = "SO-101 robot manipulation: teleoperation & Isaac Sim training"
 readme      = "README.md"
 
-# Python 3.11 고정 (Isaac Sim 5.1.0 및 LeRobot 0.4.2 공식 지원 버전)
+# Python 3.11을 포함하는 범위. Isaac Sim host는 3.11, 별도 Windows/policy project는 3.12.
 requires-python = ">=3.11,<3.13"
 
 # ── 공통 의존성 ─────────────────────────────────────────────────────────────
@@ -52,7 +53,7 @@ dependencies = [
     "hf-xet>=1.4.3",
     # ZMQ 소켓 (IsaacLab ↔ LeRobot 프로세스 간 통신)
     "pyzmq>=27.1.0",
-    # LeRobot >= 0.4.2 + feetech extra
+# 루트 host 보조용 LeRobot + feetech extra
     #   feetech extra 포함 내용: feetech-servo-sdk, pyserial, opencv-python,
     #   huggingface-hub, datasets, draccus, gym, safetensors 등
     # policy / async 의존성은 Dockerfile.policy 가 dependency-groups
@@ -75,7 +76,7 @@ dependencies = [
 # ── teleop: 실물 Arm Teleoperation ──────────────────────────────────────────
 # SO-101 Leader/Follower Arm을 직렬 포트로 연결해 원격 조작하는 환경.
 # Feetech STS3215 서보 통신을 위해 lerobot[feetech] extra 사용.
-# 실기기 native uv (Windows)는 async 와 함께 설치: --group teleop --group async
+# production Windows 실기기는 이 그룹이 아니라 scripts/real 전용 project를 사용한다.
 teleop = [
     "ffmpeg>=1.4",
     # evdev: Linux 전용 입력 장치 라이브러리 (gamepad / joystick 텔레op 지원)
@@ -85,26 +86,24 @@ teleop = [
 ]
 
 # ── policy: VLA policy 추론/학습 보조 의존성 ────────────────────────────
-# ※ 실제 설치는 Dockerfile.policy 의 uv pip install 로 수행한다.
-#   pyproject.toml 의 override-dependencies (numpy==1.26.0 등) 가 lerobot 0.5.1
-#   (numpy>=2.0) 과 충돌하므로 Docker 에서는 uv sync 를 사용하지 않는다.
-#   본 그룹은 호스트에서 uv sync --group policy 를 실행할 경우를 위한 참조용.
+# ※ production 설치는 Dockerfile.policy가 LeRobot 0.6.0 extras를 직접 설치한다.
+#   아래 그룹은 기존 host 진단/도구 호환용이며 EEF-relative 배포 기준이 아니다.
+#   NumPy 1.26 Isaac override와 LeRobot 0.6.0 요구조건이 충돌하므로 Docker에서는
+#   uv sync를 사용하지 않는다.
 #
-# GR00T-N1.5 3B 지원 패키지 (lerobot[groot] extra 내용을 풀어서 명시):
+# 기존 GR00T/SmolVLA host 진단용 선택 패키지:
 #   peft / diffusers / dm-tree / timm / decord / ninja / flash-attn
 #   flash-attn 은 uv 가 소스 빌드하며 no-build-isolation 이 필요 →
 #   아래 [tool.uv] no-build-isolation-package 에 선언. 빌드 시 NVCC 필요 →
 #   Dockerfile.policy 의 base 스테이지가 devel 이미지를 사용한다.
 policy = [
-    # Docker(Python 3.12)에서는 lerobot 0.5.1이 실제로 설치되지만,
-    # 호스트(Python 3.11)에서 uv resolve 충돌을 피하기 위해 하한만 명시.
-    # (Dockerfile.policy는 uv sync를 쓰지 않으므로 이 값이 Docker 빌드에 영향 없음)
+    # 호스트(Python 3.11) 도구 호환을 위한 marker 해석용 하한.
+    # Dockerfile.policy와 scripts/real/pyproject.toml은 각각 0.6.0을 독립 고정한다.
     "lerobot[smolvla]>=0.4.2",
     "num2words>=0.5.14,<0.6.0",
     "accelerate>=1.7.0,<2.0.0",
     "safetensors>=0.4.3,<1.0.0",
-    # ── GR00T-N1.5 의존성 ────────────────────────────────────────────────
-    # lerobot[groot] extra 를 풀어쓴 것과 동일한 패키지 셋.
+    # ── legacy host GR00T 진단 의존성 ────────────────────────────────────
     # peft: LoRA / AdaLoRA 어댑터 (GR00T fine-tune)
     "peft>=0.18.0,<1.0.0",
     # diffusers: 확산 모델 유틸리티 (GR00T 디노이징 헤드)
@@ -117,14 +116,14 @@ policy = [
     "decord>=0.6.0,<1.0.0; platform_machine == 'x86_64'",
     # ninja: C++ 확장 빌드 가속 (flash-attn 컴파일 속도 향상)
     "ninja>=1.11.1,<2.0.0",
-    # flash-attn: GR00T-N1.5 필수. SmolVLA 는 eager attention 하드코딩으로 미사용.
-    # macOS 는 CUDA 미지원이므로 제외. 소스 빌드 필요 → no-build-isolation-package 선언.
+    # flash-attn: legacy host CUDA 최적화. production N1.7 image는 공식 SDPA fallback을 사용.
+    # macOS는 CUDA 미지원이므로 제외. 소스 빌드 필요 → no-build-isolation-package 선언.
     "flash-attn>=2.5.9,<3.0.0; sys_platform != 'darwin'",
 ]
 
 # ── async: Async inference policy server (gRPC) ──────────────────────────────
 # lerobot.async_inference.policy_server / robot_client 가 의존하는 gRPC 스택.
-# 정책 서버 이미지에서만 설치된다.
+# legacy/root host 도구용. production 정책 서버/실기기 client는 각 전용 환경에서 설치된다.
 async = [
     "grpcio==1.73.1",
     "protobuf>=6.31.1,<6.32.0",

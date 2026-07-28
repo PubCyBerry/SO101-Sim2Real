@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# VLA closed-loop 데모 런처 — Isaac Sim bridge + vla-ros + policy-server 를 띄워
-#   ACT / SmolVLA / GR00T-N1.5 추론을 라이브로 관전(livestream/GUI).  eval 아님(연속 1씬).
+# VLA closed-loop 런처 — Isaac Sim bridge + vla-ros + policy-server 를 띄워
+#   ACT / SmolVLA / GR00T-N1.7 추론을 라이브로 관전하거나 정량 eval한다.
 #
 # 모델·추론 파라미터는 Docker compose 와 동일하게 `.env` + `env/<POLICY_PROFILE>.env`
 # 에서 읽는다. 더 이상 스크립트 안에 모델 경로를 하드코딩하지 않는다.
@@ -10,22 +10,25 @@
 #   - 모델 경로   = 프로필의 POLICY_REPO_ID (학습 산출 lerobot 체크포인트)
 #
 # 사용:
-#   scripts/demo_vla.sh start [profile] [옵션]
-#   scripts/demo_vla.sh stop
-#   scripts/demo_vla.sh status
+#   scripts/inference/demo_vla.sh start [profile] [옵션]
+#   scripts/inference/demo_vla.sh stop
+#   scripts/inference/demo_vla.sh status
 #
 # start 인자:
-#   profile       env/<profile>.env 이름 (예: smolvla, smolvla_nearest256, groot_n15, act).
-#                 생략 시 `.env` 의 POLICY_PROFILE 사용. `groot` 는 `groot_n15` 별칭.
+#   profile       env/<profile>.env 이름 (예: smolvla, groot_n17, act).
+#                 생략 시 `.env` 의 POLICY_PROFILE 사용. `groot` 는 `groot_n17` 별칭.
 #
 # start 옵션:
 #   --ckpt PATH   모델 경로 override (기본 = 프로필의 POLICY_REPO_ID)
 #                 컨테이너경로 /workspace/outputs/.../pretrained_model 또는 HF repo
-#   --cubes N     큐브 수 1~4 (기본 4)
+#   --cubes N     큐브 수 1~4 (기본 1)
+#   --task ID     bridge Gym config. eval 기본은 PickCube-Eval-v0, 연속 기본은 PickCube-v0.
 #   --ip ADDR     원격 WebRTC 관전 IP (tailscale/LAN). 주면 livestream mode 2 + PUBLIC_IP.
 #                 안 주면 mode 1(로컬 LAN IP 광고).
 #   --gui         로컬 디스플레이 GUI (DISPLAY 필요, livestream 대신).
 #   --headless    화면 없이 실행(로그만, 관전 X).
+#   --eval N      N 에피소드 정량 eval 후 bridge/컨테이너를 종료한다.
+#   --eval-out P  eval JSON 경로(기본 outputs/vla_eval_<profile>.json).
 #
 # eval 거동 정합 옵션 (run_nearest_256_eval.sh 와 같은 추론·물리로 맞춤):
 #   --apc N       actions_per_chunk override (기본 = 프로필 값). eval best=32.
@@ -37,18 +40,19 @@
 #   --no-slew     slew 끔 (옛 기본 동작; raw 모델 target 직접 publish — 팔이 actuator 상한속도로 휙휙).
 #   --arm-vel V   slew arm 상한 rad/s (기본 2.3 = 데이터생성 pick_cube_curobo_batch --max_cmd_vel 정합).
 #                 학습데이터 arm 속도가 p99≈2.3·≤2.5 라 같은 값으로 맞춤. gripper 상한은 node 기본 2.5(=데이터).
-#   ⚠ 연속 데모는 success 판정·all-4 종료가 없어 수치(JSON)는 안 나온다. 정확 수치는 run_nearest_256_eval.sh.
+#   `--eval`이 없는 연속 데모는 success 판정·종료가 없어 eval JSON이 나오지 않는다.
 #
 # 예:
-#   scripts/demo_vla.sh start                              # .env POLICY_PROFILE 그대로
-#   scripts/demo_vla.sh start smolvla_nearest256 --ip 10.10.16.147
-#   scripts/demo_vla.sh start smolvla_nearest256 --apc 32 --thr 0.25 --seed 40 --ip 10.10.16.147  # eval best 거동
-#   scripts/demo_vla.sh start groot --ip 10.10.16.147
-#   scripts/demo_vla.sh start smolvla --cubes 1
-#   scripts/demo_vla.sh stop
+#   scripts/inference/demo_vla.sh start                    # .env POLICY_PROFILE 그대로
+#   scripts/inference/demo_vla.sh start smolvla --ip 10.10.16.147
+#   scripts/inference/demo_vla.sh start smolvla --apc 32 --thr 0.25 --seed 40 --ip 10.10.16.147
+#   scripts/inference/demo_vla.sh start groot --ip 10.10.16.147
+#   scripts/inference/demo_vla.sh start act --eval 1 --headless
+#   scripts/inference/demo_vla.sh start smolvla --cubes 1
+#   scripts/inference/demo_vla.sh stop
 # =============================================================================
 set -uo pipefail
-REPO=/home/konan147/Workspaces/SO101-Sim2Real
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cd "$REPO" || exit 1
 LOGDIR="$REPO/outputs/p5_logs"; mkdir -p "$LOGDIR"
 DC="docker compose --env-file .env -f docker/docker-compose.yaml"
@@ -62,7 +66,7 @@ VLA_PARAMS=/workspace/ros2_ws/src/so101_vla_policy/config/vla_policy.yaml
 # --ckpt override 시에만 쓰는 임시 프로필 (cleanup 대상). 평소엔 실 프로필을 그대로 쓴다.
 OVERRIDE_PROFILE=demo_override
 # 정리 대상 임시 프로필 파일 (옛 *_demo.env 도 호환 정리)
-PROF_FILES=(env/"$OVERRIDE_PROFILE".env env/act_demo.env env/smolvla_demo.env env/groot_n15_demo.env)
+PROF_FILES=(env/"$OVERRIDE_PROFILE".env env/act_demo.env env/smolvla_demo.env env/groot_n17_demo.env)
 NAMES=(vla_demo_ps vla_demo_node)
 
 ts(){ date '+%H:%M:%S'; }
@@ -72,12 +76,12 @@ log(){ echo "[$(ts)] $*"; }
 env_get(){  grep -E "^$1=" .env 2>/dev/null         | tail -1 | cut -d= -f2-; }
 prof_get(){ grep -E "^$2=" "env/$1.env" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
-# 활성 프로필 결정: 인자 없으면 .env POLICY_PROFILE, `groot` 는 groot_n15 별칭
+# 활성 프로필 결정: 인자 없으면 .env POLICY_PROFILE, `groot` 는 groot_n17 별칭
 resolve_profile(){  # $1=arg(빈문자 가능) -> stdout=profile name
   local a="$1"
   [ -z "$a" ] && a=$(env_get POLICY_PROFILE)
-  [ -z "$a" ] && a=groot_n15   # compose 기본값과 정합
-  [ "$a" = groot ] && a=groot_n15
+  [ -z "$a" ] && a=groot_n17   # compose 기본값과 정합
+  [ "$a" = groot ] && a=groot_n17
   echo "$a"
 }
 
@@ -100,6 +104,7 @@ stop_all(){
 run_vla_node(){
   POLICY_PROFILE=$active $DC run -d --name vla_demo_node \
     -e POLICY_PROFILE=$active -e VLA_TRAJ_LOG="${VLA_TRAJ_LOG:-}" \
+    -e VLA_EEF_METRICS_LOG="${VLA_EEF_METRICS_LOG:-/workspace/logs/eef_sim_rollout.jsonl}" \
     vla-ros \
     ros2 run so101_vla_policy vla_policy_node --ros-args \
       --params-file "$VLA_PARAMS" \
@@ -139,13 +144,17 @@ start(){
   # 첫 인자가 옵션(--)이 아니면 프로필 이름으로 소비
   local prof_arg=""
   if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then prof_arg=$1; shift; fi
-  local ckpt="" cubes=4 ip="" disp="stream" seed=0 parity=1 slew=true apc_ov="" thr_ov="" armvel=2.3
+  local ckpt="" cubes=1 ip="" disp="stream" seed=0 parity=1 slew=true task=""
+  local apc_ov="" thr_ov="" armvel=2.3 eval_count=0 eval_out=""
   while [ $# -gt 0 ]; do case "$1" in
     --ckpt) ckpt=$2; shift 2;;
     --cubes) cubes=$2; shift 2;;
+    --task) task=$2; shift 2;;
     --ip) ip=$2; shift 2;;
     --gui) disp="gui"; shift;;
     --headless) disp="headless"; shift;;
+    --eval) eval_count=$2; shift 2;;
+    --eval-out) eval_out=$2; shift 2;;
     --apc) apc_ov=$2; shift 2;;
     --thr) thr_ov=$2; shift 2;;
     --seed) seed=$2; shift 2;;
@@ -164,6 +173,15 @@ start(){
   fi
   local ptype; ptype=$(prof_get "$profile" POLICY_TYPE)
   [ -z "$ptype" ] && { log "env/$profile.env 에 POLICY_TYPE 없음"; exit 1; }
+  [[ "$eval_count" =~ ^[0-9]+$ ]] || { log "--eval은 0 이상의 정수여야 함: $eval_count"; exit 1; }
+  [ -z "$eval_out" ] && eval_out="outputs/vla_eval_${profile}.json"
+  if [ -z "$task" ]; then
+    if [ "$eval_count" -gt 0 ]; then
+      task="SimToReal-SO101-PickCube-Eval-v0"
+    else
+      task="SimToReal-SO101-PickCube-v0"
+    fi
+  fi
 
   stop_all   # 멱등: 기존 데모 정리 후 시작
   log "데모 시작 — profile=$profile type=$ptype cubes=$cubes display=$disp"
@@ -197,7 +215,7 @@ start(){
   # ── 모델 타입별 서비스 기동 ──
   case "$ptype" in
     act|smolvla|groot)
-      log "  policy-server 기동 (groot=N1.5 Eagle 3B 로드는 첫 instruction 시점)"
+      log "  policy-server 기동 (groot=N1.7 3B 로드는 첫 instruction 시점)"
       POLICY_PROFILE=$active $DC run -d --name vla_demo_ps policy-server policy-server \
         > "$LOGDIR/demo_vla_ps.log" 2>&1
       sleep 8
@@ -209,18 +227,41 @@ start(){
 
   # ── Isaac bridge (연속 추론, eval 아님) — detached ──
   # eval 정합: --vla_action_parity(actuator max vel 10), --seed, --vla_reset_file(공유 reset token)
-  local bridge_extra=(--seed "$seed" --vla_reset_file "$RESET_HOST")
+  local bridge_extra=(--task "$task" --seed "$seed" --vla_reset_file "$RESET_HOST")
   [ "$parity" = 1 ] && bridge_extra+=(--vla_action_parity)
+  if [ "$eval_count" -gt 0 ]; then
+    bridge_extra+=(--eval "$eval_count" --eval_out "$eval_out" --eval_model "$model_path")
+  fi
   log "  Isaac bridge 기동 → $BRIDGE_LOG"
   nohup setsid env OMNI_KIT_ACCEPT_EULA=YES "$BRIDGE" \
     --num_cubes "$cubes" "${bridge_extra[@]}" "${disp_args[@]}" \
     > "$BRIDGE_LOG" 2>&1 &
-  echo $! > "$PIDFILE"
-  log "데모 가동. bridge pid=$(cat "$PIDFILE")"
+  local bridge_pid=$!
+  echo "$bridge_pid" > "$PIDFILE"
+  log "bridge 가동. pid=$bridge_pid"
+
+  if [ "$eval_count" -gt 0 ]; then
+    log "정량 eval 진행: ${eval_count} episode → $eval_out"
+    local bridge_rc=0
+    wait "$bridge_pid" || bridge_rc=$?
+    rm -f "$PIDFILE"
+    # SIGINT로 ROS destroy_node를 실행해 final EEF metric을 flush한다.
+    docker kill --signal=SIGINT vla_demo_node >/dev/null 2>&1 || true
+    timeout 20 docker wait vla_demo_node >/dev/null 2>&1 || true
+    docker rm -f vla_demo_node vla_demo_ps >/dev/null 2>&1 || true
+    rm -f "${PROF_FILES[@]}" "$RESET_HOST" 2>/dev/null || true
+    if [ "$bridge_rc" -ne 0 ]; then
+      log "eval bridge 실패(rc=$bridge_rc). 로그: $BRIDGE_LOG"
+      return "$bridge_rc"
+    fi
+    log "eval 완료: $REPO/$eval_out"
+    log "runtime metrics: $REPO/logs/eef_sim_rollout.jsonl"
+    return 0
+  fi
   echo
   echo "  관전:   tail -f $BRIDGE_LOG"
   [ "$disp" = stream ] && echo "  WebRTC: Omniverse Streaming Client → ${ip:-<server-LAN-ip>}:49100"
-  echo "  정지:   scripts/demo_vla.sh stop"
+  echo "  정지:   scripts/inference/demo_vla.sh stop"
 }
 
 # ── dispatch ──
@@ -228,5 +269,5 @@ case "${1:-}" in
   start)  shift; start "$@";;
   stop)   stop_all;;
   status) status;;
-  *) echo "사용: scripts/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--ip A] [--gui|--headless] [--apc N] [--thr T] [--seed S] [--no-parity] [--slew(기본on)|--no-slew] [--arm-vel V(기본2.3)] | stop | status}";;
+  *) echo "사용: scripts/inference/demo_vla.sh {start [profile] [--ckpt P] [--cubes N] [--task ID] [--ip A] [--gui|--headless] [--eval N] [--eval-out P] [--apc N] [--thr T] [--seed S] [--no-parity] [--slew|--no-slew] [--arm-vel V] | stop | status}";;
 esac

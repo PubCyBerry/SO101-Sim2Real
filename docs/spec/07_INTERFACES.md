@@ -14,7 +14,7 @@
 | ROS 2 | `/isaac_joint_states` · `/isaac_joint_commands` · `/camera/{top,wrist,front}/image_raw` · `/clock` · `/tf` | isaac-sim bridge ↔ vla-ros / pink-ik |
 | ZMQ REQ/REP | `tcp://127.0.0.1:5599` (JSON) | cuRobo planner ↔ pick-place SM |
 | ZMQ PUB/SUB | `tcp://0.0.0.0:5556` (binary) | Windows leader → Linux sim teleop |
-| gRPC | `<host>:8080` (pickle) | policy-server ↔ vla_policy_node / robot_client |
+| gRPC | `<host>:8080` (pickle) | policy-server ↔ vla_policy_node(sim) / `scripts/inference/eef_robot_client.py`(실기기) |
 | WebRTC | `:49100` | isaac-sim livestream → 원격 관전 |
 | 파일 | `logs/demo_vla_reset.token` | bridge → vla_policy_node (에피소드 리셋 신호) |
 
@@ -290,7 +290,7 @@ sequenceDiagram
 
 `RemotePolicyConfig` 의 server `rename_map` 은 **항상 빈 dict** 다.
 
-이유: LeRobot 0.5.1 서버는 `raw_observation_to_observation` 의 resize 단계에서
+이유: LeRobot(0.5.1 이후 0.6.0 도 동일) 서버는 `raw_observation_to_observation` 의 resize 단계에서
 `policy.config.image_features[key]` 를 `lerobot_features` 키로 조회하는데, 이 단계가
 preprocessor rename **이전**이다. 따라서 `lerobot_features` 의 이미지 키가 모델 config 키
 (SmolVLA = `camera1/2/3`)와 이미 일치해야 `KeyError` 가 나지 않는다.

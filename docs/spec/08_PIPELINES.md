@@ -61,7 +61,7 @@ flowchart LR
 | `teleop` | `lerobot-teleoperate <ROBOT> <TELEOP> <CAMERAS> $TELEOP_EXTRA_ARGS` |
 | `record` | `lerobot-record … --dataset.repo_id/single_task/num_episodes/fps/episode_time_s/reset_time_s/push_to_hub $RECORD_EXTRA_ARGS` |
 | `replay` | `lerobot-replay <ROBOT> --dataset.repo_id --dataset.episode $REPLAY_EXTRA_ARGS` |
-| `policy-client` | `python -m lerobot.async_inference.robot_client --server_address --policy_type --task --actions_per_chunk --chunk_size_threshold --aggregate_fn_name --client_device <ROBOT> $POLICY_CLIENT_EXTRA_ARGS` |
+| `policy-client` | **preflight → `python scripts/inference/eef_robot_client.py`** (stock `robot_client` 아님). 아래 §2.1 |
 | `env` | 로드된 주요 변수 덤프(디버그) |
 | `raw` | `uv run --active "$@"` |
 | `help` / 빈 인자 | 헤더 주석 출력 |
@@ -69,6 +69,33 @@ flowchart LR
 `TARGET_ARGS` 는 `CALIBRATE_TARGET=teleop` 이면 teleop 3인자, 아니면 robot 인자다.
 `CAMERAS` 인자는 `LEROBOT_NO_CAMERAS` 가 비어 있고 `ENABLED_CAMERAS`·`CAMERAS` 가 둘 다
 있을 때만 붙는다. `LEROBOT_DRY=1` 이면 실행 대신 echo 한다.
+
+실행 환경은 **전용 uv project** `scripts/real/pyproject.toml`
+(`requires-python >=3.12,<3.13`, `lerobot[async,core_scripts,feetech]==0.6.0`)이다. 루트
+Isaac 환경을 재사용하지 않는다 — 최초 1회 `uv sync --project scripts/real`, 이후 wrapper 가
+항상 `uv run --project scripts/real` 로 실행한다.
+
+### 2.1 `policy-client` — manifest 가 dispatch 를 결정한다
+
+stock `python -m lerobot.async_inference.robot_client` 를 쓰지 않는다. 순서:
+
+1. **preflight**: `scripts/inference/assert_checkpoint_representation.py --checkpoint
+   "$POLICY_REPO_ID" --from-env --skip-kinematics --emit client_kind`.
+   실패하면 client 를 띄우지 않는다(legacy checkpoint 는 migration 이 먼저다).
+   `ACTION_REPRESENTATION_*` 환경 변수는 **override 가 아니라 assertion** 이며,
+   client 종류는 **checkpoint manifest** 가 결정한다.
+2. **dispatch**: 4 mode 모두 `scripts/inference/eef_robot_client.py` 를 거친다.
+   - `eef_absolute` / `eef_relative` → FK/IK platform adapter + router (**IK 정확히 1회**)
+   - `joint_absolute` / `joint_relative` → canonical joint feature 경계 (**IK 0회**)
+3. **overlap 병합**: `--aggregate_fn_name=latest_only` 고정. EEF/Rot6D vector 를 elementwise
+   평균하지 않고 **IK 이후 joint queue 에서** 병합한다. 다른 값을 주면 client 가 거부한다.
+4. **안전 gate**: `--real_hardware_ik_validated="${EEF_IK_REAL_VALIDATED:-false}"`.
+   `false` 면 FK/IK 와 target/metric 만 기록하는 **motor-off dry-run** 이다
+   (`--eef_metrics_log="${EEF_REAL_METRICS_LOG:-}"`). 이 gate 는 **EEF IK 로 산출한**
+   실기기 joint command 에만 적용되며, joint-space fallback 은 IK 를 거치지 않아 대상이
+   아니다 — 대신 일반 하드웨어 안전 절차(작업자 입회·e-stop·감속·workspace 확인)로 통제한다.
+
+계약 상세 = `docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`.
 
 **출력**: LeRobot 데이터셋(v3), 옵션으로 HF push
 **검증**: `python scripts/contract/validate_lerobot_schema.py <root>` (`05_DATA_SPEC.md §7`)
@@ -404,7 +431,7 @@ uv run python scripts/convert/joint_dataset_to_eef.py \
 **명령**:
 
 ```bash
-# .env 의 POLICY_PROFILE 로 모델 선택 (smolvla | act | groot_n15)
+# .env 의 POLICY_PROFILE 로 모델 선택 (smolvla | act | groot_n17)
 docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server train
 ```
 
@@ -412,7 +439,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-ser
 
 **출력**: `outputs/train/${JOB_NAME}/checkpoints/last/pretrained_model`
 **함정**: `--policy.path` 와 `--policy.type` 동시 지정 금지 · `COMPILE_MODEL=true` +
-`groot` 조합은 자동 skip · GR00T 는 `groot_compat_patch` 가 적용된 이미지에서만 동작.
+`groot` 조합은 자동 skip · 세 정책 모두 `lerobot_v060_eef_relative_patch.py` 가 적용된
+`policy-server:0.6.0` 이미지에서만 schema v2 manifest 를 만든다.
 
 ---
 
@@ -492,7 +520,7 @@ bridge 기타 인자: `--num_cubes {1,2,3,4}`(기본 4) · `--cube_name` · `--d
 | `scripts/cuRobo/curobo_batch_planner.py` | `--self-check-geom` | 후보 생성 기하(GPU 불요) | CPU |
 | `scripts/cuRobo/curobo_batch_planner.py` | `--self-test` | 고정 4-env plan | **GPU** |
 | `scripts/cuRobo/plot_sweep.py` | `--demo` | 합성 데이터 렌더 파이프라인 | CPU |
-| `docker/groot_compat_patch.py` | 빌드 시 자동 | 4-패치 멱등 + 버전 트립와이어 | 빌드 |
+| `docker/lerobot_v060_eef_relative_patch.py` | 빌드 시 자동 | LeRobot 0.6.0 source 멱등 패치 + 버전 트립와이어 | 빌드 |
 
 추가로 `python scripts/environments/list_envs.py` 로 등록 env 를 확인할 수 있다(headless).
 

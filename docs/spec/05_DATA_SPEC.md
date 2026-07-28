@@ -81,6 +81,21 @@
 | `index` | `int64` | 데이터셋 전역 0-based |
 | `task_index` | `int64` | 현재 항상 `0` (단일 task) |
 
+위 단위는 **sim datagen v1 계약**(이 문서가 기술하는 기존 데이터셋)이다. action
+representation **schema v2** 데이터셋은 단위가 다르며, 둘은 dataset metadata
+(`meta/info.json` 의 action representation 절)로 구분한다 — **파일만 보고 추측하지 말 것.**
+
+| 계약 | `action` / `observation.state` 단위 | 구분 |
+|---|---|---|
+| sim datagen v1 (이 문서 §3) | policy-feature 6D = arm **degree**(5) + gripper `[0,100]`(1) | metadata 에 v2 action representation 절 **없음** |
+| schema v2 **joint mode** | canonical joint feature 6D = arm **radian**(5) + gripper `[0,100]`(1) | metadata 의 v2 절이 `space=joint` 선언 |
+| schema v2 **EEF mode** | **absolute** EEF state/action (pose format별 차원) | metadata 의 v2 절이 `space=eef` 선언 |
+
+> schema v2 의 mode·pose format·저장 규칙·manifest 정본 =
+> [`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](../EEF_RELATIVE_ACTION_PIPELINE_SPEC.md).
+> 차원·필드·수식을 여기에 복제하지 않는다. dataset 은 어느 mode 든 그 space 의
+> **absolute 만** 저장한다.
+
 ---
 
 ## 4. `meta/` 스키마

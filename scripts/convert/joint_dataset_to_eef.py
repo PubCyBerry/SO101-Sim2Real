@@ -424,6 +424,23 @@ def _update_metadata(
         "urdf_sha256": _sha256(urdf_path),
         "robot_yaml_sha256": _sha256(robot_yaml_path),
     }
+
+    # schema v2 dataset action contract 블록. modality.json과 같은 group을 선언해
+    # `so101_contract.action_dataset_contract`가 metadata만으로 계약을 resolve한다.
+    eef_dim = len(eef_names)
+    v2_groups = {
+        f"eef_{eef_dim}d": {"start": 0, "end": eef_dim},
+        "gripper_position": {"start": eef_dim, "end": eef_dim + 1},
+    }
+    if keep_joints:
+        v2_groups["joint_position"] = {"start": eef_dim + 1, "end": eef_dim + 6}
+    info["so101_action_representation"] = {
+        "version": "so101_dataset_action_contract_v2",
+        "space": "eef",
+        "storage_reference": "absolute",
+        "transform_group": f"eef_{eef_dim}d",
+        "groups": v2_groups,
+    }
     _atomic_write_json(info_path, info)
     _atomic_write_json(stats_path, stats)
 

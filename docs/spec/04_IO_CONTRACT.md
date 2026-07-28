@@ -308,7 +308,7 @@ TCP 회전으로 흡수한다(전 자세 상수라 정확 보정). 상세 = `09_
 
 ## 6. `action_queue` — action chunk 큐
 
-앵커: `src/so101_contract/action_queue.py`. LeRobot 0.4.4 `RobotClient` 와 동일 semantics.
+앵커: `src/so101_contract/action_queue.py`. LeRobot async `RobotClient` 호환 semantics.
 
 | 심볼 | 값 |
 |---|---|
@@ -368,8 +368,14 @@ NPZ 배열 키:
 앵커: `scripts/inference/policy_server_affine.py`
 
 `policy-server-affine` 모드는 stock `PolicyServer` 를 상속해 **정책 normalize 바깥에서**
-`observation.state`(수신)와 `action`(반환)을 변환한다. 정규화 통계가 불변이고 양쪽
-client(`vla_policy_node`·`robot_client`)는 무변경이다. **이미지는 변환하지 않는다.**
+`observation.state`(수신)와 `action`(반환)을 변환한다. 정규화 통계가 불변이고 현재 client
+두 종(sim = `ros2_ws/.../vla_policy_node.py`, 실기기 = `scripts/inference/eef_robot_client.py`)
+도 이 모드 때문에 바뀌지 않는다. **이미지는 변환하지 않는다.**
+
+**적용 범위 — joint-space 전용.** 이 affine 매트릭스는 **joint mode**(`joint_absolute`·
+`joint_relative`)의 cross-domain fallback 전용이다. **EEF mode 에서는 쓰지 않는다** — EEF
+real/sim 차이는 공통 FK/IK platform adapter(`eef_policy_io`·`eef_kinematics`·`eef_ik`)가
+담당하며, 그 위에 affine 을 겹치면 변환이 이중 적용된다. 상세 = §10 정본 문서.
 
 모드 이름 = `<학습데이터 도메인>-to-<추론 플랫폼>`:
 
@@ -397,18 +403,40 @@ client(`vla_policy_node`·`robot_client`)는 무변경이다. **이미지는 변
 
 ---
 
-## 10. 범위 밖 — EEF-relative action (진행 중)
+## 10. 범위 밖 — action representation schema v2
 
-`base_link → tcp_grasp` **absolute** pose 까지가 현재 커밋된 as-built 범위다.
-EEF-**relative** action 표현(`T_rel = inv(T_state) @ T_action`)과 그 processor·통계·
-policy 배치는 **아직 커밋되지 않은 진행 중 작업**이며, 설계는 별도 문서에 있다:
+이 문서(§1–§9)는 **joint 단위 codec 과 base_link → tcp_grasp absolute FK** 까지만 다룬다.
+그 위의 action representation 계층(mode·pose format·runtime transform·manifest·routing)은
+**구현 완료**되어 있으며 정본은 하나다:
 
-> 관련 설계 문서(`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`, GR00T-N1.7 대상)가 한때
-> 작업 트리에 있었으나 커밋되지 않고 삭제됐다. 재개 시 그 문서를 복원하고 여기서 링크한다.
+> **정본**: [`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](../EEF_RELATIVE_ACTION_PIPELINE_SPEC.md)
 
-`scripts/convert/joint_dataset_to_eef.py` 가 만드는 파생 데이터셋도 **absolute 값만**
-저장한다. relative 학습·추론에는 별도 SE(3) processor 가 필요하며 단순 벡터 뺄셈은
-부적합하다(코드 docstring 명시).
+4 mode × 3 pose format, dataset 이 그 space 의 **absolute 만** 저장한다는 규칙, relative 를
+만드는 training processor 와 되돌리는 postprocessor, universal manifest(schema v2), mode 별
+routing, legacy migration — **수치·스키마·규칙을 여기에 복제하지 않는다.** 위 정본을 볼 것.
+
+이 문서와의 접점만 적으면:
+
+| 이 문서의 계약 | schema v2 에서의 위치 |
+|---|---|
+| `feature_codec`·`follower_calibration`(§2·§4) | joint mode 의 platform 경계 변환 |
+| `eef_kinematics` FK(§5) | EEF mode 의 FK, 그 역방향은 `eef_ik` |
+| `action_queue`(§6) | IK 이후 joint queue merge(EEF 벡터를 평균하지 않는다) |
+| `JOINT_FRAME_MODE` affine(§8) | **joint mode 전용**. EEF mode 는 FK/IK adapter 사용 |
+
+`scripts/convert/joint_dataset_to_eef.py` 가 만드는 파생 데이터셋은 **absolute 값만**
+저장한다. relative 는 runtime processor 가 만들며 단순 벡터 뺄셈은 부적합하다 —
+모든 relative 변환은 rotation matrix/SE(3) 를 경유한다.
+
+**검증 상태 — 구현 완료와 외부 acceptance 미실행을 구분한다.**
+
+| 항목 | 상태 | 의미 |
+|---|---|---|
+| schema v2 구현·offline 검증 | **완료** | 24 조합 offline matrix 및 contract-level rollout dry-run 통과 |
+| 대표 조합 sim closed-loop | `NOT_RUN` | 구현 미완료가 **아니다**. 학습된 EEF checkpoint·sim 평가가 아직 실행되지 않은 **외부 acceptance 미실행** 상태 |
+| real guarded rollout | `BLOCKED_EXTERNAL` | 마찬가지로 구현 문제가 아니라 실기기 승인·작업자·e-stop gate 라는 **외부 조건 대기** 상태 |
+
+단계 정의·완료 조건·현재 수치는 전부 위 정본에 있다.
 
 ---
 

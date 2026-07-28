@@ -62,16 +62,29 @@ TRAIN_POLICY_TYPE="${TRAIN_POLICY_TYPE:-}"
 #   TRAIN_POLICY_TYPE 비움 → LeRobot 체크포인트로 간주 → --policy.path
 #                            (SmolVLA: lerobot/smolvla_base, 또는 직접 만든 LeRobot 체크포인트)
 #   TRAIN_POLICY_TYPE 설정 → 해당 타입 wrapper 로 native 포맷 베이스 적재 → --policy.base_model_path
-#                            (GR00T: groot + nvidia/GR00T-N1.5-3B)
-#   LeRobot 0.5.x parser 는 --policy.path 와 --policy.type 동시 지정을 금지한다.
+#                            (GR00T: groot + nvidia/GR00T-N1.7-3B)
+#   LeRobot parser는 --policy.path 와 --policy.type 동시 지정을 금지한다.
 POLICY_BASE_MODEL_PATH="${POLICY_BASE_MODEL_PATH:-}"
 POLICY_TOKENIZER_ASSETS_REPO="${POLICY_TOKENIZER_ASSETS_REPO:-}"
 POLICY_EMBODIMENT_TAG="${POLICY_EMBODIMENT_TAG:-}"
 POLICY_CHUNK_SIZE="${POLICY_CHUNK_SIZE:-}"
 POLICY_N_ACTION_STEPS="${POLICY_N_ACTION_STEPS:-}"
+# schema v2 action representation: joint_absolute | joint_relative | eef_absolute | eef_relative
+#   · 학습(train)에는 명시적 기본값이 필요하므로 TRAIN_* 변수로 따로 둔다.
+#   · 추론(policy-server/client)에서는 **선택적 assertion**이다. 비어 있으면 checkpoint
+#     manifest를 그대로 수용하고 routing도 manifest에서 유도한다(override 아님).
+#   우선순위: TRAIN_* 명시값 > ACTION_* 하위호환 > train 전용 기본값.
+ACTION_REPRESENTATION_MODE="${ACTION_REPRESENTATION_MODE:-}"
+ACTION_REPRESENTATION_POSE_FORMAT="${ACTION_REPRESENTATION_POSE_FORMAT:-}"
+TRAIN_ACTION_REPRESENTATION_MODE="${TRAIN_ACTION_REPRESENTATION_MODE:-${ACTION_REPRESENTATION_MODE:-joint_absolute}}"
+TRAIN_ACTION_REPRESENTATION_POSE_FORMAT="${TRAIN_ACTION_REPRESENTATION_POSE_FORMAT:-${ACTION_REPRESENTATION_POSE_FORMAT:-}}"
+ACTION_REPRESENTATION_STATS_FILE="${ACTION_REPRESENTATION_STATS_FILE:-meta/action_representation_stats.json}"
 DATASET_VIDEO_BACKEND="${DATASET_VIDEO_BACKEND:-}"
 POLICY_VIDEO_BACKEND="${POLICY_VIDEO_BACKEND:-}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"
+# LeRobot v0.6 PreTrainedConfig 기본값은 true다. 명시하지 않으면 로컬 학습도
+# 종료 시 Hub repo 생성을 시도하므로 프로젝트 기본값은 안전하게 false로 고정한다.
+POLICY_PUSH_TO_HUB="${POLICY_PUSH_TO_HUB:-false}"
 TRAIN_STEPS="${TRAIN_STEPS:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 JOB_NAME="${JOB_NAME:-}"
@@ -179,7 +192,7 @@ case "$CMD" in
   #
   #   # 위치 인자로 다른 모델 받기
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
-  #     policy-server prepare-model nvidia/GR00T-N1.5-3B
+  #     policy-server prepare-model nvidia/GR00T-N1.7-3B
   #
   #   # 추가 인자 전달 (특정 파일 패턴만)
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
@@ -247,6 +260,16 @@ case "$CMD" in
   # ────────────────────────────────────────────────────────────────────────────
   policy-server)
     info "── Policy Server 시작 (gRPC) ─────────────────────"
+    # schema v2 checkpoint 계약 assertion(선택적 사전 점검).
+    #   · 범위: CHECKPOINT_PATH 로 **정적 지정한** 모델만 확인한다. async client 가
+    #     SendPolicyInstructions 로 동적으로 넘기는 모델은 여기서 못 막는다.
+    #   · 실제 강제 지점은 patch 된 policy factory 다: 모든 target checkpoint 로드 시
+    #     validate_checkpoint_manifest() 가 manifest 를 필수 검증한다(아래 hook 은 보조).
+    #   · representation 인자는 override 가 아니라 assertion 이며, 비어 있으면 manifest 수용.
+    if [[ -n "${CHECKPOINT_PATH:-}" ]]; then
+      python /workspace/scripts/inference/assert_checkpoint_representation.py \
+        --checkpoint "${CHECKPOINT_PATH}" --from-env || exit 1
+    fi
     info "  Bind           → ${POLICY_SERVER_HOST}:${POLICY_SERVER_PORT}"
     info "  FPS            → ${POLICY_FPS}"
     info "  Inference Lat  → ${INFERENCE_LATENCY} s"
@@ -322,12 +345,14 @@ case "$CMD" in
   #       --steps=20000 --batch_size=64 \
   #       --job_name=smolvla_pick_cube --wandb.enable=true
   #
-  # 예시 (GR00T N1.5 fine-tune):
+  # 예시 (GR00T N1.7 EEF-relative fine-tune):
   #   docker compose --env-file .env -f docker/docker-compose.yaml run --rm \
   #     policy-server train \
   #       --policy.type=groot \
-  #       --policy.base_model_path=nvidia/GR00T-N1.5-3B \
-  #       --policy.chunk_size=16 --policy.n_action_steps=16 \
+  #       --policy.base_model_path=nvidia/GR00T-N1.7-3B \
+  #       --policy.chunk_size=40 --policy.n_action_steps=16 \
+  #       --policy.action_representation.mode=eef_relative \
+  #       --policy.action_representation.pose_format=xyz_rot6d_rows \
   #       --dataset.video_backend=torchcodec
   # ────────────────────────────────────────────────────────────────────────────
   train)
@@ -353,7 +378,7 @@ case "$CMD" in
     # 출발 모델 라우팅 (POLICY_BASE_MODEL_PATH 단일 변수, TRAIN_POLICY_TYPE 으로 분기):
     #   타입 설정(GR00T 등 native 포맷 베이스) → --policy.type + --policy.base_model_path
     #   타입 비움(LeRobot 체크포인트, SmolVLA 포함) → --policy.path
-    #   (LeRobot 0.5.x 는 --policy.path 와 --policy.type 동시 지정 금지)
+    #   (--policy.path 와 --policy.type 동시 지정 금지)
     if [[ -n "${TRAIN_POLICY_TYPE}" ]]; then
         TRAIN_ARGS+=("--policy.type=${TRAIN_POLICY_TYPE}")
         [[ -n "${POLICY_BASE_MODEL_PATH}" ]] && TRAIN_ARGS+=("--policy.base_model_path=${POLICY_BASE_MODEL_PATH}")
@@ -364,8 +389,12 @@ case "$CMD" in
     [[ -n "${POLICY_EMBODIMENT_TAG}" ]]      && TRAIN_ARGS+=("--policy.embodiment_tag=${POLICY_EMBODIMENT_TAG}")
     [[ -n "${POLICY_CHUNK_SIZE}" ]]          && TRAIN_ARGS+=("--policy.chunk_size=${POLICY_CHUNK_SIZE}")
     [[ -n "${POLICY_N_ACTION_STEPS}" ]]      && TRAIN_ARGS+=("--policy.n_action_steps=${POLICY_N_ACTION_STEPS}")
+    [[ -n "${TRAIN_ACTION_REPRESENTATION_MODE}" ]] && TRAIN_ARGS+=("--policy.action_representation.mode=${TRAIN_ACTION_REPRESENTATION_MODE}")
+    [[ -n "${TRAIN_ACTION_REPRESENTATION_POSE_FORMAT}" ]] && TRAIN_ARGS+=("--policy.action_representation.pose_format=${TRAIN_ACTION_REPRESENTATION_POSE_FORMAT}")
+    [[ -n "${ACTION_REPRESENTATION_STATS_FILE}" ]] && TRAIN_ARGS+=("--policy.action_representation.stats_file=${ACTION_REPRESENTATION_STATS_FILE}")
     [[ -n "${POLICY_VIDEO_BACKEND}" ]]       && TRAIN_ARGS+=("--policy.video_backend=${POLICY_VIDEO_BACKEND}")
     [[ -n "${POLICY_REPO_ID}" ]]             && TRAIN_ARGS+=("--policy.repo_id=${POLICY_REPO_ID}")
+    TRAIN_ARGS+=("--policy.push_to_hub=${POLICY_PUSH_TO_HUB}")
     [[ -n "${OUTPUT_DIR}" ]]                 && TRAIN_ARGS+=("--output_dir=${OUTPUT_DIR}")
     [[ -n "${TRAIN_STEPS}" ]]                && TRAIN_ARGS+=("--steps=${TRAIN_STEPS}")
     [[ -n "${BATCH_SIZE}" ]]                 && TRAIN_ARGS+=("--batch_size=${BATCH_SIZE}")
@@ -391,7 +420,7 @@ case "$CMD" in
     [[ -n "${RENAME_MAP}" ]] && TRAIN_ARGS+=("--rename_map=${RENAME_MAP}")
     info "  Dataset      → ${HF_DATASET_REPO_ID:-<미설정>}"
     info "  Policy       → type=${TRAIN_POLICY_TYPE:-<checkpoint>}  base=${POLICY_BASE_MODEL_PATH:-none}"
-    info "  Output       → ${OUTPUT_DIR:-<미설정>}"
+    info "  Output       → ${OUTPUT_DIR:-<미설정>}  Hub push → ${POLICY_PUSH_TO_HUB}"
     info "  Steps        → ${TRAIN_STEPS}  Batch → ${BATCH_SIZE}  Device → ${DEVICE}"
     info "  Workers      → ${NUM_WORKERS}"
     info "  Compile      → ${COMPILE_MODEL}  mode=${COMPILE_MODE}"

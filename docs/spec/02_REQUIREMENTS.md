@@ -119,8 +119,8 @@
 | FR-RT-03 | env 주입은 `.env` → `env/<POLICY_PROFILE>.env` 순(나중이 override)이어야 한다 | E2 | compose `env_file` · `vla_policy_node.py::_load_env` | — | 06 §5.1 |
 | FR-RT-04 | 모델 선택은 `POLICY_PROFILE` 한 줄로 결정돼야 한다 | E2 | `.env.example` §1 · `env/*.env` | — | 06 §6 |
 | FR-RT-05 | train 은 `--policy.type` 과 `--policy.path` 를 동시 지정하지 않아야 한다 | E2 | `docker/policy-entrypoint.sh` | — | 06 §4.1 |
-| FR-RT-06 | GR00T-N1.5 는 policy-server 안에서 ACT/SmolVLA 와 동일 경로로 학습·추론해야 한다 | E2 | `env/groot_n15.env` · `policy-entrypoint.sh` | — | 06 §6 |
-| FR-RT-07 | GR00T 호환 패치는 빌드 시 1회 적용되고, 대상 형태가 다르면 빌드를 중단해야 한다 | E1 | `docker/groot_compat_patch.py` | 빌드 | 09 §7.3 |
+| FR-RT-06 | GR00T-N1.7 은 policy-server 안에서 ACT/SmolVLA 와 동일 경로로 학습·추론해야 한다 | E2 | `env/groot_n17.env` · `policy-entrypoint.sh` | — | 06 §6 |
+| FR-RT-07 | LeRobot v0.6.0 EEF-relative 패치는 빌드 시 1회 멱등 적용되고, 예상 upstream source 형태가 다르면 빌드를 중단해야 한다 | E1 | `docker/lerobot_v060_eef_relative_patch.py` | 빌드 | 09 §7.3 |
 | FR-RT-08 | `datasets`·`outputs` 심링크는 컨테이너에서 영속돼야 한다(호스트 경로 직접 마운트) | E2 | `docker-compose.yaml` pink-ik 볼륨 주석 | — | 06 §3.1 |
 | FR-RT-09 | isaac 계열 이미지는 `/workspace` 를 통째 마운트하지 않아야 한다 | E2 | `docker-compose.yaml` 주석 | — | 06 §3.1 |
 | FR-RT-10 | vla-ros 는 컨테이너 안에서 colcon 빌드해야 한다 | E2 | `docker/vla-ros-entrypoint.sh` | — | 06 §4.3 |
@@ -169,7 +169,7 @@
 | ID | 요구사항 | E | 근거 | 상세 |
 |---|---|---|---|---|
 | NFR-COMPAT-01 | ABI 핀 8종을 유지해야 한다(`uv lock --upgrade` 금지) | E1 | `pyproject.toml` `override-dependencies` | 06 §7.2 |
-| NFR-COMPAT-02 | Python 은 `>=3.11,<3.13` 이어야 한다 | E1 | `pyproject.toml` `requires-python` | 06 §7.1 |
+| NFR-COMPAT-02 | Python 은 Isaac 호스트 `>=3.11,<3.13`, Windows 실기기 `>=3.12,<3.13` 이어야 한다 | E1 | `pyproject.toml` · `scripts/real/pyproject.toml` `requires-python` | 06 §7.1 |
 | NFR-COMPAT-03 | cuRobo 이미지는 `packaging==23.0` **정확 핀**이어야 한다 | E3 | `docker/Dockerfile.cuRobo` 주석(범위 핀 무효 실측) | 09 §7.1 |
 | NFR-COMPAT-04 | isaac 계열 이미지는 베이스의 torch/numpy/isaaclab 을 재핀하지 않아야 한다 | E4 | `docker/Dockerfile.isaac_sim` 주석 | 06 §7.3 |
 | NFR-REPRO-01 | `PickCube-v0` 는 고정 배치로 결정적이어야 한다 | E2 | `pick_cube_env_cfg.py::_CUBE_LAYOUT` | 03 §9.2 |
@@ -252,8 +252,7 @@
 | 6-DOF orientation hard constraint | 도입 안 함 | CON-02 |
 | 테스트 스위트 · lint config | 없음 | CON-09. self-check 로 대체 |
 | `depends_on` 기동 순서 | 정의 안 함 | 수동·`demo_vla.sh` 로 배선 |
-| EEF-**relative** action | **미구현** | absolute EEF 파생까지만 커밋됨 — `04_IO_CONTRACT.md §10` |
-| GR00T-N1.7 | 제거됨 | transformers 4.57 ↔ 5.3 충돌. N1.5 로 통일 |
+| GR00T-**N1.5** | 현재 경로 아님 | LeRobot v0.6.0 이 N1.5 config/checkpoint 를 명시적으로 거부한다. N1.7 로 통일 — `env/groot_n17.env`. 재현이 필요하면 LeRobot 0.5.1 (legacy) |
 | `policy-server-rtc` | 제거됨 | 백엔드 스크립트 부재 |
 
 ---

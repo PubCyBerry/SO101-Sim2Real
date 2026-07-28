@@ -14,7 +14,7 @@ compose project name = `VLA-pipeline`. 앵커: `docker/docker-compose.yaml`.
 
 | 서비스 | 이미지 | Dockerfile | container_name | GPU | 스택·역할 |
 |---|---|---|---|---|---|
-| `policy-server` | `policy-server:0.5.1` | `Dockerfile.policy` | `policy_server` | ✓ 1 | Python 3.12 + LeRobot 0.5.1. async inference gRPC 서버 + VLA 학습 |
+| `policy-server` | `policy-server:0.6.0` | `Dockerfile.policy` | `policy_server` | ✓ 1 | Python 3.12 + LeRobot 0.6.0. async inference gRPC 서버 + VLA 학습 (ACT · SmolVLA · GR00T-N1.7) |
 | `vla-ros` | `so101-vla-ros:jazzy` | `Dockerfile.vla_ros` | `so101_vla_ros` | ✗ | ROS 2 Jazzy + vendored mini-lerobot. sim 폐루프 VLA 추론 노드 |
 | `pink-ik` | `so101-pink-ik:jazzy` | `Dockerfile.pink` | `so101_pink_ik` | ✗ | ROS 2 Jazzy + pin-pink(Pinocchio)·quadprog. 결정적 pick-place SM (CPU only) |
 | `isaac-sim` | `so101-isaac-sim:5.1.0` | `Dockerfile.isaac_sim` | `so101_isaac_sim` | ✓ 1 | Isaac Sim 5.1 + IsaacLab 2.3.2 + ROS2 bridge. sim 폐루프·datagen·teleop |
@@ -198,7 +198,7 @@ vla-ros 는 **컨테이너 안에서** colcon 빌드한다(호스트 빌드 아�
 ### 5.1 주입 경로
 
 ```
-compose env_file: [ ../.env, ../env/${POLICY_PROFILE:-groot_n15}.env ]   ← 나중 파일이 override
+compose env_file: [ ../.env, ../env/${POLICY_PROFILE:-groot_n17}.env ]   ← 나중 파일이 override
         ↓
 entrypoint.sh 가 ${VAR:-default} 로 기본값 보충 → CLI 인자로 매핑
 ```
@@ -212,7 +212,7 @@ entrypoint.sh 가 ${VAR:-default} 로 기본값 보충 → CLI 인자로 매핑
 | § | 대상 머신 | 변수 |
 |---|---|---|
 | §0 비밀값 | 공통 | `HF_TOKEN` · `HF_USER` · `WANDB_API_KEY` |
-| §1 모델 선택 | 공통 | **`POLICY_PROFILE`** (기본 `groot_n15`) — 한 줄로 모델 결정 |
+| §1 모델 선택 | 공통 | **`POLICY_PROFILE`** (기본 `groot_n17`) — 한 줄로 모델 결정 |
 | §2 하드웨어 | 클라이언트 | `TELEOP_ID`=`so101_teleop` · `ROBOT_ID`=`so101_robot` · `TELEOP_PORT`=`/dev/ttyACM0` · `ROBOT_PORT`=`/dev/ttyACM1` · `ROBOT_TYPE`=`so101_follower` · `TELEOP_TYPE`=`so101_leader` · `CALIBRATE_TARGET`=`robot` |
 | §3 카메라 | 클라이언트 | `ENABLED_CAMERAS`=`top,wrist,front` · `TOP/WRIST/FRONT_CAM_PORT`=`0/1/2` · `CAM_WIDTH`=`640` · `CAM_HEIGHT`=`480` · `CAM_FPS`=`25` · `CAM_FOURCC`=`MJPG` · `CAMERAS`(inline JSON) |
 | §4 데이터 수집 | 클라이언트 | `SINGLE_TASK` · `HF_DATASET_REPO_ID` · `DATASET_ROOT` · `NUM_EPISODES`=`10` · `EPISODE_TIME_S`=`60` · `RESET_TIME_S`=`10` · `RECORD_FPS`=`30` · `PUSH_TO_HUB`=`true` · `EPISODE_INDEX`=`0` · `DISPLAY_DATA`·`DISPLAY_IP`·`DISPLAY_PORT` · `STREAM_DATA` · `ENCODER_THREADS`=`2` · `TELEOP/RECORD/REPLAY_EXTRA_ARGS` |
@@ -249,26 +249,34 @@ entrypoint.sh 가 ${VAR:-default} 로 기본값 보충 → CLI 인자로 매핑
 모델 간 값이 다른 변수만 `env/<name>.env` 로 분리하고, `.env` 의 `POLICY_PROFILE` 한 줄로
 활성 모델을 고른다. 새 모델 = 프로필 파일 추가.
 
-| 변수 | `act.env` | `groot_n15.env` | `smolvla.env` |
+| 변수 | `act.env` | `groot_n17.env` | `smolvla.env` |
 |---|---|---|---|
 | `POLICY_TYPE` | `act` | `groot` | `smolvla` |
 | `TRAIN_POLICY_TYPE` | `act` | `groot` | **(빈값)** |
-| `POLICY_BASE_MODEL_PATH` | (빈값) | `nvidia/GR00T-N1.5-3B` | `lerobot/smolvla_base` |
+| `POLICY_BASE_MODEL_PATH` | (빈값) | `nvidia/GR00T-N1.7-3B` | `lerobot/smolvla_base` |
 | `POLICY_TOKENIZER_ASSETS_REPO` | (빈값) | (빈값) | (빈값) |
 | `POLICY_EMBODIMENT_TAG` | (빈값) | `new_embodiment` | (빈값) |
-| `POLICY_CHUNK_SIZE` / `POLICY_N_ACTION_STEPS` | (빈값) | `16` / `16` | (빈값) |
+| `POLICY_CHUNK_SIZE` / `POLICY_N_ACTION_STEPS` | (빈값) | `40` / `16` | (빈값) |
 | `ACTIONS_PER_CHUNK` | `100` | `16` | `20` |
-| `POLICY_REPO_ID` | `${HF_USER}/so101_act_pick_cube` | `/workspace/outputs/train/so101_groot_n15_pick_cube/checkpoints/last/pretrained_model` | `/workspace/outputs/train/so101_smolvla_pick_cube_v2/checkpoints/last/pretrained_model` |
-| `JOB_NAME` | `so101_act_pick_cube` | `so101_groot_n15_pick_cube` | `so101_smolvla_pick_cube` |
+| `ACTION_REPRESENTATION_MODE` | `eef_relative` | `eef_relative` | `eef_relative` |
+| `ACTION_REPRESENTATION_POSE_FORMAT` | `xyz_rot6d_rows` | `xyz_rot6d_rows` | `xyz_rot6d_rows` |
+| `ACTION_REPRESENTATION_STATS_FILE` | `meta/action_representation_stats.json` | 동상 | 동상 |
+| `AGGREGATE_FN_NAME` | `latest_only` | `latest_only` | `latest_only` |
+| `POLICY_REPO_ID` | `${HF_USER}/so101_act_eef_relative_pick_cube` | `/workspace/outputs/train/so101_groot_n17_eef_relative_pick_cube/checkpoints/last/pretrained_model` | `/workspace/outputs/train/so101_smolvla_pick_cube_v2/checkpoints/last/pretrained_model` |
+| `JOB_NAME` | `so101_act_eef_relative_pick_cube` | `so101_groot_n17_eef_relative_pick_cube` | `so101_smolvla_eef_relative_pick_cube` |
 | `RENAME_MAP` | (빈값) | (빈값) | `{"observation.images.top":"...camera1", "...wrist":"...camera2", "...front":"...camera3"}` |
 | `DATASET_VIDEO_BACKEND` | — | (빈값) | — |
 | `HF_DATASET_REPO_ID` | — | `${HF_USER}/so101_sim_pick_cube` | — |
 | `GRIPPER_CMD_OFFSET` | — | `0.0` | `0.0` |
 
-**GR00T-N1.5 는 별도 서비스가 아니다.** LeRobot 0.5.1 내장 `groot` policy(Eagle-2.5 backbone)라
+> `ACTION_REPRESENTATION_*` 는 **override 가 아니라 assertion** 이다. 값의 의미와 4 mode ×
+> 3 pose format 계약은 `docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md` 가 정본이다.
+
+**GR00T-N1.7 은 별도 서비스가 아니다.** LeRobot 0.6.0 내장 `groot` policy 라
 policy-server 안에서 ACT·SmolVLA 와 동일하게 학습·추론한다. 추론 시
 `vla_policy_node` 가 `policy_type=groot` 로 `SendPolicyInstructions` 하면 서버가
-`GrootPolicy` 를 로드한다.
+`GrootPolicy` 를 로드한다. raw N1.7 base 는 SO-101 processor 가 없으므로 최소 1회
+fine-tune 한 checkpoint 를 `POLICY_REPO_ID` 로 쓴다.
 
 `RENAME_MAP` 은 서버가 아니라 **클라이언트가** 적용한다 — 이유는 `07_INTERFACES.md §8.2`.
 
@@ -322,14 +330,14 @@ index 라우팅: `torch`/`torchvision` → `pytorch-cu128`(`https://download.pyt
 
 | 이미지 | base | 핵심 핀·설치 |
 |---|---|---|
-| `Dockerfile.policy` | `nvidia/cuda:12.8.0-devel-ubuntu24.04` → runtime | uv managed **CPython 3.12**, venv `/opt/venv`. `torch>=2.7.0,<2.11.0`·`torchvision>=0.22.0,<0.26.0` (cu128 index) → **`lerobot[smolvla,async]==0.5.1`** → GR00T 의존 → `flash-attn` (`TORCH_CUDA_ARCH_LIST="8.6 9.0 12.0"`, `MAX_JOBS=8`, `--no-build-isolation`) → `groot_compat_patch.py` 실행 후 삭제 |
+| `Dockerfile.policy` | `nvidia/cuda:12.8.0-devel-ubuntu24.04` → runtime | uv managed **CPython 3.12**(lerobot 0.6.0 `requires-python=">=3.12"`), venv `/opt/venv`. `torch>=2.7.0,<2.12.0`·`torchvision>=0.22.0,<0.27.0` (cu128 index) → **`lerobot[smolvla,async,groot]==0.6.0`** → `lerobot_v060_eef_relative_patch.py` 실행 후 삭제. **flash-attn 미설치 — GR00T-N1.7 은 공식 SDPA fallback 을 쓴다** |
 | `Dockerfile.isaac_sim` | `nvcr.io/nvidia/isaac-lab:2.3.2` | 추가 pip: `pyarrow<19` · `pandas` · `imageio` · `imageio-ffmpeg` · `prettytable` · `pyzmq>=27.1.0`. isaaclab/isaacsim/torch/numpy/cv2 는 **베이스 보유 — 재핀 금지** |
 | `Dockerfile.cuRobo` | `so101-isaac-sim:5.1.0` | `SETUPTOOLS_SCM_PRETEND_VERSION=0.8.0 pip install "/opt/curobo[cu12]" "packaging==23.0" nvidia-cuda-cccl-cu12` → `pip install --force-reinstall --no-deps "nvidia-cuda-nvrtc-cu12==12.8.93"` |
 | `Dockerfile.pink` | `ros:jazzy-ros-base` | `pin-pink` · `quadprog` · `typing-extensions` · **`numpy<2`** · `pyarrow<19` · pandas · imageio |
 | `Dockerfile.vla_ros` | `ros:jazzy-ros-base` | `torch`(**CPU index**) · `grpcio` · `protobuf>=6.31,<7` · `python-dotenv` · **`numpy<2`** · `huggingface_hub` · `pyarrow<19`. **lerobot 미설치** — vendored shim 사용 |
 
-`Dockerfile.policy` 가 uv sync 를 쓰지 않는 이유: pyproject override(`numpy==1.26.0` 등)와
-lerobot 0.5.1(`numpy>=2.0`)이 충돌한다. `uv pip install` 로 직접 설치한다.
+`Dockerfile.policy` 가 uv sync 를 쓰지 않는 이유: 루트 pyproject override(`numpy==1.26.0` 등)와
+lerobot 0.6.0(`numpy>=2.0`)이 충돌한다. `uv pip install` 로 직접 설치한다.
 
 **cuRobo 설치 함정 3종**(코드 주석):
 
@@ -340,14 +348,18 @@ lerobot 0.5.1(`numpy>=2.0`)이 충돌한다. `uv pip install` 로 직접 설치�
 
 numpy 1.26 · warp 1.11 · torch 2.7 ABI 3핀은 불변이다. nvcc 는 불필요(NVRTC JIT).
 
-### 7.4 `groot_compat_patch.py` — 버전 트립와이어
+### 7.4 `lerobot_v060_eef_relative_patch.py` — 버전 트립와이어
 
-`Dockerfile.policy` 빌드 시 `lerobot[smolvla,async]==0.5.1` 설치 직후 **1회** 실행된다.
-transformers 5.3 + torch 2.10 에서 LeRobot 0.5.1 의 GR00T-N1.5 네이티브 wrapper 가 깨지는
-4지점을 site-packages 에서 **멱등** 패치한다.
+`Dockerfile.policy` 빌드 시 `lerobot[smolvla,async,groot]==0.6.0` 설치 직후 **1회** 실행된다.
+PyPI LeRobot 0.6.0 source 에 공통 SE(3) processor, train/checkpoint manifest,
+full-chunk sync/async hook 을 site-packages 에서 **멱등** 적용한다.
 
-> **GR00T-N1.5 추론·학습에 필수 — 삭제 금지.** 대상 코드 형태가 다르면 `RuntimeError` 로
-> 빌드를 중단한다(버전 트립와이어). lerobot·transformers 업그레이드 시 이 패치부터 점검할 것.
+> **삭제 금지.** 예상 upstream source 형태가 다르면 빌드를 중단한다(버전 트립와이어).
+> lerobot·transformers 업그레이드 시 이 패치부터 점검할 것. 패치가 강제하는 계약은
+> `docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md` 가 정본이다.
+
+`docker/groot_compat_patch.py` 는 **LeRobot 0.5.1 + GR00T-N1.5 재현용 legacy 자료**다.
+현재 `Dockerfile.policy` 는 이 스크립트를 실행하지 않는다(삭제도 하지 않는다).
 
 ---
 
@@ -397,7 +409,7 @@ docker compose --env-file .env -f docker/docker-compose.yaml up policy-server is
 `--apc N` · `--thr T` · `--seed S`(기본 0) · `--no-parity` · `--slew`(기본 on) / `--no-slew` ·
 `--arm-vel V`(기본 2.3).
 
-프로필 해석 순서: 인자 → `.env` 의 `POLICY_PROFILE` → `groot_n15`. `groot` 는 `groot_n15` 별칭.
+프로필 해석 순서: 인자 → `.env` 의 `POLICY_PROFILE` → `groot_n17`. `groot` 는 `groot_n17` 별칭.
 임시 override 프로필 = `env/demo_override.env`(`POLICY_REPO_ID` 만 치환).
 데모 전용 컨테이너명 = `vla_demo_ps` / `vla_demo_node`, 로그 = `outputs/p5_logs/`.
 
@@ -412,12 +424,14 @@ WSL·Docker·usbipd 없이 Windows 호스트의 native uv 로 실행한다.
 
 | 항목 | 내용 |
 |---|---|
-| 의존성 | `uv sync --group teleop --group async` (= lerobot 0.4.4 CLI) |
-| `.env` 로드 | 자동 안 됨 → Git Bash `set -a; source .env; set +a` |
+| 의존성 | **전용 project** `scripts/real/pyproject.toml` — 최초 1회 `uv sync --project scripts/real`. **Python 3.12 전용**, `lerobot[async,core_scripts,feetech]==0.6.0` 고정. **루트 Isaac 환경을 재사용하지 않는다** |
+| `.env` 로드 | **래퍼가 자동 로드**한다 — `scripts/real/lerobot.sh` 가 루트 `.env` + 모델 프로필을 읽는다(수동 `source` 불필요) |
 | 포트 | COM 포트 직결(`ROBOT_PORT`/`TELEOP_PORT`). usbipd 불필요 |
-| 래퍼 | `scripts/real/lerobot.sh` — `.env`+프로필 로드 후 변수→인자 매핑 |
+| 래퍼 | `scripts/real/lerobot.sh <mode>` — `.env`+프로필 로드 후 변수→인자 매핑, 항상 `uv run --project scripts/real` 로 실행 |
+| policy-client | **manifest 가 dispatch 를 결정한다**(preflight `--emit client_kind`). **4 mode 모두** `scripts/inference/eef_robot_client.py` 를 거친다(EEF=FK/IK, joint=canonical joint 경계). stock client 아님 |
 
-CLI 모드·인자 매핑 = `08_PIPELINES.md §2`.
+CLI 모드·인자 매핑 = `08_PIPELINES.md §2`. checkpoint manifest 계약 =
+`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`.
 
 > ⚠ `evdev` 는 linux 전용이라 Windows 에 설치되지 않는다(`sys_platform` 게이트).
 

@@ -1,16 +1,17 @@
 # LeRobot v0.6.0 소스 분석 (참고 구현)
 
-> 이 문서는 **upstream 참고 자료**다. 현재 실행 스택은 Windows LeRobot 0.4.4 /
-> Linux policy-server LeRobot 0.5.1 이며, 이 저장소의 as-built 명세는
-> [`SPEC.md`](SPEC.md) 에 있다.
+> 이 문서는 **upstream 소스 분석 자료**다. 현재 실행 스택은 Windows 실기기
+> (`scripts/real/pyproject.toml`) / Linux policy-server(`docker/Dockerfile.policy`) **양쪽 모두
+> LeRobot 0.6.0** 이며, 이 저장소의 as-built 명세는 [`SPEC.md`](SPEC.md) 에 있다.
 
 ---
 
 분석 기준은 `ref_repos/lerobot`의 **v0.6.0**, commit
 [`30da8e6`](https://github.com/huggingface/lerobot/tree/30da8e687a6dfc617fcd94afc367ac7071c376ce)이다.
-이 clone은 다음 버전 설계를 검토하기 위한 참고용이며, 현재 실행 스택은
-Windows LeRobot 0.4.4 / Linux policy-server LeRobot 0.5.1을 그대로 사용한다
-(`../README.md` §실행 경로).
+현재 실행 스택이 쓰는 버전과 같으며, 이 저장소는 그 위에
+`docker/lerobot_v060_eef_relative_patch.py` 를 멱등 적용해 action representation schema v2 를
+얹는다(계약 정본 = [`EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](EEF_RELATIVE_ACTION_PIPELINE_SPEC.md),
+실행 경로 = `../README.md` §실행 경로).
 
 <details>
 <summary><strong>lerobot-train 처리 파이프라인과 VLA별 분기</strong></summary>

@@ -14,8 +14,13 @@
 | 언어 | 한국어 본문 + 영어 식별자 |
 | 대상 독자 | 신규 개발자 · 에이전트 · 코드를 읽기 전에 계약을 확인하려는 사람 |
 
-**as-built 가 아닌 것은 싣지 않는다.** 예를 들어 EEF-relative action 파이프라인은 설계만
-있고 커밋된 구현이 없으므로 `spec/04 §10` 에 "미구현" 으로만 적는다.
+**as-built 가 아닌 것은 싣지 않는다.**
+
+> **action representation schema v2 계약의 정본은
+> [`EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](EEF_RELATIVE_ACTION_PIPELINE_SPEC.md) 다.**
+> 4 mode(`joint_absolute`·`joint_relative`·`eef_absolute`·`eef_relative`) × 3 pose format ×
+> 3 policy 조합, universal manifest, stats profile, migration, mode별 추론 routing, Phase
+> 정의가 전부 그 문서에 있다. **세부 계약·수식·상수를 이 문서로 복사하지 말고 링크한다.**
 
 ---
 
@@ -32,7 +37,7 @@ flowchart TD
         RL["실기기 record"]
     end
     DS[("LeRobot v3<br/>6D joint + 3-cam")]
-    TR["학습<br/>ACT · SmolVLA · GR00T-N1.5"]
+    TR["학습<br/>ACT · SmolVLA · GR00T-N1.7"]
     subgraph infer["추론"]
         SI["sim 폐루프<br/>bridge + vla-ros"]
         RI["실기기<br/>policy-client"]
@@ -69,6 +74,7 @@ flowchart TD
 | [`spec/07_INTERFACES.md`](spec/07_INTERFACES.md) | 프로세스 간 무엇을 주고받는가 | ROS 노드 · ZMQ · gRPC |
 | [`spec/08_PIPELINES.md`](spec/08_PIPELINES.md) | 실제로 어떻게 데이터를 만들고 학습·평가하는가 | `scripts/` |
 | [`spec/09_TACIT_KNOWLEDGE.md`](spec/09_TACIT_KNOWLEDGE.md) | **왜 이 값이고 바꾸면 무엇이 깨지는가** | 코드 주석 · 측정 기록 |
+| [`EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](EEF_RELATIVE_ACTION_PIPELINE_SPEC.md) | **action representation schema v2 계약 정본** — 4 mode × 3 pose format × 3 policy, manifest·stats·migration·routing | `src/so101_contract/` · `docker/lerobot_v060_eef_relative_patch.py` |
 
 ---
 

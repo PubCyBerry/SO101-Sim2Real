@@ -1,6 +1,6 @@
 """lerobot.async_inference.helpers 의 **최소 vendored 사본** (pickle 호환 전용).
 
-policy-server(실 lerobot 0.5.1)와 주고받는 pickle 객체의 클래스 경로
+policy-server(실 LeRobot 0.6.0)와 주고받는 pickle 객체의 클래스 경로
 (`lerobot.async_inference.helpers.{RemotePolicyConfig,TimedObservation,TimedAction}`)를
 ROS 컨테이너(py3.12)에서 재현하기 위한 dataclass 만 담는다. 실 lerobot 은 transformers/
 datasets/diffusers 까지 끌어와(import 체인) 컨테이너에 부적합 → 여기서는 직렬화에 필요한

@@ -12,7 +12,7 @@ SO-ARM101 6축 로봇 팔의 **Sim-to-Real 파이프라인**이다. Isaac Sim �
 | 산출물 | 형식 | 명세 |
 |---|---|---|
 | 학습 데이터셋 | LeRobot Dataset v3 (6D joint + 3-cam video) | `05_DATA_SPEC.md` |
-| 학습된 정책 | ACT · SmolVLA · GR00T-N1.5 체크포인트 | `08_PIPELINES.md §8` |
+| 학습된 정책 | ACT · SmolVLA · GR00T-N1.7 체크포인트 | `08_PIPELINES.md §8` |
 | 폐루프 평가 수치 | 성공률 JSON | `08_PIPELINES.md §9.2` |
 
 ### 범위에 포함
@@ -26,7 +26,7 @@ SO-ARM101 6축 로봇 팔의 **Sim-to-Real 파이프라인**이다. Isaac Sim �
 |---|---|
 | `scripts/ece_4560/` | 격리된 과정 프로젝트. 파이프라인 코드를 import 하지 않는다(단, `follower_calibration` 측정에 `read_position.py` 를 사용한 이력만 있음) |
 | `ref_repos/` | `.gitignore` 대상. 외부 참조 저장소 |
-| EEF-relative action 파이프라인 | **미구현**. absolute EEF 파생까지만 커밋돼 있다 (`04_IO_CONTRACT.md §10`) |
+| action representation schema v2 (4 mode × 3 pose format) | 정본이 별도 문서다 — `docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`. 여기에 계약을 복제하지 않는다 |
 | 에러 사례집 | `docs/TROUBLESHOOTING.md`(92개 항목)가 별 도메인으로 관리 |
 
 > 이 명세서는 **as-built** 다 — 커밋된 코드가 실제로 하는 일만 기술한다.
@@ -60,9 +60,9 @@ flowchart LR
 
 | | Windows 워크스테이션 | Linux 서버 |
 |---|---|---|
-| 실행 방식 | native uv + `pyproject.toml` (WSL·Docker 없음) | Docker compose |
-| 작업 | teleop · record · replay · calibrate · setup-motors · **실기기 policy-client** | sim 폐루프 · VLA 학습 · 추론 서버 · datagen |
-| 스택 | LeRobot 0.4.4 (`teleop` + `async` 그룹) | Isaac Sim 5.1 / IsaacLab 2.3.2 / LeRobot 0.5.1 |
+| 실행 방식 | native uv + **`scripts/real/pyproject.toml`** (WSL·Docker 없음), 진입점 `scripts/real/lerobot.sh <mode>` | Docker compose |
+| 작업 | teleop · record · replay · calibrate · setup-motors · find-port · **실기기 policy-client** | sim 폐루프 · VLA 학습 · 추론 서버 · datagen |
+| 스택 | **Python 3.12 전용 uv project** + LeRobot 0.6.0 (`lerobot[async,core_scripts,feetech]==0.6.0`) | Isaac Sim 5.1 / IsaacLab 2.3.2 / LeRobot 0.6.0 |
 | GPU | RTX A4000 16 GB (추론은 서버 위임) | RTX PRO 5000 Blackwell 48 GB |
 
 상세 = `06_RUNTIME_SPEC.md §1, §8, §10`.
@@ -232,10 +232,10 @@ USD 체인에 URDF `wrist_roll` origin 의 `Ry(0.0487)` 항이 없어 이중 FK 
 | Isaac Sim | 5.1.0 | `pyproject.toml` `isaac` 그룹 |
 | Isaac Lab | 2.3.2 | 동상 · `docker/Dockerfile.isaac_sim` (`nvcr.io/nvidia/isaac-lab:2.3.2`) |
 | ROS 2 | Jazzy | `docker/Dockerfile.pink`, `Dockerfile.vla_ros` (`ros:jazzy-ros-base`) |
-| LeRobot (Windows 실기기) | 0.4.4 | `pyproject.toml` `lerobot[feetech]>=0.4.4` |
-| LeRobot (서버) | **0.5.1** | `docker/Dockerfile.policy` (`lerobot[smolvla,async]==0.5.1`) |
+| LeRobot (Windows 실기기) | **0.6.0** | `scripts/real/pyproject.toml` (`lerobot[async,core_scripts,feetech]==0.6.0`) |
+| LeRobot (서버) | **0.6.0** | `docker/Dockerfile.policy` (`lerobot[smolvla,async,groot]==0.6.0`) |
 | CUDA base | 12.8.0 | `docker/Dockerfile.policy` |
-| Python | `>=3.11,<3.13` (호스트) / 3.12 (policy 이미지) | `pyproject.toml` · `Dockerfile.policy` |
+| Python | `>=3.11,<3.13` (Isaac 호스트) / 3.12 (policy 이미지) / `>=3.12,<3.13` (Windows 실기기) | `pyproject.toml` · `Dockerfile.policy` · `scripts/real/pyproject.toml` |
 | torch | 2.7.0+cu128 | `pyproject.toml` override · `uv.lock` |
 | numpy | 1.26.0 (override) | `pyproject.toml` |
 | cuRobo | v2 (0.8.0) | `docker/Dockerfile.cuRobo` |
@@ -259,7 +259,7 @@ SO101-Sim2Real/
 ├── docker/                   5 서비스 이미지 · compose · entrypoint
 ├── ros2_ws/src/so101_vla_policy/   VLA 추론 ROS 노드 + vendored lerobot shim
 ├── assets/                   robots(USD·URDF·cuRobo yml) · scenes · layouts
-├── env/                      모델 프로필 (act · groot_n15 · smolvla)
+├── env/                      모델 프로필 (act · groot_n17 · smolvla)
 ├── docs/                     본 명세서 + 설계·트러블슈팅 문서
 ├── datasets/ → /DISK1/...    (심링크)
 ├── outputs/  → /DISK1/...    (심링크)
