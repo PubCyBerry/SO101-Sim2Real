@@ -1,19 +1,20 @@
 # SO-ARM101 Sim-to-Real
 
-SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬레이션에서 VLA 정책(ACT · SmolVLA · GR00T-N1.5)을 학습·검증하고, 실기기 SO-101 에 배포한다.
+SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시뮬레이션에서 VLA 정책(ACT · SmolVLA · GR00T-N1.7)을 학습·검증하고, 실기기 SO-101 에 배포한다.
 
 작업은 **2대의 머신**으로 나뉜다.
 
 - **Windows 워크스테이션** — 실기기 SO-101 직결. **native uv**(WSL·Docker 없음)로 teleop·record·calibrate·setup-motors·policy-client.
 - **Linux 서버** — 시뮬·학습·추론 서버. **전부 Docker**로 Isaac Sim 폐루프, VLA 학습, policy-server.
 
-스택: **Isaac Sim 5.1 · Isaac Lab 2.3.2 · LeRobot 0.5.1(policy-server)/0.4.4(실기기 CLI) · ROS 2 Jazzy**.
+스택: **Isaac Sim 5.1 · Isaac Lab 2.3.2 · LeRobot 0.6.0(policy-server/실기기 전용 uv project) · ROS 2 Jazzy**.
 
 ## 목차 <!-- omit in toc -->
 
 - [아키텍처 — 2-머신](#아키텍처--2-머신)
 - [실행 경로](#실행-경로)
-- [LeRobot v0.6.0 소스 분석 (참고 구현)](#lerobot-v060-소스-분석-참고-구현)
+- [EEF-relative action 파이프라인](#eef-relative-action-파이프라인)
+- [LeRobot v0.6.0 소스 분석과 구현 기준](#lerobot-v060-소스-분석과-구현-기준)
 - [현재 PickCube 환경·에셋·cuRobo 평가](#현재-pickcube-환경에셋curobo-평가)
 - [환경 요구사항](#환경-요구사항)
 - [사전 설치 확인](#사전-설치-확인)
@@ -30,9 +31,9 @@ SO-ARM101 6축 로봇 팔용 **Sim-to-Real 파이프라인**. Isaac Sim 5.1 시�
 | | Windows 워크스테이션 | Linux 서버 |
 |---|---|---|
 | **역할** | 실기기 SO-101 제어 | 시뮬·학습·추론 서버 |
-| **실행** | native uv + `pyproject.toml` (WSL·Docker 없음) | Docker (전부) |
+| **실행** | native uv + `scripts/real/pyproject.toml` (WSL·Docker 없음) | Docker (전부) |
 | **작업** | teleop · record · replay · calibrate · setup-motors · find-port · policy-client | Isaac Sim 폐루프 · VLA 학습 · policy-server · sim policy-client(vla-ros) |
-| **LeRobot** | 0.4.4 (pyproject `teleop`+`async`) | 0.5.1 (policy-server 독립 핀) |
+| **LeRobot** | 0.6.0 (Python 3.12 전용 uv project) | 0.6.0 / commit `30da8e6` 기반 patch |
 | **로봇 I/O** | COM 포트 직결 (usbipd/WSL 불필요) | 로봇 직결 없음 (sim/추론만) |
 | **GPU** | RTX A4000 16GB (실기기 CLI 는 GPU 불요) | RTX PRO 5000 Blackwell 48GB |
 
@@ -64,23 +65,253 @@ flowchart LR
 
 | 경로 | 머신 | 진입점 | 용도 |
 |---|---|---|---|
-| **실기기 LeRobot** | Windows (native uv) | `uv run lerobot-<mode>` | teleop · record · calibrate · setup-motors · find-port |
-| **실기기 VLA 추론** | Windows (native uv) | `uv run python -m lerobot.async_inference.robot_client` | policy-client → Linux policy-server gRPC |
+| **실기기 LeRobot** | Windows (native uv) | `scripts/real/lerobot.sh <mode>` | teleop · record · calibrate · setup-motors · find-port |
+| **실기기 VLA 추론** | Windows (native uv) | `scripts/real/lerobot.sh policy-client` | joint fallback 또는 EEF FK/IK client → Linux gRPC |
 | **sim VLA 폐루프** | Linux (Docker) | `docker compose up policy-server isaac-sim vla-ros` | `SimToReal-SO101-PickCube-Eval-v0` closed-loop 평가 (디바운스 성공; 데이터생성은 `-DR-v0`) |
 | **sim SM 데이터 생성** | Linux (Docker) | isaac-sim `datagen` 모드 (`record_state_machine.py`) | State Machine 데모 → LeRobot v3 (GPU 런타임 검증 진행 중) |
-| **VLA 학습** | Linux (Docker) | policy-server `train` | SmolVLA · ACT · GR00T-N1.5 (모두 네이티브) |
+| **VLA 학습** | Linux (Docker) | policy-server `train` | ACT · SmolVLA · GR00T-N1.7 + 공통 EEF-relative processor |
 | **sim 수동 teleop** (보조) | Linux (host uv) | `uv run scripts/.../teleop_se3_agent.py` | Isaac Lab 로컬 teleop · USD 씬 author |
 
 > **추론 백엔드는 1개**: `policy-server`(gRPC). 실기기 policy-client(Windows)와 sim vla-ros(Linux)가 같은 서버에 접속한다.
 
 ---
 
-## LeRobot v0.6.0 소스 분석 (참고 구현)
+## EEF-relative action 파이프라인
+
+LeRobot v3에는 state/action을 모두 canonical absolute EEF 10D로 보존한다.
+
+```text
+[tcp_grasp xyz(3), Rot6D first two rows(6), absolute gripper feature(1)]
+```
+
+학습 preprocessor만 각 action horizon을 현재 observation 기준
+`T_rel = inv(T_state) @ T_action`으로 바꾸고, 추론 postprocessor는 full chunk를 한 번에
+`T_action = T_state @ T_rel`로 복원한다. 이후 sim/real client가 같은 URDF·robot YAML로
+sequential bounded IK를 수행한다. Rot6D/EEF 벡터의 elementwise 평균은 금지하며 overlap은
+IK 이후 `latest_only`로 처리한다.
+
+```mermaid
+flowchart LR
+    J["Joint-space LeRobot v3"] --> C["joint_dataset_to_eef.py"]
+    C --> D["Absolute EEF 10D dataset"]
+    D --> S["Horizon별 relative stats"]
+    D --> P["SE(3) train preprocessor"]
+    S --> P
+    P --> M["ACT / SmolVLA / GR00T-N1.7"]
+    M --> Q["Full-chunk postprocessor"]
+    Q --> I["sim/real sequential IK"]
+    I --> R["Absolute joint command"]
+```
+
+### 데이터 준비와 학습
+
+```bash
+# 1) 원본은 보존하고 absolute joint → absolute EEF Rot6D 파생셋 생성
+python scripts/convert/joint_dataset_to_eef.py \
+  --input-dir datasets/joint_v3 --output-dir datasets/eef_v3 \
+  --source-domain sim --rotation-representation rot6d
+
+# 2) policy horizon별 stats profile을 같은 artifact(meta/action_representation_stats.json)에 추가
+#    --all 은 그 dataset이 지원하는 representation(absolute/relative)을 모두 만든다.
+python scripts/data/generate_action_representation_stats.py --dataset-root datasets/eef_v3 --horizon 100 --all
+python scripts/data/generate_action_representation_stats.py --dataset-root datasets/eef_v3 --horizon 50 --all
+python scripts/data/generate_action_representation_stats.py --dataset-root datasets/eef_v3 --horizon 40 --all
+
+# 3) .env의 DATASET_ROOT/HF_DATASET_REPO_ID를 EEF dataset으로 지정하고 profile 선택
+#    action representation은 profile 변수로 고른다(schema v2, 4 mode × 3 EEF pose format):
+#      ACTION_REPRESENTATION_MODE=joint_absolute|joint_relative|eef_absolute|eef_relative
+#      ACTION_REPRESENTATION_POSE_FORMAT=xyz_rot6d_rows|xyz_quaternion_wxyz|xyz_rpy  (EEF 전용)
+POLICY_PROFILE=act docker compose -f docker/docker-compose.yaml run --rm policy-server train
+POLICY_PROFILE=smolvla docker compose -f docker/docker-compose.yaml run --rm policy-server train
+POLICY_PROFILE=groot_n17 docker compose -f docker/docker-compose.yaml run --rm policy-server train
+```
+
+`POLICY_PUSH_TO_HUB=false`가 프로젝트 기본값이다. LeRobot v0.6 policy config의 upstream
+기본값은 `true`이므로, checkpoint를 실제 Hub에 올릴 때만 `.env`에서 명시적으로
+`POLICY_PUSH_TO_HUB=true`로 바꾼다.
+
+학습 checkpoint에는 model/config/processor stats와 함께 `action_representation.json`
+(**schema v2**)이 **mode와 무관하게 항상** 저장된다(periodic·final·Hub root). manifest는
+mode/pose_format/dim, dataset fingerprint·revision, resolved group indices, stats profile hash,
+policy horizon/family, LeRobot/project commit, URDF/YAML hash, selective-reuse report를 기록한다.
+추론 server와 platform client는 이를 다시 검증하며 누락·변조·kinematics 불일치 시 시작을 거부한다.
+v1 manifest checkpoint는 자동 승격되지 않는다(Phase 16 migration 필요).
+
+추론 시 representation 인자(`ACTION_REPRESENTATION_MODE`/`ACTION_REPRESENTATION_POSE_FORMAT`)는
+**assertion**이다. checkpoint 의미를 바꾸지 않으며, 값이 다르면 policy-server·sim client·
+real client 모두 로봇/sim 명령 이전에 기동을 중단한다. 생략하면 manifest 값을 그대로 쓴다.
+
+legacy checkpoint는 자동 승격되지 않는다. 별도 migration으로 v2 checkpoint를 만든다
+(원본은 그대로 두고 새 디렉터리에 생성).
+
+```bash
+# manifest 없는 legacy checkpoint → joint_absolute (정확한 flag 필수)
+python scripts/convert/migrate_action_representation_checkpoint.py \
+  --source outputs/train/old/checkpoints/last/pretrained_model \
+  --output outputs/train/old/checkpoints/last/pretrained_model_v2 \
+  --dataset-root datasets/joint_v3 --horizon 50 \
+  --allow-legacy-joint-absolute-checkpoint
+
+# v1 EEF-relative(xyz_rot6d_rows) checkpoint
+python scripts/convert/migrate_action_representation_checkpoint.py \
+  --source outputs/train/eef/checkpoints/last/pretrained_model \
+  --output outputs/train/eef/checkpoints/last/pretrained_model_v2 \
+  --dataset-root datasets/eef_v3 --horizon 50
+
+# checkpoint 계약 확인/assertion (local dir 또는 HF repo id)
+python scripts/inference/assert_checkpoint_representation.py \
+  --checkpoint outputs/train/eef/checkpoints/last/pretrained_model_v2 --json
+```
+
+```bash
+# 24 조합(3 policy × 8 representation) 통합 검증
+python scripts/contract/validate_action_representation_policies.py --fixture-root scratch/fx --policies act,smolvla,groot
+# 실제 CLI checkpoint의 manifest/reload 검증
+python scripts/contract/validate_action_representation_checkpoint_cli.py --fixture scratch/fx/joint --mode joint_relative
+# Phase 16: migration·routing·CLI assertion
+python scripts/contract/validate_action_migration.py --fixture-root scratch/fx
+python scripts/contract/validate_action_routing.py
+python scripts/contract/validate_representation_cli_assertions.py
+```
+
+```bash
+# Phase 17: 24 조합 × §25.2 13개 필수 검증 통합 matrix (실제 policy·sync engine·PolicyServer)
+#   Docker policy-server:0.6.0 안에서 실행한다(현재 image의 patch가 authoritative).
+docker run --rm --gpus all --ipc=host \
+  -v "$PWD":/workspace -w /workspace \
+  -v lerobot_hf_cache:/workspace/.cache/huggingface \
+  -e HF_HOME=/workspace/.cache/huggingface -e HF_HUB_OFFLINE=1 \
+  -e SO101_PROJECT_GIT_COMMIT=$(git rev-parse HEAD) \
+  -e SO101_PROJECT_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+  -e SO101_PROJECT_GIT_DIRTY=$([ -n "$(git status --porcelain)" ] && echo true || echo false) \
+  -e SO101_DOCKER_IMAGE_ID=$(docker inspect --format '{{.Id}}' policy-server:0.6.0) \
+  --entrypoint python policy-server:0.6.0 \
+  scripts/contract/validate_action_representation_matrix.py \
+    --fixture-root scratch/p17-baseline \
+    --output scratch/p17-matrix/phase17_24combo.json
+
+# 결과 집계(24 조합 × 13 check 전부 pass 인지)
+jq '.totals' scratch/p17-matrix/phase17_24combo.json
+jq '[.combinations[].checks[].status] | group_by(.) | map({(.[0]): length}) | add' \
+  scratch/p17-matrix/phase17_24combo.json
+```
+
+- 개발 중 부분 실행은 `--policies act` / `--representations joint_absolute` 필터를 쓴다.
+  completion 실행은 24 조합 전부여야 하며, 부족하면 runner가 `INCOMPLETE`로 실패한다.
+- 결과 artifact: `scratch/p17-matrix/phase17_24combo.json`
+  (schema version·생성시각·git SHA/branch/dirty·Docker image ID·LeRobot version/commit·
+  device/GPU·seed·24 totals·조합별 13 check·failures/skips, atomic write, mode 0644).
+- **provenance**: `SO101_PROJECT_GIT_{COMMIT,BRANCH,DIRTY}`를 host에서 주입해야 worktree
+  실제 상태가 기록된다. 주입이 없으면 container 안에서 검출을 시도하고, 검출도 못 하면
+  `dirty: null`(unknown)로 남긴다 — clean으로 단정하지 않는다. 각 필드의 출처는
+  `.git.provenance_source`에 있다.
+
+```bash
+# Phase 18(부분): 24 조합 contract-level rollout dry-run — GPU·정책 weight 불요(CPU)
+docker run --rm --ipc=host -v "$PWD":/workspace -w /workspace -e HF_HUB_OFFLINE=1 \
+  -e SO101_PROJECT_GIT_COMMIT=$(git rev-parse HEAD) \
+  -e SO101_PROJECT_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+  -e SO101_PROJECT_GIT_DIRTY=$([ -n "$(git status --porcelain)" ] && echo true || echo false) \
+  -e SO101_DOCKER_IMAGE_ID=$(docker inspect --format '{{.Id}}' policy-server:0.6.0) \
+  --entrypoint python policy-server:0.6.0 \
+  scripts/contract/validate_action_representation_rollout_dry_run.py \
+    --phase17-artifact scratch/p17-matrix/phase17_24combo.json \
+    --output scratch/p18-dry-run/phase18_24combo_dry_run.json
+
+jq -c '.status, .phase18_complete, .totals, .acceptance' \
+  scratch/p18-dry-run/phase18_24combo_dry_run.json
+```
+
+**결과 해석 — 이 artifact는 Phase 18을 완료시키지 않는다.**
+
+| 필드 | 의미 |
+|---|---|
+| `status = DRY_RUN_PASS` | 24 조합 × 6 stage가 실제 router/platform adapter/action queue로 통과. **계약 수준만** |
+| `phase18_complete = false` | **항상 false. 이 runner는 non-promoting이다** — 외부 sim/real report가 둘 다 `REPORT_VERIFIED`여도 승격하지 않는다. Phase 18 승격은 별도 closure 절차(spec 상태표 + §26.2 checkbox 갱신)로만 한다 |
+| `acceptance.sim_closed_loop = NOT_RUN` | 학습된 EEF checkpoint·sim 평가 없음(Phase 9 미실행) |
+| `acceptance.real_guarded_rollout = BLOCKED_EXTERNAL` | 실기기 승인·작업자·e-stop gate 없음(Phase 10 미실행) |
+| `operational_metrics` | 조합별 IK failure·invalid chunk·abort·starvation/empty/stale·residual·routed/published. **`aborts`/`invalid_chunks`/`queue_starvation_ticks`/`empty_chunks`/`stale_chunks`의 0은 장시간 rollout 측정치가 아니라 정상 경로에서 구조적으로 0인 값이다**(짧은 결정적 chunk 1개, 실패 주입 없음). 이 runner는 주입 guard와 evaluator self-test로 **fail-closed 동작만** 검증한다. 실제 rate/threshold acceptance는 외부 evaluator report 몫 |
+| `injected_guard_events` | **의도적으로 주입한** guard 수 = 조합당 6건(stale merge 1 + empty pop 1 + invalid chunk 4), 전체 144. operational failure 지표와 분리 |
+| `combination_coverage` | 실행된 조합 ID의 set/uniqueness. `exact_24_set=false`면 completion 아님 |
+| `phase17_artifact` | **historical 입력 artifact**의 SHA256 + 형식 검증 결과. 현재 Phase 18 실행 환경과의 동일성 비교가 **아니다**(이번 실행 provenance는 top-level `git`/`docker_image_id`/`lerobot`, `provenance_scope="current dry-run execution environment"`에 따로 기록된다). 검증 항목: ① schema version ② §25.1 **24개 expected combination ID set 완전 일치**(중복·누락·초과 0) ③ entry status=pass, `checks` key set이 `CHECK_NAMES`와 정확히 일치 ④ `totals`의 expected/ran/passed/failed 값 정확 일치(24 조합·312 check) ⑤ provenance 형식(commit 40-hex · branch nonempty · dirty bool · `provenance_source` object의 3필드 nonempty · `docker_image_id` `sha256:`+64hex · lerobot version `0.6.0` · lerobot commit 40-hex). 하나라도 어긋나면 전체 FAIL + exit 1 |
+
+- 조합별 stage: `checkpoint_contract_resolve` · `sim_boundary_route`(EEF IK 1회 / joint 0회) ·
+  `real_dry_run_boundary`(motor command publish 0을 sink counter로 증명) ·
+  `action_queue_operations`(실제 `ActionChunkQueue` latest_only/overlap/stale/empty/refill) ·
+  `invalid_chunk_rejection`(NaN·차원·rank·도달불가 chunk가 queue/publish 이전 거부) ·
+  `acceptance_gate_real_dry_run`(실제 `evaluate_eef_rollout_metrics.py --mode real-dry-run` 호출).
+- runner는 `evaluate_eef_rollout_metrics.py`의 sim/real-dry-run/real pass와 fail-closed 4종을
+  synthetic JSONL로 실제 호출하는 acceptance-gate self-test도 1회 수행한다.
+- 외부 평가 결과가 생기면 `--sim-eval-report` / `--real-rollout-report`로 넘겨 acceptance를
+  조립한다. 인자는 `evaluate_eef_rollout_metrics.py --output`이 만든 **JSON object**여야 하며
+  runner가 실제로 load해 ① 파일 존재 ② `mode`가 기대값(sim / real·real-dry-run) ③ `status=PASS`
+  ④ `failures`가 빈 list ⑤ `final.event=="final"`을 **전부** 요구한다. 통과하면 상태가
+  `REPORT_VERIFIED`가 되고 report의 path/SHA256이 acceptance evidence로 기록된다. 하나라도
+  어긋나면 `REPORT_INVALID` + 전체 `status=FAIL` + exit 1이다(존재만 확인하고 통과시키지 않는다).
+  report를 주지 않으면 위 표대로 NOT_RUN/BLOCKED_EXTERNAL로 남는다. **둘 다 REPORT_VERIFIED가
+  되어도 `phase18_complete`는 false다** — 이 runner는 evidence를 모을 뿐 Phase를 승격하지
+  않는다(non-promoting). 승격은 사람이 spec 상태표/§26.2 checkbox를 갱신하는 별도 closure
+  절차다.
+- **안전 gate 범위**: `EEF_IK_REAL_VALIDATED`는 **EEF IK로 산출한 real joint command**에만
+  걸린다. joint-space fallback(`joint_absolute`/`joint_relative`)은 IK를 거치지 않으므로 이
+  EEF-specific gate의 대상이 **아니며**, 그래서 fallback으로 즉시 선택 가능하다. 대신 joint
+  경로의 실기기 구동은 이 gate가 아니라 **일반 하드웨어 안전 절차**(작업자 입회·e-stop·감속·
+  workspace 확인)로 별도 통제해야 한다.
+- completion은 24개 **expected combination ID의 정확한 set**(중복·누락·초과 0)까지 확인한다.
+  `--policies`에 중복 policy를 주면 argparse 단계에서 거부한다(`--policies act,act,smolvla`처럼
+  GR00T 없이 24개를 채워 completion을 위조할 수 없다). subset 필터 실행은 `DRY_RUN_PARTIAL` +
+  exit 1이다.
+
+### 검증과 rollout
+
+```bash
+# 순수 계약·processor·FK/IK sweep
+python scripts/contract/validate_eef_relative_contract.py
+python scripts/contract/validate_eef_platform_adapter.py
+python scripts/contract/validate_eef_ik_workspace.py
+
+# 학습된 checkpoint의 recorded target 대비 full-chunk open-loop 비교
+docker compose -f docker/docker-compose.yaml run --rm policy-server python \
+  /workspace/scripts/inference/evaluate_eef_open_loop.py \
+  --checkpoint /workspace/outputs/train/<run>/checkpoints/last/pretrained_model \
+  --dataset-root /workspace/datasets/eef_v3 \
+  --output /workspace/logs/eef_open_loop.json
+
+# sim closed-loop 1-episode. metrics와 eval JSON을 함께 생성
+scripts/inference/demo_vla.sh start act --eval 1 --headless
+python scripts/contract/evaluate_eef_rollout_metrics.py \
+  --mode sim --metrics logs/eef_sim_rollout.jsonl \
+  --eval outputs/vla_eval_act.json
+
+# DR batch는 task/episode 수와 허용 성공률을 명시
+scripts/inference/demo_vla.sh start smolvla --eval 20 --headless \
+  --task SimToReal-SO101-PickCube-DR-Eval-v0
+python scripts/contract/evaluate_eef_rollout_metrics.py \
+  --mode sim --metrics logs/eef_sim_rollout.jsonl \
+  --eval outputs/vla_eval_smolvla.json --min-success-rate 0.8
+
+# Windows: false=motor-off IK target log, true=실기기 command 승인
+EEF_IK_REAL_VALIDATED=false scripts/real/lerobot.sh policy-client
+python scripts/contract/evaluate_eef_rollout_metrics.py \
+  --mode real-dry-run --metrics logs/eef_real_rollout.jsonl
+
+EEF_IK_REAL_VALIDATED=true  scripts/real/lerobot.sh policy-client
+python scripts/contract/evaluate_eef_rollout_metrics.py \
+  --mode real --metrics logs/eef_real_rollout.jsonl
+```
+
+상세 계약·단계별 acceptance criteria는
+[`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md)에 있다.
+
+---
+
+## LeRobot v0.6.0 소스 분석과 구현 기준
 
 분석 기준은 `ref_repos/lerobot`의 **v0.6.0**, commit
 [`30da8e6`](https://github.com/huggingface/lerobot/tree/30da8e687a6dfc617fcd94afc367ac7071c376ce)이다.
-이 clone은 다음 버전 설계를 검토하기 위한 참고용이며, 현재 실행 스택은 위 표의
-Windows LeRobot 0.4.4 / Linux policy-server LeRobot 0.5.1을 그대로 사용한다.
+reference clone은 read-only 분석 기준이다. 실행 image는 PyPI `lerobot==0.6.0`에
+`docker/lerobot_v060_eef_relative_patch.py`를 version-tripwire 방식으로 적용하며 같은 commit을
+image label과 checkpoint manifest에 기록한다.
 
 <details>
 <summary><strong>lerobot-train 처리 파이프라인과 VLA별 분기</strong></summary>
@@ -249,7 +480,8 @@ sequenceDiagram
    버리므로, 밀릴 때 backlog를 처리하지 않고 **가장 최신 관측**으로 교체한다.
 5. receiver thread의 `GetActions`가 관측 하나를 가져와
    `raw robot obs → LeRobot obs → preprocessor → policy.predict_action_chunk()`를 실행한다.
-   결과는 `actions_per_chunk`까지만 자르고 postprocessor를 적용한 뒤 CPU `TimedAction`으로 만든다.
+   이 프로젝트 patch는 **full chunk를 한 번 postprocess한 뒤** `actions_per_chunk`로 자르고
+   CPU `TimedAction`으로 만든다.
 6. client는 이미 실행한 timestep 이하의 stale action을 버리고, 기존 queue와 새 chunk가 겹치는
    timestep은 `aggregate_fn`으로 결합한다. 기본 `weighted_average`는
    `0.3 × old + 0.7 × new`이다.
@@ -280,24 +512,25 @@ sequenceDiagram
 - camera key는 checkpoint의 `policy.config.image_features`와 맞아야 한다. `RemotePolicyConfig`에는
   `rename_map`이 있지만 stock `RobotClientConfig` CLI에는 이를 노출하는 field가 없어, key가 다르면
   client 쪽 schema를 맞추거나 별도 client wrapper가 필요하다.
-- 관측 중복 필터는 image를 비교하지 않고 `observation.state`의 L2 distance만 본다
-  (`atol=1`). joint가 아닌 EEF state로 바꾸면 단위와 차원이 달라지므로 threshold도 함께 재설계해야 한다.
+- stock 관측 중복 필터는 image를 비교하지 않고 `observation.state`의 L2 distance만 본다
+  (`atol=1`). 이 threshold는 EEF 단위에 맞지 않으므로 EEF-relative processor가 감지되면
+  해당 필터를 bypass하고 timestamp/stale-action 규칙만 사용한다.
 - stock server는 action chunk를 postprocessor에 한 번에 넣지 않고 `(B, action_dim)`으로 한 step씩
   호출한다. 반면 GR00T N1.7의 native relative decoder는 horizon별 stats와 기준 pose 때문에
   `(B, T, action_dim)` 전체를 요구하고 single-step decode를 명시적으로 거부한다. 따라서
-  **v0.6.0 stock async 경로 그대로는 native GR00T EEF-relative chunk와 호환되지 않는다.**
-  GR00T 및 공통 EEF-relative processor를 적용할 때는 server가 chunk 전체를 한 번에 postprocess하도록
-  수정하고, 해당 processor를 학습 checkpoint에 저장해야 한다.
+  **v0.6.0 stock async 경로 그대로는 EEF-relative chunk와 호환되지 않는다.**
+  이 프로젝트는 server와 sync/eval 경로를 full-chunk postprocess + external absolute FIFO로
+  patch하고 processor/stats/manifest를 checkpoint에 함께 저장한다.
 - transport는 `grpc.insecure_channel`이고 policy config·observation·action에 Python pickle을 사용한다.
   인증·TLS·payload 검증이 없으므로 인터넷에 직접 노출하면 안 된다. client/server를 같은 신뢰
   boundary에 두고 방화벽, VPN 또는 SSH tunnel을 사용한다.
 - server instance에는 session ID가 없고 `Ready`가 전역 queue를 초기화한다. 여러 client가 동시에
   접속하면 서로 model/session 상태를 덮어쓸 수 있어 사실상 **server 하나당 active client 하나** 구조다.
 
-이 프로젝트에서는 실기기가 stock `RobotClient` 계열을 사용하고, sim은
+이 프로젝트에서는 실기기가 `RobotClient`를 확장한 `eef_robot_client.py`를 사용하고, sim은
 `vla_policy_node`가 같은 gRPC/pickle 계약을 구현하되 ROS observation과 자체 `deque`·inference
-thread를 사용한다. `policy-server-affine`은 server의 관측 enqueue 전과 action chunk 생성 후에
-joint-frame affine 변환을 추가하며, policy의 checkpoint processor 바깥에서 동작한다.
+thread를 사용한다. EEF mode에서는 `policy-server-affine`을 사용하지 않는다. 그 server는
+joint-space absolute fallback의 cross-domain affine 전용이다.
 
 소스 근거:
 [`robot_client.py`](https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/async_inference/robot_client.py) ·
@@ -428,7 +661,7 @@ grasp manifold, chord-center 보정, 5-frame contact hold와 재현 명령은
 | Docker | **불필요** | Docker + NVIDIA Container Toolkit |
 | NVIDIA Driver | (Isaac Sim 로컬 실행 시) 580+ | 580+ (CUDA 12.8 컨테이너) |
 | WSL2 / usbipd | **불필요 (제거됨)** | 해당 없음 |
-| Python | 3.11 (uv 가 관리) | 3.11 (컨테이너) |
+| Python | 3.12 (실기기 전용 uv project) | policy=3.12 / Isaac=3.11 |
 
 ### 하드웨어
 
@@ -445,10 +678,10 @@ grasp manifold, chord-center 보정, 5-frame contact hold와 재현 명령은
 
 | 패키지 | 버전 | 위치 |
 |---|---|---|
-| Python | 3.11 | (필수) |
-| torch | 2.7.0+cu128 | (공용) |
-| lerobot | 0.4.4 | 실기기 native uv (`teleop`+`async`) |
-| lerobot[smolvla,async] | 0.5.1 | `policy-server` 이미지 (Dockerfile.policy 독립 핀) |
+| Python | 3.12 | Windows 실기기·policy-server |
+| lerobot[async,core_scripts,feetech] | 0.6.0 | Windows `scripts/real/pyproject.toml` |
+| lerobot[smolvla,async,groot] | 0.6.0 | `policy-server` image + pinned patch |
+| Python / torch | 3.11 / 2.7.0+cu128 | Isaac Sim host uv 환경 |
 | isaacsim | 5.1.0 `[all,extscache]` | `isaac` 그룹 |
 | isaaclab | 2.3.2 `[all,isaacsim]` | `isaac` (직접 의존, 외부 래퍼 제거) |
 
@@ -491,7 +724,7 @@ cp .env.example .env
 | 블록 | 변수 (발췌) |
 |---|---|
 | §0 시크릿 | `HF_TOKEN` `HF_USER` `WANDB_API_KEY` |
-| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n15/act) — 활성 모델 1줄 선택 |
+| §1 모델 프로필 | `POLICY_PROFILE`(smolvla/groot_n17/act) — 활성 모델 1줄 선택 |
 | §2 하드웨어 | `TELEOP_PORT` `ROBOT_PORT` `ROBOT_ID` `TELEOP_ID` (Windows=COM, Docker=`/dev/ttyACM*`) |
 | §3 카메라 | `ENABLED_CAMERAS` `*_CAM_PORT` `CAM_WIDTH/HEIGHT/FPS` |
 | §4 데이터 | `SINGLE_TASK` `HF_DATASET_REPO_ID` `NUM_EPISODES` `RECORD_FPS` |
@@ -511,38 +744,26 @@ cp .env.example .env
 WSL·Docker·usbipd 없이 Git Bash 에서 직접 실행한다.
 
 ```bash
-# 1) 실기기 의존성 설치
-uv sync --group teleop --group async
+# 1) Python 3.12 + LeRobot 0.6.0 전용 환경 동기화
+uv sync --project scripts/real
 
-# 2) .env 로드 (Git Bash)
-set -a; source .env; set +a
+# 2) .env/profile 자동 로드 wrapper
+scripts/real/lerobot.sh find-port
+scripts/real/lerobot.sh setup-motors
+scripts/real/lerobot.sh calibrate
+scripts/real/lerobot.sh record
 
-# 3) 포트 감지 · 모터 셋업 · 캘리브레이션
-uv run lerobot-find-port
-uv run lerobot-setup-motors --robot.type=so101_follower --robot.port=$ROBOT_PORT
-uv run lerobot-calibrate    --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID
-
-# 4) 데이터 수집 (record)
-uv run lerobot-record \
-  --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID \
-  --teleop.type=so101_leader  --teleop.port=$TELEOP_PORT --teleop.id=$TELEOP_ID \
-  --dataset.repo_id=$HF_DATASET_REPO_ID --dataset.single_task="$SINGLE_TASK" \
-  --dataset.num_episodes=$NUM_EPISODES --dataset.fps=$RECORD_FPS
-
-# 5) 실기기 VLA 추론 (policy-client → Linux policy-server)
-uv run python -m lerobot.async_inference.robot_client \
-  --server_address=$POLICY_SERVER_ADDRESS \
-  --policy_type=$POLICY_TYPE --task="$TASK" \
-  --actions_per_chunk=$ACTIONS_PER_CHUNK --chunk_size_threshold=$CHUNK_SIZE_THRESHOLD \
-  --robot.type=so101_follower --robot.port=$ROBOT_PORT --robot.id=$ROBOT_ID
+# 3) EEF profile이면 FK/IK client, absolute profile이면 stock joint client로 자동 분기
+scripts/real/lerobot.sh policy-client
 ```
 
-> 정확한 인자 전체는 `uv run lerobot-record --help` 등으로 확인. `--robot.type` 이 거부되면(huggingface/lerobot#3078) robot config 선(先)import 또는 lerobot 0.4.5+ 사용.
+> 추가 인자는 wrapper 뒤에 그대로 전달된다. 예:
+> `scripts/real/lerobot.sh record --dataset.num_episodes=3`.
 
 ### Linux Docker — sim VLA 폐루프
 
 ```bash
-# 3-서비스 폐루프 (SmolVLA · ACT · GR00T-N1.5 — 모두 policy-server 네이티브)
+# 3-서비스 폐루프 (ACT · SmolVLA · GR00T-N1.7)
 docker compose --env-file .env -f docker/docker-compose.yaml up policy-server isaac-sim vla-ros
 ```
 
@@ -551,8 +772,8 @@ docker compose --env-file .env -f docker/docker-compose.yaml up policy-server is
 ### Linux Docker — VLA 학습
 
 ```bash
-# SmolVLA / ACT / GR00T-N1.5 — 모두 lerobot 네이티브 policy-server train
-# (모델 선택 = .env 의 POLICY_PROFILE: smolvla | act | groot_n15)
+# ACT / SmolVLA / GR00T-N1.7 — 공통 EEF-relative processor로 학습
+# (모델 선택 = .env 의 POLICY_PROFILE: act | smolvla | groot_n17)
 docker compose -f docker/docker-compose.yaml run --rm policy-server train
 ```
 
@@ -561,7 +782,7 @@ docker compose -f docker/docker-compose.yaml run --rm policy-server train
 ### Linux Docker — policy-server
 
 ```bash
-docker compose -f docker/docker-compose.yaml up -d policy-server      # 표준 async gRPC (ACT/SmolVLA/GR00T-N1.5)
+docker compose -f docker/docker-compose.yaml up -d policy-server      # full-chunk async gRPC
 ```
 
 실기기(Windows)·sim(vla-ros) 양쪽 클라이언트의 공용 추론 백엔드.
@@ -601,6 +822,7 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-S
 | 문서 | 내용 |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | 내부 구조·규칙·자주 쓰는 명령 (개발자용) |
+| [`docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md`](docs/EEF_RELATIVE_ACTION_PIPELINE_SPEC.md) | EEF-relative 데이터·processor·checkpoint·FK/IK·rollout 계약 |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | ABI 불일치 · GPU/드라이버 호환 · 의존성 핀 충돌 · USD/씬 물리 |
 
 ---
@@ -610,7 +832,7 @@ uv run scripts/environments/teleoperation/teleop_se3_agent.py --task SimToReal-S
 - [Isaac Sim 5.1 + Isaac Lab 2.3 + LeIsaac on Windows](https://hackmd.io/@asierarranz/rkg1tvT93gx)
 - [Teleoperation | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/teleoperation)
 - [Policy Training & Inference | LeIsaac Document](https://lightwheelai.github.io/leisaac/docs/getting_started/policy_support)
-- [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning)
+- [LeRobot action representations](https://huggingface.co/docs/lerobot/action_representations)
 - [Train an SO-101 Robot From Sim-to-Real With NVIDIA Isaac](https://docs.nvidia.com/learning/physical-ai/sim-to-real-so-101/latest/index.html)
 - [isaac-sim/Sim-to-Real-SO-101-Workshop](https://github.com/isaac-sim/Sim-to-Real-SO-101-Workshop)
 - [LeRobot Installation](https://huggingface.co/docs/lerobot/main/installation)
