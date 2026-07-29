@@ -347,6 +347,9 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 
 **공통 요구**: `--auto_trials N > 0` · `--enable_cameras` (없으면 SystemExit).
 
+> 대량 생성(수백~수천 ep)은 이 인자를 직접 쓰지 말고 **`scripts/cuRobo/generate_dataset.sh`**
+> 를 쓴다 — 배치로 쪼개 생성(GPU)과 변환(CPU)을 겹치고 변환된 HDF5 를 지운다. §5.8.
+
 **에피소드 규격**: 정지 `preroll_s`(2 s) → pick-place → init 복귀 → 정지 `posthold_s`(1 s).
 종료는 termination 이 자동 판정한다(`returned_home_after_motion` +
 `placed_and_returned`). **플래닝 대기 구간은 기록되지 않는다** — plan ZMQ 블록 중엔
