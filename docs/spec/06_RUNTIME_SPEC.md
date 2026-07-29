@@ -81,6 +81,7 @@ healthcheck 는 두 서비스만:
 | `isaac_lab_cache_pip` | 동일 | `/root/.cache/pip` | 동 |
 | `isaac_lab_cache_gl` | 동일 | `/root/.cache/nvidia/GLCache` | 동 |
 | `isaac_lab_cache_compute` | 동일 | `/root/.nv/ComputeCache` | 동 |
+| `isaac_lab_cache_warp` | 동일 | `/root/.cache/warp` | 동 |
 | `isaac_lab_logs` | 동일 | `/root/.nvidia-omniverse/logs` | 동 |
 | `isaac_lab_data` | 동일 | `/root/.local/share/ov/data` | 동 |
 | `isaac_lab_docs` | 동일 | `/root/Documents` | 동 |
@@ -88,6 +89,15 @@ healthcheck 는 두 서비스만:
 HF 캐시가 `/root` 가 아닌 `/workspace` 하위인 이유 = policy-server 가 non-root UID 로 뜨기
 때문이다. 머신 이전 시:
 `docker run -v lerobot_hf_cache:/cache alpine tar czf - -C /cache . > hf_cache.tgz`.
+
+`isaac_lab_cache_warp`(warp 커널 JIT 캐시)는 `isaac_lab_cache_compute`(CUDA 드라이버 PTX→SASS
+JIT 캐시)와 **별개다** — 후자만 걸어도 warp 커널은 매 `run --rm` 재컴파일된다. 캐시 경로에
+warp 버전이 들어가므로(`/root/.cache/warp/<ver>`) 패키지 업그레이드는 자동 분리된다. **드라이버나
+GPU 아키텍처를 바꿨을 때만** 수동으로 비운다:
+
+```bash
+docker volume rm isaac_lab_cache_warp
+```
 
 ---
 
