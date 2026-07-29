@@ -14,13 +14,20 @@ IsaacLab env 실행 + 궤적 replay). 둘 다 `network_mode: host`. 설계 상�
 GPU 1장 공유 서버다. 기존 세션과 경합하면 사용자 작업을 망친다:
 
 ```bash
-docker ps --format '{{.Names}}\t{{.Status}}' | grep -iE "isaac|curobo"   # 기존 SM/planner 세션?
+docker ps --format '{{.Names}}\t{{.Status}}' | grep -iE "isaac|curobo|planner|datagen"  # 기존 세션?
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader     # 여유 메모리?
 ```
 
 - 이미 `pickplace_sm`/`curobo_batch_planner` 프로세스가 떠 있으면(컨테이너 내부 `ps aux` 로 확인)
   **새로 띄우지 말고 사용자에게 확인**. planner REP 소켓은 1개라 SM 2개가 붙으면 요청이 섞인다.
 - 녹화(카메라 on)는 env 당 GPU 메모리를 크게 먹는다(아래 §4 가이드).
+
+```bash
+df -h datasets/    # HDF5 는 에피소드당 ~375 MB. 64 ep 배치 하나가 24 GB 다
+```
+
+- **`datasets/` 는 /DISK1 심볼릭이고 `scratch/` 는 루트 파티션이다.** 대용량 산출물을
+  `scratch/` 에 쓰면 / 가 찬다(2026-07-28 에 124 GB 로 100% 도달).
 
 ## 1. planner 기동 (항상 먼저)
 
@@ -75,6 +82,10 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 | 메모리 | 이미지 GPU 누적 ~1.2 GB/env/15 s | step 마다 CPU 스트리밍 |
 | 보존 | 전체 씬 state(replay·재라벨 가능) | frame(action/state/3-cam)만 |
 
+> **수백~수천 ep 는 위 명령을 직접 쓰지 말 것.** 단일 HDF5 로 몰면 1000 ep = 375 GB 다.
+> `scripts/cuRobo/generate_dataset.sh` 가 배치(기본 64 ep)로 쪼개 생성(GPU)과 변환(CPU)을
+> 겹치고, 변환 확인된 HDF5 를 지운다 — §3.1.
+
 함정:
 - `--enable_cameras` 필수(없으면 즉시 에러). `--auto_trials 0`(인터랙티브)에선 녹화 불가.
 - `--record_lerobot` 은 기존 출력 디렉터리를 덮어쓴다.
@@ -83,11 +94,41 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 - 산출물 경로는 컨테이너 기준 `/workspace/datasets` = 호스트 `./datasets` (compose 볼륨).
 - 진행 요약은 `--summary_dir`(기본 scratch) 의 `summary.json`.
 
+### 3.1 대량 생성 (권장 경로)
+
+```bash
+./scripts/cuRobo/generate_dataset.sh 1000 16 64      # TOTAL_EP NUM_ENVS BATCH_EP [OUT_ROOT]
+```
+
+배치 N 생성 중 배치 N-1 을 백그라운드 변환한다. planner 는 전 배치 공용으로 1회만 뜬다.
+변환 성공(`meta/info.json` 의 `total_episodes > 0`)을 확인한 배치만 HDF5 를 지우고,
+실패하면 **보존 + 경고**한다.
+
+| | 직렬 | 이 드라이버 |
+|---|---|---|
+| 1000 ep | 3.83 h | **2.98 h** |
+| HDF5 피크 | 375 GB | **~48 GB** (in-flight 2배치) |
+
+산출은 `OUT_ROOT/v3/batch_NNN/` 로 **배치마다 나뉜다**(writer 가 append 불가).
+하나로 합치려면 §5 참조. 설계·실측 = `docs/spec/08_PIPELINES.md` §5.8.
+
 ## 4. num_envs / 용량 가이드
 
-3-cam 640×480 uint8 @30 Hz ≈ 2.8 MB/frame/env. HDF5 경로는 auto-reset 까지 GPU 에 누적:
-15 s 에피소드 ≈ 1.2 GB/env 이라 `--num_envs 4~8` 을 권장한다(48 GB GPU 기준, sim 자체 사용량 감안).
-HDF5 파일은 gzip 후 대략 200 MB/에피소드.
+**`--num_envs 16` 이 최적**이다(2026-07-28 실측, 구성당 64 ep 생성 + v3 변환, 전 구성 64/64):
+
+| num_envs | 1 | 2 | 4 | 8 | **16** |
+|---|---|---|---|---|---|
+| s/에피소드 | 31.6 | 27.3 | 24.2 | 16.8 | **13.8** |
+| VRAM 피크 | 9.7 | 11.4 | 14.7 | 22.1 | **34.9 GB** |
+
+48 GB 카드에서 16-env 는 OOM 이 아니다. 3-cam 640×480 uint8 @30 Hz ≈ 2.8 MB/frame/env 가
+auto-reset 까지 GPU 에 누적된다(≈1 GiB/env/에피소드).
+
+디스크는 `lzf` + frame-chunk 압축 기준 **~375 MB/에피소드**(64 ep = 24 GB). v3 변환 후엔
+8 MB/에피소드로 46배 줄어드니, HDF5 는 버리는 중간물로 취급한다.
+
+⚠ **공유 GPU 에서 잰 VRAM 절대값은 믿지 말 것.** 다른 워크로드가 26 GB 를 잡고 있으면
+8-env 가 45 GB 로 보인다(실제 22.1). 상대 비교만 유효하다.
 
 ## 5. 변환 (HDF5 → LeRobot v3, Isaac·lerobot 패키지 불요)
 
@@ -98,6 +139,15 @@ HDF5 파일은 gzip 후 대략 200 MB/에피소드.
 
 success demo 만 변환(`--include_failed` 로 해제). 직기록과 같은 writer 를 쓰므로 스키마 동일.
 HF 업로드는 `scripts/data/upload_to_huggingface.py`.
+
+**배치를 하나로 합치려면** 사후 병합 도구가 없다(카메라마다 mp4 1개에 전 에피소드가 연결돼
+있어 파일 복사로는 인덱스·stats 가 깨진다). 대신 변환기에 **쉼표 구분으로 전부 먹인다**:
+
+```bash
+--hdf5_files "$(ls -1 OUT_ROOT/hdf5/*.hdf5 | paste -sd,)" --output_dir OUT_ROOT/v3_merged --overwrite
+```
+
+단 HDF5 를 전부 남겨야 해서 디스크 이점과 상충한다. 절차 상세 = `08_PIPELINES.md` §5.8.
 
 ## 6. 검증 (녹화·변환 후 반드시)
 
@@ -122,7 +172,7 @@ EOF
 
 ## 7. 정리
 
-작업 끝나면 컨테이너를 내린다(공유 GPU): `docker stop curobo-planner sm-run` (docker stop 에 의한
+작업 끝나면 컨테이너를 내린다(공유 GPU): `docker stop curobo-planner sm-run datagen_planner` (docker stop 에 의한
 planner exit 137 은 정상). 스모크 산출물은 `datasets/smoke_*` 네이밍으로 만들고 확인 후 삭제.
 
 ## 트러블슈팅 요약
