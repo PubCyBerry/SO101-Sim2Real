@@ -22,6 +22,7 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 | `curobo_batch_planner.py` | curobo-datagen | ZMQ REP planner. per-env cube/bowl(base_link) → 6-phase pick-place 궤적(arm deg + gripper feat) 리스트. **multi-env 실행은 IsaacLab lockstep**, planner는 cuRobo BatchMotionPlanner batch 차원을 env 차원으로 쓰고, grasp 후보는 priority 순서대로 pass를 나눠 검증한다. 아래 §grasp/place 파이프라인. |
 | `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env. **서브커맨드 `random`·`fail`·`sweep`** (아래 §실행). 한 번의 B 로 batch plan → per-env 궤적 replay(plan-fail env 는 init hold, 짧은 궤적 last-row 패딩) → per-env `_cubes_in_bowl` 판정. `--num_envs`(기본 1) lockstep. **결정적 replay 위해 `success`/`cube_lost` termination 비활성**(transit 중 그릇 상공 통과 시 `task_done` 조기 발화 버그. time_out 30s 만 유지). |
 | `plot_sweep.py` | host `.venv` | `sweep` 결과 JSON → matplotlib 성공맵 PNG. `spawn_area.py` 만 importlib 로드(=isaac 무의존). `--demo` = 합성데이터 렌더 self-check. |
+| `sweep_num_envs.sh` | 호스트 | `--num_envs` 별 데이터 생성 처리량 측정(구성당 N ep 생성 + LeRobot v3 변환, s/에피소드·VRAM 피크). 기준선 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.6 |
 | `build_robot_model.py` | curobo-datagen | (기존) SO-101 cuRobo config 빌더. |
 
 > DR 스폰영역 기하는 `src/sim_to_real/tasks/pick_cube/spawn_area.py`(순수 python 단일 소스) — `pickplace_sm sweep`·`plot_sweep`·env_cfg 가 공유. `python3 …/spawn_area.py` 로 self-check.

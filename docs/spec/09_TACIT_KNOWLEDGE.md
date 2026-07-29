@@ -644,7 +644,9 @@ plan 사이에 `update_tool_pose_criteria`/`disable_link_collision` 을 토글�
 32-env 는 미측정이다. 8→16 이 아직 1.22× 로 꺾이지 않았고 여유가 14 GB 남지만, VRAM 이
 8-env 배증마다 +12.8 GB 라 아슬아슬하다.
 
-측정 하네스 = `scratch/2026-07-28-coldstart/sweep_num_envs.sh`(결과 JSON 은 같은 폴더 `logs/`).
+재측정 하네스 = `scripts/cuRobo/sweep_num_envs.sh`
+(`./sweep_num_envs.sh "1 2 4 8 16" 64` → `scratch/num-envs-sweep/logs/sweep_num_envs.json`).
+하드웨어·카메라 해상도·압축 프리셋을 바꾸면 이 표를 다시 떠야 한다.
 
 ### 13.5 warp 캐시는 ComputeCache 와 다르다
 
