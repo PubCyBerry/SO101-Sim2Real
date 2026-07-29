@@ -7,6 +7,7 @@
 - [`uv pip install torch` 단계에서 nvidia CUDA 휠 다운로드 timeout](#uv-pip-install-torch-단계에서-nvidia-cuda-휠-다운로드-timeout)
 - [torchcodec `c10::MessageLogger::stream` 심볼 누락으로 학습 DataLoader 크래시](#torchcodec-c10messageloggerstream-심볼-누락으로-학습-dataloader-크래시)
 - [`torch.compile` 활성화 시 `InvalidCxxCompiler: No working C++ compiler found`](#torchcompile-활성화-시-invalidcxxcompiler-no-working-c-compiler-found)
+- [policy-server 컨테이너가 `entrypoint.sh: Permission denied` 로 즉사 (non-root user)](#policy-server-컨테이너가-entrypointsh-permission-denied-로-즉사-non-root-user)
 - [lerobot 0.5.x 업그레이드 후 SmolVLA import 경로 변경 (`ImportError`)](#lerobot-05x-업그레이드-후-smolvla-import-경로-변경-importerror)
 - [LeRobot 0.5.1 GR00T N1.5 학습 smoke가 단계별로 실패](#lerobot-051-gr00t-n15-학습-smoke가-단계별로-실패)
 - [GR00T 추론 서버에서 `policy-server-rtc`가 표준 추론으로 fallback](#gr00t-추론-서버에서-policy-server-rtc가-표준-추론으로-fallback)
@@ -384,6 +385,51 @@ docker compose -f docker/docker-compose.yaml run --rm policy-server python \
 ```
 
 재빌드 후 `torch.compile` 활성 상태로 학습 재실행 시 첫 번째 스텝에서 수 분간 컴파일이 발생한 후 정상 진행 확인.
+
+---
+
+## policy-server 컨테이너가 `entrypoint.sh: Permission denied` 로 즉사 (non-root user)
+
+**현상**
+
+`docker compose run ... policy-server <mode>` 가 아무 로그도 없이 종료. 같은 이미지를
+`--user root` 로 띄우면 정상 동작한다.
+
+**오류 메시지**
+
+```
+bash: /usr/local/bin/entrypoint.sh: Permission denied
+```
+
+**원인**
+
+`COPY` 는 호스트 파일의 mode 를 그대로 이미지로 가져오고, `RUN chmod +x` 는 거기에 x 비트만
+더한다. 호스트 `docker/policy-entrypoint.sh` 가 `0600` 이면 이미지 안에서 `0711` 이 되는데,
+shell script 는 인터프리터가 파일을 **읽어야** 실행되므로 r 비트 없는 non-root user 는 실행에
+실패한다. compose 는 `user: "${UID:-1000}:${GID:-1000}"` 로 학습 산출물을 호스트 소유로 만들기
+때문에 이 서비스는 항상 non-root 다. (`Dockerfile.isaac_sim` 도 같은 `chmod +x` 패턴이었고,
+호스트 파일이 `0664` 라 우연히 드러나지 않았을 뿐이다.)
+
+**해결 방법**
+
+Dockerfile 에서 상대 모드(`+x`) 대신 절대 모드로 고정한 뒤 재빌드:
+
+```dockerfile
+RUN chmod 0755 /usr/local/bin/entrypoint.sh \
+```
+
+```bash
+docker compose -f docker/docker-compose.yaml build policy-server
+```
+
+**확인 방법**
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yaml run --rm policy-server env | head -3
+# entrypoint 배너("LeRobot 0.6.0 Policy Server")가 뜨면 정상
+docker run --rm --entrypoint bash policy-server:0.6.0 -c 'ls -l /usr/local/bin/entrypoint.sh'
+# -rwxr-xr-x 여야 한다 (-rwx--x--x 면 아직 깨진 이미지)
+```
 
 ---
 
