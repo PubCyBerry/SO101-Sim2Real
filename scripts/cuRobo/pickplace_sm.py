@@ -147,7 +147,6 @@ faulthandler.enable()  # C-레벨 크래시 시 파이썬 스택 덤프
 
 import carb  # noqa: E402
 import numpy as np  # noqa: E402
-import omni.appwindow  # noqa: E402
 import torch  # noqa: E402
 import zmq  # noqa: E402
 import gymnasium as gym  # noqa: E402
@@ -390,6 +389,11 @@ def _step(env, action, recorder=None):
 def _key_listener():
     """Subscribe to carb keyboard (comes through the WebRTC livestream client). R/N/B set a
     one-shot flag consumed by the loop. Returns a dict holding the flag + the subscription."""
+    # ⚠ 지연 import — `omni.appwindow` 는 headless + 카메라 없음(=sweep 의 조합)에서 로드되지
+    #   않아 모듈 최상단 import 면 ModuleNotFoundError 로 sweep 이 부팅 중 죽는다.
+    #   이 함수는 interactive 모드에서만 호출되므로 여기서 들여온다.
+    import omni.appwindow  # noqa: PLC0415
+
     state = {"key": None}
     app_window = omni.appwindow.get_default_app_window()
     keyboard = app_window.get_keyboard()
