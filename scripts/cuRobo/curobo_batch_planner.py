@@ -64,13 +64,14 @@ DIAG_LOG = "/workspace/outputs/planner_diag.log"  # 호스트 마운트(./output
 # shoulder_pan 프레임 일치 조건에서 T(urdf←usd)=Rz(90°)+BASE_T (실측 유도 — 미보정 시 ~3cm 빗나감).
 BASE_YAW = 90.0
 BASE_T = (0.01576, -0.02079, -0.03248)
-TABLE_TOP = 0.035 + BASE_T[2]   # 책상 상판 z (urdf 프레임)
 
 # ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
 PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face 선택 기준점(URDF)
 # fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
 # 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
-from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF  # noqa: E402
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
+# 책상 상판 z (urdf 프레임) — base_link 실측 단일 소스에서 파생. descend clamp 가 쓴다.
+TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
 # 큐브 반변 — face_center = cube_center + half·closing_axis.
 # ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
 # 아래 상수는 그 필드가 없는 구버전 SM 요청용 폴백일 뿐이다.
@@ -142,7 +143,11 @@ WRIST_ROLL_DELTA_LIMIT = math.radians(WRIST_ROLL_DELTA_LIMIT_DEG)
 
 # ═══ phase 파라미터 ═══════════════════════════════════════════════════════════════
 K = 40              # goalset 크기(bank reach)
-GRASP_Z_OFF = -0.008  # grasp 깊이 미세보정(m): pinch 큐브 상단걸침 → 8mm 하향(clamp 우선)
+# grasp 깊이 미세보정(m). 요청이 실어 보내는 큐브 z 는 2026-07-29 부터 실측 정합값
+# (TABLE_TOP_BASE + half)이라, 이 offset 은 **중심 대비 조준 높이**만 뜻한다.
+# +2.2 mm = 예전 조합(--grasp_z 0.060 과대 + 이 값 −8 mm)이 만들던 solver 조준점을 그대로
+# 보존한 값이다 — 프레임 장부만 고치고 물리 working point 는 건드리지 않았다.
+GRASP_Z_OFF = 0.0022
 TABLE_MARGIN = 0.004  # pad 최저점 정지 고도(table_top 위, m). 사용자 요구 "실제 ≥2mm 무접촉"
                       # — IK 잔차+tilt 투영오차가 먹으므로 4mm 조준 → 실제 ≥2mm.
 LIFT_BACK = 0.10    # ③ lift: grasp 서 tool -z 최대 역행(approach 되감기, m)

@@ -615,6 +615,11 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 > Python 리터럴 상수만 싣는다. `CUBE_SPECS`(dataclass 호출)·`SO101_FOLLOWER_CFG`(cfg 객체)
 > 같은 비-리터럴 값은 §6·§9.1 에 별도 서술한다.
 
+> `TABLE_TOP_BASE`(base_link 프레임 상판)와 `_DESK_TOP_WORLD_Z`(world 프레임 상판)는 **같은
+> 물리량의 다른 프레임 표현**이다: `0.705(world) − 0.6749(robot base z) = 0.0301` 이고,
+> 등재값 `0.0298` 은 큐브 collider 접촉 침투 0.34 mm 를 반영한 **실측 정착값**이다. 한쪽을
+> 고치면 다른 쪽도 검토해야 한다 — 근거 = `09_TACIT_KNOWLEDGE.md` §14.
+
 | 심볼 | 값 | 앵커 |
 |---|---|---|
 | `_ROBOT_POS` | `(0.0, 0.0, 0.6749)` | `src/sim_to_real/tasks/so101_base_env_cfg.py::_ROBOT_POS` |
@@ -671,6 +676,9 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 | `BOWL_MAX_CONVEX_HULLS` | `64` | `scripts/environments/author_pick_cube_scene.py::BOWL_MAX_CONVEX_HULLS` |
 | `BOWL_HULL_VERTEX_LIMIT` | `64` | `scripts/environments/author_pick_cube_scene.py::BOWL_HULL_VERTEX_LIMIT` |
 | `BOWL_VOXEL_RESOLUTION` | `500000` | `scripts/environments/author_pick_cube_scene.py::BOWL_VOXEL_RESOLUTION` |
+| `TABLE_TOP_BASE` | `0.0298` | `src/so101_contract/grasp_geometry.py::TABLE_TOP_BASE` |
+| `GRASP_Z_OFF` | `0.0022` | `scripts/cuRobo/curobo_batch_planner.py::GRASP_Z_OFF` |
+| `TABLE_MARGIN` | `0.004` | `scripts/cuRobo/curobo_batch_planner.py::TABLE_MARGIN` |
 
 ---
 

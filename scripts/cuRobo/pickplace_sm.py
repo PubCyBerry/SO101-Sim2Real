@@ -61,7 +61,10 @@ _common.add_argument("--task", default="SimToReal-SO101-PickCube-DR-v0",
                      help="registered pick_cube env variant (tasks/pick_cube/__init__.py)")
 _common.add_argument("--planner", default="tcp://127.0.0.1:5599", help="cuRobo planner ZMQ REQ endpoint")
 _common.add_argument("--num_envs", type=int, default=1, help="parallel envs (lockstep plan+replay)")
-_common.add_argument("--grasp_z", type=float, default=0.06, help="grasp height in robot-base frame (m)")
+_common.add_argument("--grasp_z", type=float, default=None,
+                     help="grasp 조준 z 를 robot-base 프레임에서 직접 지정(m). 기본 None = "
+                          "`TABLE_TOP_BASE + cube_half` 로 유도(grasp_geometry 단일 소스). "
+                          "튜닝 실험용 override 이며 상시 사용하는 값이 아니다")
 _common.add_argument("--settle", type=int, default=5, help="physics steps to settle after each reset")
 _common.add_argument("--bowl_tol", type=float, default=0.06,
                      help="success = cube-center within this xy radius of bowl center (m)")
@@ -159,7 +162,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_sim_joint_radians  # noqa: E402
 from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER  # noqa: E402
-from so101_contract.grasp_geometry import PAD_LOW_OFF  # noqa: E402
+from so101_contract.grasp_geometry import PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
 from sim_to_real.utils.cube_specs import CUBE_HALF_EXTENTS  # noqa: E402
 from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCfg  # noqa: E402
 from sim_to_real.tasks.pick_cube import spawn_area as SA  # noqa: E402
@@ -182,8 +185,7 @@ def _force_done_term(env):
     return mask
 # jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(planner 와 같은 값을 공유).
 FIXED_INNER_CENTER = np.array(_FIXED_INNER_CENTER, dtype=np.float64)  # 진단 로그용
-_REF_CUBE_HALF = 0.020    # --grasp_z 기본값이 튜닝된 기준 큐브 반변(40 mm)
-_CUBE_Z_DRIFT_TOL = 0.005  # 측정 z vs 유도 z 경고 문턱(m) — settle 잔진동보다 크게
+_CUBE_Z_DRIFT_TOL = 0.005  # 측정 z vs 유도 z 경고 문턱(m) — settle 잔진동(0.1 mm)보다 크게
 
 # record 트라이얼의 종료 대기 상한. 정상 경로는 posthold 뒤 termination 이 즉시 발화하므로
 # 여기까지 오면 이미 이상 상태 — env time_out(30 s) 에 넘기고 다음 트라이얼로 간다.
@@ -304,12 +306,13 @@ def _cubes_bowls_in_base(env):
     planner extracts cube face normals directly from the quat.
 
     z 는 측정값이 아니라 **유도값**을 보낸다(안착 직후 측정 z 는 settle 잔진동으로 흔들린다).
-    유도 규칙 = ``--grasp_z``(40 mm 큐브 기준 튜닝값) + (실제 half − 기준 half) — 큐브 크기가
-    바뀌면 그만큼 따라 올라간다. 예전에는 크기와 무관한 상수라 50 mm 큐브에서 조준이 5 mm
-    어긋나도 **에러 없이 성공률만** 떨어졌다.
-    ponytail: 진짜 규칙은 `책상상판 + half` 다. 그 값은 --grasp_z 튜닝값과 1 cm 어긋나 있어
-    (GRASP_Z_OFF 와 얽힘) 지금 바꾸면 100% 기준선이 흔들린다 → 아래 drift 경고로 감시만 하고,
-    책상 높이/오프셋을 함께 재측정할 때 교체한다.
+    유도 규칙 = ``TABLE_TOP_BASE + cube_half`` — 책상 상판 위에 큐브가 놓인다는 기하 그대로다.
+    상판은 `grasp_geometry.TABLE_TOP_BASE`(실측) 단일 소스이고 planner 의 urdf-프레임
+    ``TABLE_TOP`` 도 같은 값에서 파생한다. 큐브 크기가 바뀌면 half 를 통해 자동으로 따라간다.
+
+    2026-07-29 이전에는 ``--grasp_z 0.060``(경험 튜닝) + (half − 0.020) 이었고 실측 안착
+    0.04976 과 **10.24 mm** 어긋나 있었다. planner 의 ``GRASP_Z_OFF = -0.008`` 이 그걸 부분
+    상쇄해 우연히 동작하던 상태다 — 두 값을 함께 재측정해 정리했다(§Goal B).
     """
     robot = env.scene["robot"].data
     cp, cq = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
@@ -319,7 +322,7 @@ def _cubes_bowls_in_base(env):
                                       env.scene[BOWL].data.root_pos_w,
                                       env.scene[BOWL].data.root_quat_w)
     cube_half = CUBE_HALF_EXTENTS[CUBE]
-    grasp_z = args.grasp_z + (cube_half - _REF_CUBE_HALF)
+    grasp_z = args.grasp_z if args.grasp_z is not None else TABLE_TOP_BASE + cube_half
     _warn_cube_z_drift(cp[:, 2], grasp_z)
     cubes = [[cp[i, 0].item(), cp[i, 1].item(), grasp_z, *cq[i].tolist()]
              for i in range(env.num_envs)]

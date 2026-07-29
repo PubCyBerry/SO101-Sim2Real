@@ -659,6 +659,83 @@ planner 첫 plan 이 58.0 s(cold) vs 50.8 s(warm). 볼륨·무효화 절차 = `0
 
 ---
 
+## 14. 책상 높이 · grasp 조준 z — 두 상수가 서로를 가리고 있었다
+
+### 14.1 증상
+
+`pickplace_sm` 이 **매 실행** `⚠ cube z drift 10.3 mm` 를 띄웠다. 성공률에는 영향이 없어
+(2026-07-28 스윕 320/320) 감시만 하고 미뤄둔 잠복 결함이었다.
+
+### 14.2 실측 (2026-07-29, 96 샘플)
+
+| 값 | 측정 | 비고 |
+|---|---|---|
+| 큐브 안착 중심 z (base_link) | **0.04976** ± 0.0001 | 추가 30 스텝 변화 0.09 mm = **정착값, 잔진동 아님** |
+| 로봇 base z (world) | 0.67490 | `_ROBOT_POS` 와 일치 |
+| 큐브 중심 z (world) | 0.72466 | 저작 0.705+0.020=0.725 대비 −0.34 mm(접촉 침투) |
+
+### 14.3 원인 — 오차가 둘이고 서로 상쇄하고 있었다
+
+| 상수 | 옛 값 | 실측 | 오차 |
+|---|---|---|---|
+| `--grasp_z`(base) | 0.060 (경험 튜닝) | 0.04976 | **+10.24 mm** |
+| `TABLE_TOP`(urdf) | `0.035 + BASE_T[2]` = 0.00252 | −0.00272 | **+5.24 mm** |
+
+`--grasp_z` 가 10.24 mm 높고 `GRASP_Z_OFF = −0.008` 이 8 mm 끌어내려, solver 조준점이
+**중심보다 2.24 mm 위**라는 working point 에 우연히 안착해 있었다. 두 오류가 서로를 가려
+어느 쪽도 단독으로는 못 고친다 — 그래서 "함께 재측정할 때 교체한다"고 미뤄뒀던 것이다.
+
+### 14.4 수정 — 단일 소스에서 파생
+
+```
+so101_contract/grasp_geometry.py :: TABLE_TOP_BASE = 0.0298   (base_link, 실측 정착값)
+    ├── SM      : grasp_z   = TABLE_TOP_BASE + cube_half
+    └── planner : TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
+GRASP_Z_OFF : −0.008 → +0.0022
+```
+
+`GRASP_Z_OFF` 는 이제 **중심 대비 조준 높이**만 뜻한다. 값 +0.0022 는 옛 조합이 만들던
+solver 조준점 `0.01952` 를 **정확히 보존**하도록 잡았다 — 프레임 장부만 고치고 물리
+working point 는 건드리지 않았다.
+
+**임의 큐브 크기에 유효하다**: 씬은 큐브를 `상판 + half + slack` 에 저작하고(`author_pick_cube_scene.py`)
+물리는 `상판 + half − 침투` 로 정착시킨다. 둘 다 `half` 에 선형이고 상수항이 같아 40/50 mm
+어느 쪽이든 유도식이 맞는다 — 50 mm 별도 실측이 필요 없는 이유다.
+
+`--grasp_z` 는 `default=None` 으로 격하됐다(튜닝 override). 상시 경로는 유도식이다.
+
+### 14.5 부수 효과 — descend clamp 와 bowl ring 이 5.24 mm 내려간다
+
+`TABLE_TOP` 은 조준뿐 아니라 pad 최저점 clamp(`TABLE_TOP + TABLE_MARGIN`)와 bowl ring
+obstacle 높이(`TABLE_TOP + BOWL_RING_H/2`)에도 쓰인다. 상판을 실측값으로 내리면 이 둘이
+같이 내려간다 — 즉 **유효 clamp 여유가 9.24 mm 에서 의도했던 4 mm 로 돌아온다**
+(`TABLE_MARGIN` 의 "실제 ≥2 mm 무접촉" 요구는 여전히 충족).
+
+조준점은 보존되지만 이건 실제 거동 변화라 sweep 으로 판정했다 — §14.6.
+
+### 14.6 무회귀 검증
+
+기준선 파라미터 = `sweep` 기본값(`nx=15 ny=8 boundary_n=20`) = **124 셀**.
+
+| | 기준선(main) | 수정 후 | 판정 |
+|---|---|---|---|
+| yaw0 | 124/124 | **124/124 = 100%** | 동률 |
+| yaw random ×3 | 372/372 | **372/372 = 100%** | 동률 |
+| drift 경고 | 매 실행 발화 | **0회** | 해소 |
+
+`TABLE_TOP` 하강으로 descend clamp 여유가 9.24 → 4 mm 로 좁아졌는데도 회귀가 없다 —
+clamp 가 실제로 binding 하는 경우가 드물다는 뜻이다(대부분 `_descend_tstar` 의 기하 해가
+먼저 지배한다). 496 시도 전부 성공.
+
+### 14.7 곁다리로 고친 것 — headless sweep 이 부팅 중 죽던 버그
+
+`pickplace_sm` 이 `omni.appwindow` 를 모듈 최상단에서 import 했는데, 이 확장은
+**headless + 카메라 없음**(= `sweep` 의 정확한 조합)에서 로드되지 않아
+`ModuleNotFoundError` 로 죽었다. record 경로가 늘 `--enable_cameras` 라 가려져 있었다.
+`_key_listener()` 안으로 지연 import — interactive 모드에서만 필요한 심볼이다.
+
+---
+
 ## 참조
 
 - 상수의 현재 값 → `03_ENV_SPEC.md §12` 상수 대장

@@ -370,6 +370,7 @@ preroll hold → 궤적 replay → posthold 대기(guard 1200 step) → plan-fai
 | +rho-cap yaw-random ×3 | 1300/1305 = **99.62%** |
 | 54-sphere 재평가, chord 보정 전 yaw0 / random×3 | 182/183 = 99.45% / 1298/1305 = 99.46% |
 | **+chord-center 0.5× + grasp hold, yaw0 / random×3** | **183/183 = 100%** / **1305/1305 = 100%** |
+| **+책상 높이·grasp 조준 z 정합(2026-07-29), yaw0 / random×3** | **124/124 = 100%** / **372/372 = 100%** |
 
 pan축 spawn 좌표 수정(마운트 원점 → pan축)이 `base_arc` 를 68→100% 로 견인했다 —
 도달 불가한 −x corner 가 스폰 영역에서 배제돼 셀이 187→183 으로 줄었다
@@ -377,6 +378,10 @@ pan축 spawn 좌표 수정(마운트 원점 → pan축)이 `base_arc` 를 68→1
 
 `RHO_CAP` 을 18°로 키우면 실패 8건 중 8건이 풀리지만 64-env 첫 planning 이 약 17분으로
 느려진다. 12° 유지 + chord 0.5× 보정으로 같은 결과를 얻었다.
+
+마지막 행은 셀 수가 다르다(183 → 124) — spawn_area 가 pan축 기준으로 바뀐 뒤의 기본
+`sweep` 파라미터(`nx=15 ny=8 boundary_n=20`) 기준이다. 옛 183셀 baseline 은 재현 불가라
+**같은 파라미터끼리만** 비교한다. 정합 근거 = `09_TACIT_KNOWLEDGE.md` §14.
 
 최종 산출물: `scratch/2026-07-22-curobo-sm-model54-final/`.
 
