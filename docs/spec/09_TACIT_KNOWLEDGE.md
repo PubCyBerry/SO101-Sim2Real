@@ -595,13 +595,9 @@ IsaacLab 기본은 gzip(4)이고, export 는 `RecorderManager.export_episodes` �
 파이프라인을 드레인시키는 동기화**다. env 가 늘수록 커진다 — 2-env 에선 +26%, 8-env 에선
 **+41%**. 그래서 채택하지 않았다.
 
-**대신 VRAM 이 실질 `--num_envs` 상한이다** (48.9 GB 카드 기준):
-
-| num_envs | VRAM 피크 | 에피소드당 |
-|---|---|---|
-| 2 | ~36 GB | 25.8 s |
-| 8 | 45.0 GB (92%) | 14.7 s ← 사실상 상한 |
-| 16 | OOM 예상 | — |
+> ⚠ 위 표의 **VRAM 절대값은 신뢰하지 말 것** — 이 A/B 실행 중 다른 워크로드가 같은 GPU 에서
+> 26 GB 를 잡고 있었다. 두 실행이 연속이라 **차이(−10.6 GB)** 는 유효하지만(8 env × 1 GiB
+> 이미지 버퍼 + stack 피크와 일치), 절대값은 그만큼 부풀려져 있다. 깨끗한 값은 §13.6.
 
 **더 높은 `--num_envs` 가 필요하거나 GPU 를 학습과 공유할 때만** `DatagenRecorderTerm` 의
 반환 텐서에 `.cpu()` 를 붙인다(한 줄). VRAM −10.6 GB 를 replay +41% 로 산다.
@@ -622,6 +618,33 @@ IsaacLab 기본은 gzip(4)이고, export 는 `RecorderManager.export_episodes` �
 5–7× 빠르지만 3번째 요청에서 해를 잃고 4번째에서 프로세스가 죽는다. `_plan_to_batch` 가
 plan 사이에 `update_tool_pose_criteria`/`disable_link_collision` 을 토글하고
 `_ensure_batch_size` 가 solver 를 destroy 하는 구조와 graph 재캡처가 맞지 않는 것으로 보인다.
+
+### 13.6 `--num_envs` 스윕 — 16 이 최적, VRAM 상한은 아직 안 닿았다
+
+2026-07-28, **유휴 GPU**(48.9 GB, 외부 워크로드 0)에서 구성마다 64 에피소드를 생성하고
+`scripts/convert/isaaclab2lerobotv3.py` 변환까지 마친 wall-clock. 전 구성 **64/64 성공**.
+
+| num_envs | trials | 생성 | 변환 | 합계 | **s/에피소드** | VRAM 피크 |
+|---|---|---|---|---|---|---|
+| 1 | 64 | 1831.2 s | 191.8 s | 2023.0 s | 31.61 | 9.7 GB |
+| 2 | 32 | 1551.5 s | 195.0 s | 1746.6 s | 27.29 | 11.4 GB |
+| 4 | 16 | 1351.3 s | 194.8 s | 1546.1 s | 24.16 | 14.7 GB |
+| 8 | 8 | 877.5 s | 195.8 s | 1073.4 s | 16.77 | 22.1 GB |
+| **16** | 4 | **686.1 s** | 196.0 s | **882.1 s** | **13.78** | 34.9 GB |
+
+1000 에피소드 환산: 1-env 8.8 h · 8-env 4.7 h · **16-env 3.8 h**.
+
+**§13.3 이 "8 env 45 GB = 사실상 상한, 16 env OOM 예상"이라 적었던 것은 오염된 측정이었다.**
+깨끗한 환경에서 8-env 는 22.1 GB, 16-env 는 34.9 GB 로 OOM 이 나지 않는다.
+
+**변환 196 s 는 `num_envs` 와 무관한 상수다**(191.8–196.0, 편차 2%). 에피소드 단위 CPU
+작업이라 상각되지 않아 16-env 총시간의 22%를 차지한다 — 생성(GPU)과 변환(CPU)을 겹치면
+10.7 s/ep = 3.0 h 가 된다. 아직 안 했다.
+
+32-env 는 미측정이다. 8→16 이 아직 1.22× 로 꺾이지 않았고 여유가 14 GB 남지만, VRAM 이
+8-env 배증마다 +12.8 GB 라 아슬아슬하다.
+
+측정 하네스 = `scratch/2026-07-28-coldstart/sweep_num_envs.sh`(결과 JSON 은 같은 폴더 `logs/`).
 
 ### 13.5 warp 캐시는 ComputeCache 와 다르다
 

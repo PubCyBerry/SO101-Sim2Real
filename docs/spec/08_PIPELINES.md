@@ -321,7 +321,7 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 | multi-env | ✓ env 당 1 demo | ✗ **`--num_envs 1` 전용** |
 | 저장 범위 | 실패 포함(`success` attr) | **성공만** |
 | 기존 디렉터리 | append 계열 | **덮어씀**(`overwrite=True`) |
-| 메모리 | 에피소드 동안 **VRAM** 누적 (~1 GiB/env/에피소드) — 8 env ≈ 45 GB 피크 | step 마다 CPU 스트리밍 |
+| 메모리 | 에피소드 동안 **VRAM** 누적 (~1 GiB/env/에피소드) — 16 env 34.9 GB 피크 | step 마다 CPU 스트리밍 |
 | 압축 | `lzf` + frame-chunk (`hdf5_compression.hdf5_handler`) | LeRobot v3 비디오 인코딩 |
 
 **HDF5 키** = `obs_x/joint_pos` · `obs_x/images/{top,wrist,front}` · `applied_target`
@@ -331,7 +331,19 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 
 **압축**: IsaacLab 기본 gzip(4) 대신 `lzf` + 프레임 단위 청크. export 가 env 순차 blocking
 이라 `--num_envs` 에 비례해 심 루프를 세우는 구간이다 — 실측 10.8 → 3.7 s/demo, 디스크는 2배.
-프리셋 표와 선택 근거 = `09_TACIT_KNOWLEDGE.md` §11.
+프리셋 표와 선택 근거 = `09_TACIT_KNOWLEDGE.md` §13.2.
+
+**권장 `--num_envs 16`** — 구성마다 64 에피소드를 생성하고 v3 변환까지 마친 실측
+(48.9 GB GPU 유휴, 전 구성 64/64 성공):
+
+| num_envs | 1 | 2 | 4 | 8 | **16** |
+|---|---|---|---|---|---|
+| s/에피소드 | 31.6 | 27.3 | 24.2 | 16.8 | **13.8** |
+| VRAM 피크 | 9.7 GB | 11.4 GB | 14.7 GB | 22.1 GB | 34.9 GB |
+
+1000 에피소드 = 16-env 기준 **3.8 h**(1-env 8.8 h). 변환 196 s/64 ep 는 `num_envs` 와
+무관한 상수라 총시간의 22%를 차지한다 — 생성과 겹치면 3.0 h. 상세·32-env 미측정 사유 =
+`09_TACIT_KNOWLEDGE.md` §13.6.
 
 **공통 요구**: `--auto_trials N > 0` · `--enable_cameras` (없으면 SystemExit).
 

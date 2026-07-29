@@ -106,9 +106,10 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
   `applied_target`(slew 통과 적용 target) + `initial_state`·`actions`. stock `states`·`obs`·
   `processed_actions` 는 읽는 코드가 없어 꺼져 있다(`actions` 는 `num_samples` attr 산출용으로 유지).
 - **용량/메모리**: 3-cam 640×480 uint8 @30 Hz ≈ 2.64 MiB/frame/env — 379-step 에피소드 원본
-  ≈ 999 MiB/env 가 auto-reset 까지 **VRAM** 에 누적된다. 48.9 GB 카드 기준 실측 피크 =
-  2 env ~36 GB · **8 env 45.0 GB(92%, 사실상 상한)**. 더 키우려면 recorder term 에 `.cpu()` 를
-  붙인다 — replay 가 8 env 에서 +41% 느려지는 대가다(`09_TACIT_KNOWLEDGE.md` §13.3).
+  ≈ 999 MiB/env 가 auto-reset 까지 **VRAM** 에 누적된다. 48.9 GB 카드 유휴 실측 피크 =
+  1 env 9.7 · 4 env 14.7 · 8 env 22.1 · **16 env 34.9 GB**(OOM 아님).
+- **권장 `--num_envs 16`** — 64 ep 생성+변환 실측 s/에피소드: 1 env 31.6 · 8 env 16.8 ·
+  **16 env 13.8**. 전 구성 64/64 성공. 표 전체 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.6.
 - **압축**: `lzf` + 프레임 단위 청크. export 는 env 순차 blocking 이라 `--num_envs` 에 비례해
   심 루프를 세운다 — 실측 gzip(4) 10.8 s/demo → lzf 3.7 s/demo, 디스크는 2배.
   프리셋 표·선택 근거 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.
