@@ -99,7 +99,7 @@ docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
 
 ⚠ `--record_lerobot` 은 기존 출력 디렉터리를 **덮어쓴다**(overwrite, `record_state_machine` 규약).
 
-- **에피소드 규격**: `[정지 2 s(--preroll_s)] → 이동 → pick-place → init 복귀 → [정지 1 s(--posthold_s)] → 자동 종료`.
+- **에피소드 규격**: `[정지 1 s(--preroll_s)] → 이동 → pick-place → init 복귀 → [정지 0.5 s(--posthold_s)] → 자동 종료`.
   종료는 termination term(`returned_home_after_motion`)이 발화 → env auto-reset 순간
   RecorderManager 가 HDF5 로 export. `success` attr = `placed_and_returned`(복귀+그릇 안).
 - **플래닝/cold-start 대기 미포함**: plan ZMQ 블록 중엔 env.step 이 없어 기록 자체가 없고,

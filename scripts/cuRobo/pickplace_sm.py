@@ -108,9 +108,9 @@ _p_random.add_argument("--record_lerobot", default=None,
 _p_random.add_argument("--task_description",
                        default="pick up the cube and place it in the bowl",
                        help="record_lerobot: LeRobot task 문자열(계약 canonical 기본값)")
-_p_random.add_argument("--preroll_s", type=float, default=2.0,
+_p_random.add_argument("--preroll_s", type=float, default=1.0,
                        help="record: 이동 시작 전 정지 구간(초)")
-_p_random.add_argument("--posthold_s", type=float, default=1.0,
+_p_random.add_argument("--posthold_s", type=float, default=0.5,
                        help="record: init 복귀 후 정지 유지(초) — 종료 term 의 hold 길이")
 
 _p_fail = _sub.add_parser("fail", parents=[_common], help="sweep 결과의 fail 좌표만 재현")

@@ -300,7 +300,7 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 
 | 서브커맨드 | 인자 | 용도 |
 |---|---|---|
-| `random` | `--auto_trials`(0=인터랙티브) · `--record_viewport_dir` · `--summary_dir` · `--record_fps`(30) · `--record_every`(1) · `--record_hdf5` · `--record_lerobot` · `--task_description` · `--preroll_s`(2.0) · `--posthold_s`(1.0) | 랜덤 DR 시행 · 데이터 녹화 |
+| `random` | `--auto_trials`(0=인터랙티브) · `--record_viewport_dir` · `--summary_dir` · `--record_fps`(30) · `--record_every`(1) · `--record_hdf5` · `--record_lerobot` · `--task_description` · `--preroll_s`(1.0) · `--posthold_s`(0.5) | 랜덤 DR 시행 · 데이터 녹화 |
 | `fail` | `--results`(**필수**) · `--auto` | sweep 실패 셀 재현 |
 | `sweep` | `--nx`(15) · `--ny`(8) · `--boundary_n`(20) · `--trials`(1) · `--yaw`(`"0"` 또는 `random`) · `--out` | 스폰 영역 정량 평가 |
 
@@ -350,7 +350,7 @@ AppLauncher 화이트리스트: `headless, livestream, enable_cameras, device, k
 > 대량 생성(수백~수천 ep)은 이 인자를 직접 쓰지 말고 **`scripts/cuRobo/generate_dataset.sh`**
 > 를 쓴다 — 배치로 쪼개 생성(GPU)과 변환(CPU)을 겹치고 변환된 HDF5 를 지운다. §5.8.
 
-**에피소드 규격**: 정지 `preroll_s`(2 s) → pick-place → init 복귀 → 정지 `posthold_s`(1 s).
+**에피소드 규격**: 정지 `preroll_s`(1 s) → pick-place → init 복귀 → 정지 `posthold_s`(0.5 s).
 종료는 termination 이 자동 판정한다(`returned_home_after_motion` +
 `placed_and_returned`). **플래닝 대기 구간은 기록되지 않는다** — plan ZMQ 블록 중엔
 `env.step` 을 돌리지 않는다.

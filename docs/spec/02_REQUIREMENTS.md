@@ -154,7 +154,7 @@
 | FR-PIPE-01 | 녹화 모드 2종은 상호배타여야 한다 | E1 | `scripts/cuRobo/pickplace_sm.py` (SystemExit) | — | 08 §5.6 |
 | FR-PIPE-02 | 녹화는 `--enable_cameras` 와 `--auto_trials N > 0` 을 요구해야 한다 | E1 | 동상 | — | 08 §5.6 |
 | FR-PIPE-03 | LeRobot 직기록은 `--num_envs 1` 을 요구해야 한다 | E1 | 동상 | — | 08 §5.6 |
-| FR-PIPE-04 | 에피소드는 정지 2 s → 동작 → init 복귀 → 정지 1 s 규격이어야 한다 | E2 | `pickplace_sm.py` `--preroll_s`/`--posthold_s` 기본값 | — | 08 §5.6 |
+| FR-PIPE-04 | 에피소드는 정지 1 s → 동작 → init 복귀 → 정지 0.5 s 규격이어야 한다 | E2 | `pickplace_sm.py` `--preroll_s`/`--posthold_s` 기본값 | — | 08 §5.6 |
 | FR-PIPE-05 | 플래닝 대기 구간은 기록되지 않아야 한다 | E2 | `pickplace_sm.py::_manipulate_record` | — | 08 §5.6 |
 | FR-PIPE-06 | teleop 은 `--record` + `lerobot_v3` 에 `--enable_cameras` 를 요구해야 한다 | E1 | `teleop_se3_agent.py` (ValueError) | — | 08 §3 |
 | FR-PIPE-07 | 미지원 teleop device 는 `NotImplementedError` 여야 한다 | E1 | `teleop_se3_agent.py` | — | 08 §3 |
