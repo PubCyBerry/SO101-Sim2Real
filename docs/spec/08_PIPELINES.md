@@ -382,6 +382,78 @@ pan축 spawn 좌표 수정(마운트 원점 → pan축)이 `base_arc` 를 68→1
 
 ---
 
+### 5.8 대량 생성 — 생성·변환 파이프라이닝
+
+**`scripts/cuRobo/generate_dataset.sh [TOTAL_EP] [NUM_ENVS] [BATCH_EP] [OUT_ROOT]`**
+(기본 `1000 16 64 datasets/so101_pickplace_pipelined`)
+
+생성은 GPU(isaac-sim), 변환은 CPU(호스트 `.venv` + ffmpeg)라 자원이 겹치지 않는다.
+`--record_hdf5` 를 배치로 쪼개고 **배치 N 생성 중에 배치 N-1 변환을 백그라운드로** 돌린다.
+
+```
+생성 b0 ──▶ 생성 b1 ──▶ 생성 b2 ──▶ …
+            변환 b0 ──▶ 변환 b1 ──▶ …
+```
+
+| | 직렬 | 파이프라인 |
+|---|---|---|
+| 1000 ep wall-clock | 3.83 h | **2.98 h** |
+| HDF5 디스크 피크 | 375 GB(전 배치) | **~48 GB**(in-flight 2배치) |
+
+변환이 배치당 196 s 인데 생성이 686 s 라 마지막 배치분만 남고 전부 숨는다(§13.6).
+planner 는 전 배치 공용으로 **1회만** 기동한다(배치마다 재기동 = init 6 s 낭비).
+
+**e2e 실측** (2026-07-29, 64 ep × 3 배치 × 16-env, 192/192 성공):
+
+| | 값 |
+|---|---|
+| 생성 | 689 + 700 + 739 = 2128 s |
+| **총 wall-clock** | **2325 s** |
+| 직렬이었다면 | 2128 + 3×202 = 2734 s |
+| **숨은 시간** | **409 s ≈ 변환 2회분** — 설계대로 마지막 1회만 노출 |
+| **HDF5 디스크 피크** | **48.4 GB** (in-flight 2배치) · 종료 시 잔여 0 |
+| 산출 | 192 ep · 71,228 frame · v3 3개, `validate_lerobot_schema.py` 전부 PASS(오류 0·경고 0) |
+
+겹침 중 변환은 207 s 로 단독(196 s) 대비 **+5.6%** 다 — 생성이 GPU, 변환이 CPU(14 코어 중
+load 4.5)라 경합이 사실상 없다.
+
+**HDF5 수명**: 변환 성공(`meta/info.json` 의 `total_episodes > 0`)을 확인한 배치만 삭제한다.
+변환·생성이 실패하면 해당 HDF5 를 **보존하고 크게 알린다** — 조용한 삭제 금지.
+종료 시 보존 목록을 출력한다.
+
+**산출**: `OUT_ROOT/v3/batch_NNN/` — 배치당 v3 데이터셋 1개. `LeRobotV3DatasetWriter` 가
+append 를 지원하지 않아(기존 디렉터리면 `FileExistsError`, `overwrite=True` 면 `rmtree`)
+하나로 못 모은다.
+
+#### 하나의 데이터셋이 필요하면
+
+**권장 = 변환기에 전 배치를 한 번에 먹인다.** 변환기는 쉼표 구분 복수 HDF5 를 받아
+단일 v3 를 만든다 — 인덱스·비디오·통계가 전부 정합한다.
+
+```bash
+python scripts/convert/isaaclab2lerobotv3.py     --hdf5_files "$(ls -1 OUT_ROOT/hdf5/*.hdf5 | paste -sd,)"     --output_dir OUT_ROOT/v3_merged --overwrite
+```
+
+단 이 경로는 **HDF5 를 전부 남겨야** 한다(1000 ep = 375 GB). 파이프라인의 디스크 이점과
+상충하므로, 디스크가 넉넉할 때만 쓴다. 배치 삭제를 끄려면 스크립트의 `rm -f "$CONV_H5"` 를
+막으면 된다.
+
+**사후 병합은 자동 도구가 없다**(`scripts/data/` 에 배치 병합기 없음). 수동으로 하려면
+v3 레이아웃상 아래를 전부 맞춰야 한다 — 단순 파일 복사로는 깨진다:
+
+| 대상 | 해야 할 일 |
+|---|---|
+| `videos/observation.images.{cam}/chunk-000/file-000.mp4` | 카메라마다 mp4 **1개에 전 에피소드가 연결**돼 있다. ffmpeg concat(동일 코덱이라 stream copy 가능) |
+| `data/chunk-000/file-000.parquet` | `episode_index`·`index` 를 앞 배치 누적분만큼 offset |
+| `meta/episodes/chunk-000/file-000.parquet` | `episode_index`·`dataset_from_index`·`dataset_to_index` offset |
+| `meta/info.json` | `total_episodes`·`total_frames` 합산 |
+| `meta/stats.json` | 전체 프레임 기준 재계산(배치 평균을 그대로 평균내면 틀린다) |
+| `meta/tasks.parquet` | 단일 task 라 그대로 복사 |
+
+**검증**: `python scripts/contract/validate_lerobot_schema.py <v3_dir>` (오류 0 · 경고 0).
+
+---
+
 ## 6. pink IK pick-place SM (이전 세대)
 
 `scripts/datagen/pink_ik_bridge_node.py` — pink(Pinocchio) 미분 IK 로 결정적 pick-place 궤적을
