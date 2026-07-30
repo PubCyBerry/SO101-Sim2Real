@@ -38,6 +38,7 @@ disable → transit 은 잡은 큐브 부피 포함 계획 → release 직전 de
 실행: /isaac-sim/python.sh curobo_batch_planner.py [--port 5599] [--self-test]
 """
 import argparse
+import itertools
 import json
 import math
 import tempfile
@@ -70,16 +71,21 @@ PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face �
 # fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
 # 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
 from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
+from so101_contract.feature_codec import POLICY_GRIPPER_RANGE, SIM_GRIPPER_RANGE_DEG  # noqa: E402
 # 책상 상판 z (urdf 프레임) — base_link 실측 단일 소스에서 파생. descend clamp 가 쓴다.
 TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
 # 큐브 반변 — face_center = cube_center + half·closing_axis.
 # ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
-# 아래 상수는 그 필드가 없는 구버전 SM 요청용 폴백일 뿐이다.
+# 크기 DR 이 켜지면 **env 마다 다르므로 리스트**로 오고, 스칼라/누락은 하위호환 폴백이다.
 CUBE_HALF = 0.020
-# 큐브 obstacle/attach blob 한 변(m) — cube_specs 최대값(50 mm) 고정.
-# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어
-# 요청마다 못 바꾼다 → 보수적 최대값을 쓴다(40 mm 큐브면 살짝 뚱뚱한 박스로 계획).
-CUBE_DIMS = 0.05
+# 큐브 obstacle/attach blob 한 변(m) — **크기 DR 사다리 상한**(cube_specs
+# `max(CUBE_SIZE_CHOICES)`) 고정. authored 크기(현재 25 mm = 사다리 하한)가 아니라 상한이다:
+# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어 요청마다
+# 못 바꾼다 → 어떤 env 가 어떤 크기를 뽑아도 감싸야 한다(작은 큐브면 뚱뚱한 박스로 계획).
+# 예전 0.05 는 50 mm 큐브 씬 유물이라 사다리 상한보다도 컸다.
+# ⚠ `CUBE_SIZE_CHOICES` 를 바꾸면 여기도 같이 바꾼다(planner 는 sim_to_real 를 import 하지
+#   않는 self-contained 프로세스라 자동 추종이 안 된다 — `SELF_CHECK_HALVES` 도 같은 규약).
+CUBE_DIMS = 0.04
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
 DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가
                       # 큐브 obstacle 과 모델상 겹침(짧은 wrist, 물리 접촉 없음=sphere 보수 근사)
@@ -128,6 +134,15 @@ CHORD_CENTER_RATIO = 0.5
 # 등거리 face(yaw 45°) 셀은 face 선택이 번갈리는 limit cycle 이라 수렴 자체가 불가능하다 —
 # 그래서 수렴을 요구하지 않고 잔차만 meta(pan_resid_deg·closing_resid_deg)로 노출한다.
 PAN_FIXPOINT_ITER = 5
+# ★후보 채택 정책: 게이트를 **처음** 통과한 후보가 아니라, 앞쪽 이만큼의 pass 를 모두 검사한
+# 뒤 `_candidate_score` 가 가장 낮은 후보를 쓴다(2026-07-30).
+#   옛 동작: |α| 오름차순으로 돌다 첫 통과 즉시 채택 — score 는 계산해 diag 에 싣기만 했다.
+#   게이트 창이 넓어서(e_norm 2~8 mm · |e_t| ≤22 mm) "통과했지만 조준이 나쁜" 후보가 그대로
+#   쓰였고, 드물게 폐합 때 jaw 가 큐브를 밀어내 grasp 가 실패했다(측정 1/496, 큐브가 48 mm
+#   밀린 채 +3 mm 만 들림). 근거·측정 = `09_TACIT_KNOWLEDGE.md §15.5`.
+#   통과한 env 도 이 pass 수까지는 batch slot 을 계속 쓰므로 plan 호출은 늘지 않는다
+#   (어차피 미통과 env 때문에 pass 를 더 돈다).
+CANDIDATE_SCAN_PASSES = 3
 SIMPLE_FACE_GATE_MAX_DEG = 40.0  # FK gate 안전망: solver XY face_angle 허용 절댓값
 WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
@@ -163,10 +178,44 @@ PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24   # r≤R0→MIN · r≥R1→MAX (사이 �
 # ═══ gripper 시퀀스 (feature [0,100]) ═════════════════════════════════════════════
 GRIP_OPEN, GRIP_CLOSE = 75.0, 5.0  # open 75=straddle 마진(60 은 tangential 3mm 오차로 squirt)
 GRIP_INIT = 0.0     # ⑥ retreat 끝 복원값 = SM init(-10°=feature 0)
-CLOSE_STEPS = 5     # ② grasp 폐합 ramp 프레임
-GRASP_HOLD_STEPS = 5  # 폐합 직후 정지: 접촉 안정화 후 lift(즉시 lift 시 드문 slip/squirt 방지)
-OPEN_STEPS = 10     # ⑤ release 개방 ramp 프레임(정지 상태 투하)
+# 폐합 직후 정지: 접촉 안정화 후 lift. ★2026-07-30 5 → 15.
+# gripper ramp 가 slew cap 에 맞춰 17 프레임으로 늘어난 뒤(§15), 마지막 프레임에야 목표
+# 각도에 닿는다 — hold 5(0.17 s)는 PhysX 접촉력이 정착하기 전에 lift 를 시작시켰다.
+# 잔여 실패 1건이 정확히 그 모습(큐브를 16 mm 들다 놓침 = slip, 밀어냄과 구분되는 유형)이라
+# 정착 시간을 0.5 s 로 늘린다. 궤적 기하는 불변, 에피소드만 10 프레임(0.33 s) 길어진다.
+GRASP_HOLD_STEPS = 15
 SETTLE_STEPS = 5    # ⑤ release 전 그릇 상공 정지 hold 프레임
+
+# ── gripper ramp 길이는 env 의 slew cap 에서 **유도**한다(하드코딩 금지) ──────────
+# feature [0,100] → sim gripper rad 기울기. 단일 소스 = so101_contract.feature_codec.
+_GRIP_RAD_PER_FEATURE = (
+    math.radians(SIM_GRIPPER_RANGE_DEG[1] - SIM_GRIPPER_RANGE_DEG[0])
+    / (POLICY_GRIPPER_RANGE[1] - POLICY_GRIPPER_RANGE[0]))
+# env 가 gripper 명령에 거는 slew 상한(rad/s)과 제어 주파수.
+#   = pick_cube_env_cfg._PICKCUBE_JOINT_MAX_VELOCITY["gripper"], 1/(sim.dt*decimation)
+GRIPPER_SLEW_MAX_RAD_S = 2.5
+CONTROL_HZ = 30.0
+GRIP_RAMP_MIN_STEPS = 5   # 아주 짧은 Δ 에서도 이 정도는 나눠 보낸다
+
+
+def grip_ramp_steps(g_from, g_to):
+    """gripper feature 이동을 **slew cap 안에서** 소화하는 데 필요한 프레임 수.
+
+    ★2026-07-29: 옛 상수(CLOSE_STEPS=5 · OPEN_STEPS=10)는 명령 속도 8.06 / 4.03 rad/s 로
+    env cap(2.5)을 3.2×/1.6× 넘겼다. 명령이 cap 을 넘으면 SlewLimited action 이 잘라내므로
+    **정해진 프레임 안에 폐합이 끝나지 않는다** — grasp 는 close(5)+hold(5)=10 프레임 예산에
+    1.344 rad 중 0.833 rad 만 진행한 채 lift 로 넘어갔고, 남은 29° 는 팔이 올라가는 중에
+    닫혔다. 큐브를 다 물기 전에 드는 셈이라 드물게(측정 3/2232 ≈ 0.13 %) jaw 가 큐브를
+    밀어내고 grasp 가 실패했다(sweep 진단: max_cube_z 가 안착면 +5 mm 에서 멈춤).
+    release 도 같은 구조 — 다 열리기 전에 retreat 이 시작되면 큐브를 끌고 나온다.
+
+    ramp 를 cap 이내로 맞추면 **실제 폐합 속도는 그대로**(어차피 cap 이 지배)이고 lift/retreat
+    타이밍만 폐합/개방 완료 뒤로 밀린다 = 순수 안정화. 기록되는 action 도 물리적으로 실현
+    가능한 값이 된다(sim2real 데이터 품질).
+    """
+    delta_rad = abs(float(g_from) - float(g_to)) * _GRIP_RAD_PER_FEATURE
+    return max(GRIP_RAMP_MIN_STEPS,
+               int(math.ceil(delta_rad / (GRIPPER_SLEW_MAX_RAD_S / CONTROL_HZ))))
 
 # ═══ bowl obstacle = hollow rim ring (오목 그릇 fit) ══════════════════════════════
 # cuRobo world obstacle 은 solid convex 뿐 — 오목 그릇을 solid box 로 넣으면 내부(빈 공간)가
@@ -454,6 +503,25 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
     }
 
 
+def _resolve_cube_halves(cube_half, n_env):
+    """요청의 ``cube_half`` → 길이 n_env 리스트.
+
+    리스트(per-env 크기 DR) · 스칼라(전 env 동일) · None(구버전 요청 → 상수 폴백) 모두 수용.
+    길이가 모자라면 마지막 값으로 패딩한다(요청이 잘려 들어와도 조준이 침묵하지 않게 —
+    길이 불일치는 진단 로그에 남는다).
+    """
+    if cube_half is None:
+        return [CUBE_HALF] * n_env
+    if isinstance(cube_half, (list, tuple)):
+        vals = [float(v) for v in cube_half] or [CUBE_HALF]
+        if len(vals) < n_env:
+            PickPlacePlanner._diag(
+                f"[cube-half] 요청 길이 {len(vals)} < env {n_env} — 마지막 값으로 패딩")
+            vals = vals + [vals[-1]] * (n_env - len(vals))
+        return vals[:n_env]
+    return [float(cube_half)] * n_env
+
+
 class PickPlacePlanner:
     """pick-place planner. BatchMotionPlanner batch 차원 = IsaacLab env 차원.
 
@@ -466,8 +534,9 @@ class PickPlacePlanner:
         self.default_bowl_bl = bowl_bl
         self.max_batch_size = int(max_batch_size)
         self.max_goalset = max(K, len(ALPHA_SCAN_DEG))
-        # 요청마다 갱신되는 큐브 반변(cube_specs 단일 소스). 필드 없는 구버전 요청은 상수 폴백.
-        self.cube_half = CUBE_HALF
+        # 요청마다 갱신되는 **per-env** 큐브 반변(cube_specs 단일 소스, 크기 DR 이면 env 마다
+        # 다르다). 필드 없는 구버전 요청은 상수 폴백. len == 요청 env 수.
+        self.cube_halves = [CUBE_HALF]
         bx, by, _ = usd_to_urdf((bowl_bl[0], bowl_bl[1], 0.0))
         self.bowl_s = (bx, by)
         # 책상은 world obstacle 로 넣지 않는다 — 로봇이 책상 위에 장착돼 base 구가 상판(TABLE_TOP)
@@ -625,17 +694,17 @@ class PickPlacePlanner:
             z_axes.append(zax)
         return pos, quat, np.asarray(z_axes, dtype=np.float64)
 
-    def _grasp_face_error(self, q_pre, cube, face_normal=None):
+    def _grasp_face_error(self, q_pre, cube, cube_half, face_normal=None):
         """IK-후-FK 실측 fixed jaw inner face center 를 cube face center 와 **3D** 비교(사용자 스펙).
 
         grasp 자세 = pre 자세서 approach축(tcp z) linear descend(table clamp; plan_pickplace grasp
         와 동일 식). descend 는 orientation 보존 → grasp 회전 = pre 회전이라 pad 방향 정확, 위치만
         하강 이동. fixed jaw inner face center = grasp_tcp + R·FIXED_INNER_CENTER(단순 tcp+offset·x̂ 아님).
-        face_center = cube_center + CUBE_HALF·n(closing축). e 를 (normal, tangent, height)로 분해.
+        face_center = cube_center + cube_half·n(closing축). e 를 (normal, tangent, height)로 분해.
         returns {n:e_normal(clearance), t:e_tangent(face-plane lateral), h:e_height(world-z),
                  tilt_deg:grasp pitch°, face_angle:signed solver-XY alpha°,
                  c:centerline(√(t²+h²))}."""
-        geom = self._grasp_geometry(q_pre, cube, face_normal)
+        geom = self._grasp_geometry(q_pre, cube, cube_half, face_normal)
         e = geom["fixed_inner"] - geom["face_center"]
         n_face = geom["face_normal"]
         t = geom["face_tangent"]
@@ -661,7 +730,7 @@ class PickPlacePlanner:
                 "tilt_deg": float(tilt_deg), "c": math.hypot(e_t, e_h),
                 "face_angle": float(face_angle)}
 
-    def _grasp_geometry(self, q_pre, cube, face_normal=None):
+    def _grasp_geometry(self, q_pre, cube, cube_half, face_normal=None):
         """선택된 pre-grasp IK 해에서 실제 grasp 순간의 TCP/fixed-jaw/cube 기하를 같은 frame에 모은다."""
         tp = self.p.compute_kinematics(q_pre).tool_poses.get_link_pose(self.tf[0])
         pos = tp.position.detach().view(-1).cpu().numpy()[:3]
@@ -676,7 +745,7 @@ class PickPlacePlanner:
         n_face[2] = 0.0
         n_norm = np.linalg.norm(n_face)
         n_face = n_face / n_norm if n_norm > 1e-6 else xax
-        face_center = cc + self.cube_half * n_face                 # fixed jaw 가 닿는 실제 cube face 중심
+        face_center = cc + float(cube_half) * n_face               # fixed jaw 가 닿는 실제 cube face 중심
         t = np.cross(np.array([0.0, 0.0, 1.0]), n_face); tn = np.linalg.norm(t)
         t = t / tn if tn > 1e-6 else np.array([0.0, 1.0, 0.0])     # face-plane tangent(수평, ⊥ closing)
         fixed_tip = grasp_tcp + PAD_LOW_OFF * zax
@@ -694,8 +763,8 @@ class PickPlacePlanner:
             "tcp_axes": {"x": xax, "y": yax, "z": zax},
         }
 
-    def _grasp_geometry_diag(self, q_pre, cube, cube_quat_wxyz, face_normal=None):
-        geom = self._grasp_geometry(q_pre, cube, face_normal)
+    def _grasp_geometry_diag(self, q_pre, cube, cube_quat_wxyz, cube_half, face_normal=None):
+        geom = self._grasp_geometry(q_pre, cube, cube_half, face_normal)
         q_cube_solver = _quat_mul(_quat_z(math.radians(BASE_YAW)), _quat_normalize(cube_quat_wxyz))
 
         def vec(v):
@@ -705,6 +774,7 @@ class PickPlacePlanner:
             "frame": geom["frame"],
             "units": {"position": "m", "euler_xyz": "deg"},
             "cube": {
+                "half_extent": float(cube_half),
                 "position": vec(geom["cube_center"]),
                 "quat_wxyz": vec(q_cube_solver),
                 "euler_xyz_deg": _quat_to_euler_xyz_deg(q_cube_solver),
@@ -761,7 +831,7 @@ class PickPlacePlanner:
                     faces.append((f"f{len(faces)}", cand))
         return faces
 
-    def _manifold_candidates(self, xyz, faces, knobs=None):
+    def _manifold_candidates(self, xyz, faces, cube_half, knobs=None):
         """(pan,α,ρ) 후보 목록 — ALPHA_SCAN_DEG 순서(|α| 오름차순 ± interleave)가 곧 우선순위."""
         kn = knobs or {}
         rho_cap_rad = math.radians(float(kn.get("rho_cap_deg", RHO_CAP_DEG)))
@@ -779,7 +849,7 @@ class PickPlacePlanner:
         for a_deg in ALPHA_SCAN_DEG:
             cand = cand_pose_manifold(
                 xyz, faces, a_deg, tau, rho_cap_rad=rho_cap_rad,
-                chord_center_ratio=chord_center_ratio, cube_half=self.cube_half,
+                chord_center_ratio=chord_center_ratio, cube_half=float(cube_half),
             )
             if cand is None:
                 continue
@@ -793,11 +863,11 @@ class PickPlacePlanner:
         self._diag(msg)
         return cands
 
-    def _gate_candidate(self, end, start_row, cube, cube_quat, meta, cand_idx,
+    def _gate_candidate(self, end, start_row, cube, cube_quat, cube_half, meta, cand_idx,
                         n_cands, seed_i, rescue=False):
         """cuRobo 성공 후보의 FK gate 판정 + 진단 dict — batch scan·rescue 공용."""
         wrist_ok, wr, wr_delta = self._wrist_delta_ok(end, start_row)
-        fe = self._grasp_face_error(end, cube, meta.get("face_normal"))
+        fe = self._grasp_face_error(end, cube, cube_half, meta.get("face_normal"))
         ok = (wrist_ok and FIXED_JAW_CLEAR_MIN <= fe["n"] <= FIXED_JAW_CLEAR_MAX
               and abs(fe["t"]) <= E_TANGENT_MAX and abs(fe["h"]) <= E_HEIGHT_MAX
               and abs(fe["face_angle"]) <= SIMPLE_FACE_GATE_MAX_DEG)
@@ -811,7 +881,7 @@ class PickPlacePlanner:
                 "wrist_roll_deg": math.degrees(wr),
                 "wrist_delta_deg": math.degrees(wr_delta),
                 "fk_face_error": {k: float(v) for k, v in fe.items()},
-                "geometry": self._grasp_geometry_diag(end, cube, cube_quat,
+                "geometry": self._grasp_geometry_diag(end, cube, cube_quat, cube_half,
                                                       meta.get("face_normal")),
                 "selection": {
                     "policy": ("homogeneous_batch_rescue" if rescue
@@ -871,18 +941,35 @@ class PickPlacePlanner:
 
     @staticmethod
     def _candidate_score(fe, meta, wr_delta, clear_target=FIXED_JAW_CLEAR_TARGET):
-        """낮고 중심에 가까운 grasp를 우선한다. 값이 작을수록 물리 grasp가 안정적이다."""
+        """정렬 먼저, 그 다음 낮고 중심에 가까운 grasp. 작을수록 물리 grasp 가 안정적이다.
+
+        ★1순위 = closing 축 ↔ face normal 각도(``face_angle``)의 5° 버킷 (2026-07-30).
+        비스듬한 closing 은 한쪽 jaw 가 face 모서리를 먼저 때려 **큐브를 밀어낸다** — 측정된
+        grasp 실패가 정확히 그 모습이었다(face_angle +32.7°, 큐브 20 mm 밀린 채 +2.7 mm 만 들림.
+        게이트 ``SIMPLE_FACE_GATE_MAX_DEG=40`` 은 통과한다).
+
+        ★2순위 = ``|e_n − target|``(clearance). ``e_n`` 은 pad 이 face 에서 떨어진 거리 =
+        **폐합이 이동해야 하는 거리**다. 게이트 창이 2~8 mm 로 넓어 8 mm 짜리 후보가 통과했고,
+        그 케이스도 큐브를 15 mm 밀어낸 채 실패했다(e_n +7.9 mm, 정렬은 −12.9° 로 양호).
+        멀리서 닫을수록 큐브를 칠 확률이 커지므로 정렬 다음으로 중요하다.
+
+        예전 1순위였던 ``|e_h|`` 는 table clamp 가 지배해 후보 간 변동이 4 mm 안쪽(실측 p50 14.6 /
+        p90 18.8 mm)이라 **변별력이 거의 없는데** 정렬(0~40° 변동)과 clearance(2~8 mm)를 눌러
+        이겼다 → 4순위로 내렸다. face_angle 에 5° 버킷을 쓰는 이유는 연속값 1순위면 0.1° 차이로
+        clearance 가 훨씬 나쁜 후보가 뽑히기 때문이다.
+        근거·측정 = ``09_TACIT_KNOWLEDGE.md §15.5``.
+        """
         return (
-            round(abs(fe["h"]) * 1000.0, 2),
-            round(abs(fe["t"]) * 1000.0, 2),
-            round(abs(fe["n"] - clear_target) * 1000.0, 2),
-            round(abs(fe["face_angle"]), 2),
+            int(round(abs(fe["face_angle"]) / 5.0)),   # ① 정렬(5° 버킷) — 밀어냄의 직접 원인
+            round(abs(fe["n"] - clear_target) * 1000.0, 2),  # ② 폐합 이동거리
+            round(abs(fe["t"]) * 1000.0, 2),                 # ③ face 내 lateral
+            round(abs(fe["h"]) * 1000.0, 2),                 # ④ 높이(clamp 지배 → 변별력 낮음)
             round(abs(float(meta.get("tilt_deg", 0.0))), 2),
             int(meta.get("face_rank", 0)),
             round(abs(math.degrees(wr_delta)), 2),
         )
 
-    def _plan_pregrasp_batch(self, cubes, face_sets, cube_quats, starts, knobs):
+    def _plan_pregrasp_batch(self, cubes, face_sets, cube_quats, halves, starts, knobs):
         """N env manifold 후보를 priority order(|α| 오름차순)로 검사한다.
 
         각 pass는 env별 후보 1개씩을 BatchMotionPlanner batch 차원으로 병렬 계획한다.
@@ -901,8 +988,8 @@ class PickPlacePlanner:
         disable_cube = bool(kn.get("disable_cube_obstacle_for_approach", False))
         start_pos, start_quat, _ = self._ee_pose_axis_batch(starts)
         per_env = []
-        for cube, faces in zip(cubes, face_sets):
-            cands = self._manifold_candidates(cube, faces, kn)
+        for cube, faces, half in zip(cubes, face_sets, halves):
+            cands = self._manifold_candidates(cube, faces, half, kn)
             per_env.append(list(cands[:self.max_goalset]))
 
         trajs = [None] * n_env
@@ -915,6 +1002,8 @@ class PickPlacePlanner:
             diagnostics.append({"mode": "manifold", "fail": fail, "num_candidates": len(per_env[i])})
         initial_goalset_size = max((len(c) for c in per_env), default=0)
         ok_mask = [False] * n_env
+        # env 별 최선 후보 (score, traj, end, diag) — 앞 CANDIDATE_SCAN_PASSES pass 를 비교한다.
+        best = [None] * n_env
         plan_ms = 0.0
         plan_calls = 0
         # pass 수는 후보 수에 따라 자란다: clearance 만 어긋난 후보는 bias 보정본을 **같은 env 의
@@ -923,7 +1012,11 @@ class PickPlacePlanner:
         pass_idx = -1
         while True:
             pass_idx += 1
-            active = [i for i in range(n_env) if not ok_mask[i] and pass_idx < len(per_env[i])]
+            # 미통과 env 는 물론, **이미 통과한 env 도** 스캔 폭 안에서는 계속 후보를 본다
+            # (더 나은 score 가 나오면 교체). batch slot 을 놀리지 않으므로 공짜다.
+            active = [i for i in range(n_env)
+                      if pass_idx < len(per_env[i])
+                      and (not ok_mask[i] or pass_idx < CANDIDATE_SCAN_PASSES)]
             if not active:
                 break
             pos = np.zeros((n_env, 3), dtype=np.float32)
@@ -972,19 +1065,24 @@ class PickPlacePlanner:
                 start_row = JointState.from_position(
                     starts.position[i: i + 1].detach().clone(), joint_names=self.p.joint_names)
                 ok, diag = self._gate_candidate(
-                    end, start_row, cubes[i], cube_quats[i], meta, pass_idx,
+                    end, start_row, cubes[i], cube_quats[i], halves[i], meta, pass_idx,
                     len(per_env[i]), None if seed is None else int(seed) + i)
-                diagnostics[i] = diag
                 if ok:
-                    trajs[i] = traj
-                    ends[i] = end
+                    score = tuple(diag["score"])
+                    if best[i] is None or score < best[i][0]:
+                        best[i] = (score, traj, end, diag)
+                        trajs[i] = traj
+                        ends[i] = end
+                        diagnostics[i] = diag
                     ok_mask[i] = True
                 else:
+                    if best[i] is None:
+                        diagnostics[i] = diag   # 아직 통과본이 없을 때만 실패 진단을 남긴다
                     adj = self._bias_adjusted_goal(pos[i], meta, diag)
                     if adj is not None:  # clearance 만 어긋남 → 보정본을 뒤 pass 후보로 추가
                         p_adj, meta_adj = adj
                         per_env[i].append((p_adj, quat[i], meta_adj))
-            if all(ok_mask):
+            if all(ok_mask) and pass_idx + 1 >= CANDIDATE_SCAN_PASSES:
                 break
 
         # ── rescue: 혼합 batch 가 굶긴 env 를 동질 batch(동일 goal·start 전 row 복제)로 구제.
@@ -1033,7 +1131,7 @@ class PickPlacePlanner:
                         f"alpha={float(meta.get('alpha_deg', 0.0)):+.0f} solved=False")
                     continue
                 ok, diag = self._gate_candidate(
-                    end, start_row, cubes[i], cube_quats[i], meta, cand_idx,
+                    end, start_row, cubes[i], cube_quats[i], halves[i], meta, cand_idx,
                     len(per_env[i]), seed_i, rescue=True)
                 adj = None if ok else self._bias_adjusted_goal(p_i, meta, diag)
                 if adj is not None:
@@ -1042,7 +1140,7 @@ class PickPlacePlanner:
                     traj2, end2 = _dup_plan(p_adj, q_i)
                     if traj2 is not None:
                         ok2, diag2 = self._gate_candidate(
-                            end2, start_row, cubes[i], cube_quats[i], meta_adj,
+                            end2, start_row, cubes[i], cube_quats[i], halves[i], meta_adj,
                             cand_idx, len(per_env[i]), seed_i, rescue=True)
                         if ok2:
                             traj, end, ok, diag = traj2, end2, ok2, diag2
@@ -1181,12 +1279,13 @@ class PickPlacePlanner:
                              cube_half=None):
         """N개 env full pick-place를 BatchMotionPlanner 1개로 병렬 계획.
 
-        ``cube_half`` = 요청이 실어 보낸 큐브 반변(m, cube_specs 단일 소스). None 이면
-        구버전 SM 요청으로 보고 상수 ``CUBE_HALF``(40 mm) 로 폴백한다.
+        ``cube_half`` = 요청이 실어 보낸 큐브 반변(m, cube_specs 단일 소스). 크기 DR 이 켜지면
+        env 마다 다르므로 **길이 N 리스트**로 온다. 스칼라(전 env 동일)와 None(구버전 SM →
+        상수 ``CUBE_HALF`` 폴백)도 받는다.
         """
         n_env = len(cube_bls)
-        self._ensure_batch_size(n_env)   # ※ 배치 크기 변경 시 __init__ 재실행 → cube_half 재설정 후
-        self.cube_half = float(cube_half) if cube_half else CUBE_HALF
+        self._ensure_batch_size(n_env)   # ※ 배치 크기 변경 시 __init__ 재실행 → cube_halves 재설정 후
+        self.cube_halves = _resolve_cube_halves(cube_half, n_env)
         kn = knobs or {}
         z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
@@ -1226,6 +1325,7 @@ class PickPlacePlanner:
                     for label, n in face_sets[i]
                 ],
                 "bowl_solver_xy": [float(bowls[i][0]), float(bowls[i][1])],
+                "cube_half": float(self.cube_halves[i]),
                 "candidate": None,
                 "phases": {},
                 "profile_ms": {},
@@ -1241,7 +1341,7 @@ class PickPlacePlanner:
         # ① APPROACH: batch=N. 후보 = (pan,α,ρ) manifold 파라미터화 — face 는 ρ 보상 후
         # closing 축 최근접으로 자동 결정, |α| 오름차순 lockstep 검사.
         pre, q_pre, cand_diag, pre_ok, pre_prof = self._plan_pregrasp_batch(
-            cubes, face_sets, cube_quats, starts, kn)
+            cubes, face_sets, cube_quats, self.cube_halves, starts, kn)
         profile.update(pre_prof)
 
         # ② GRASP descend + ③ LIFT.
@@ -1377,19 +1477,21 @@ class PickPlacePlanner:
         gripper 폐합(grasp)·개방(release=transit 상공) ramp 을 정지 hold 에 삽입."""
         a, de, li, tr, rt = (np.rad2deg(phases[k]) for k in
                              ("approach", "grasp", "lift", "transit", "retreat"))
-        close_hold = np.repeat(de[-1:], CLOSE_STEPS, 0)    # grasp: 정지 상태서 폐합
+        close_steps = grip_ramp_steps(g_open, g_close)     # slew cap 에서 유도(하드코딩 아님)
+        open_steps = grip_ramp_steps(g_close, g_open)
+        close_hold = np.repeat(de[-1:], close_steps, 0)    # grasp: 정지 상태서 폐합
         grasp_hold = np.repeat(de[-1:], GRASP_HOLD_STEPS, 0)  # 폐합 접촉 안정화 후 lift
         settle_hold = np.repeat(tr[-1:], SETTLE_STEPS, 0)  # 그릇 상공서 짧게 정지(안정)
-        open_hold = np.repeat(tr[-1:], OPEN_STEPS, 0)      # release: 그릇 상공(transit)서 개방
+        open_hold = np.repeat(tr[-1:], open_steps, 0)      # release: 그릇 상공(transit)서 개방
         seq = [
             _grip(a, np.linspace(GRIP_INIT, g_open, len(a))),        # ① approach + gripper 개방(접근하며)
             _grip(de, g_open),                                       # ② grasp descend
-            _grip(close_hold, np.linspace(g_open, g_close, CLOSE_STEPS)),  #   grasp close
+            _grip(close_hold, np.linspace(g_open, g_close, close_steps)),  #   grasp close
             _grip(grasp_hold, g_close),                              #   grasp settle (hold)
             _grip(li, g_close),                                      # ③ lift
             _grip(tr, g_close),                                      # ④ transit
             _grip(settle_hold, g_close),                            #   settle over bowl (hold)
-            _grip(open_hold, np.linspace(g_close, g_open, OPEN_STEPS)),    # ⑤ release over bowl
+            _grip(open_hold, np.linspace(g_close, g_open, open_steps)),    # ⑤ release over bowl
             _grip(rt, np.linspace(g_open, GRIP_INIT, len(rt))),      # ⑥ retreat + gripper→init 복원
         ]
         return np.vstack(seq).astype(np.float32)
@@ -1449,6 +1551,48 @@ def serve_loop(pl, sock):
             return
 
 
+# 크기 DR 사다리의 반변(m) — cube_specs CUBE_SIZE_CHOICES 미러. planner 는 self-contained
+# 컨테이너에서 도는 진단 스크립트라 sim_to_real 패키지(isaac 의존)를 import 하지 않는다.
+# ⚠ cube_specs.CUBE_SIZE_CHOICES 를 바꾸면 여기도 같이 바꾼다(self-check 가 잡는다).
+SELF_CHECK_HALVES = (0.0125, 0.015, 0.0175, 0.020)
+
+
+def _check_grip_ramp_within_cap():
+    """유도한 ramp 가 정말 slew cap 안인가 + 폐합이 lift 전에 끝나는가."""
+    step_cap = GRIPPER_SLEW_MAX_RAD_S / CONTROL_HZ
+    for g_from, g_to, label in ((GRIP_OPEN, GRIP_CLOSE, "close"), (GRIP_CLOSE, GRIP_OPEN, "open")):
+        n = grip_ramp_steps(g_from, g_to)
+        per_step = abs(g_from - g_to) * _GRIP_RAD_PER_FEATURE / n
+        assert per_step <= step_cap + 1e-9, (
+            f"{label} ramp {n} 프레임 = {per_step * CONTROL_HZ:.2f} rad/s > cap "
+            f"{GRIPPER_SLEW_MAX_RAD_S} — 정해진 프레임 안에 끝나지 않는다")
+    print(f"self-check-geom: grip ramp close={grip_ramp_steps(GRIP_OPEN, GRIP_CLOSE)} "
+          f"open={grip_ramp_steps(GRIP_CLOSE, GRIP_OPEN)} 프레임 "
+          f"(cap {GRIPPER_SLEW_MAX_RAD_S} rad/s @ {CONTROL_HZ:.0f} Hz)")
+
+
+def _check_grasp_height_budget():
+    """크기 사다리 전 구간에서 **table clamp 이후** pad 조준 높이가 FK 게이트 안인가.
+
+    descend 는 jaw tip 이 ``TABLE_TOP + TABLE_MARGIN`` 아래로 못 가게 clamp 된다
+    (``_descend_tstar``). 큐브가 작아질수록 중심이 낮아지는데 tip 은 못 내려가므로
+    pad center 가 큐브 중심보다 **위로** 벌어진다. α=0(top-down, 최악)에서:
+
+        e_h = TABLE_MARGIN + PAD_LOW_OFF − FIXED_INNER_CENTER[2] − half − GRASP_Z_OFF
+
+    이 값이 ``E_HEIGHT_MAX`` 를 넘으면 그 크기는 FK 게이트에서 전멸한다 — 크기 하한을
+    더 낮추거나 TABLE_MARGIN·pad 기하를 바꿀 때 **조용히** 깨지는 자리라 여기서 터뜨린다.
+    """
+    for half in SELF_CHECK_HALVES:
+        e_h = TABLE_MARGIN + PAD_LOW_OFF - FIXED_INNER_CENTER[2] - half - GRASP_Z_OFF
+        assert abs(e_h) <= E_HEIGHT_MAX, (
+            f"cube half {half * 1000:.1f}mm: table clamp 후 pad 조준 오차 {e_h * 1000:+.1f}mm "
+            f"> E_HEIGHT_MAX {E_HEIGHT_MAX * 1000:.1f}mm — 이 크기는 FK 게이트에서 전멸한다")
+    worst = TABLE_MARGIN + PAD_LOW_OFF - FIXED_INNER_CENTER[2] - min(SELF_CHECK_HALVES) - GRASP_Z_OFF
+    print(f"self-check-geom: grasp height budget worst e_h={worst * 1000:+.1f}mm "
+          f"(limit {E_HEIGHT_MAX * 1000:.1f}mm, half={min(SELF_CHECK_HALVES) * 1000:.1f}mm)")
+
+
 def self_check_geom():
     """오프라인 기하 self-check — 후보 생성만 검증(planner 생성·GPU plan 불요. 단 모듈
     top-level 이 torch/curobo import 라 datagen 컨테이너 안에서 실행해야 한다).
@@ -1459,6 +1603,8 @@ def self_check_geom():
       (b) 최종 R closing 축 수평방위 ↔ 선택 face normal 잔차 < 1° (ρ 보상+feedback 수렴)
       (c) τ 결합 게이트: 후보는 항상 ≥5개(top-down 부근은 τ 무관) + yaw 어긋난 셀에서
           큰 |α| 후보가 실제로 배제됨"""
+    _check_grasp_height_budget()
+    _check_grip_ramp_within_cap()
     tau = math.radians(TAU_MAX_DEG)
     n_total = n_kept = n_cells = 0
     pruned_any = False  # τ 게이트가 실제로 한 번이라도 후보를 걸렀는지
@@ -1474,9 +1620,11 @@ def self_check_geom():
                 assert len(faces) == 4, f"faces={len(faces)} != 4 (yaw={yaw_deg})"
                 n_cells += 1
                 cell_kept = 0
-                for a_deg in ALPHA_SCAN_DEG:
+                # 크기 DR 사다리 전체(25~40 mm)를 돈다 — cube_half 는 chord-shift·pad 조준에
+                # 들어가므로 크기가 바뀌면 후보 기하도 바뀐다(옛 체크는 40 mm 만 봤다).
+                for half, a_deg in itertools.product(SELF_CHECK_HALVES, ALPHA_SCAN_DEG):
                     n_total += 1
-                    cand = cand_pose_manifold(cube, faces, a_deg, tau)
+                    cand = cand_pose_manifold(cube, faces, a_deg, tau, cube_half=half)
                     if cand is None:
                         pruned_any = True
                         continue
@@ -1501,13 +1649,15 @@ def self_check_geom():
                             math.atan2(R[1, 0], R[0, 0]) - math.atan2(nf[1], nf[0]))))
                         assert resid < 1.0, (
                             f"closing-face resid {resid:.2f}° az={az_deg} r={r} "
-                            f"yaw={yaw_deg} alpha={a_deg}")
+                            f"yaw={yaw_deg} alpha={a_deg} half={half}")
                 # (c) top-down 부근(τ 게이트: |Δψ|≤45° 서 α≤10° 는 항상 통과) ≥5개 보장
-                assert cell_kept >= 5, f"cell kept={cell_kept} az={az_deg} r={r} yaw={yaw_deg}"
+                # (크기마다 ≥5 → 사다리 전체로 ≥5×len(SELF_CHECK_HALVES))
+                assert cell_kept >= 5 * len(SELF_CHECK_HALVES), \
+                    f"cell kept={cell_kept} az={az_deg} r={r} yaw={yaw_deg}"
                 n_kept += cell_kept
     assert pruned_any, "tau gate never pruned — gate dead?"
     print(f"self-check-geom: cells={n_cells} candidates kept={n_kept}/{n_total} "
-          f"(tau={TAU_MAX_DEG}deg)")
+          f"(tau={TAU_MAX_DEG}deg halves={[round(h, 4) for h in SELF_CHECK_HALVES]})")
     print("GEOM_SELFCHECK_OK")
 
 
@@ -1535,16 +1685,20 @@ def main():
         init = [math.radians(v) for v in (0.0, -100.0, 90.0, 50.0, -90.0, -10.0)]
         # yaw 0°/22.5°/45° 케이스 — manifold 후보의 cube-yaw 정렬(ρ 보상) 경로까지 커버
         trajs, diagnostics = plan_batch(pl, {
-            "cubes": [[0.017, -0.253, 0.06, *q_identity],
-                      [0.167, -0.133, 0.06, *q_identity],
-                      [0.017, -0.253, 0.06, *_qz_bl(22.5)],
-                      [0.100, -0.200, 0.06, *_qz_bl(45.0)]],
+            # env 마다 다른 큐브 크기 = 크기 DR 배선(per-env cube_half) 스모크.
+            # z 는 SM 과 같은 규칙(TABLE_TOP_BASE + half)으로 각자 계산한다.
+            "cubes": [[0.017, -0.253, TABLE_TOP_BASE + 0.0125, *q_identity],
+                      [0.167, -0.133, TABLE_TOP_BASE + 0.020, *q_identity],
+                      [0.017, -0.253, TABLE_TOP_BASE + 0.015, *_qz_bl(22.5)],
+                      [0.100, -0.200, TABLE_TOP_BASE + 0.0175, *_qz_bl(45.0)]],
+            "cube_half": [0.0125, 0.020, 0.015, 0.0175],
             "start": [init, init, init, init],
         })
         ok = all(t is not None for t in trajs)
         for i, d in enumerate(diagnostics):
             cand = d.get("candidate") or {}
-            print(f"self-test env{i}: ok={d.get('ok')} phases={d.get('phases')} "
+            print(f"self-test env{i}: half={d.get('cube_half')} ok={d.get('ok')} "
+                  f"phases={d.get('phases')} "
                   f"candidate_fail={cand.get('fail')} alpha={cand.get('alpha_deg')} "
                   f"rho={cand.get('rho_deg')} dpsi={cand.get('dpsi_deg')} "
                   f"profile_ms={d.get('profile_ms')}")

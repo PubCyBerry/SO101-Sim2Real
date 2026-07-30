@@ -33,6 +33,8 @@ from isaaclab.managers import ManagerTermBase
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
+from .cube_specs import mass_for_size
+
 
 # ---------------------------------------------------------------------------
 # mdp functions (called by the event manager on reset)
@@ -163,6 +165,109 @@ def randomize_object_in_ellipse(
     )
 
 
+def _prim_env_index(prim) -> int:
+    """``/World/envs/env_<i>/...`` prim → env 인덱스.
+
+    prim 목록 정렬 키. lexicographic 정렬은 ``env_10 < env_2`` 라 10 env 이상에서
+    prim[i] ↔ env i 대응이 깨진다(실측 버그) — 항상 이 키로 자연 정렬한다.
+    """
+    import re
+
+    m = re.search(r"env_(\d+)", str(prim.GetPath()))
+    return int(m.group(1)) if m else 0
+
+
+# env 에 붙는 per-env 큐브 한 변(m) 기록: ``env.cube_size_m[name] -> (num_envs,) tensor``.
+# 크기 DR 이 뽑은 실제 값을 소비자(스폰 z 보정 · cuRobo SM 의 grasp 조준/planner 요청)가
+# 되읽는 유일한 통로다. 크기 DR 이 없는 env 에는 attribute 자체가 없다(소비자는 폴백).
+CUBE_SIZE_ATTR = "cube_size_m"
+
+
+def _randomize_cube_scale_fn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    asset_cfgs: list[SceneEntityCfg],
+    sizes: list[float],
+    base_sizes: list[float],
+) -> None:
+    """큐브 USD scale + 질량을 env 별로 **이산** 무작위화 (mode=``prestartup`` 전용).
+
+    ``mdp.randomize_rigid_body_scale`` 대신 자체 구현인 이유:
+      1. 스톡은 연속 range 만 받는다 — 우리는 5 mm 격자(25/30/35/40)의 이산 사다리다.
+      2. 스톡은 ``xformOp:scale`` 이 없을 때 ``xformOpOrder`` 를 통째로
+         ``[translate, orient, scale]`` 로 덮어쓴다. 씬의 큐브 order 는
+         ``[translate, rotateZ]`` 라 authored rotateZ 가 order 에서 사라진다.
+         여기서는 ``AddScaleOp()`` 로 **append** 만 한다.
+      3. 스케일과 함께 질량을 ``mass_for_size`` 로 같이 옮겨야 grasp 물리가 일관된다
+         (USD scale 은 mass attr 을 건드리지 않아 25 mm 큐브가 40 mm 무게로 남는다).
+
+    ⚠ ``prestartup`` = 물리 파싱 **전** USD 편집. EventManager 가 이 모드에서
+    ``scene.replicate_physics=True`` 를 금지한다(복제되면 env 간 속성이 공유됨).
+    """
+    import isaaclab.sim as sim_utils
+    from isaaclab.sim import get_current_stage
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    if env.sim.is_playing():
+        raise RuntimeError("큐브 크기 DR 은 시뮬 시작 전에만 가능(mode='prestartup')")
+    get_current_stage()  # stage 준비 확인(없으면 여기서 실패해야 진단이 쉽다)
+    num_envs = env.scene.num_envs
+    choices = torch.tensor([float(s) for s in sizes], dtype=torch.float32)
+    record: dict[str, torch.Tensor] = dict(getattr(env, CUBE_SIZE_ATTR, {}) or {})
+
+    for asset_cfg, base in zip(asset_cfgs, base_sizes):
+        prims = sorted(sim_utils.find_matching_prims(env.scene[asset_cfg.name].cfg.prim_path),
+                       key=_prim_env_index)
+        # prim ↔ env 대응이 어긋나면 크기와 조준 z 가 조용히 다른 env 를 가리킨다 → fail-fast.
+        if len(prims) != num_envs:
+            raise RuntimeError(
+                f"{asset_cfg.name}: prim {len(prims)}개 ≠ env {num_envs}개 "
+                f"({env.scene[asset_cfg.name].cfg.prim_path}) — 크기 DR 을 적용할 수 없다")
+        picked = choices[torch.randint(0, len(choices), (num_envs,))]
+        for i, prim in enumerate(prims):
+            size = float(picked[i])
+            factor = size / float(base)
+            xform = UsdGeom.Xformable(prim)
+            op = next((o for o in xform.GetOrderedXformOps()
+                       if o.GetOpType() == UsdGeom.XformOp.TypeScale), None)
+            if op is None:
+                op = xform.AddScaleOp()  # order 뒤에 append — authored translate/rotateZ 보존
+            op.Set(Gf.Vec3f(factor, factor, factor))
+            UsdPhysics.MassAPI.Apply(prim).CreateMassAttr().Set(mass_for_size(size))
+        record[asset_cfg.name] = picked.to(env.device)
+        uniq = sorted({round(float(v), 4) for v in picked.tolist()})
+        print(f"[cube-scale-dr] {asset_cfg.name}: base={base:.3f} sizes={uniq} "
+              f"(n_env={num_envs})", flush=True)
+    setattr(env, CUBE_SIZE_ATTR, record)
+
+
+def randomize_cube_scale(
+    cube_names: list[str],
+    sizes: list[float],
+    base_sizes: list[float],
+) -> EventTerm:
+    """큐브 크기(+질량) 이산 무작위화 EventTerm(``prestartup``).
+
+    Args:
+        cube_names: 스케일할 큐브 prim 이름.
+        sizes: 뽑을 한 변 후보(m). 등확률.
+        base_sizes: 각 큐브의 **authored** 한 변(m) — USD scale = size/base 라 필요하다.
+
+    ⚠ env 당 크기는 런 내내 고정이다(USD 편집은 물리 파싱 전에만 가능 — 리셋마다
+    재추첨 불가). 다양성은 **env 수 + 새 seed**로 얻는다. 크기 DR 을 쓰는 env 는
+    ``scene.replicate_physics=False`` 여야 한다.
+    """
+    return EventTerm(
+        func=_randomize_cube_scale_fn,
+        mode="prestartup",
+        params={
+            "asset_cfgs": [SceneEntityCfg(n) for n in cube_names],
+            "sizes": [float(s) for s in sizes],
+            "base_sizes": [float(s) for s in base_sizes],
+        },
+    )
+
+
 def _bell_halfwidth(y: torch.Tensor, ys: torch.Tensor, ws: torch.Tensor) -> torch.Tensor:
     """종 모양 x 반너비 |x|<=w(y) 의 piecewise-linear 보간.
 
@@ -255,8 +360,9 @@ def _randomize_cubes_scattered_fn(
         base_xy = root_xy + torch.tensor(base_sep_offset_xy, device=device, dtype=root_xy.dtype)
     min_base_sep_sq = min_base_sep ** 2
 
-    # 누적 배치 xy — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
+    # 누적 배치 xy / footprint 반경 — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
     placed_xy: list[torch.Tensor] = []
+    placed_r: list[torch.Tensor | None] = []
 
     min_bowl_sep_sq = min_bowl_sep ** 2
     min_cube_sep_sq = min_cube_sep ** 2
@@ -265,10 +371,23 @@ def _randomize_cubes_scattered_fn(
     # 이격을 동적 계산. cube_sizes 미지정(legacy)=스칼라 min_cube_sep/min_bowl_sep 그대로.
     #   큐브쌍: r_i + r_j + margin (40mm쌍 ≈0.057+margin → 기존 0.060 재현).
     #   그릇  : min_bowl_sep(40mm 정합값) + (r_i − r_40). 50mm 면 +0.007.
+    # ★크기 DR 이 켜지면 반경은 **env 마다 다르다**(`env.cube_size_m`) → nominal 대신 실제
+    #   크기를 쓴다. authored 가 사다리 하한(25 mm)이 된 뒤로는 이게 필수다: nominal 기준이면
+    #   40 mm 가 뽑힌 env 가 25 mm 이격으로 그릇에 10.6 mm 더 붙어 스폰된다(transit 계획 실패).
     radii = None
     if cube_sizes is not None:
         radii = [float(s) * (2.0 ** 0.5) / 2.0 for s in cube_sizes]
-        R_REF40 = 0.040 * (2.0 ** 0.5) / 2.0
+    R_REF40 = 0.040 * (2.0 ** 0.5) / 2.0
+    dr_size_map = getattr(env, CUBE_SIZE_ATTR, None) or {}
+
+    def _footprint_radius(cube_idx: int, name: str) -> torch.Tensor | None:
+        """이 큐브의 per-env footprint 반경 (n,). 크기 정보가 전혀 없으면 None."""
+        sizes = dr_size_map.get(name)
+        if sizes is not None:
+            return sizes[env_ids] * (2.0 ** 0.5) / 2.0
+        if radii is not None:
+            return torch.full((n,), radii[cube_idx], device=device, dtype=torch.float32)
+        return None
 
     n_active = len(cube_cfgs) if num_active is None else max(1, min(len(cube_cfgs), int(num_active)))
 
@@ -292,10 +411,12 @@ def _randomize_cubes_scattered_fn(
         final_y = default[:, 1].clone()
         placed = torch.zeros(n, dtype=torch.bool, device=device)
 
-        # 이 큐브의 그릇 이격 (크기 대응: 큰 큐브일수록 더 멀리)
-        cur_bowl_sep_sq = min_bowl_sep_sq
-        if radii is not None:
-            cur_bowl_sep_sq = (min_bowl_sep + (radii[cube_idx] - R_REF40)) ** 2
+        # 이 큐브의 그릇 이격 (크기 대응: 큰 큐브일수록 더 멀리). per-env 텐서 (n,).
+        r_this = _footprint_radius(cube_idx, cube_cfg.name)
+        if r_this is None:
+            cur_bowl_sep_sq = torch.full((n,), min_bowl_sep_sq, device=device, dtype=torch.float32)
+        else:
+            cur_bowl_sep_sq = (min_bowl_sep + (r_this - R_REF40)).clamp_min(0.0) ** 2
 
         for _ in range(max_attempts):
             unplaced_mask = ~placed
@@ -320,7 +441,8 @@ def _randomize_cubes_scattered_fn(
 
             # 그릇 최소 거리 확인 (큐브 크기 대응 이격)
             bxy = bowl_xy[idx]
-            ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq)
+            ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2)
+                        >= cur_bowl_sep_sq[idx])
 
             # robot base 최소 거리 확인 (inner-reach spawn 금지)
             if base_xy is not None:
@@ -330,11 +452,13 @@ def _randomize_cubes_scattered_fn(
                     >= min_base_sep_sq
                 )
 
-            # 이미 배치된 큐브들과의 최소 거리 확인 (per-pair 크기 대응 이격)
+            # 이미 배치된 큐브들과의 최소 거리 확인 (per-pair·per-env 크기 대응 이격)
             for prev_idx, prev in enumerate(placed_xy):
-                pair_sep_sq = min_cube_sep_sq
-                if radii is not None:
-                    pair_sep_sq = (radii[cube_idx] + radii[prev_idx] + cube_sep_margin) ** 2
+                r_prev = placed_r[prev_idx]
+                if r_this is None or r_prev is None:
+                    pair_sep_sq = min_cube_sep_sq
+                else:
+                    pair_sep_sq = ((r_this + r_prev + cube_sep_margin) ** 2)[idx]
                 pxy = prev[idx]
                 ok = ok & (
                     (cand_x - pxy[:, 0]).pow(2) + (cand_y - pxy[:, 1]).pow(2) >= pair_sep_sq
@@ -346,6 +470,7 @@ def _randomize_cubes_scattered_fn(
             placed[accept] = True
 
         placed_xy.append(torch.stack([final_x, final_y], dim=-1))
+        placed_r.append(r_this)
 
         # orientation: full_orient 면 **이산 stable-face + random yaw**.
         #   평평한 매트 위 큐브는 6면 중 하나로만 안착 → 6 (roll,pitch) 중 택1 후 yaw 균등.
@@ -370,6 +495,12 @@ def _randomize_cubes_scattered_fn(
         # z 분산(쌓임 유발): default z 위로 [z_lo, z_hi] 띄워 spawn → 낙하·적재
         z_lo, z_hi = z_range
         final_z = default[:, 2]
+        # 크기 DR 보정: authored z 는 nominal 반높이 기준이라, 스케일된 env 는 그 차이만큼
+        # 내려앉혀야 한다. 안 하면 작은 큐브가 (nominal−실제)/2 만큼 공중에서 떨어져
+        # 튀면서 DR 이 정한 xy 를 벗어난다.
+        dr_sizes = dr_size_map.get(cube_cfg.name)
+        if dr_sizes is not None and cube_sizes is not None:
+            final_z = final_z + 0.5 * (dr_sizes[env_ids] - float(cube_sizes[cube_idx]))
         if z_hi > z_lo:
             final_z = final_z + (torch.rand(n, device=device) * (z_hi - z_lo) + z_lo)
         positions = torch.stack([final_x, final_y, final_z], dim=-1) + env.scene.env_origins[env_ids]
@@ -717,8 +848,6 @@ class _RandomizeRobotColor(ManagerTermBase):
 
     def __init__(self, cfg: EventTerm, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        import re
-
         from isaacsim.core.utils.extensions import enable_extension
         import isaaclab.sim as sim_utils
         from pxr import Usd, UsdShade
@@ -741,10 +870,7 @@ class _RandomizeRobotColor(ManagerTermBase):
         # 바인딩된 원본 material 을 못 이겨 body 가 안 바뀌었다(실측: 관절만 바뀜). root override 가
         # 전 하위 binding 을 이긴다. OmniPBR 생성은 스톡 randomize_visual_color 와 동일 = Fabric 반영.
         # env 인덱스 자연 정렬(lexicographic 는 env_10 < env_2 라 ≥10 env 서 self._mats[i]↔env i 깨짐).
-        def _env_idx(prim):
-            m = re.search(r"env_(\d+)", str(prim.GetPath()))
-            return int(m.group(1)) if m else 0
-        roots = sorted(sim_utils.find_matching_prims(glob), key=_env_idx)
+        roots = sorted(sim_utils.find_matching_prims(glob), key=_prim_env_index)
         for root in roots:
             for prim in Usd.PrimRange(root):
                 if prim.IsInstanceable():

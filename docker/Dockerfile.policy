@@ -194,7 +194,9 @@ ENV VIRTUAL_ENV=/opt/venv \
 #   2) workspace 디렉터리 생성 + 권한 개방
 #   3) lerobot 버전 파일 생성 (cold start 최적화)
 #   4) /root traverse 허용 (non-root 컨테이너용)
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+# chmod 0755 (not +x): COPY 는 호스트 파일 mode 를 그대로 가져오므로, 호스트가 0600 이면
+# `+x` 는 0711 이 되어 non-root user 가 스크립트를 **읽지** 못해 "Permission denied" 로 죽는다.
+RUN chmod 0755 /usr/local/bin/entrypoint.sh \
     && mkdir -p /workspace/.cache/huggingface /workspace/datasets /workspace/logs /workspace/outputs \
     && chmod -R 0777 /workspace \
     && python -c "import importlib.metadata; open('/opt/lerobot_version.txt','w').write(importlib.metadata.version('lerobot'))" \

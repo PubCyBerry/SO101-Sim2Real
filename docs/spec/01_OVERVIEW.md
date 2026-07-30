@@ -112,12 +112,12 @@ sequenceDiagram
     SM->>EN: reset + DR 배치
     SM->>PL: ZMQ plan_pickplace(cubes, bowl, start)
     PL-->>SM: trajectories [(T,6)] (arm deg + gripper feature)
-    SM->>EN: preroll hold (2 s)
+    SM->>EN: preroll hold (1 s)
     loop 궤적 replay
         SM->>EN: step(action)
         EN-->>SM: obs + termination
     end
-    SM->>EN: posthold (1 s) → 자동 리셋 = 에피소드 export
+    SM->>EN: posthold (0.5 s) → 자동 리셋 = 에피소드 export
 ```
 
 ### 4.2 sim VLA 폐루프

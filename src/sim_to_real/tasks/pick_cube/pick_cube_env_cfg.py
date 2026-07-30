@@ -31,18 +31,20 @@ from sim_to_real.utils.constant import (
     BOWL_NAME,
     CUBE_HALF_EXTENTS,
     CUBE_NAMES,
+    CUBE_SIZE_CHOICES,
     CUBE_SIZES,
 )
 from sim_to_real.utils.domain_randomization import (
     CameraExtrinsicDRCfg,
     randomize_camera_focal,
-    reset_camera_extrinsic_dr,
+    randomize_cube_scale,
     randomize_cubes_scattered,
     randomize_lights,
     randomize_object_mass,
     randomize_object_material,
     randomize_object_on_arc,
     randomize_robot_color,
+    reset_camera_extrinsic_dr,
 )
 
 from sim_to_real.tasks.pick_cube import mdp as task_mdp
@@ -572,6 +574,15 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
     #   Cube3 최악 위치 (-0.05, 0.235) 기준 임계 각도 풀면 9.48°.
     #   → 안전 여유 포함 오른쪽 한계 +8°
     randomize_bowl = randomize_object_on_arc(BOWL_NAME, radius=0.44, angle_range_deg=(-4.0, 8.0))
+
+    # 큐브 크기 DR(mode=prestartup, 물리 파싱 전 USD scale+mass) — 25/30/35/40 mm 이산.
+    # authored 40 mm 가 상한이라 scale ≤ 1(줄이는 방향만) — 키우면 spawn z·이격·planner
+    # obstacle blob 이 전부 40 mm 기준이라 함께 손봐야 한다. 스폰 z 보정은
+    # randomize_cubes(_randomize_cubes_scattered_fn)가 env.cube_size_m 을 읽어 처리한다.
+    # ⚠ env 당 크기는 런 내내 고정(리셋 재추첨 불가) — 다양성 = env 수 × seed.
+    randomize_cube_sizes = randomize_cube_scale(
+        CUBE_NAMES, list(CUBE_SIZE_CHOICES), [_CUBE_SIZES_M[n] for n in CUBE_NAMES]
+    )
 
     # full 모드: 좌우대칭 종모양 스폰 + 로봇암 제외 + 그릇/큐브/base 이격.
     # (그릇 이격 = 위 randomize_bowl 적용 후의 **실제** 그릇 xy 기준 — 선언순서가 곧 적용순서.)

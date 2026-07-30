@@ -734,6 +734,176 @@ clamp 가 실제로 binding 하는 경우가 드물다는 뜻이다(대부분 `_
 `ModuleNotFoundError` 로 죽었다. record 경로가 늘 `--enable_cameras` 라 가려져 있었다.
 `_key_listener()` 안으로 지연 import — interactive 모드에서만 필요한 심볼이다.
 
+### 14.8 큐브가 작아지면 table clamp 가 조준을 밀어올린다 (크기 DR 전제조건)
+
+크기 DR(25~40 mm, `03_ENV_SPEC.md` §9.1.1)을 넣기 전에 답해야 했던 질문:
+**작은 큐브에서도 pad 조준이 FK 게이트 안에 남는가.**
+
+`cand_pose_manifold` 는 pad center 를 **face center 높이**(= 큐브 중심 높이)에 조준한다.
+그런데 descend 는 jaw tip 이 `TABLE_TOP + TABLE_MARGIN` 아래로 못 가게 clamp 된다
+(`_descend_tstar`). tip 은 pad center 보다 `PAD_LOW_OFF − FIXED_INNER_CENTER[2]` = 28.7 mm
+아래이므로 **pad center 가 내려갈 수 있는 하한**이 `TABLE_TOP + 4 + 28.7 mm` 로 고정된다.
+큐브가 작아지면 중심은 내려가는데 이 하한은 그대로다 → 조준이 위로 벌어진다.
+
+α = 0(top-down, 최악)에서 정리하면 오차는 **크기에만** 의존한다:
+
+```
+e_h = TABLE_MARGIN + PAD_LOW_OFF − FIXED_INNER_CENTER[2] − half − GRASP_Z_OFF
+    = 0.004 + 0.075 − 0.0463 − half − 0.0022
+    = 0.0305 − half
+```
+
+| 큐브 | half | e_h (해석, α=0) | 한계 `E_HEIGHT_MAX` |
+|---|---:|---:|---:|
+| 40 mm | 0.0200 | +10.5 mm | 28 mm |
+| 35 mm | 0.0175 | +13.0 mm | 〃 |
+| 30 mm | 0.0150 | +15.5 mm | 〃 |
+| 25 mm | 0.0125 | +18.0 mm | 〃 |
+
+★ **`half < 0.0305` 인 한 clamp 는 항상 binding 이다.** 즉 40 mm 에서도 pad center 는 이미
+큐브 중심보다 10.5 mm 위에서 잡고 있었고, 크기 DR 은 그 편차를 키울 뿐 **새로운 실패 모드를
+만들지 않는다**. (§14.6 의 "clamp 가 실제로 binding 하는 경우가 드물다"는 서술은 성공률이
+안 변했다는 관찰에 대한 잘못된 해석이었다 — binding 은 상시이고, 둔감한 쪽은 `e_h` 다.)
+
+물리적으로도 무리가 없다: pad 은 center 에서 tip 까지 28.7 mm 뻗어 있어 25 mm 큐브의 옆면
+(`z ∈ [table, table+25 mm]`)을 pad 하단 구간이 통째로 덮는다.
+
+`curobo_batch_planner.py --self-check-geom` 이 사다리 전 구간에 이 부등식을 assert 한다
+(`_check_grasp_height_budget`). 크기 하한을 더 낮추거나 `TABLE_MARGIN`·pad 기하를 건드리면
+sweep 을 돌리기 전에 여기서 먼저 터진다.
+
+---
+
+## 15. gripper ramp 가 slew cap 을 넘어 폐합이 lift 전에 안 끝나고 있었다
+
+### 15.1 증상
+
+크기 DR sweep(크기 4종 × yaw0/yaw-random, 총 2232 시도)에서 **3건**만 place-fail 이 났다.
+전부 30 mm·yaw-random 이고, 같은 셀을 `fail --auto` 로 재현하면 성공했다(확률적 꼬리).
+
+sweep 실패 기록에 물리 흔적(`max_cube_z`·`final_cube_xyz`)을 남기게 하고 다시 재니
+정체가 드러났다:
+
+```
+cell (+0.1371,+0.1743) interior  yaw=83.6  max_z=0.7255  final=(+0.1439,+0.2063,+0.7199)
+```
+
+`max_cube_z` 가 안착면(책상 0.705 + half 0.015 = 0.720)보다 **5 mm** 높을 뿐이다 —
+그릇 밖으로 튕긴 게 아니라 **애초에 큐브를 들지 못했다**. 큐브는 제자리에서 32 mm 밀렸다
+(jaw 가 밀어냄 = skate 항복모드).
+
+### 15.2 원인 — 명령 속도가 env slew cap 의 3.2 배
+
+`_assemble` 은 gripper 폐합을 `CLOSE_STEPS = 5` 프레임 linspace 로 보냈다.
+
+| | Δ(feature) | Δ(rad) | 프레임 | 명령 속도 | env cap |
+|---|---:|---:|---:|---:|---:|
+| close (75→5) | 70 | 1.344 | 5 | **8.06 rad/s** | 2.5 |
+| open (5→75) | 70 | 1.344 | 10 | **4.03 rad/s** | 2.5 |
+
+`SlewLimitedJointPositionAction` 이 명령을 cap 으로 잘라내므로, 폐합에 실제로 필요한 시간은
+`1.344 / 2.5 = 0.54 s` = **16 프레임**이다. 그런데 예산은 `close(5) + grasp_hold(5) = 10`
+프레임뿐 → 그리퍼가 1.344 rad 중 0.833 rad 만 닫힌 채 **lift 가 시작**됐다. 남은 29° 는
+팔이 올라가는 도중에 닫힌다. 대개는 그래도 물리지만, 드물게 jaw 가 아직 벌어진 쪽으로
+큐브를 밀어내고 grasp 가 실패한다. release 도 같은 구조다 — 다 열리기 전에 retreat 이
+시작되면 큐브를 끌고 나온다.
+
+같은 종류의 함정이 이미 두 번 있었다: arm slew cap 2.5 가 lock-step 을 깨뜨린 건
+(`08_PIPELINES.md` 상수 표 주석), 기록된 action 이 물리적으로 불가능해 VLA 데이터가
+jerky 했던 건([[vla-data-jerky-slew-record-fix]]) — **명령과 cap 이 갈리면 조용히 어긋난다.**
+
+### 15.3 수정 — ramp 길이를 cap 에서 유도
+
+```python
+def grip_ramp_steps(g_from, g_to):
+    delta_rad = abs(g_from - g_to) * _GRIP_RAD_PER_FEATURE
+    return max(GRIP_RAMP_MIN_STEPS, ceil(delta_rad / (GRIPPER_SLEW_MAX_RAD_S / CONTROL_HZ)))
+```
+
+`CLOSE_STEPS`·`OPEN_STEPS` 상수를 없애고 `_assemble` 이 매번 유도한다(knob 으로 `grip_open`/
+`grip_close` 를 바꿔도 따라간다). 기본값에서 close = open = **17 프레임 = 2.37 rad/s ≤ 2.5**.
+
+★ **실제 폐합 속도는 그대로다** — 어차피 cap 이 지배했다. 바뀌는 것은 lift/retreat 타이밍이
+폐합·개방 **완료 뒤로** 밀린다는 것뿐이다(순수 안정화, 궤적 기하 불변). 부수 이득으로 기록된
+action 이 물리적으로 실현 가능한 값이 된다.
+
+`--self-check-geom` 의 `_check_grip_ramp_within_cap` 이 이 부등식을 assert 한다.
+
+### 15.4 검증
+
+`sweep`(124 셀) × 크기 4종, `--yaw random --trials 3` = 크기당 372 시도:
+
+| 큐브 | 수정 전 | 수정 후 |
+|---|---|---|
+| 25 mm | 372/372 | 372/372 |
+| 30 mm | **370/372 · 371/372**(2회 측정 모두 실패) | **372/372** |
+| 35 mm | 372/372 | 372/372 |
+| 40 mm | 372/372 | 372/372 |
+
+실패가 30 mm 에만 몰린 것은 통계적으로 유의하지 않다(전체 3/2232 ≈ 0.13 % 의 꼬리이고,
+다른 크기 1488 시도에서 0건일 확률이 ~14 %). 즉 **크기 DR 이 만든 결함이 아니라 원래 있던
+ramp 결함**이며, 40 mm 단일 크기 시절의 100 % 도 그만큼 운이었다.
+
+### 15.5 grasp 후보를 "처음 통과한 것"으로 채택하고 있었다
+
+ramp 를 고친 뒤에도 ~0.05 %/시도 의 꼬리가 남았고, 실패 진단(§15.1 의 기록 필드)을 모으니
+전부 **큐브를 밀어낸 뒤 못 드는** 모습이었다. 채택된 후보의 FK 오차가 범인을 지목했다:
+
+| 실패 | lift | 큐브 이동 | e_n | e_t | face_angle |
+|---|---:|---:|---:|---:|---:|
+| 25 mm yaw0 | +2.7 mm | 20 mm | +3.6 | +1.5 | **+32.7°** |
+| 25 mm yaw0(다음 회차) | +1.7 mm | 16 mm | **+7.9** | +0.9 | −12.9° |
+
+둘 다 게이트를 통과한다(`SIMPLE_FACE_GATE_MAX_DEG=40` · clearance 창 `2~8 mm`). 게이트가
+넓은데 **채택은 게이트 통과 순간 끝났다** — `_plan_pregrasp_batch` 는 `|α|` 오름차순으로 돌며
+처음 통과한 후보를 쓰고 `_candidate_score` 는 계산해 진단에 싣기만 했다. 즉 "통과했지만
+조준이 나쁜" 후보가 그대로 실행됐다.
+
+수정 3가지:
+
+1. **최선 후보 채택** — `CANDIDATE_SCAN_PASSES = 3`. 통과한 env 도 앞 3 pass 는 batch slot 을
+   계속 쓰며 후보를 비교하고, score 최소를 채택한다. 미통과 env 때문에 어차피 pass 를 더
+   돌므로 plan 호출은 늘지 않는다.
+2. **score 재정렬** — `(face_angle 5° 버킷, |e_n − target|, |e_t|, |e_h|, …)`.
+   ① 비스듬한 closing 이 한쪽 jaw 로 face 모서리를 때려 큐브를 민다.
+   ② `e_n` = pad↔face 거리 = **폐합이 이동해야 하는 거리**(멀수록 칠 확률↑).
+   ④ 예전 1순위 `|e_h|` 는 table clamp 지배로 변동이 4 mm 안쪽(§14.8)이라 변별력이 없는데
+      정렬·clearance 를 눌러 이겼다.
+3. **접촉 정착 연장** — `GRASP_HOLD_STEPS 5 → 15`. ramp 가 17 프레임으로 늘어난 뒤 hold 5 는
+   접촉력 정착 전에 lift 를 시작시켰다(큐브를 16 mm 들다 놓친 slip 1건).
+
+**검증**(크기 4종 × `yaw0`(124) + `yaw random ×3`(372) = 1984 시도):
+
+| 단계 | yaw0 (496) | yaw-random ×3 (1488) | 합 |
+|---|---|---|---|
+| 원본 | 496/496 | 1485/1488 | 1981 (99.85 %) |
+| + ramp 유도(§15.3) | 495/496 | 1488/1488 | 1983 (99.95 %) |
+| + 최선 후보·score·hold | **496/496** | 1485/1488 | 1981 (99.85 %) |
+| + `--grasp_retries 1` | 124/124 (25 mm 만, 재시도 발동 0회) | 미측정 | **전면 검증 미완** |
+
+### 15.6 잔여 실패의 정체 — 조준이 아니라 5-DOF 한계
+
+실패를 하나씩 잡을 때마다 **지배 요인이 바뀌었다**(정렬 32.7° → clearance 7.9 mm → slip →
+tilt 15°). 마지막 케이스는 `face_angle +2.3°` · `e_n +4.4 mm` 로 조준이 거의 완벽한데도
+큐브를 25 mm 밀어냈다 — α(tilt) 15° 가 강제된 셀, 즉 α 0~10° 가 IK·게이트로 불가능해서
+비스듬한 접근밖에 없는 위치였다. 조준 품질 튜닝으로는 여기를 못 넘는다.
+
+두 가지 구조적 원인이 남는다:
+
+- **대각 yaw(≈45°)**: 정사각 큐브는 어느 face 를 골라도 `wrap90` 후 최대 45° 어긋나고,
+  `RHO_CAP_DEG=12` 가 wrist_roll 보호를 위해 12° 까지만 보정 → `face_angle` 17~25° 잔류.
+  `rho_cap_deg 12→16` A/B: 72 시도 71 성공으로 **개선 신호 없음** → 12 유지.
+- **α 강제 셀**: 원거리·경계에서 작은 α 가 도달 불가 → 기울어진 접근이 유일한 해.
+
+그래서 마지막 조치는 조준이 아니라 **재시도**다(`--grasp_retries`, 기본 1):
+grasp 실패는 큐브를 15~48 mm 밀어내므로 **입력 pose 가 바뀐다** → 결정적 planner 도 재계획하면
+다른 후보·다른 궤적을 낸다. 성공한 env 는 init hold 로 고정해 그릇 안 큐브를 다시 건드리지
+않고 판정을 누적한다. record(데이터 생성) 경로는 에피소드 규격 때문에 재시도하지 않는다
+— 실패 에피소드는 `success=False` 로 저장돼 변환기가 걸러낸다.
+
+⚠ **retry 포함 구성의 전면 sweep 은 사용자 요청으로 중단됐다**(25 mm yaw0 124/124 까지만).
+남은 조합을 재려면 `scratch/chain_full_verify.sh` 를 다시 돌린다.
+
 ---
 
 ## 15. 카메라 extrinsic DR — 왜 EventTerm 이 아니고, 왜 USD write 가 되는가

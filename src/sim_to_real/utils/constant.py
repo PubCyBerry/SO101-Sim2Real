@@ -11,11 +11,13 @@ from __future__ import annotations
 from .cube_specs import (  # noqa: F401
     CUBE_HALF_EXTENTS,
     CUBE_MASSES,
+    CUBE_SIZE_CHOICES,
     CUBE_SIZES,
     CUBE_SPECS,
     MAX_CUBE_FOOTPRINT_RADIUS,
     MAX_CUBE_SIZE,
     CubeSpec,
+    mass_for_size,
 )
 
 # 단일 큐브 씬(2026-06-26): 40mm Cube1 1개만. 매트 제거 + 1-cube 구성.
