@@ -55,6 +55,10 @@ docker compose --env-file .env -f docker/docker-compose.yaml run --rm --name sm-
 | `fail` | sweep 결과의 fail 셀 좌표만 재현 | `--results <sweep.json>` (+`--auto`=headless 집계) |
 | `sweep` | DR 스폰영역 정량 평가 → JSON | `--num_envs 12 --headless --out ...` |
 
+공용 `--cube_sizes` = 큐브 **크기 DR**(25/30/35/40 mm 이산) 사다리를 좁힌다. env 당 크기는
+런 내내 고정(prestartup USD 편집)이라, 크기별 성공률을 깨끗이 재려면 `--cube_sizes 0.025`
+처럼 하나로 고정해 크기마다 따로 돌린다. 생략하면 사다리 전체에서 env 마다 뽑는다.
+
 원격 관전 = WebRTC :49100 (`.env` 의 `LIVESTREAM=1`+`PUBLIC_IP` 필요, 없으면 검은 화면).
 
 ## 3. 데이터셋 녹화 (`random --auto_trials N` 전용)

@@ -65,6 +65,16 @@ _common.add_argument("--grasp_z", type=float, default=None,
                      help="grasp 조준 z 를 robot-base 프레임에서 직접 지정(m). 기본 None = "
                           "`TABLE_TOP_BASE + cube_half` 로 유도(grasp_geometry 단일 소스). "
                           "튜닝 실험용 override 이며 상시 사용하는 값이 아니다")
+_common.add_argument("--cube_sizes", default=None,
+                     help="큐브 크기 DR 후보를 이 목록으로 **덮어쓴다**(콤마 구분, m). "
+                          "예 `0.025` = 전 env 25 mm 고정(크기별 성공률 진단용), "
+                          "`0.025,0.040` = 두 크기만. 기본 None = env cfg 사다리(25~40 mm) 그대로. "
+                          "크기 DR 이 없는 env(-DR 아닌 변형)에서는 사용 불가")
+_common.add_argument("--grasp_retries", type=int, default=1,
+                     help="한 번에 실패한 env 를 몇 번 더 재계획·재시도할지(기본 1). "
+                          "grasp 실패로 큐브가 밀려나면 **입력 pose 가 바뀌므로** 결정적 planner 도 "
+                          "다른 궤적을 낸다. 이미 성공한 env 는 init hold 로 고정해 건드리지 않는다. "
+                          "0 = 옛 동작(1회 시도). record 모드는 에피소드 규격상 재시도하지 않는다")
 _common.add_argument("--settle", type=int, default=5, help="physics steps to settle after each reset")
 _common.add_argument("--bowl_tol", type=float, default=0.06,
                      help="success = cube-center within this xy radius of bowl center (m)")
@@ -164,6 +174,7 @@ from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_si
 from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER  # noqa: E402
 from so101_contract.grasp_geometry import PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
 from sim_to_real.utils.cube_specs import CUBE_HALF_EXTENTS  # noqa: E402
+from sim_to_real.utils.domain_randomization import CUBE_SIZE_ATTR  # noqa: E402
 from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCfg  # noqa: E402
 from sim_to_real.tasks.pick_cube import spawn_area as SA  # noqa: E402
 from sim_to_real.tasks.pick_cube.mdp import terminations as pc_term  # noqa: E402
@@ -299,10 +310,23 @@ class ViewportVideoRecorder:
 
 
 # ══ task-space reads (robot base frame, per-env) ══════════════════════════════════
+def _cube_halves(env):
+    """Per-env 큐브 반변(m) — 크기 DR(`randomize_cube_sizes`)이 기록한 **실제** 값.
+
+    크기 DR 이 없는 env 변형에는 attribute 자체가 없으므로 authored 상수로 폴백한다.
+    grasp 조준 z(`TABLE_TOP_BASE + half`)와 planner 의 face-center 계산이 같은 값을 써야
+    하므로, 이 함수가 SM 쪽 단일 소스다.
+    """
+    sizes = (getattr(env, CUBE_SIZE_ATTR, None) or {}).get(CUBE)
+    if sizes is None:
+        return [CUBE_HALF_EXTENTS[CUBE]] * env.num_envs
+    return [0.5 * float(v) for v in sizes.tolist()]
+
+
 def _cubes_bowls_in_base(env):
     """Per-env cube (6D) + bowl (xy) in each robot's base_link frame — the planner input
     (it applies Rz(90)+BASE_T internally, see curobo_batch_planner.usd_to_urdf).
-    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y]).
+    Returns (cubes [N][x,y,grasp_z,qw,qx,qy,qz], bowls [N][x,y], halves [N]).
     planner extracts cube face normals directly from the quat.
 
     z 는 측정값이 아니라 **유도값**을 보낸다(안착 직후 측정 z 는 settle 잔진동으로 흔들린다).
@@ -321,13 +345,14 @@ def _cubes_bowls_in_base(env):
     wp, _ = subtract_frame_transforms(robot.root_pos_w, robot.root_quat_w,
                                       env.scene[BOWL].data.root_pos_w,
                                       env.scene[BOWL].data.root_quat_w)
-    cube_half = CUBE_HALF_EXTENTS[CUBE]
-    grasp_z = args.grasp_z if args.grasp_z is not None else TABLE_TOP_BASE + cube_half
-    _warn_cube_z_drift(cp[:, 2], grasp_z)
-    cubes = [[cp[i, 0].item(), cp[i, 1].item(), grasp_z, *cq[i].tolist()]
+    # 크기 DR 로 env 마다 큐브가 다르면 조준 z 도 env 마다 다르다(상판 + 각자의 반변).
+    halves = _cube_halves(env)
+    grasp_zs = [args.grasp_z if args.grasp_z is not None else TABLE_TOP_BASE + h for h in halves]
+    _warn_cube_z_drift(cp[:, 2], grasp_zs)
+    cubes = [[cp[i, 0].item(), cp[i, 1].item(), grasp_zs[i], *cq[i].tolist()]
              for i in range(env.num_envs)]
     bowls = [[wp[i, 0].item(), wp[i, 1].item()] for i in range(env.num_envs)]
-    return cubes, bowls, cube_half
+    return cubes, bowls, halves
 
 
 def _warn_cube_z_drift(measured_z, assumed_z, tol=_CUBE_Z_DRIFT_TOL):
@@ -336,10 +361,12 @@ def _warn_cube_z_drift(measured_z, assumed_z, tol=_CUBE_Z_DRIFT_TOL):
     책상 높이 변경·큐브 교체·안착 실패(굴러떨어짐/겹침) 같은 "조용히 조준만 틀어지는" 사고를
     잡는 저비용 감시. 판정에는 개입하지 않는다(경고만) — 유도값이 여전히 진실 소스다.
     """
-    dz = float((measured_z - assumed_z).abs().max().item())
+    assumed = torch.as_tensor(assumed_z, device=measured_z.device, dtype=measured_z.dtype)
+    dz = float((measured_z - assumed).abs().max().item())
     if dz > tol and not getattr(_warn_cube_z_drift, "warned", False):
         _warn_cube_z_drift.warned = True
-        print(f"[sm] ⚠ cube z drift {dz * 1000:.1f} mm (measured vs assumed {assumed_z:.4f}) "
+        print(f"[sm] ⚠ cube z drift {dz * 1000:.1f} mm (measured vs assumed "
+              f"{assumed.min().item():.4f}~{assumed.max().item():.4f}) "
               f"— 책상 높이·큐브 크기·안착 상태 확인. grasp 조준이 그만큼 어긋난다", flush=True)
 
 
@@ -452,10 +479,18 @@ def _restore_layout(env, layout):
         obj.write_root_velocity_to_sim(torch.zeros((env.num_envs, 6), device=env.device))
 
 
-def _sweep_summary(cells, n_targets):
-    """sweep 셀 집계 + 스폰영역 기하 메타 → plot_sweep 가 읽는 JSON dict."""
+def _sweep_summary(cells, n_targets, cube_halves=None):
+    """sweep 셀 집계 + 스폰영역 기하 메타 → plot_sweep 가 읽는 JSON dict.
+
+    ``cube_halves`` = per-env 큐브 반변(크기 DR). env 당 크기가 런 내내 고정이므로
+    셀↔크기 대응은 ``cells[].fails[].env`` 인덱스로 되짚는다. 크기별 성공률을 깨끗이
+    보려면 ``--cube_sizes <하나>`` 로 고정해 sweep 을 크기마다 돌린다.
+    """
     return {
         "task": args.task, "num_envs": args.num_envs, "bowl_tol": args.bowl_tol,
+        "cube_sizes_arg": args.cube_sizes,
+        "grasp_retries": int(args.grasp_retries),
+        "cube_halves": [float(h) for h in cube_halves] if cube_halves else None,
         "yaw": args.yaw, "trials": args.trials, "seed": args.seed,
         "grid": {"nx": args.nx, "ny": args.ny, "boundary_n": args.boundary_n},
         "spawn": {
@@ -490,13 +525,25 @@ def _build_env():
             raise SystemExit("--record_lerobot 은 --num_envs 1 전용 (multi-env 는 --record_hdf5)")
     else:
         remove_pick_cube_cameras(env_cfg)  # SM plans on state only → skip camera spawn/render
-        # SM 은 렌더 없는 state-only → 시각 DR 제거 + 표준 physics 복원. -DR 은 robot-color(Replicator)
-        # 용으로 replicate_physics=False + robot-color/lights/focal 이벤트를 켜는데, 이는 렌더가 있어야
+        # SM 은 렌더 없는 state-only → **시각** DR 만 제거. -DR 은 robot-color(Replicator) 용으로
+        # replicate_physics=False + robot-color/lights/focal 이벤트를 켜는데, 이는 렌더가 있어야
         # 의미 있고 headless 에선 physx view(get_dof_velocities)를 깨뜨린다. datagen(카메라 경로)은 유지.
-        env_cfg.scene.replicate_physics = True
         for _ev in ("randomize_robot_color", "randomize_lights", "randomize_camera_focal"):
             if hasattr(env_cfg.events, _ev):
                 setattr(env_cfg.events, _ev, None)
+        # 큐브 **크기** DR 은 물리(=grasp 기하)라 state-only 에서도 유지한다. 다만 prestartup
+        # USD 편집이라 EventManager 가 replicate_physics=True 를 금지 → 켜져 있으면 False 로 둔다.
+        # (시각 DR 만 있었을 때는 True 로 되돌려 physx view 크래시를 피하던 자리다.)
+        env_cfg.scene.replicate_physics = getattr(env_cfg.events, "randomize_cube_sizes", None) is None
+    if args.cube_sizes:
+        # 크기별 성공률 진단·검증용 override — DR 사다리를 이 목록으로 좁힌다(전 env 고정도 가능).
+        # ⚠ record/state-only 분기 **뒤**에 둔다(분기 안에 끼면 카메라 제거 else 를 가로챈다).
+        ev = getattr(env_cfg.events, "randomize_cube_sizes", None)
+        if ev is None:
+            raise SystemExit(f"--cube_sizes 는 큐브 크기 DR 이 있는 env 에서만 사용 가능 "
+                             f"(task={args.task} 에 randomize_cube_sizes 이벤트 없음)")
+        ev.params["sizes"] = [float(v) for v in str(args.cube_sizes).split(",") if v.strip()]
+        print(f"[sm] cube size DR override → {ev.params['sizes']}", flush=True)
     # Robot spawns AT the start pose from frame 0 (no neutral→init transient), reset jitter zeroed.
     env_cfg.scene.robot.init_state.joint_pos = dict(INIT_RAD)
     if hasattr(env_cfg.events, "reset_robot_joints"):
@@ -666,18 +713,20 @@ class PickPlaceSM:
           knob 으로 보내지 않는다(옛 `knobs.seed` 는 진단 문자열에만 쓰이던 no-op).
         """
         env = self.env
-        cubes, bowls, cube_half = _cubes_bowls_in_base(env)
+        cubes, bowls, cube_halves = _cubes_bowls_in_base(env)
         starts = [self.robot.data.joint_pos[i][self.so101_idx].tolist() for i in range(env.num_envs)]
         # cube_half = 큐브 기하가 pose 와 **함께** 실려 간다(cube_specs 단일 소스).
         # planner 가 자체 상수로 40 mm 를 가정하던 것을 대체 — 크기 변경이 한 곳만 고치면 끝난다.
+        # 크기 DR 이 켜지면 env 마다 다르므로 **per-env 리스트**로 보낸다(planner 는 스칼라도 수용).
         req = {"cmd": "plan_pickplace", "cubes": cubes, "bowl": bowls, "start": starts,
-               "cube_half": float(cube_half)}
+               "cube_half": [float(h) for h in cube_halves]}
         if self.planner_knobs:
             req["knobs"] = dict(self.planner_knobs)
         self.request_i += 1
         request_i = self.request_i
         print(f"[sm] send plan_request #{request_i}: envs={env.num_envs} "
-              f"cube0={_fmt_vec(cubes[0][:3])} bowl0={_fmt_vec(bowls[0])}", flush=True)
+              f"cube0={_fmt_vec(cubes[0][:3])} bowl0={_fmt_vec(bowls[0])} "
+              f"cube_mm={[round(2000.0 * h) for h in cube_halves]}", flush=True)
         self.sock.send_string(json.dumps(req))
         status, rep = self._recv_plan()
         if status == "closed":
@@ -687,7 +736,8 @@ class PickPlaceSM:
                   f"소켓 재연결 후 다음 batch 로 진행 (planner 로그 확인)", flush=True)
             self._connect_planner()
             self.last_manip = {
-                "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
+                "request": {"cubes": cubes, "bowls": bowls, "starts": starts,
+                            "cube_halves": [float(h) for h in cube_halves]},
                 "planner_ok": False, "planner_err": "timeout", "diagnostics": [],
                 "planned": [False] * env.num_envs, "placed": [False] * env.num_envs,
                 "n_steps": 0,
@@ -698,7 +748,8 @@ class PickPlaceSM:
             print(f"[sm] planner ERROR: {rep.get('err')}", flush=True)
         trajs = rep.get("trajectories") if rep.get("ok") else None
         self.last_manip = {
-            "request": {"cubes": cubes, "bowls": bowls, "starts": starts},
+            "request": {"cubes": cubes, "bowls": bowls, "starts": starts,
+                            "cube_halves": [float(h) for h in cube_halves]},
             "planner_ok": bool(rep.get("ok")),
             "planner_err": rep.get("err"),
             "diagnostics": rep.get("diagnostics", []),
@@ -736,11 +787,43 @@ class PickPlaceSM:
 
     # ── replay ───────────────────────────────────────────────────────────────────
     def manipulate(self, recorder=None):
-        """B: batch-plan all envs' cubes and replay the trajectories in lockstep.
+        """batch-plan + lockstep replay, 실패 env 는 ``--grasp_retries`` 회 재시도.
 
-        → (status, val): ("closed",_) window closed · ("abort","N"/"R") R/N mid-run ·
-        ("done", (n_attempt, n_placed)). plan-fail env 는 init hold(실패 처리),
-        짧은 궤적은 마지막 row 로 패딩 — 모든 env 가 같은 step 수를 소화한다.
+        재시도가 의미 있는 이유: grasp 실패는 큐브를 **밀어낸다**(측정상 15~48 mm). planner 는
+        결정적이지만 입력 cube pose 가 바뀌었으므로 재계획하면 다른 후보·다른 궤적이 나온다.
+        사람이 놓친 물건을 다시 집는 것과 같다. 이미 성공한 env 는 init hold 로 고정해
+        (그릇 안 큐브를 다시 집으려다 쳐내는 사고를 막는다) 성공 판정을 누적한다.
+
+        → (status, val): ("closed",_) · ("abort","N"/"R") · ("done", (n_attempt, n_placed)).
+        """
+        env = self.env
+        status, val = self._manipulate_once(recorder)
+        if status != "done":
+            return status, val
+        retries = max(0, int(args.grasp_retries))
+        for attempt in range(1, retries + 1):
+            placed = list(self.last_manip.get("placed", []))
+            fail_ids = [i for i, ok in enumerate(placed) if not ok]
+            if not fail_ids:
+                break
+            print(f"[sm] retry {attempt}/{retries}: 실패 env {fail_ids} 재계획 "
+                  f"(성공 env 는 init hold)", flush=True)
+            hold_ids = [i for i in range(env.num_envs) if i not in set(fail_ids)]
+            status, val = self._manipulate_once(recorder, hold_ids=hold_ids)
+            if status != "done":
+                return status, val
+            merged = [bool(a or b) for a, b in zip(placed, self.last_manip.get("placed", []))]
+            self.last_manip["placed"] = merged
+            self.last_manip["retry_attempts"] = attempt
+            self.last_manip["retry_env_ids"] = fail_ids
+            val = (env.num_envs, sum(merged))
+        return "done", val
+
+    def _manipulate_once(self, recorder=None, hold_ids=()):
+        """1회 batch-plan + lockstep replay. ``hold_ids`` env 는 궤적 대신 init hold.
+
+        plan-fail env 는 init hold(실패 처리), 짧은 궤적은 마지막 row 로 패딩 —
+        모든 env 가 같은 step 수를 소화한다.
         """
         env = self.env
         status, plan = self.plan_batch()
@@ -749,6 +832,8 @@ class PickPlaceSM:
         if status == "allfail":
             return "done", (env.num_envs, 0)
         planned, tgt = plan["planned"], plan["tgt"]
+        for i in hold_ids:   # 재시도: 이미 성공한 env 는 움직이지 않는다
+            tgt[:, i, :] = np.asarray(INIT_ACTION, np.float32)
         cube_asset = env.scene[CUBE]
         max_cube_z = (cube_asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]).clone()
         truncated = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -1079,6 +1164,7 @@ def run_sweep(sm):
     env = sm.env
     targets_all = SA.sweep_targets(args.nx, args.ny, args.boundary_n)
     N = env.num_envs
+    halves = _cube_halves(env)   # env 당 고정(크기 DR) — 결과 JSON 메타로 남긴다
     yaw_mode = str(args.yaw).strip().lower()
     rng = np.random.default_rng(args.seed)
     cells = {}
@@ -1143,16 +1229,31 @@ def run_sweep(sm):
                         }
                         if i < len(diags) and isinstance(diags[i], dict) and diags[i].get("fail"):
                             fail["diagnostic"] = diags[i]["fail"]
+                        # 실패 유형 판별용 물리 흔적. 이게 없으면 place-fail 이 "못 잡았다"인지
+                        # "잡았는데 그릇 밖에 떨어뜨렸다"인지 사후에 알 방법이 없어, 재현 실행을
+                        # 한 번 더 돌려야 했다(확률적 실패는 재현도 안 된다).
+                        mz = sm.last_manip.get("max_cube_z", [])
+                        fx = sm.last_manip.get("final_cube_xyz", [])
+                        if i < len(mz):
+                            fail["max_cube_z"] = mz[i]
+                        if i < len(fx):
+                            fail["final_cube_xyz"] = fx[i]
+                        # 채택된 grasp 후보의 FK 오차 — place-fail 이 "조준이 나빴나"를 본다.
+                        cand = (diags[i].get("candidate") or {}) if i < len(diags) else {}
+                        if cand.get("fk_face_error"):
+                            fail["fk_face_error"] = cand["fk_face_error"]
+                            fail["alpha_deg"] = cand.get("alpha_deg")
+                            fail["score"] = cand.get("score")
                     _record_cell(x, y, kind, pl, ok, fail)
                 done = sum(v["n"] for v in cells.values())
                 placed_tot = sum(v["n_placed"] for v in cells.values())
                 print(f"[sweep] trial {trial} chunk {ci + 1}/{len(chunks)} "
                       f"→ cumulative placed {placed_tot}/{done}", flush=True)
                 with out_path.open("w", encoding="utf-8") as fp:  # 증분 저장(중단 안전)
-                    json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
+                    json.dump(_sweep_summary(cells, len(targets_all), halves), fp, indent=2)
     finally:
         with out_path.open("w", encoding="utf-8") as fp:
-            json.dump(_sweep_summary(cells, len(targets_all)), fp, indent=2)
+            json.dump(_sweep_summary(cells, len(targets_all), halves), fp, indent=2)
         print(f"[sweep] done → {out_path}", flush=True)
 
 

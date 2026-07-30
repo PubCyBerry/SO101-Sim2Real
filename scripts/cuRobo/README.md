@@ -23,6 +23,8 @@ SO-101 pick-place를 **cuRobo collision-free planner**(planning)와 **IsaacLab e
 | `pickplace_sm.py` | isaac-sim | ZMQ REQ + IsaacLab pick_cube env. **서브커맨드 `random`·`fail`·`sweep`** (아래 §실행). 한 번의 B 로 batch plan → per-env 궤적 replay(plan-fail env 는 init hold, 짧은 궤적 last-row 패딩) → per-env `_cubes_in_bowl` 판정. `--num_envs`(기본 1) lockstep. **결정적 replay 위해 `success`/`cube_lost` termination 비활성**(transit 중 그릇 상공 통과 시 `task_done` 조기 발화 버그. time_out 30s 만 유지). |
 | `plot_sweep.py` | host `.venv` | `sweep` 결과 JSON → matplotlib 성공맵 PNG. `spawn_area.py` 만 importlib 로드(=isaac 무의존). `--demo` = 합성데이터 렌더 self-check. |
 | `generate_dataset.sh` | 호스트 | **대량 데이터 생성 드라이버**. 배치로 쪼개 생성(GPU)과 LeRobot v3 변환(CPU)을 겹친다 — 1000 ep 3.83 → 2.98 h, HDF5 피크 375 → 48 GB. 변환 성공 확인된 배치만 삭제(실패 시 보존+경고). 절차 = `docs/spec/08_PIPELINES.md` §5.8 |
+| `sweep_cube_sizes.sh` | 호스트 | 크기 DR 사다리(25/30/35/40 mm)를 **하나로 고정**한 sweep 을 크기마다 1회. `./sweep_cube_sizes.sh [yaw] [trials] [tag]`. planner 를 직접 관리(없으면 띄우고 SIGKILL 당하면 watchdog 이 되살림) + `planner TIMEOUT` 로그가 있으면 그 결과를 버리고 재시도 — 공유 GPU 서버에서 인프라 사고와 실제 실패를 섞지 않는다. |
+| `summarize_sweeps.py` | 호스트 python3 | `outputs/cube_size_dr_sweep/sweep_*mm_*.json` → 크기 × yaw 조건 성공률 표 + 실패 셀 목록(stdlib only). |
 | `sweep_num_envs.sh` | 호스트 | `--num_envs` 별 데이터 생성 처리량 측정(구성당 N ep 생성 + LeRobot v3 변환, s/에피소드·VRAM 피크). 기준선 = `docs/spec/09_TACIT_KNOWLEDGE.md` §13.6 |
 | `build_robot_model.py` | curobo-datagen | (기존) SO-101 cuRobo config 빌더. |
 
@@ -42,7 +44,12 @@ SM 은 **3 서브커맨드**로 나뉜다 (`pickplace_sm.py {random|fail|sweep} 
 `--task`(env variant) · `--num_envs`(기본 1) · `--livestream 2`(인터랙티브 키 필수) ·
 `--cam_eye/--cam_target`(env-상대 카메라) · `--seed` · `--bowl_tol` ·
 `--plan_timeout_s`(기본 900 s, planner 사망 시 무한 정지 방지 — 0=무제한) ·
-`--log_every`(기본 0=끔; headless sweep 에서 켜면 step 당 3줄이 stdout 을 잡아먹는다).
+`--log_every`(기본 0=끔; headless sweep 에서 켜면 step 당 3줄이 stdout 을 잡아먹는다) ·
+`--grasp_retries`(기본 1 — 실패 env 만 재계획해 재시도. grasp 실패는 큐브를 밀어내므로
+입력 pose 가 바뀌어 결정적 planner 도 다른 궤적을 낸다. 성공 env 는 init hold 로 고정.
+record 모드는 에피소드 규격상 재시도하지 않는다) ·
+`--cube_sizes`(큐브 크기 DR 사다리를 이 목록으로 좁힌다. 예 `0.025` = 전 env 25 mm 고정 —
+크기별 성공률을 깨끗이 재려면 이걸로 하나씩 sweep 한다. 기본 None = env cfg 사다리 25~40 mm).
 
 > ⚠ 성공 판정 `--bowl_tol` 은 **xy 거리만** 본다(z 무시). 드롭 XY 가 rim 근처(`BOWL_PULL`)라
 > 그릇 밖 책상에 튄 큐브도 성공으로 셀 수 있다 — env 의 `object_in_container` 와는 계약이 다르다.
@@ -139,8 +146,11 @@ base/bowl/exclude 경계 셀을 항상 포함한다(`spawn_area.sweep_targets`).
 - `cubes`: `[[x, y, grasp_z, qw,qx,qy,qz] ×N]` — per-env **6-DOF pose**. planner가 quat에서 cube face normal을 직접 추출한다.
 - `bowl`: `[x, y]`(공용) 또는 `[[x, y] ×N]`(per-env) — place 목표로 **xy만** 소비.
 - `start`: `[[6 joint rad, SO101 순서] ×N]` — per-env **reset·settle 후 실제 robot joint**(arm 5개 사용).
-- `cube_half`: 큐브 반변(m). SM 이 `cube_specs` 단일 소스에서 읽어 pose 와 **함께** 보낸다.
-  없으면 planner 가 40 mm 로 폴백(구버전 호환).
+- `cube_half`: 큐브 반변(m) — **per-env 리스트**(`[h ×N]`). SM 이 크기 DR 이 뽑은 실제 값
+  (`env.cube_size_m`, 없으면 `cube_specs` authored)을 pose 와 **함께** 보낸다. 스칼라(전 env 동일)
+  와 누락(구버전 → planner 가 40 mm 폴백)도 받는다. planner 는 이 값으로 face-center·chord shift·
+  pad 조준을 env 마다 따로 계산한다. ⚠ **obstacle/attach blob(`CUBE_DIMS`)은 요청마다 못 바꾼다**
+  (world dims 가 planner 초기화 시 굳는다) — 크기 DR 상한 40 mm 고정 = 작은 큐브엔 과대근사(안전측).
 - `knobs`: 선택. `grasp_z_off`, `grip_open`, `grip_close`, `bowl_pull`, `tau_max_deg`, `rho_cap_deg`,
   `chord_center_ratio`, `transit_z`. ⚠ **`seed` 는 no-op**(cuRobo `reset_seed()` 가 인자를 안 받아
   외부 seed 로 해를 흔들 수 없다 = planning 은 입력에 대해 결정적). SM 은 보내지 않는다.
