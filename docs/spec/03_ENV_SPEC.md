@@ -351,13 +351,17 @@ kinematic 센서라 렌더·카메라와 무관하다 (`--enable_cameras` 불요
 
 | name | size (m) | mass (kg) | half_extent | footprint_radius (`s/2·√2`) |
 |---|---:|---:|---:|---:|
-| `Cube1` | 0.040 | 0.035 | 0.020 | 0.028284 |
+| `Cube1` | **0.025** | 0.013672 | 0.0125 | 0.017678 |
 | `Cube2` | 0.040 | 0.035 | 0.020 | 0.028284 |
 | `Cube3` | 0.050 | 0.055 | 0.025 | 0.035355 |
 | `Cube4` | 0.050 | 0.055 | 0.025 | 0.035355 |
 
-질량 근거(코드 주석): 의자다리 커버 폼이라 부피 완전비례보다 가볍게, **쉘(표면적 ∝ 변²) 비례** —
-40 mm 35 g, 50 mm `35 × (50/40)² ≈ 54.7 → 55 g`.
+질량 근거(코드 주석): 의자다리 커버 폼이라 부피 완전비례보다 가볍게, **쉘(표면적 ∝ 변²) 비례**.
+`mass_for_size(s) = 0.035 · (s/0.040)²` 가 그 규칙이고 기준점은 40 mm = 35 g(실측)이다 —
+25 mm → 13.67 g, 50 mm → 54.7 g. `_self_check` 가 표의 모든 authored mass 를 이 식과 대조한다.
+
+**Cube1 은 2026-07-30 에 40 → 25 mm 로 내렸다**(사용자 지시). 크기 DR 사다리의 **하한**이 되어
+USD scale 이 1.0~1.6 배(키우는 방향)로 걸린다 — §9.1.1.
 
 `cube_specs.py` 는 **stdlib 만** 쓴다(상대 import 금지) — author 스크립트가 AppLauncher 이전에
 importlib 로 직접 로드하기 때문이다.
@@ -371,15 +375,25 @@ importlib 로 직접 로드하기 때문이다.
 (등확률, 5 mm 간격). 질량은 `mass_for_size(s) = 0.035 · (s/0.040)²` (쉘 비례, `CUBE_SPECS`
 와 같은 규칙)로 함께 따라간다.
 
-| size (m) | half | mass (kg) | USD scale (`size/0.040`) |
+| size (m) | half | mass (kg) | USD scale (`size/0.025`) |
 |---:|---:|---:|---:|
-| 0.025 | 0.0125 | 0.0137 | 0.625 |
-| 0.030 | 0.0150 | 0.0197 | 0.750 |
-| 0.035 | 0.0175 | 0.0268 | 0.875 |
-| 0.040 | 0.0200 | 0.0350 | 1.000 |
+| 0.025 | 0.0125 | 0.0137 | 1.0 (authored) |
+| 0.030 | 0.0150 | 0.0197 | 1.2 |
+| 0.035 | 0.0175 | 0.0268 | 1.4 |
+| 0.040 | 0.0200 | 0.0350 | 1.6 |
 
-**authored 40 mm 가 상한**이다 — scale ≤ 1 만 쓴다. 키우는 방향은 spawn z·DR 이격·planner
-obstacle blob 이 전부 40 mm 기준이라 함께 손봐야 한다(줄이는 쪽은 모두 안전측).
+**authored 25 mm 가 하한**이다 — scale 은 1.0~1.6 배다. 크기에 의존하는 값은 전부 per-env
+실제 크기(`env.cube_size_m`)에서 파생하므로 자동 추종한다:
+
+| 값 | 파생 |
+|---|---|
+| spawn z | `default_z + (size − nominal)/2` (§11.3) |
+| DR 그릇·큐브 이격 | per-env footprint 반경 `s·√2/2` (§11.3) |
+| grasp 조준 z | `TABLE_TOP_BASE + half` (SM `_cube_halves`) |
+| planner face-center·chord shift | 요청 `cube_half` (§11.6) |
+
+예외는 planner world obstacle·attach blob(`CUBE_DIMS = 0.04`) 하나다 — 초기화 시 dims 가
+굳어 요청마다 못 바꾸므로 **사다리 상한**으로 고정한다(작은 큐브엔 과대근사 = 안전측).
 이벤트 정의 = §11.6, grasp 조준에 미치는 영향 = `09_TACIT_KNOWLEDGE.md §14.8`.
 
 ### 9.2 고정 배치 (DR-off)
@@ -587,6 +601,9 @@ in_spawn_area(x, y) =  |x| ≤ bell(y)                       # 좌우대칭 종�
 - `full_orient` = **6 이산 stable face × uniform yaw** (uniform SO(3) 는 폐기됨)
 - `num_active` 초과 큐브는 `z = -1.0` 으로 파킹
 - `max_attempts` 실패 시 default 좌표 fallback
+- **크기 DR 이격**: 그릇·큐브쌍 이격을 **per-env 실제 크기**의 footprint 반경으로 계산한다
+  (`_footprint_radius`). nominal 기준이면 authored 가 하한이 된 뒤로 40 mm 가 뽑힌 env 가
+  25 mm 이격으로 그릇에 10.6 mm 더 붙어 스폰된다(transit 계획 실패).
 - **크기 DR z 보정**: `final_z += (env.cube_size_m[name] − cube_sizes[i]) / 2`.
   authored z 는 nominal 반높이 기준이라, 스케일된 env 는 그만큼 내려앉혀야 한다
   (안 하면 작은 큐브가 공중에서 떨어져 튀며 DR 이 정한 xy 를 벗어난다)

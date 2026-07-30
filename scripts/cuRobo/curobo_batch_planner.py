@@ -78,10 +78,13 @@ TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
 # ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
 # 크기 DR 이 켜지면 **env 마다 다르므로 리스트**로 오고, 스칼라/누락은 하위호환 폴백이다.
 CUBE_HALF = 0.020
-# 큐브 obstacle/attach blob 한 변(m) — **크기 DR 상한**(cube_specs CUBE_SIZE_CHOICES max
-# = authored 40 mm) 고정. collision 은 과대근사가 안전측이고, world obstacle dims 는 planner
-# 초기화 시 굳어 요청마다 못 바꾼다 → 상한을 쓴다(25 mm 큐브면 뚱뚱한 박스로 계획).
-# 예전 0.05 는 50 mm 큐브 씬 유물이라 25 mm 상대로 2배까지 벌어졌다.
+# 큐브 obstacle/attach blob 한 변(m) — **크기 DR 사다리 상한**(cube_specs
+# `max(CUBE_SIZE_CHOICES)`) 고정. authored 크기(현재 25 mm = 사다리 하한)가 아니라 상한이다:
+# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어 요청마다
+# 못 바꾼다 → 어떤 env 가 어떤 크기를 뽑아도 감싸야 한다(작은 큐브면 뚱뚱한 박스로 계획).
+# 예전 0.05 는 50 mm 큐브 씬 유물이라 사다리 상한보다도 컸다.
+# ⚠ `CUBE_SIZE_CHOICES` 를 바꾸면 여기도 같이 바꾼다(planner 는 sim_to_real 를 import 하지
+#   않는 self-contained 프로세스라 자동 추종이 안 된다 — `SELF_CHECK_HALVES` 도 같은 규약).
 CUBE_DIMS = 0.04
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
 DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가

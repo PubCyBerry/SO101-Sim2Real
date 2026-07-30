@@ -359,8 +359,9 @@ def _randomize_cubes_scattered_fn(
         base_xy = root_xy + torch.tensor(base_sep_offset_xy, device=device, dtype=root_xy.dtype)
     min_base_sep_sq = min_base_sep ** 2
 
-    # 누적 배치 xy — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
+    # 누적 배치 xy / footprint 반경 — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
     placed_xy: list[torch.Tensor] = []
+    placed_r: list[torch.Tensor | None] = []
 
     min_bowl_sep_sq = min_bowl_sep ** 2
     min_cube_sep_sq = min_cube_sep ** 2
@@ -369,10 +370,23 @@ def _randomize_cubes_scattered_fn(
     # 이격을 동적 계산. cube_sizes 미지정(legacy)=스칼라 min_cube_sep/min_bowl_sep 그대로.
     #   큐브쌍: r_i + r_j + margin (40mm쌍 ≈0.057+margin → 기존 0.060 재현).
     #   그릇  : min_bowl_sep(40mm 정합값) + (r_i − r_40). 50mm 면 +0.007.
+    # ★크기 DR 이 켜지면 반경은 **env 마다 다르다**(`env.cube_size_m`) → nominal 대신 실제
+    #   크기를 쓴다. authored 가 사다리 하한(25 mm)이 된 뒤로는 이게 필수다: nominal 기준이면
+    #   40 mm 가 뽑힌 env 가 25 mm 이격으로 그릇에 10.6 mm 더 붙어 스폰된다(transit 계획 실패).
     radii = None
     if cube_sizes is not None:
         radii = [float(s) * (2.0 ** 0.5) / 2.0 for s in cube_sizes]
-        R_REF40 = 0.040 * (2.0 ** 0.5) / 2.0
+    R_REF40 = 0.040 * (2.0 ** 0.5) / 2.0
+    dr_size_map = getattr(env, CUBE_SIZE_ATTR, None) or {}
+
+    def _footprint_radius(cube_idx: int, name: str) -> torch.Tensor | None:
+        """이 큐브의 per-env footprint 반경 (n,). 크기 정보가 전혀 없으면 None."""
+        sizes = dr_size_map.get(name)
+        if sizes is not None:
+            return sizes[env_ids] * (2.0 ** 0.5) / 2.0
+        if radii is not None:
+            return torch.full((n,), radii[cube_idx], device=device, dtype=torch.float32)
+        return None
 
     n_active = len(cube_cfgs) if num_active is None else max(1, min(len(cube_cfgs), int(num_active)))
 
@@ -396,10 +410,12 @@ def _randomize_cubes_scattered_fn(
         final_y = default[:, 1].clone()
         placed = torch.zeros(n, dtype=torch.bool, device=device)
 
-        # 이 큐브의 그릇 이격 (크기 대응: 큰 큐브일수록 더 멀리)
-        cur_bowl_sep_sq = min_bowl_sep_sq
-        if radii is not None:
-            cur_bowl_sep_sq = (min_bowl_sep + (radii[cube_idx] - R_REF40)) ** 2
+        # 이 큐브의 그릇 이격 (크기 대응: 큰 큐브일수록 더 멀리). per-env 텐서 (n,).
+        r_this = _footprint_radius(cube_idx, cube_cfg.name)
+        if r_this is None:
+            cur_bowl_sep_sq = torch.full((n,), min_bowl_sep_sq, device=device, dtype=torch.float32)
+        else:
+            cur_bowl_sep_sq = (min_bowl_sep + (r_this - R_REF40)).clamp_min(0.0) ** 2
 
         for _ in range(max_attempts):
             unplaced_mask = ~placed
@@ -424,7 +440,8 @@ def _randomize_cubes_scattered_fn(
 
             # 그릇 최소 거리 확인 (큐브 크기 대응 이격)
             bxy = bowl_xy[idx]
-            ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2) >= cur_bowl_sep_sq)
+            ok = ok0 & ((cand_x - bxy[:, 0]).pow(2) + (cand_y - bxy[:, 1]).pow(2)
+                        >= cur_bowl_sep_sq[idx])
 
             # robot base 최소 거리 확인 (inner-reach spawn 금지)
             if base_xy is not None:
@@ -434,11 +451,13 @@ def _randomize_cubes_scattered_fn(
                     >= min_base_sep_sq
                 )
 
-            # 이미 배치된 큐브들과의 최소 거리 확인 (per-pair 크기 대응 이격)
+            # 이미 배치된 큐브들과의 최소 거리 확인 (per-pair·per-env 크기 대응 이격)
             for prev_idx, prev in enumerate(placed_xy):
-                pair_sep_sq = min_cube_sep_sq
-                if radii is not None:
-                    pair_sep_sq = (radii[cube_idx] + radii[prev_idx] + cube_sep_margin) ** 2
+                r_prev = placed_r[prev_idx]
+                if r_this is None or r_prev is None:
+                    pair_sep_sq = min_cube_sep_sq
+                else:
+                    pair_sep_sq = ((r_this + r_prev + cube_sep_margin) ** 2)[idx]
                 pxy = prev[idx]
                 ok = ok & (
                     (cand_x - pxy[:, 0]).pow(2) + (cand_y - pxy[:, 1]).pow(2) >= pair_sep_sq
@@ -450,6 +469,7 @@ def _randomize_cubes_scattered_fn(
             placed[accept] = True
 
         placed_xy.append(torch.stack([final_x, final_y], dim=-1))
+        placed_r.append(r_this)
 
         # orientation: full_orient 면 **이산 stable-face + random yaw**.
         #   평평한 매트 위 큐브는 6면 중 하나로만 안착 → 6 (roll,pitch) 중 택1 후 yaw 균등.
@@ -477,7 +497,7 @@ def _randomize_cubes_scattered_fn(
         # 크기 DR 보정: authored z 는 nominal 반높이 기준이라, 스케일된 env 는 그 차이만큼
         # 내려앉혀야 한다. 안 하면 작은 큐브가 (nominal−실제)/2 만큼 공중에서 떨어져
         # 튀면서 DR 이 정한 xy 를 벗어난다.
-        dr_sizes = (getattr(env, CUBE_SIZE_ATTR, None) or {}).get(cube_cfg.name)
+        dr_sizes = dr_size_map.get(cube_cfg.name)
         if dr_sizes is not None and cube_sizes is not None:
             final_z = final_z + 0.5 * (dr_sizes[env_ids] - float(cube_sizes[cube_idx]))
         if z_hi > z_lo:

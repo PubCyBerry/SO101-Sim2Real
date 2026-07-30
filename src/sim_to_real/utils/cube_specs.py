@@ -57,10 +57,13 @@ def mass_for_size(size: float) -> float:
 
 
 # ── 단일 진실 소스 — 큐브 크기/질량 변경은 여기 한 곳만 고친다 ──────────────
-#   mass: 의자다리 커버 폼이라 부피 완전비례보다 가볍게, 쉘(표면적 ∝ 변²)비례.
-#         40mm(Cube1/2): 35 g, 50mm(Cube3/4): 35×(50/40)²≈54.7 → 55 g.
+#   mass: 의자다리 커버 폼이라 부피 완전비례보다 가볍게, 쉘(표면적 ∝ 변²)비례 —
+#         `mass_for_size` 가 그 규칙이다(기준점 40mm=35g 실측).
+#   ★Cube1 = 25 mm (2026-07-30 사용자 지시로 40 → 25). 크기 DR 사다리의 **하한**이라
+#     USD scale 은 1.0~1.6 배(키우는 방향)로 걸린다 — 이격·spawn z 는 per-env 실제 크기로
+#     계산되므로 자동 추종하고, planner obstacle blob 만 별도 상한(CUBE_DIMS)을 쓴다.
 CUBE_SPECS: dict[str, CubeSpec] = {
-    "Cube1": CubeSpec("Cube1", 0.040, 0.035),
+    "Cube1": CubeSpec("Cube1", 0.025, 0.013672),
     "Cube2": CubeSpec("Cube2", 0.040, 0.035),
     "Cube3": CubeSpec("Cube3", 0.050, 0.055),
     "Cube4": CubeSpec("Cube4", 0.050, 0.055),
@@ -75,14 +78,23 @@ MAX_CUBE_SIZE: float = max(s.size for s in CUBE_SPECS.values())
 MAX_CUBE_FOOTPRINT_RADIUS: float = max(s.footprint_radius for s in CUBE_SPECS.values())
 
 # ── 크기 DR 사다리 (2026-07-29) ────────────────────────────────────────────────
-# 런타임 큐브 크기 무작위화가 뽑는 이산 후보. **authored 크기(40 mm)가 상한**이라
-# USD scale 은 항상 ≤1 이다 — 키우는 방향은 spawn z·이격·planner obstacle blob 이 모두
-# 40 mm 기준으로 굳어 있어 별도 재조정이 필요하다(줄이는 쪽은 전부 안전측).
+# 런타임 큐브 크기 무작위화가 뽑는 이산 후보. **authored 크기(Cube1 = 25 mm)가 하한**이라
+# USD scale 은 1.0~1.6 배다. 크기에 의존하는 값은 전부 per-env 실제 크기에서 파생한다:
+#   spawn z(`(size−nominal)/2` 보정) · DR 그릇/큐브 이격(footprint 반경) ·
+#   grasp 조준 z(`TABLE_TOP_BASE + half`) · planner face-center/chord shift.
+# 예외는 planner world obstacle·attach blob(`CUBE_DIMS`) 하나뿐 — 요청마다 못 바꿔서
+# **사다리 상한**으로 고정한다(작은 큐브엔 과대근사 = 안전측).
 CUBE_SIZE_CHOICES: tuple[float, ...] = (0.025, 0.030, 0.035, 0.040)
 
 
 def _self_check() -> None:
-    assert max(CUBE_SIZE_CHOICES) <= MAX_CUBE_SIZE, "DR 상한이 authored 큐브보다 크다(scale>1)"
+    # authored 크기가 사다리 안에 있어야 한다(밖이면 scale 이 사다리를 못 덮는다).
+    assert min(CUBE_SIZE_CHOICES) <= CUBE_SPECS["Cube1"].size <= max(CUBE_SIZE_CHOICES), \
+        f"authored Cube1 {CUBE_SPECS['Cube1'].size} 이 DR 사다리 밖"
+    # authored mass 는 같은 쉘 규칙에서 나와야 한다(크기만 바꾸고 질량을 잊는 사고 방지).
+    for spec in CUBE_SPECS.values():
+        assert abs(spec.mass - mass_for_size(spec.size)) < 5e-4, \
+            f"{spec.name} mass {spec.mass} != mass_for_size({spec.size})={mass_for_size(spec.size):.4f}"
     assert abs(mass_for_size(0.040) - 0.035) < 1e-9
     assert abs(mass_for_size(0.050) - 0.0546875) < 1e-9  # CUBE_SPECS 55 g 반올림과 정합
     # 5 mm 등간격

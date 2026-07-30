@@ -69,13 +69,14 @@ MATERIALS = {
 
 # 큐브 4개 scene-local 평면 배치 (이름 → x, y, yaw°). 매트 앞쪽에 흩뿌림.
 # z 와 scale·mass 는 cube_specs(단일 진실 소스)에서 파생 — 크기 변경은 cube_specs 만.
-# 단일 큐브 씬(2026-06-26): 40mm Cube1 1개만. 매트 제거.
+# 단일 큐브 씬(2026-06-26): Cube1 1개만. 매트 제거.
+# 크기는 cube_specs 가 정한다 — 2026-07-30 부터 25mm(크기 DR 사다리의 하한).
 _CUBE_LAYOUT: dict[str, tuple[float, float, float]] = {
     "Cube1": (-0.50, 0.08, 20.0),
 }
 _DESK_TOP_LOCAL: float = 0.0    # 책상 상판 윗면 scene-local z (매트 제거됨)
 _CUBE_Z_SLACK: float = 0.001    # spawn 침투 방지 여유
-# z 중심 = 책상 상판 + 큐브 반높이 + slack (40mm→0.021).
+# z 중심 = 책상 상판 + 큐브 반높이 + slack (25mm→0.0135 · 40mm→0.021).
 CUBES = tuple(
     (name, (x, y, _DESK_TOP_LOCAL + _CUBE_SPECS[name].half_extent + _CUBE_Z_SLACK), yaw)
     for name, (x, y, yaw) in _CUBE_LAYOUT.items()

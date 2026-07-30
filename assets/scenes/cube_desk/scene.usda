@@ -181,7 +181,7 @@ def Xform "Scene"
     )
     {
         float xformOp:rotateZ = 20
-        double3 xformOp:translate = (-0.14, 0.125, 0.726)
+        double3 xformOp:translate = (-0.14, 0.125, 0.7184999999999999)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
 
         over "Collision" (
