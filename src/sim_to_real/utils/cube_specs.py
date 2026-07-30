@@ -43,6 +43,19 @@ class CubeSpec:
         return self.size * 0.5 * _SQRT2
 
 
+# 쉘(표면적 ∝ 변²) 비례 질량 기준점 — 40 mm = 35 g(실물 의자다리 커버 폼 실측).
+_MASS_REF_SIZE, _MASS_REF_MASS = 0.040, 0.035
+
+
+def mass_for_size(size: float) -> float:
+    """한 변 ``size``(m) 큐브의 질량(kg) — 쉘 비례(∝ 변²).
+
+    크기 DR 이 런타임에 큐브를 스케일할 때 질량도 같은 규칙으로 따라가야 grasp 물리가
+    일관된다(부피 비례로 하면 25 mm 가 8.5 g 로 너무 가벼워 jaw 에 튕긴다).
+    """
+    return _MASS_REF_MASS * (size / _MASS_REF_SIZE) ** 2
+
+
 # ── 단일 진실 소스 — 큐브 크기/질량 변경은 여기 한 곳만 고친다 ──────────────
 #   mass: 의자다리 커버 폼이라 부피 완전비례보다 가볍게, 쉘(표면적 ∝ 변²)비례.
 #         40mm(Cube1/2): 35 g, 50mm(Cube3/4): 35×(50/40)²≈54.7 → 55 g.
@@ -60,3 +73,24 @@ CUBE_HALF_EXTENTS: dict[str, float] = {n: s.half_extent for n, s in CUBE_SPECS.i
 MAX_CUBE_SIZE: float = max(s.size for s in CUBE_SPECS.values())
 # 최대 큐브 footprint 반경 = volume inset (사각 spawn 영역 안쪽 마진).
 MAX_CUBE_FOOTPRINT_RADIUS: float = max(s.footprint_radius for s in CUBE_SPECS.values())
+
+# ── 크기 DR 사다리 (2026-07-29) ────────────────────────────────────────────────
+# 런타임 큐브 크기 무작위화가 뽑는 이산 후보. **authored 크기(40 mm)가 상한**이라
+# USD scale 은 항상 ≤1 이다 — 키우는 방향은 spawn z·이격·planner obstacle blob 이 모두
+# 40 mm 기준으로 굳어 있어 별도 재조정이 필요하다(줄이는 쪽은 전부 안전측).
+CUBE_SIZE_CHOICES: tuple[float, ...] = (0.025, 0.030, 0.035, 0.040)
+
+
+def _self_check() -> None:
+    assert max(CUBE_SIZE_CHOICES) <= MAX_CUBE_SIZE, "DR 상한이 authored 큐브보다 크다(scale>1)"
+    assert abs(mass_for_size(0.040) - 0.035) < 1e-9
+    assert abs(mass_for_size(0.050) - 0.0546875) < 1e-9  # CUBE_SPECS 55 g 반올림과 정합
+    # 5 mm 등간격
+    steps = {round(b - a, 6) for a, b in zip(CUBE_SIZE_CHOICES, CUBE_SIZE_CHOICES[1:])}
+    assert steps == {0.005}, f"5 mm 간격 아님: {steps}"
+    print(f"[cube_specs] OK sizes={CUBE_SIZE_CHOICES} "
+          f"masses={[round(mass_for_size(s), 4) for s in CUBE_SIZE_CHOICES]}")
+
+
+if __name__ == "__main__":
+    _self_check()

@@ -365,6 +365,23 @@ importlib 로 직접 로드하기 때문이다.
 **현재 활성 큐브는 `Cube1` 하나**다 (`src/sim_to_real/utils/constant.py::CUBE_NAMES = ['Cube1']`).
 나머지는 씬 USD 에 존재하지만 env cfg 가 wrap 하지 않는다.
 
+#### 9.1.1 크기 DR 사다리 (2026-07-29)
+
+`CUBE_SIZE_CHOICES = (0.025, 0.030, 0.035, 0.040)` — DR-on env 가 env 마다 하나를 뽑는다
+(등확률, 5 mm 간격). 질량은 `mass_for_size(s) = 0.035 · (s/0.040)²` (쉘 비례, `CUBE_SPECS`
+와 같은 규칙)로 함께 따라간다.
+
+| size (m) | half | mass (kg) | USD scale (`size/0.040`) |
+|---:|---:|---:|---:|
+| 0.025 | 0.0125 | 0.0137 | 0.625 |
+| 0.030 | 0.0150 | 0.0197 | 0.750 |
+| 0.035 | 0.0175 | 0.0268 | 0.875 |
+| 0.040 | 0.0200 | 0.0350 | 1.000 |
+
+**authored 40 mm 가 상한**이다 — scale ≤ 1 만 쓴다. 키우는 방향은 spawn z·DR 이격·planner
+obstacle blob 이 전부 40 mm 기준이라 함께 손봐야 한다(줄이는 쪽은 모두 안전측).
+이벤트 정의 = §11.6, grasp 조준에 미치는 영향 = `09_TACIT_KNOWLEDGE.md §14.8`.
+
 ### 9.2 고정 배치 (DR-off)
 
 | 오브젝트 | env-local 좌표 | 산출 |
@@ -484,6 +501,7 @@ DR-on(`PickCubeDREventCfg`)이 얹는 것:
 | `randomize_lights` | `reset` | dome `(1400.0, 2700.0)`, key `(1100.0, 2400.0)`, `warmth_range=(0.0, 1.0)` |
 | `randomize_camera_focal` | `reset` | `(14.0, 22.0)`, per-env 독립 샘플 |
 | `randomize_robot_color` | **`prestartup`** | §11.5 |
+| `randomize_cube_sizes` | **`prestartup`** | §11.6 — `CUBE_SIZE_CHOICES` 이산 샘플 |
 | `randomize_cube1_material` | **`startup`** | static friction `(1.4, 2.0)`, dynamic `(1.2, 1.7)`, restitution `(0.0, 0.0)`, `num_buckets=64` |
 | `randomize_cube1_mass` | **`startup`** | `mass_range=(0.9, 1.1)`, `operation="scale"` |
 
@@ -569,6 +587,9 @@ in_spawn_area(x, y) =  |x| ≤ bell(y)                       # 좌우대칭 종�
 - `full_orient` = **6 이산 stable face × uniform yaw** (uniform SO(3) 는 폐기됨)
 - `num_active` 초과 큐브는 `z = -1.0` 으로 파킹
 - `max_attempts` 실패 시 default 좌표 fallback
+- **크기 DR z 보정**: `final_z += (env.cube_size_m[name] − cube_sizes[i]) / 2`.
+  authored z 는 nominal 반높이 기준이라, 스케일된 env 는 그만큼 내려앉혀야 한다
+  (안 하면 작은 큐브가 공중에서 떨어져 튀며 DR 이 정한 xy 를 벗어난다)
 
 ### 11.4 sweep 타깃 생성
 
@@ -604,6 +625,35 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 
 `randomize_camera_focal` 기본 glob 3개: `/World/envs/env_.*/TopCamera`,
 `.../Robot/gripper/WristCamera`, `.../Robot/shoulder/FrontCamera`.
+
+### 11.6 큐브 크기 DR
+
+`randomize_cube_scale(CUBE_NAMES, CUBE_SIZE_CHOICES, base_sizes)` — mode **`prestartup`**.
+사다리·질량 규칙 = §9.1.1. env 마다 크기를 하나 뽑아 그 env 의 큐브 prim 에
+`xformOp:scale = size/base` 를 걸고 `physics:mass` 를 `mass_for_size(size)` 로 덮어쓴다.
+뽑힌 값은 `env.cube_size_m[name]` `(num_envs,)` 텐서로 남고, 이것이 **소비자의 유일한 통로**다:
+
+| 소비자 | 쓰임 |
+|---|---|
+| `_randomize_cubes_scattered_fn` | spawn z 보정(§11.3) |
+| `pickplace_sm.py::_cube_halves` | grasp 조준 z (`TABLE_TOP_BASE + half`) + planner 요청 `cube_half` |
+
+⚠ 이 표 **밖의** 소비자(`datagen/state_machine/pick_cube.py`, `pink_ik_bridge_node.py` 등
+legacy 경로)는 `CUBE_SIZES` authored nominal 을 가정한다 — 크기 DR 이 켜진 env 를 그 경로로
+돌리면 조준이 조용히 어긋난다. 크기 DR 은 현재 cuRobo SM 경로에서만 배선돼 있다.
+
+스톡 `mdp.randomize_rigid_body_scale` 을 쓰지 않는 이유 3가지(구현 주석과 동일):
+
+1. 스톡은 연속 range 만 받는다 — 사다리는 5 mm 이산이다.
+2. 스톡은 `xformOp:scale` 부재 시 `xformOpOrder` 를 `[translate, orient, scale]` 로 **덮어쓴다**.
+   씬 큐브의 order 는 `[translate, rotateZ]` 라 authored rotateZ 가 사라진다. 자체 구현은
+   `AddScaleOp()` 로 **append** 만 한다.
+3. USD scale 은 `physics:mass` 를 건드리지 않아 25 mm 큐브가 40 mm 질량으로 남는다.
+
+제약은 robot color DR(§11.5)과 같다: `replicate_physics=False` 필수(아니면 `RuntimeError`),
+**env 당 크기는 런 내내 고정**(리셋 재추첨 불가) → 다양성은 env 수 × `--seed`.
+그래서 `pickplace_sm` 의 state-only 경로는 시각 DR 만 끄고 크기 DR 은 남기며,
+`replicate_physics` 를 이 이벤트 유무로 정한다.
 
 ---
 
@@ -651,6 +701,7 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 | `BASE_XY` | `(0.0, 0.0)` | `src/sim_to_real/tasks/pick_cube/spawn_area.py::BASE_XY` |
 | `PAN_AXIS_XY` | `(-0.021, 0.023)` | `src/sim_to_real/tasks/pick_cube/spawn_area.py::PAN_AXIS_XY` |
 | `MIN_BASE_SEP` | `0.123` | `src/sim_to_real/tasks/pick_cube/spawn_area.py::MIN_BASE_SEP` |
+| `CUBE_SIZE_CHOICES` | `(0.025, 0.03, 0.035, 0.04)` | `src/sim_to_real/utils/cube_specs.py::CUBE_SIZE_CHOICES` |
 | `DESK_TOP_Z` | `0.76` | `src/sim_to_real/tasks/common/mdp/_geometry.py::DESK_TOP_Z` |
 | `JAW_GRASP_OFFSET` | `(-0.021, -0.07, 0.02)` | `src/sim_to_real/tasks/common/mdp/_geometry.py::JAW_GRASP_OFFSET` |
 | `CONTAINER_DEFAULT_CENTER_XY` | `(0.36, 0.395)` | `src/sim_to_real/tasks/common/mdp/_geometry.py::CONTAINER_DEFAULT_CENTER_XY` |

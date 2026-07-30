@@ -220,15 +220,16 @@ world obstacle: 그릇 hollow ring 8× cuboid + `"cube"`(per-request pose 주입
 | `ARM_LIMITS` (rad) | `(-1.91986, 1.91986)` `(-1.74533, 1.74533)` `(-1.69, 1.69)` `(-1.65806, 1.65806)` `(-2.74385, 2.84121)` | |
 | `TCP_TWIST_RY` | `-0.0486795` | 2.79° cone 보정 |
 | `ALPHA_SCAN_DEG` | `0, ±5, ±10, … ±50` (21개, ± interleave) | grasp 후보 스캔 |
-| `TAU_MAX_DEG` / `RHO_CAP_DEG` | `10.0` / `12.0` | knobs 로 override 가능 |
+| `TAU_MAX_DEG` / `RHO_CAP_DEG` | `25.0` / `12.0` | knobs 로 override 가능 |
 | `CHORD_CENTER_RATIO` | `0.5` | 대각 yaw chord miss 반 보정 |
-| `GRASP_Z_OFF` / `TABLE_MARGIN` | `-0.008` / `0.004` | |
+| `GRASP_Z_OFF` / `TABLE_MARGIN` | `0.0022` / `0.004` | |
 | `LIFT_BACK` / `TRANSIT_Z` / `BOWL_PULL` | `0.10` / **`0.21`** / `0.03` | |
 | `PRE_BACK_MIN/MAX` · `R0/R1` | `0.06` / `0.12` · `0.13` / `0.24` | r 적응 선형보간 |
 | `GRIP_OPEN` / `GRIP_CLOSE` / `GRIP_INIT` | `75.0` / `5.0` / `0.0` | feature `[0,100]` |
-| `CLOSE_STEPS` / `GRASP_HOLD_STEPS` / `OPEN_STEPS` / `SETTLE_STEPS` | `5` / `5` / `10` / `5` | |
+| `GRASP_HOLD_STEPS` / `SETTLE_STEPS` | `15` / `5` | hold=폐합 접촉 정착(0.5 s) — ramp 17 프레임과 짝 |
+| gripper ramp (close·open) | **유도** `grip_ramp_steps()` → 기본 17 프레임 | `|Δfeature|·rad/feature ÷ (GRIPPER_SLEW_MAX_RAD_S/CONTROL_HZ)`. 상수 하드코딩 금지 — 옛 `CLOSE_STEPS=5`/`OPEN_STEPS=10` 은 env slew cap(2.5 rad/s)을 3.2×/1.6× 넘겨 폐합이 lift 전에 끝나지 않았다(`09_TACIT_KNOWLEDGE.md §15`) |
 | `BOWL_RING_N` / `RC` / `H` | `8` / `0.080` / `0.075` | 그릇 keep-out ring |
-| `CUBE_HALF` / `CUBE_DIMS` | `0.02` / `0.05` | ⚠ 40 mm 하드코딩 |
+| `CUBE_HALF` / `CUBE_DIMS` | `0.02` / `0.04` | 반변은 **요청의 per-env `cube_half`** 가 정본, `CUBE_HALF` 는 구버전 요청 폴백. `CUBE_DIMS` = obstacle/attach blob 한 변 = 크기 DR 상한 |
 
 `GRIP_OPEN=75` 인 이유: 60 은 tangential 3 mm 오차에서 큐브가 튀어나간다(straddle 마진).
 
@@ -263,7 +264,9 @@ collision 구성(cuRobo 정석): target 큐브 = world obstacle → grasp 후 at
 | `--task` | `SimToReal-SO101-PickCube-DR-v0` |
 | `--planner` | `tcp://127.0.0.1:5599` |
 | `--num_envs` | `1` |
-| `--grasp_z` | `0.06` (robot-base frame, m) |
+| `--grasp_z` | `None` = `TABLE_TOP_BASE + cube_half` 유도(튜닝 override 전용) |
+| `--grasp_retries` | `1` — 실패 env 만 재계획·재시도(성공 env 는 init hold). `0` = 옛 1회 시도. record 모드는 재시도 안 함 |
+| `--cube_sizes` | `None` = env cfg 크기 DR 사다리 그대로. 콤마 구분 목록으로 **좁힌다** (예 `0.025` = 전 env 25 mm 고정, 크기별 성공률 진단용) |
 | `--settle` | `5` (reset 후 물리 step) |
 | `--bowl_tol` | `0.06` (성공 xy 반경, m) |
 | `--seed` | `0` |
