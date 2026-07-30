@@ -168,6 +168,44 @@ GRASP_HOLD_STEPS = 5  # 폐합 직후 정지: 접촉 안정화 후 lift(즉시 l
 OPEN_STEPS = 10     # ⑤ release 개방 ramp 프레임(정지 상태 투하)
 SETTLE_STEPS = 5    # ⑤ release 전 그릇 상공 정지 hold 프레임
 
+# ═══ 궤적 다양성 노브 (P1 후보 셔플 · P2 phase jitter) ══════════════════════════════
+# 왜: planner 는 입력에 대해 결정적이라(v0.8 `reset_seed()` 무인자 — plan_pickplace_batch
+# 주석 참조) 같은 큐브 pose 는 항상 같은 궤적을 낸다. BC 학습셋의 궤적 다양성이 0 이라는 뜻.
+# IsaacLab Mimic 의 증강 축(소스 선택 랜덤 + subtask 경계 offset)을 프레임워크 없이 여기에 둔다.
+#
+# ⚠ RNG 는 **모듈 전역**이다. planner 인스턴스에 두면 `_ensure_batch_size` 의 `self.__init__`
+#   재실행이 RNG 를 매번 되감아, num_envs 가 바뀔 때마다 같은 난수열이 반복된다.
+_RNG = np.random.default_rng()
+
+# P2 jitter 폭 — (kind, 기본상수, lo, hi). 실제 값 = knobs 기본값 + U(lo,hi)·jitter_scale.
+# ⚠ 폭은 물리 민감도에 반비례한다: grasp 폐합(close_steps)·조준 높이(grasp_z_off)는 실측
+#   튜닝값이라 좁게, 자유공간 hold(settle/open)는 넓게. 넓히려면 sweep 성공률 재측정 필수.
+JITTER_SPEC = {
+    "close_steps":      ("int",   CLOSE_STEPS,      -1.0, 3.0),
+    "grasp_hold_steps": ("int",   GRASP_HOLD_STEPS, -2.0, 5.0),
+    "settle_steps":     ("int",   SETTLE_STEPS,     -2.0, 7.0),
+    "open_steps":       ("int",   OPEN_STEPS,       -4.0, 6.0),
+    "transit_z":        ("float", TRANSIT_Z,      -0.015, 0.015),
+    "bowl_pull":        ("float", BOWL_PULL,       -0.01, 0.01),
+    "grasp_z_off":      ("float", GRASP_Z_OFF,    -0.001, 0.001),
+}
+JITTER_MIN_STEPS = 2  # ramp 카운트 하한. 1 이면 np.linspace(a,b,1)=[a] 라 gripper 가 목표에 못 닿는다.
+
+
+def sample_jitter(kn):
+    """env 1개분 phase 타이밍·기하 값 — `knobs` 기본값 ± JITTER_SPEC 폭 × `jitter_scale`.
+
+    `jitter_scale` 0(기본) = 현행 동작 그대로(난수 소비 없음). env 마다 1회씩 호출한다.
+    """
+    scale = float(kn.get("jitter_scale", 0.0))
+    out = {}
+    for name, (kind, const, lo, hi) in JITTER_SPEC.items():
+        base = float(kn.get(name, const))
+        val = base if scale <= 0.0 else base + float(_RNG.uniform(lo, hi)) * scale
+        out[name] = max(JITTER_MIN_STEPS, int(round(val))) if kind == "int" else float(val)
+    return out
+
+
 # ═══ bowl obstacle = hollow rim ring (오목 그릇 fit) ══════════════════════════════
 # cuRobo world obstacle 은 solid convex 뿐 — 오목 그릇을 solid box 로 넣으면 내부(빈 공간)가
 # retreat 자세와 허위충돌. rim 벽만 N× cuboid octagon 으로 근사(내부 hole+상단 open) →
@@ -785,8 +823,16 @@ class PickPlacePlanner:
                 continue
             cand[2]["pan_radius"] = float(pan_r)
             cands.append(cand)
+        # P1 — 접근 자세 다양성. 검사 우선순위(|α| 오름차순)는 **앞 k 개 안에서만** 흔든다.
+        # k 이후 순서는 그대로라 후보를 소진하는 어려운 셀의 도달성은 변하지 않는다
+        # (top-k 는 전부 top-down 근방 = 이미 통과하던 후보들). 기본 0/1 = 현행 결정적 동작.
+        # 호출이 env 마다 1회라 per-env 독립 샘플링이 자동으로 성립한다.
+        shuffle_k = int(kn.get("cand_shuffle_top_k", 0))
+        if shuffle_k > 1 and len(cands) > 1:
+            head = min(shuffle_k, len(cands))
+            cands[:head] = [cands[j] for j in _RNG.permutation(head)]
         msg = (f"[manifold] cube=({float(xyz[0]):+.3f},{float(xyz[1]):+.3f}) r={pan_r:.3f} "
-               f"faces={len(faces)} cands={len(cands)}")
+               f"faces={len(faces)} cands={len(cands)} shuffle_k={shuffle_k}")
         if cands:
             msg += (f" dpsi={cands[0][2]['dpsi_deg']:+.1f} rho0={cands[0][2]['rho_deg']:+.1f} "
                     f"pan={cands[0][2]['pan_deg']:+.1f}")
@@ -1188,10 +1234,11 @@ class PickPlacePlanner:
         self._ensure_batch_size(n_env)   # ※ 배치 크기 변경 시 __init__ 재실행 → cube_half 재설정 후
         self.cube_half = float(cube_half) if cube_half else CUBE_HALF
         kn = knobs or {}
-        z_off = float(kn.get("grasp_z_off", GRASP_Z_OFF))
         g_open = float(kn.get("grip_open", GRIP_OPEN))
         g_close = float(kn.get("grip_close", GRIP_CLOSE))
-        b_pull = float(kn.get("bowl_pull", BOWL_PULL))
+        # P2 — grasp_z_off·transit_z·bowl_pull·phase step 수를 **env 마다 독립 샘플링**.
+        # jitter_scale 0(기본)이면 knobs/상수 값 그대로라 현행 동작과 비트 동일하다.
+        jit = [sample_jitter(kn) for _ in range(n_env)]
         cube_off_pick_contact = bool(kn.get("disable_cube_obstacle_for_pick_contact", False))
         t_all0 = time.perf_counter()
         profile = {}
@@ -1204,7 +1251,7 @@ class PickPlacePlanner:
         per_env_bowl = bool(bowl_bls) and isinstance(bowl_bls[0], (list, tuple))
         for i, cube_bl in enumerate(cube_bls):
             cube = usd_to_urdf(cube_bl[:3])
-            cube = (cube[0], cube[1], cube[2] + z_off)
+            cube = (cube[0], cube[1], cube[2] + jit[i]["grasp_z_off"])
             cubes.append(cube)
             face_sets.append(self._cube_face_normals(cube_bl))
             cube_quats.append(cube_bl[3:7] if len(cube_bl) >= 7 else [1.0, 0.0, 0.0, 0.0])
@@ -1287,15 +1334,15 @@ class PickPlacePlanner:
         fk_pos, fk_quat, _ = self._ee_pose_axis_batch(q_lift)
         tr_pos = np.zeros((n_env, K, 3), dtype=np.float32)
         tr_quat = np.zeros((n_env, K, 4), dtype=np.float32)
-        transit_z = float(kn.get("transit_z", TRANSIT_Z)) + BASE_T[2]
         for i, (bx, by) in enumerate(bowls):
             if not lift_ok[i]:
                 tr_pos[i] = np.repeat(fk_pos[i: i + 1], K, axis=0)
                 tr_quat[i] = np.repeat(fk_quat[i: i + 1], K, axis=0)
                 continue
             bd = math.hypot(bx, by)
-            s = 1.0 - b_pull / bd if bd > 1e-6 else 1.0
+            s = 1.0 - jit[i]["bowl_pull"] / bd if bd > 1e-6 else 1.0
             px, py = bx * s, by * s
+            transit_z = jit[i]["transit_z"] + BASE_T[2]
             idx = np.argsort(np.linalg.norm(self.FK_POS_ALL - np.array((px, py, transit_z)), axis=1))[:K]
             tr_pos[i] = self.FK_POS_ALL[idx]
             tr_quat[i] = self.FK_QUAT_ALL[idx]
@@ -1342,16 +1389,21 @@ class PickPlacePlanner:
             diagnostics[i]["attached"] = bool(attached)
             diagnostics[i]["attach_failed"] = bool(attach_failed)
             diagnostics[i]["profile_ms"] = {k: float(v) for k, v in profile.items()}
+            diagnostics[i]["jitter"] = dict(jit[i])   # P2 실제 적용값(재현·분석용)
             ok = all(phases.values())
             diagnostics[i]["ok"] = ok
             if ok:
-                trajectories.append(self._assemble({
+                traj, bounds = self._assemble({
                     "approach": pre[i],
                     "grasp": desc_planned[i][0],
                     "lift": lift_planned[i][0],
                     "transit": transit_planned[i][0],
                     "retreat": retreat_planned[i][0],
-                }, g_open, g_close))
+                }, g_open, g_close, jit[i])
+                trajectories.append(traj)
+                # P3 — SM 이 phase 별 노이즈 게인을 걸 수 있게 경계를 진단에 실어 보낸다
+                # (별도 프로토콜 필드를 만들지 않는다 — diagnostics 는 이미 SM 까지 흐른다).
+                diagnostics[i]["phase_bounds"] = bounds
             else:
                 trajectories.append(None)
         self.last_plan_diag = diagnostics[0] if diagnostics else {}
@@ -1372,27 +1424,39 @@ class PickPlacePlanner:
         self.last_candidate_diag = diagnostics[0].get("candidate")
         return trajs[0]
 
-    def _assemble(self, phases, g_open, g_close):
-        """5 phase 궤적(rad) → 단일 (T,6) 시퀀스[arm deg + gripper feature].
-        gripper 폐합(grasp)·개방(release=transit 상공) ramp 을 정지 hold 에 삽입."""
+    def _assemble(self, phases, g_open, g_close, jit):
+        """5 phase 궤적(rad) → (T,6) 시퀀스[arm deg + gripper feature] + phase 경계.
+
+        gripper 폐합(grasp)·개방(release=transit 상공) ramp 을 정지 hold 에 삽입한다.
+        ``jit`` = `sample_jitter` 가 준 env 1개분 step 수(P2).
+
+        → ``(seq, bounds)``. ``bounds`` = {phase명: [start, end)} — SM 이 P3 action noise 를
+        phase 별로 게이팅하는 데 쓴다(폐합/투하 구간 노이즈 = grasp·drop 실패).
+        """
         a, de, li, tr, rt = (np.rad2deg(phases[k]) for k in
                              ("approach", "grasp", "lift", "transit", "retreat"))
-        close_hold = np.repeat(de[-1:], CLOSE_STEPS, 0)    # grasp: 정지 상태서 폐합
-        grasp_hold = np.repeat(de[-1:], GRASP_HOLD_STEPS, 0)  # 폐합 접촉 안정화 후 lift
-        settle_hold = np.repeat(tr[-1:], SETTLE_STEPS, 0)  # 그릇 상공서 짧게 정지(안정)
-        open_hold = np.repeat(tr[-1:], OPEN_STEPS, 0)      # release: 그릇 상공(transit)서 개방
+        n_close, n_hold = jit["close_steps"], jit["grasp_hold_steps"]
+        n_settle, n_open = jit["settle_steps"], jit["open_steps"]
+        close_hold = np.repeat(de[-1:], n_close, 0)     # grasp: 정지 상태서 폐합
+        grasp_hold = np.repeat(de[-1:], n_hold, 0)      # 폐합 접촉 안정화 후 lift
+        settle_hold = np.repeat(tr[-1:], n_settle, 0)   # 그릇 상공서 짧게 정지(안정)
+        open_hold = np.repeat(tr[-1:], n_open, 0)       # release: 그릇 상공(transit)서 개방
         seq = [
-            _grip(a, np.linspace(GRIP_INIT, g_open, len(a))),        # ① approach + gripper 개방(접근하며)
-            _grip(de, g_open),                                       # ② grasp descend
-            _grip(close_hold, np.linspace(g_open, g_close, CLOSE_STEPS)),  #   grasp close
-            _grip(grasp_hold, g_close),                              #   grasp settle (hold)
-            _grip(li, g_close),                                      # ③ lift
-            _grip(tr, g_close),                                      # ④ transit
-            _grip(settle_hold, g_close),                            #   settle over bowl (hold)
-            _grip(open_hold, np.linspace(g_close, g_open, OPEN_STEPS)),    # ⑤ release over bowl
-            _grip(rt, np.linspace(g_open, GRIP_INIT, len(rt))),      # ⑥ retreat + gripper→init 복원
+            ("approach", _grip(a, np.linspace(GRIP_INIT, g_open, len(a)))),   # ① + gripper 개방
+            ("grasp", _grip(de, g_open)),                                     # ② grasp descend
+            ("close", _grip(close_hold, np.linspace(g_open, g_close, n_close))),  # grasp close
+            ("grasp_hold", _grip(grasp_hold, g_close)),                       #   grasp settle
+            ("lift", _grip(li, g_close)),                                     # ③ lift
+            ("transit", _grip(tr, g_close)),                                  # ④ transit
+            ("settle", _grip(settle_hold, g_close)),                          #   settle over bowl
+            ("release", _grip(open_hold, np.linspace(g_close, g_open, n_open))),  # ⑤ release
+            ("retreat", _grip(rt, np.linspace(g_open, GRIP_INIT, len(rt)))),  # ⑥ + gripper→init
         ]
-        return np.vstack(seq).astype(np.float32)
+        bounds, cursor = {}, 0
+        for name, block in seq:
+            bounds[name] = [cursor, cursor + len(block)]
+            cursor += len(block)
+        return np.vstack([block for _, block in seq]).astype(np.float32), bounds
 
 
 def plan_batch(pl, req):
@@ -1511,6 +1575,80 @@ def self_check_geom():
     print("GEOM_SELFCHECK_OK")
 
 
+def self_check_knobs():
+    """P1/P2 다양성 노브 오프라인 self-check (planner 인스턴스·GPU 불요).
+
+    불변식:
+      (a) 노브 off(기본) = **현행 동작** — jitter 가 상수 그대로, 후보 순서 불변
+      (b) knobs 명시값이 jitter 의 base 로 쓰인다
+      (c) jitter_scale=1 이 SPEC 폭을 벗어나지 않고, int 항목이 하한 이상
+      (d) P1 셔플이 후보 **집합**을 보존하고 head 밖 순서를 건드리지 않는다
+      (e) `_assemble` phase 경계가 빈틈없이 연속하고 총합 = 궤적 길이
+    """
+    # (a) off = 상수
+    off = sample_jitter({})
+    for name, (kind, const, _lo, _hi) in JITTER_SPEC.items():
+        want = max(JITTER_MIN_STEPS, int(round(const))) if kind == "int" else float(const)
+        assert off[name] == want, f"jitter off != 상수: {name} {off[name]} vs {want}"
+    # (b) knobs override 가 base
+    ov = sample_jitter({"transit_z": 0.30, "open_steps": 20})
+    assert ov["transit_z"] == 0.30 and ov["open_steps"] == 20, f"knobs base 무시됨: {ov}"
+    # (c) scale=1 범위 + int 하한
+    for _ in range(500):
+        j = sample_jitter({"jitter_scale": 1.0})
+        for name, (kind, const, lo, hi) in JITTER_SPEC.items():
+            if kind == "int":
+                assert j[name] >= JITTER_MIN_STEPS, f"{name} 하한 위반: {j[name]}"
+                assert const + lo - 0.5 <= j[name] <= const + hi + 0.5, f"{name} 범위 이탈: {j[name]}"
+            else:
+                assert const + lo - 1e-12 <= j[name] <= const + hi + 1e-12, f"{name} 범위 이탈: {j[name]}"
+
+    # (d) 셔플 — __init__(GPU/cuRobo) 없이 후보 생성만 쓰는 stub
+    stub = PickPlacePlanner.__new__(PickPlacePlanner)
+    stub.cube_half = CUBE_HALF
+    cube_bl = [0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0]
+    faces = PickPlacePlanner._cube_face_normals(cube_bl)
+    cube = (PAN_AXIS_XY[0] + 0.18, PAN_AXIS_XY[1], 0.03)
+
+    def _key(c):
+        return (round(c[2]["alpha_deg"], 6), round(c[2]["rho_deg"], 6))
+
+    base = [_key(c) for c in stub._manifold_candidates(cube, faces, {})]
+    k = 5
+    assert len(base) > k, f"셔플 검증에 후보가 부족: {len(base)}"
+    for off_k in (0, 1):
+        got = [_key(c) for c in stub._manifold_candidates(cube, faces, {"cand_shuffle_top_k": off_k})]
+        assert got == base, f"cand_shuffle_top_k={off_k} 인데 순서가 바뀜"
+    moved = False
+    for _ in range(50):
+        sh = [_key(c) for c in stub._manifold_candidates(cube, faces, {"cand_shuffle_top_k": k})]
+        assert sorted(sh) == sorted(base), "셔플이 후보 집합을 바꿈"
+        assert sh[k:] == base[k:], "셔플이 head 밖 순서를 바꿈"
+        moved = moved or sh[:k] != base[:k]
+    assert moved, "셔플이 50회 동안 순서를 한 번도 안 바꿈 — RNG 죽었나?"
+
+    # (e) phase 경계 — `_assemble` 은 self 를 안 쓰므로 None 으로 부른다(테스트 전용 호출)
+    n_phase = 7
+    fake = {name: np.zeros((n_phase, 5), dtype=np.float64)
+            for name in ("approach", "grasp", "lift", "transit", "retreat")}
+    jit = sample_jitter({"jitter_scale": 1.0})
+    seq, bounds = PickPlacePlanner._assemble(None, fake, GRIP_OPEN, GRIP_CLOSE, jit)
+    order = ["approach", "grasp", "close", "grasp_hold", "lift",
+             "transit", "settle", "release", "retreat"]
+    assert list(bounds) == order, f"phase 순서/이름 불일치: {list(bounds)}"
+    cursor = 0
+    for name in order:
+        start, end = bounds[name]
+        assert start == cursor and end > start, f"phase 경계 불연속: {name}={bounds[name]}"
+        cursor = end
+    assert cursor == len(seq) == 5 * n_phase + sum(
+        jit[s] for s in ("close_steps", "grasp_hold_steps", "settle_steps", "open_steps")), (
+        f"경계 총합 {cursor} != 궤적 길이 {len(seq)}")
+    assert seq.shape[1] == 6, f"궤적 폭 {seq.shape[1]} != 6"
+    print(f"self-check-knobs: candidates={len(base)} phase_len={len(seq)} bounds={bounds}")
+    print("KNOBS_SELFCHECK_OK")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=5599)
@@ -1519,10 +1657,21 @@ def main():
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--self-check-geom", action="store_true",
                     help="후보 생성 기하만 오프라인 검증(planner/GPU plan 불요)")
+    ap.add_argument("--self-check-knobs", action="store_true",
+                    help="P1/P2 다양성 노브만 오프라인 검증(planner/GPU plan 불요)")
+    ap.add_argument("--rng_seed", type=int, default=None,
+                    help="다양성 노브(P1 후보 셔플·P2 jitter) RNG seed. 기본 None = OS 엔트로피"
+                         "(기동마다 다름). 재현이 필요한 A/B 에서만 고정한다")
     a = ap.parse_args()
+    global _RNG
+    _RNG = np.random.default_rng(a.rng_seed)
     if a.self_check_geom:
         self_check_geom()
         return
+    if a.self_check_knobs:
+        self_check_knobs()
+        return
+    print(f"[planner] diversity rng_seed={a.rng_seed}", flush=True)
     pl = PickPlacePlanner(max_batch_size=a.max_batch_size)
     print("[planner] ready", flush=True)
     if a.self_test:

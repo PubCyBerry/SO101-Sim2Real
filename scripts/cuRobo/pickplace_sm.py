@@ -75,6 +75,13 @@ _common.add_argument("--plan_timeout_s", type=float, default=900.0,
                           "0 = 무제한")
 _common.add_argument("--planner_knobs_json", default=None,
                      help="JSON object forwarded to cuRobo planner request.knobs")
+_common.add_argument("--action_noise", type=float, default=0.0,
+                     help="replay joint target 에 섞을 gaussian 노이즈 σ(rad). 0(기본)=끔. "
+                          "arm 5축만·phase 별 게인(_PHASE_NOISE_GAIN)으로 폐합/투하 구간은 0. "
+                          "BC 학습셋에 이탈-복귀(recovery) 샘플을 넣는 용도")
+_common.add_argument("--self_check_noise", action="store_true",
+                     help="P3 노이즈 게이팅 self-check 만 돌리고 종료(씬 생성·planner 불요). "
+                          "--headless 와 함께 쓴다")
 _common.add_argument("--log_every", type=int, default=0,
                      help="print EE/cube state every N env steps. 0(기본) = 끔 — headless "
                           "sweep 은 step 마다 3줄이 수십만 줄 stdout 이 돼 스텝률을 갉아먹는다")
@@ -160,7 +167,11 @@ from isaaclab.utils.math import (  # noqa: E402
 from isaaclab.managers import DatasetExportMode, SceneEntityCfg  # noqa: E402
 from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
-from so101_contract.feature_codec import SO101_JOINT_ORDER, policy_feature_to_sim_joint_radians  # noqa: E402
+from so101_contract.feature_codec import (  # noqa: E402
+    SO101_JOINT_ORDER,
+    clamp_sim_joint_radians,
+    policy_feature_to_sim_joint_radians,
+)
 from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER  # noqa: E402
 from so101_contract.grasp_geometry import PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
 from sim_to_real.utils.cube_specs import CUBE_HALF_EXTENTS  # noqa: E402
@@ -199,6 +210,120 @@ INIT_POSE_DEG = {
 }
 INIT_RAD = {j: math.radians(d) for j, d in INIT_POSE_DEG.items()}
 INIT_ACTION = [INIT_RAD[j] for j in SO101_JOINT_ORDER]  # env action / planner start order (rad)
+
+# ══ P3 action noise ═══════════════════════════════════════════════════════════════
+# 왜: planner 는 결정적이라 학습셋에 "궤적에서 벗어났다 돌아오는" 샘플이 0 이다. closed-loop
+# 추론의 covariate shift(= drift 벽)를 덮으려면 그 샘플이 있어야 한다. 노이즈는 **명령 target**
+# 에 섞이므로 누적되지 않는다 — 다음 스텝은 계획된 row 를 그대로 명령해 팔을 되당긴다.
+#
+# ⚠ phase 게인이 핵심이다. 폐합(close)·투하(release) 구간의 노이즈는 다양성이 아니라 그냥
+#   실패다(pad 가 face 를 빗나가거나 큐브를 그릇 밖에 던진다). 큐브를 쥔 구간(lift/transit)도
+#   마찰 파지라 흔들면 놓친다 → 자유공간(approach/retreat)에 예산을 몰아준다.
+# ponytail: descend(grasp) 전체를 0 으로 둔다. 꼬리만 0 으로 테이퍼하면 접근 다양성을 더 얻을
+#   수 있지만, 먼저 이 보수적 프로파일로 성공률 손실을 측정한 뒤 열 것.
+_PHASE_NOISE_GAIN = {
+    "approach": 1.0,    # 자유공간 — 예산 전부
+    "grasp": 0.0,       # descend 정밀도 = grasp 성패
+    "close": 0.0,       # 폐합 중 이동 금지
+    "grasp_hold": 0.0,  # 접촉 안정화
+    "lift": 0.3,        # 큐브 쥔 상태(마찰 파지)
+    "transit": 0.6,     # 큐브 쥐었지만 장애물서 멂
+    "settle": 0.0,      # 드롭 직전 정지
+    "release": 0.0,     # 투하 정밀도
+    "retreat": 1.0,     # 빈 손
+}
+# 노이즈 전용 RNG — env reset/sweep RNG 와 스트림을 섞지 않아야 --seed 재현이 유지된다.
+_NOISE_RNG = np.random.default_rng(args.seed)
+
+
+def _noise_gain(diagnostics, n_steps, n_env):
+    """(T,N) per-step 노이즈 게인 — planner 가 준 phase 경계로 게이팅.
+
+    ``phase_bounds`` 가 없으면(구버전 planner · plan-fail env) 그 env 는 **전 구간 0**.
+    경계를 추정해서 grasp 를 깨뜨리는 쪽보다 노이즈를 포기하는 쪽이 안전하다.
+    패딩 구간(짧은 궤적의 last-row 반복)은 어떤 경계에도 안 들어가 자동으로 0 이 된다 —
+    여기에 노이즈가 실리면 init 복귀 판정(`returned_home_after_motion`)이 흔들려 에피소드가
+    종료되지 않는다.
+    """
+    gain = np.zeros((n_steps, n_env), dtype=np.float32)
+    for i in range(n_env):
+        diag = diagnostics[i] if i < len(diagnostics) else None
+        bounds = (diag or {}).get("phase_bounds")
+        if not bounds:
+            continue
+        for name, span in bounds.items():
+            g = _PHASE_NOISE_GAIN.get(name, 0.0)
+            if g <= 0.0:
+                continue
+            gain[max(0, int(span[0])):min(int(span[1]), n_steps), i] = g
+    return gain
+
+
+def _apply_action_noise(tgt, diagnostics, sigma=None):
+    """(T,N,6) joint target(rad) → 노이즈 주입본. **arm 5축만**, gripper 열은 불변.
+
+    slew 는 하류 ``SlewLimitedJointPositionAction`` 이 처리하므로 여기선 속도 제한을 걸지
+    않는다. 마지막 ``clamp_sim_joint_radians`` 는 sim joint limit(arm ±π) 클램프 겸 NaN 가드다
+    — 실제 SO-101 관절 한계보다 넓어서 σ 가 작을 땐 사실상 no-op 이고, 물리 한계는 PhysX 가 건다.
+    """
+    sigma = float(args.action_noise if sigma is None else sigma)
+    if sigma <= 0.0:
+        return tgt
+    n_steps, n_env = tgt.shape[0], tgt.shape[1]
+    gain = _noise_gain(diagnostics, n_steps, n_env)
+    if not gain.any():
+        print("[sm] ⚠ action_noise 켜졌으나 적용 구간 0 — planner 가 phase_bounds 를 안 준다"
+              "(구버전 planner?)", flush=True)
+        return tgt
+    noise = _NOISE_RNG.normal(0.0, sigma, size=(n_steps, n_env, 5))
+    out = np.array(tgt, dtype=np.float32, copy=True)
+    out[:, :, :5] += (noise * gain[:, :, None]).astype(np.float32)
+    return clamp_sim_joint_radians(out)
+
+
+def _self_check_noise():
+    """P3 노이즈 게이팅 self-check — 순수 numpy(씬·GPU·planner 불요).
+
+    불변식:
+      (a) σ=0 이면 원본 비트 동일
+      (b) ``phase_bounds`` 없는 env(구버전 planner·plan-fail)는 전 구간 노이즈 0
+      (c) 게인 0 인 phase(grasp/close/grasp_hold/settle/release)는 노이즈 0
+      (d) ★패딩 구간 노이즈 0 — 여기에 노이즈가 실리면 init 복귀 판정이 흔들려 에피소드가
+          종료되지 않는다(auto-reset=export 가 안 나서 녹화가 멈춘다)
+      (e) gripper 열(idx 5)은 절대 불변
+    """
+    n_steps, n_env = 40, 3
+    # env0 = 정상(궤적 30 step + 패딩 10) · env1 = 경계 없음 · env2 = 게인 0 phase 만
+    bounds0 = {"approach": [0, 10], "grasp": [10, 15], "close": [15, 18],
+               "grasp_hold": [18, 20], "lift": [20, 23], "transit": [23, 27],
+               "settle": [27, 28], "release": [28, 29], "retreat": [29, 30]}
+    diagnostics = [{"phase_bounds": bounds0}, {}, {"phase_bounds": {"close": [0, 30]}}]
+    base = np.tile(np.asarray(INIT_ACTION, np.float32), (n_steps, n_env, 1))
+
+    assert np.array_equal(_apply_action_noise(base, diagnostics, sigma=0.0), base), "σ=0 인데 변함"
+
+    out = _apply_action_noise(base, diagnostics, sigma=0.05)
+    delta = np.abs(out - base)
+    assert np.all(delta[:, :, 5] == 0.0), "gripper 열이 오염됨"
+    assert np.all(delta[:, 1, :] == 0.0), "phase_bounds 없는 env 에 노이즈가 실림"
+    assert np.all(delta[:, 2, :] == 0.0), "게인 0 phase 에 노이즈가 실림"
+    assert np.all(delta[30:, 0, :] == 0.0), "★패딩 구간에 노이즈가 실림"
+    for name, (start, end) in bounds0.items():
+        moved = bool(np.any(delta[start:end, 0, :5] > 0.0))
+        want = _PHASE_NOISE_GAIN[name] > 0.0
+        assert moved == want, f"phase {name} 게이팅 불일치: moved={moved} want={want}"
+
+    # 게인 스케일이 실제로 반영되는가 — approach(1.0) 가 transit(0.6) 보다 크게 흔들린다
+    big = _apply_action_noise(np.tile(base, (200, 1, 1)),
+                              [{"phase_bounds": {"approach": [0, 4000], "transit": [4000, 8000]}}],
+                              sigma=0.05)
+    ref = np.tile(base, (200, 1, 1))
+    sd_app = float(np.std((big - ref)[:4000, 0, :5]))
+    sd_tra = float(np.std((big - ref)[4000:8000, 0, :5]))
+    assert sd_app > sd_tra > 0.0, f"게인 스케일 미반영: approach {sd_app:.4f} vs transit {sd_tra:.4f}"
+    print(f"self-check-noise: sd(approach)={sd_app:.4f} sd(transit)={sd_tra:.4f} "
+          f"ratio={sd_app / sd_tra:.2f} (기대 ≈ {1.0 / 0.6:.2f})")
+    print("NOISE_SELFCHECK_OK")
 
 
 # ══ 포맷/수학 헬퍼 ════════════════════════════════════════════════════════════════
@@ -732,6 +857,10 @@ class PickPlaceSM:
                 rows = np.concatenate([rows, np.tile(rows[-1:], (n_steps - len(rows), 1))])
             per_env.append(rows)
         tgt = np.stack(per_env, axis=1)  # (T, N, 6)
+        # P3 — 노이즈는 replay 루프가 아니라 **여기서 한 번에** 섞는다. 스텝별 i.i.d. 라
+        # 결과가 같고, manipulate/manipulate_record 두 루프를 건드리지 않아도 된다
+        # (기록되는 applied_target 도 노이즈 포함 실제 명령이 그대로 남는다).
+        tgt = _apply_action_noise(tgt, self.last_manip["diagnostics"])
         return "ok", {"planned": planned, "tgt": tgt}
 
     # ── replay ───────────────────────────────────────────────────────────────────
@@ -1157,6 +1286,11 @@ def run_sweep(sm):
 
 
 def main():
+    # 씬·planner 없이 순수 numpy 검증만 하고 빠진다(모듈 import 로 이미 부팅된 kit 만 닫음).
+    if args.self_check_noise:
+        _self_check_noise()
+        simulation_app.close()
+        return
     sm = PickPlaceSM()
     try:
         {"random": run_random, "fail": run_fail, "sweep": run_sweep}[args.mode](sm)

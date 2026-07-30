@@ -736,6 +736,102 @@ clamp 가 실제로 binding 하는 경우가 드물다는 뜻이다(대부분 `_
 
 ---
 
+## 15. 궤적 다양성 노브 — 왜 Mimic 을 안 쓰고 SM 에 넣었나
+
+### 15.1 문제 — 우리 데이터는 궤적 다양성이 0 이다
+
+cuRobo planner 는 **입력에 대해 결정적**이다. v0.8 `reset_seed()` 가 인자를 받지 않아 외부
+seed 로 해를 흔들 수 없고, grasp 후보는 `ALPHA_SCAN_DEG` 를 `|α|` 오름차순으로 훑어 **첫
+성공 후보를 확정**한다. 결과: 같은 큐브 pose → 항상 같은 접근각·같은 궤적·같은 길이.
+
+DR 이 큐브 **배치**는 흔들지만 **궤적**은 안 흔든다. BC 학습셋에 "궤적에서 벗어났다 돌아오는"
+샘플이 한 개도 없다는 뜻이고, 이건 closed-loop 추론의 covariate shift(=drift 벽)를 정면으로
+방치한 것이다.
+
+### 15.2 왜 IsaacLab Mimic 을 도입하지 않았나
+
+Mimic 의 핵심은 소수 시연을 새 씬으로 **SE(3) 재타깃**하는 것이다. 우리에게 안 맞는 이유 셋:
+
+1. **5-DOF manifold 파괴.** Mimic 은 `T_new = T_obj_now · T_obj_src⁻¹ · T_eef_src` 로 EEF↔객체
+   상대 pose 를 완전 보존한다. 6-DOF 전제 수식이다. SO-101 은 접근축이 pan 수직평면 안에
+   갇혀 있어(§ `curobo_batch_planner` 헤더) 재타깃된 pose 는 일반적으로 **도달 불가**다.
+   우리 planner 는 바로 그 문제를 풀려고 후보를 `(pan, α, ρ)` manifold 위에서 생성한다.
+2. **Mimic 의 다양성 ≤ 소스 시연의 다양성.** 소스를 우리 SM 으로 뽑으면 전부 같은 플래너·
+   같은 6-phase 에서 나온다 → 재타깃해도 새 전략이 안 생긴다. Mimic 이 추가로 주는 건
+   자기 노브(action noise·경계 offset)뿐인데, 그게 정확히 아래 P1~P3 다.
+3. **SkillGen 은 우리 상위집합이 아니다.** SkillGen = "시연 사이 **전이 구간만** 충돌회피
+   플래너". 우리 SM 은 **전 구간**이 충돌회피 + attach/detach 다. 게다가 `isaaclab_mimic` 의
+   플래너는 `curobo.wrap.reacher.motion_gen.MotionGen` = **cuRobo v1(0.7.x)** API 라 우리
+   v2(0.8) `BatchMotionPlanner` 와 모듈 경로부터 호환되지 않는다.
+
+→ 프레임워크를 들이는 대신 **증강 축 3개만 SM 으로 옮겼다**. 신규 파일 0, 신규 의존성 0.
+
+> 이 등식은 **소스가 사람 teleop 시연이 되는 순간 깨진다.** 실기기 시연을 증폭하고 싶어지면
+> 그때 Mimic 도입이 처음으로 정당해진다.
+
+### 15.3 P1 — 왜 top-k 안에서만 셔플하나
+
+후보 순서는 그냥 순서가 아니라 **검사 우선순위**다. `|α|` 오름차순은 top-down 우선이라는
+뜻이고, 어려운 셀은 후보를 뒤까지 소진하며 겨우 해를 찾는다. 전체를 셔플하면 그 셀들이
+"쉬운 후보를 먼저 보는" 이점을 잃는다.
+
+앞 k 개만 섞으면:
+- 후보 **집합**은 불변 → 도달 가능성 자체가 안 변한다.
+- head 밖 순서 불변 → 후보 소진형 셀의 탐색 순서가 그대로다.
+- head 안(k=3 이면 α ∈ {0°, +5°, -5°})은 전부 top-down 근방이라 어차피 통과하던 후보들이다.
+
+Mimic 의 `nearest_neighbor_object` + `nn_k=3`(상위 k 중 균등 랜덤)과 같은 발상이다.
+
+### 15.4 P2 — jitter 폭은 물리 민감도에 반비례한다
+
+`JITTER_SPEC` 한 곳에 폭이 모여 있고, **env 마다 독립 샘플링**한다(batch 공통이면 다양성이
+batch 하나로 접힌다). 폭 배분 근거:
+
+| 항목 | 폭 | 왜 |
+|---|---|---|
+| `close_steps` | -1/+3 | 폐합 속도 = 40 mm drop 의 직접 레버(§Waypoint SM 교훈). 좁게 |
+| `grasp_z_off` | ±1 mm | §14 에서 프레임 장부를 맞춘 **실측 정합값**. 건드릴 여유가 없다 |
+| `grasp_hold_steps` | -2/+5 | 접촉 안정화 시간. 늘어나는 쪽은 안전 |
+| `settle_steps`·`open_steps` | 넓게 | 자유공간 정지 hold — 실패 경로가 없다 |
+| `transit_z` | ±15 mm | ring keep-out 이 rim 을 피하는 범위 안 |
+| `bowl_pull` | ±10 mm | 드롭 XY. `--bowl_tol` 6 cm 안이라 판정 영향 없음 |
+
+step 카운트 하한 `JITTER_MIN_STEPS=2` — 1 이면 `np.linspace(a, b, 1) == [a]` 라 gripper 가
+목표값에 **도달하지 못한다**(폐합/개방이 조용히 실패).
+
+### 15.5 P3 — phase 게이팅이 노이즈 자체보다 중요하다
+
+노이즈는 **명령 target** 에 섞이므로 누적되지 않는다. 다음 스텝이 계획된 row 를 그대로
+명령해 팔을 되당긴다 → 이탈-복귀 샘플이 생긴다. 문제는 *어디에* 섞느냐다.
+
+| phase | 게인 | 근거 |
+|---|---|---|
+| approach / retreat | 1.0 | 자유공간. 손이 비었거나 아직 안 잡았다 |
+| grasp(descend) | 0.0 | descend 종점 = grasp 성패. pad 가 face 를 빗나가면 그냥 실패 |
+| close / grasp_hold | 0.0 | 폐합 중 이동 금지(§stall-press grip 물리) |
+| lift 0.3 / transit 0.6 | 낮게 | 마찰 파지라 흔들면 놓친다 |
+| settle / release | 0.0 | 투하 정밀도 = 그릇 안착 |
+| **패딩** | **0.0** | ★짧은 궤적의 last-row 반복 구간. 여기 노이즈가 실리면 `returned_home_after_motion` 이 발화하지 않아 **에피소드가 종료되지 않는다**(auto-reset=export 가 안 난다 = 녹화 정지) |
+
+`grasp` 전체를 0 으로 둔 건 보수적 선택이다. 꼬리만 0 으로 테이퍼하면 접근 다양성을 더
+얻을 수 있지만, 먼저 이 프로파일로 성공률 손실을 측정한 뒤 열 것.
+
+구현상 노이즈는 replay 루프가 아니라 `plan_batch` 에서 **궤적 텐서에 한 번에** 섞는다.
+스텝별 i.i.d. 라 결과가 같고, `manipulate`/`manipulate_record` 두 루프를 안 건드려도 되며,
+기록되는 `applied_target` 에 노이즈 포함 실제 명령이 그대로 남는다.
+
+### 15.6 RNG 를 planner 인스턴스에 두면 안 되는 이유
+
+`_ensure_batch_size` 는 batch 크기가 바뀌면 `self.__init__` 을 **다시 부른다**(cuRobo 는
+`max_batch_size` 가 곧 실제 batch 라 재생성이 유일한 방법). RNG 를 인스턴스 필드로 두면
+`--num_envs` 가 바뀔 때마다 난수열이 되감겨 같은 시퀀스가 반복된다. → **모듈 전역** `_RNG`,
+재현은 `--rng_seed` 로.
+
+SM 쪽 노이즈 RNG(`_NOISE_RNG`)도 env reset/sweep RNG 와 **스트림을 분리**한다. 섞으면
+`--action_noise` 를 켜고 끄는 것만으로 씬 레이아웃이 달라져 A/B 가 성립하지 않는다.
+
+---
+
 ## 참조
 
 - 상수의 현재 값 → `03_ENV_SPEC.md §12` 상수 대장

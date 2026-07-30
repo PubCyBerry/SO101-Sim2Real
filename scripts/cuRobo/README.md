@@ -142,12 +142,61 @@ base/bowl/exclude 경계 셀을 항상 포함한다(`spawn_area.sweep_targets`).
 - `cube_half`: 큐브 반변(m). SM 이 `cube_specs` 단일 소스에서 읽어 pose 와 **함께** 보낸다.
   없으면 planner 가 40 mm 로 폴백(구버전 호환).
 - `knobs`: 선택. `grasp_z_off`, `grip_open`, `grip_close`, `bowl_pull`, `tau_max_deg`, `rho_cap_deg`,
-  `chord_center_ratio`, `transit_z`. ⚠ **`seed` 는 no-op**(cuRobo `reset_seed()` 가 인자를 안 받아
-  외부 seed 로 해를 흔들 수 없다 = planning 은 입력에 대해 결정적). SM 은 보내지 않는다.
+  `chord_center_ratio`, `transit_z` + **다양성 노브**(아래 §궤적 다양성). ⚠ **`seed` 는 no-op**
+  (cuRobo `reset_seed()` 가 인자를 안 받아 외부 seed 로 해를 흔들 수 없다 = planning 은 입력에
+  대해 결정적). SM 은 보내지 않는다 — 다양성 RNG 는 planner 의 `--rng_seed` 가 잡는다.
 - 응답: `{"ok":true, "trajectories": [[[6]×T]|null ×N], "diagnostics":[…]}` — 실패 env 는 null.
+  성공 env 의 `diagnostics[i]` 에는 `phase_bounds`(phase→[start,end) 스텝 인덱스)와 `jitter`
+  (실제 적용된 P2 값)가 실린다. SM 의 action noise 게이팅이 `phase_bounds` 를 쓴다.
   요청 처리 중 예외가 나도 planner 는 죽지 않고 `{"ok":false,"err":…}` 로 답한다(REP 를
   빠뜨리면 REQ 클라이언트가 영원히 블록된다). SM 쪽은 `--plan_timeout_s`(기본 900 s) 초과 시
   해당 batch 를 plan-fail 로 기록하고 소켓을 재연결해 진행한다.
+
+## 궤적 다양성 노브 (P1~P3) — 기본 전부 off
+
+planner 는 입력에 대해 **결정적**이라 같은 큐브 pose 는 항상 같은 궤적을 낸다. BC 학습셋의
+궤적 다양성이 0 이라는 뜻이다. IsaacLab Mimic 의 증강 축(소스 선택 랜덤·subtask 경계 offset·
+action noise)을 mimic 프레임워크 없이 세 노브로 옮겨 놓았다. **기본값은 전부 off = 기존 동작.**
+설계 근거·게인 선택 이유 = `docs/spec/09_TACIT_KNOWLEDGE.md` §15.
+
+| # | 노브 | 위치 | 기본 | 무엇이 흔들리나 |
+|---|---|---|---|---|
+| P1 | `knobs.cand_shuffle_top_k` | planner | `0`(off) | grasp 접근각 α — 우선순위 **앞 k 개 안에서만** 셔플 |
+| P2 | `knobs.jitter_scale` | planner | `0.0`(off) | phase step 수(close/hold/settle/open) + `transit_z`·`bowl_pull`·`grasp_z_off`, **env 마다 독립** |
+| P3 | `--action_noise σ` | SM | `0.0`(off) | replay joint target 에 gaussian(rad), **arm 5축만** |
+
+```bash
+# planner — 다양성 RNG seed 고정(재현 A/B 용). 생략하면 기동마다 다르다.
+python /workspace/scripts/cuRobo/curobo_batch_planner.py --max_batch_size 16 --rng_seed 0
+
+# SM — P1+P2 는 knobs 로, P3 는 CLI 로
+python /workspace/scripts/cuRobo/pickplace_sm.py random \
+    --task SimToReal-SO101-PickCube-DR-v0 --num_envs 16 --auto_trials 64 --headless \
+    --planner_knobs_json '{"cand_shuffle_top_k": 3, "jitter_scale": 1.0}' \
+    --action_noise 0.02 --record_hdf5 /workspace/datasets/pick_cube_div.hdf5
+```
+
+- **P1** 은 후보 **집합**을 바꾸지 않는다(순서만) — head 밖 순서가 그대로라 후보를 소진하는
+  어려운 셀의 도달성은 불변이다. `k=3` 이면 α ∈ {0°, +5°, -5°} 중 랜덤 = Mimic `nn_k=3` 대응.
+- **P2** 폭은 `JITTER_SPEC` 한 곳에 있다. grasp 물리 민감 항목(`close_steps`·`grasp_z_off`)은
+  의도적으로 좁다 — 넓히려면 sweep 성공률 재측정이 선행돼야 한다.
+- **P3** 는 phase 게이팅이 핵심이다. 폐합·투하 구간의 노이즈는 다양성이 아니라 그냥 실패다 —
+  자유공간에 예산을 몰고 큐브를 쥔 구간은 낮게, 정밀 구간과 **패딩 구간은 0** 이다(패딩에
+  노이즈가 실리면 init 복귀 판정이 흔들려 에피소드가 종료되지 않는다). 게인 값 = `_PHASE_NOISE_GAIN`
+  단일 소스, 배분 근거 = 09 §15.5.
+- 노이즈는 replay 루프가 아니라 `plan_batch` 에서 **궤적 텐서에 한 번에** 섞인다. 그래서
+  기록되는 `applied_target` 에 노이즈 포함 실제 명령이 그대로 남는다.
+
+**self-check (GPU 계획 불요, 컨테이너 안에서 실행):**
+
+```bash
+# P1/P2 — 후보 집합 보존·jitter 범위·phase 경계 연속성
+docker compose -f docker/docker-compose.yaml run --rm curobo-datagen \
+    python /workspace/scripts/cuRobo/curobo_batch_planner.py --self-check-knobs
+# P3 — 게이팅·패딩 0·gripper 불변 (Isaac 부팅만 하고 씬은 안 만든다)
+docker compose -f docker/docker-compose.yaml run --rm isaac-sim \
+    python /workspace/scripts/cuRobo/pickplace_sm.py random --self_check_noise --headless
+```
 
 ## grasp/place 파이프라인 (`curobo_batch_planner.py`)
 
