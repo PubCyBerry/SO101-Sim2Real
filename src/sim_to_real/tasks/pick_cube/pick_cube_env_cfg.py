@@ -34,7 +34,9 @@ from sim_to_real.utils.constant import (
     CUBE_SIZES,
 )
 from sim_to_real.utils.domain_randomization import (
+    CameraExtrinsicDRCfg,
     randomize_camera_focal,
+    reset_camera_extrinsic_dr,
     randomize_cubes_scattered,
     randomize_lights,
     randomize_object_mass,
@@ -583,6 +585,10 @@ class PickCubeDREventCfg(SO101BaseEventCfg):
     randomize_lights = randomize_lights()
     randomize_camera_focal = randomize_camera_focal()
     randomize_robot_color = randomize_robot_color()  # leisaac resets.py 이식(plastic 바디만)
+    # 카메라 extrinsic(6-DoF pose) DR: 여기서는 **리셋 상태 초기화 + episode bias 재추첨**만.
+    # frame-wise jitter 는 PickCubeEnv.step() 훅이 한다(렌더 뒤에 도는 interval term 은 늦음).
+    # 범위·모드 단일 소스 = PickCubeDREnvCfg.camera_extrinsic_dr.
+    reset_camera_extrinsic_dr = reset_camera_extrinsic_dr()
 
     def __post_init__(self) -> None:
         # 물리 DR(startup): 큐브별 마찰/질량을 무작위화해 env 간 물리 다양성 확보.
@@ -605,6 +611,7 @@ class PickCubeDRBaseEventCfg(PickCubeDREventCfg):
     randomize_cubes = _make_randomize_cubes(
         _CUBE_BASE_X_RANGE, _CUBE_BASE_Y_RANGE, None
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +652,9 @@ class PickCubeDREnvCfg(PickCubeEnvCfg):
     """DR-on 변형(**full 모드**) — 큐브 좌우대칭 종모양 scatter + 그릇 arc + 물리·시각 DR."""
 
     events: PickCubeDREventCfg = PickCubeDREventCfg()
+    # 카메라 6-DoF extrinsic DR (episode bias + frame-wise jitter). DR-off 변형에는 이 필드가
+    # 없어 step 훅이 즉시 return 한다. 범위·축 규약·이유 = CameraExtrinsicDRCfg docstring.
+    camera_extrinsic_dr: CameraExtrinsicDRCfg = CameraExtrinsicDRCfg()
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -659,6 +669,7 @@ class PickCubeDRBaseEnvCfg(PickCubeEnvCfg):
     """DR-on **base 모드** 변형 — 큐브 스폰을 nominal 주변 좁은 사각형으로 제한(그 외 full 동일)."""
 
     events: PickCubeDRBaseEventCfg = PickCubeDRBaseEventCfg()
+    camera_extrinsic_dr: CameraExtrinsicDRCfg = CameraExtrinsicDRCfg()  # full 모드와 동일
 
     def __post_init__(self) -> None:
         super().__post_init__()

@@ -494,9 +494,13 @@ def _build_env():
         # 용으로 replicate_physics=False + robot-color/lights/focal 이벤트를 켜는데, 이는 렌더가 있어야
         # 의미 있고 headless 에선 physx view(get_dof_velocities)를 깨뜨린다. datagen(카메라 경로)은 유지.
         env_cfg.scene.replicate_physics = True
-        for _ev in ("randomize_robot_color", "randomize_lights", "randomize_camera_focal"):
+        for _ev in ("randomize_robot_color", "randomize_lights", "randomize_camera_focal",
+                    "reset_camera_extrinsic_dr"):
             if hasattr(env_cfg.events, _ev):
                 setattr(env_cfg.events, _ev, None)
+        # 카메라 extrinsic DR 도 렌더 전제 → step 훅이 카메라 부재로 no-op 이지만 명시적으로 끈다.
+        if hasattr(env_cfg, "camera_extrinsic_dr"):
+            env_cfg.camera_extrinsic_dr.enabled = False
     # Robot spawns AT the start pose from frame 0 (no neutral→init transient), reset jitter zeroed.
     env_cfg.scene.robot.init_state.joint_pos = dict(INIT_RAD)
     if hasattr(env_cfg.events, "reset_robot_joints"):

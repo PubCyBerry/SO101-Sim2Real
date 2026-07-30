@@ -613,6 +613,8 @@ bridge 기타 인자: `--num_cubes {1,2,3,4}`(기본 4) · `--cube_name` · `--d
 | `scripts/contract/validate_so101_io_contract.py` | 인자 없음 | codec·ROS 어댑터·action queue·snapshot 4-validator (`04_IO_CONTRACT.md §9`) | CPU |
 | `scripts/contract/validate_lerobot_schema.py` | `<root>` 또는 `--self-test` | 데이터셋 v3 스키마 (`05_DATA_SPEC.md §7`) | CPU(pyarrow) |
 | `scripts/contract/replay_so101_policy_snapshot.py` | `<snapshot.npz>` | 스냅샷 재현 대조 | CPU(+gRPC) |
+| `scripts/contract/validate_camera_extrinsic_dr.py` | `--headless [--csv PATH]` | 카메라 extrinsic DR 상태기계 9항목(유계·무누적·리셋 격리·smooth vs iid) (`03_ENV_SPEC.md §11.6`) | CPU 텐서 (단 SimulationApp 부팅 필요 — isaaclab math 가 pxr 요구) |
+| `scripts/contract/validate_camera_extrinsic_dr_sim.py` | `--headless --enable_cameras --camera_dr on\|off` | 같은 DR 의 in-sim 동작: Fabric 반영·링크 부착 유지·유계·성능 | **GPU** |
 | `src/so101_contract/follower_calibration.py` | `python3 <파일>` | affine round-trip·fit 복원 4종 | CPU |
 | `src/sim_to_real/tasks/pick_cube/spawn_area.py` | `python3 <파일>` | 스폰 마스크·타깃 불변식 | CPU |
 | `src/sim_to_real/tasks/pick_cube/mdp/observations.py` | `python3 <파일>` | grasp hysteresis 6케이스 | CPU(torch) |

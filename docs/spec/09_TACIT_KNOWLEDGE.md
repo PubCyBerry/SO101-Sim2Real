@@ -736,6 +736,63 @@ clamp 가 실제로 binding 하는 경우가 드물다는 뜻이다(대부분 `_
 
 ---
 
+## 15. 카메라 extrinsic DR — 왜 EventTerm 이 아니고, 왜 USD write 가 되는가
+
+frame-wise 카메라 pose DR(`03_ENV_SPEC.md §11.6`)을 만들면서 확정한 네 가지.
+
+### 15.1 ★ frame-wise 갱신은 `mode="interval"` EventTerm 으로 하면 1 프레임 늦는다
+
+- **결정**: pose write 는 `PickCubeEnv.step()` **최상단**(= `super().step()` 앞)에서 한다.
+- **근거**: `ManagerBasedRLEnv.step()` 은 decimation 루프 **안**에서 `sim.render()` 를 부르고,
+  interval 이벤트는 그 루프가 끝난 **뒤**에 `event_manager.apply(mode="interval")` 로 돈다.
+  즉 interval term 이 쓴 pose 는 다음 step 의 렌더에 처음 반영된다 → RGB 와 extrinsic
+  metadata 가 한 프레임 어긋난다.
+- **어기면**: 조용히 어긋난다. 픽셀은 그럴듯하고 라벨만 틀린다(학습이 잘못된 pose 를 배운다).
+- **앵커**: `src/sim_to_real/tasks/pick_cube/pick_cube_env.py::PickCubeEnv.step`
+
+reset 상태 초기화는 EventTerm 으로 해도 된다(`reset_camera_extrinsic_dr`) — `_reset_idx` 안에서
+돌고, 그 직후의 `num_rerenders_on_reset` 재렌더가 새 bias 를 보게 하려고 reset 핸들러가 pose 를
+바로 write 한다.
+
+### 15.2 ★ 카메라 xform 의 USD write 는 Fabric 렌더에 반영된다 (material 과 다르다)
+
+- **측정(2026-07-30, probe)**: 정지 씬에서 `cam._view.set_local_poses()` 로 로컬 x 를 크게 밀고
+  같은 step 의 RGB 를 비교 — 프레임 평균 픽셀차(0~255) `noop 0.036 / 0.20 m 이동 14.4`(top),
+  `0.078 / 24.5`(wrist, 0.05 m), `0.036 / 44.3`(front, 0.10 m). **articulation 링크 자식
+  (wrist=gripper, front=shoulder)도 동일하게 반영**된다.
+- **왜 확인이 필요했나**: `§5.5 robot color DR` 이 정확히 반대였다 — 런타임 USD material 편집이
+  Fabric 렌더에 무반영이라 Replicator 로 재작성해야 했다. 그 함정은 **material 한정**이고
+  transform 에는 해당하지 않는다는 걸 실증하기 전에는 구현 경로를 고를 수 없었다.
+- **부수 관측**: 큰 점프 직후 1 프레임에 잔상이 남는다(nominal 복원 후 픽셀차 1.2~2.8 vs noop
+  0.036) — RTX 시간축 누적(TAA/denoise). `temporal_mode="iid"` 가 비현실적인 또 하나의 이유다.
+- **앵커**: `scripts/contract/validate_camera_extrinsic_dr.py` (상태기계) ·
+  `scratch/2026-07-29-camera-extrinsic-dr/` (probe·스모크, 임시물)
+
+### 15.3 `set_world_poses` 가 아니라 `_view.set_local_poses` 를 쓴다
+
+- **결정**: private `cam._view.set_local_poses()` (IsaacLab 2.3.2 에 local pose 공개 API 없음).
+- **근거**: `Camera.set_world_poses()` 는 부모 world transform 을 USD
+  `ComputeLocalToWorldTransform` 으로 재계산해 local 을 역산한다 — 우리가 원하는 건 애초에
+  local mount 갱신이고, 부모가 physics 로 움직이는 링크(wrist/front)면 그 재계산이 비용이자
+  stale 위험이다. local 로 쓰면 **세 카메라가 같은 코드 한 줄**이 된다(top 은 부모가 정적일 뿐).
+- **검증**: world 위치를 `T_world_parent(t) ⊗ local(t)` 과 대조 — 오차 **0.000 mm**(wrist·front,
+  16 env × 120 프레임). 부모-자식 관계가 유지된다.
+
+### 15.4 nominal 은 cfg 가 아니라 prim 에서 읽는다 (convention 왕복 금지)
+
+- **결정**: `CameraExtrinsicDR.__init__` 이 `cam._view.get_local_poses()` 로 nominal 을 1회 캡처.
+- **근거**: cfg 의 `OffsetCfg.convention="world"`(fwd +X·up +Z)는 **author 시점 표기**다. prim 에
+  실제 저장된 quat 은 OpenGL/USD 카메라 규약(fwd −Z·up +Y)으로 변환돼 있어 값이 다르다
+  (`03_ENV_SPEC.md §7` 표 아래 실측값). prim 값을 기준으로 삼으면 변환 왕복이 0회가 되고,
+  teleop `--tune_cameras` 오버라이드도 자동으로 따라온다.
+- **함정**: 이 규약 때문에 delta 축 이름을 roll/pitch/yaw 로 부르면 오해가 생긴다 →
+  `x=right(tilt)` · `y=up(pan)` · `z=backward(roll)` 로 부른다.
+- **함정 2**: USD 는 `xformOp:orient` 를 `w>0` 정규형으로 돌려줄 수 있다(front nominal 은
+  `w=-0.5`). 읽어온 quat 을 **componentwise** 로 비교하면 같은 회전인데 diff≈1 로 보인다 —
+  회전 오차는 두 quat 내적의 각도(부호 무시)로 재야 한다.
+
+---
+
 ## 참조
 
 - 상수의 현재 값 → `03_ENV_SPEC.md §12` 상수 대장

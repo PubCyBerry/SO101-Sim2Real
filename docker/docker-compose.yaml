@@ -235,6 +235,9 @@ services:
       - ../scripts:/workspace/scripts
       - ../assets:/workspace/assets
       - ../outputs:/workspace/outputs
+      # scratch: 임시물(스모크 산출물·SM summary.json·probe). 안 걸면 --rm 과 함께 사라진다
+      # (pickplace_sm 기본 --summary_dir 이 /workspace/scratch 다).
+      - ../scratch:/workspace/scratch
       # datasets: datagen·teleop 모드의 LeRobot v3 출력 영속 (호스트 ./datasets)
       - ../datasets:/workspace/datasets
     # ── 환경 변수 ──────────────────────────────────────────────────────────

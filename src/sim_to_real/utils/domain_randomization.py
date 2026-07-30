@@ -31,6 +31,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ManagerTermBase
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils import configclass
 
 
 # ---------------------------------------------------------------------------
@@ -803,3 +804,330 @@ def randomize_robot_color(
         mode="prestartup",
         params={"robot_prim_glob": robot_prim_glob, "color_names": color_names},
     )
+
+
+# ---------------------------------------------------------------------------
+# 카메라 extrinsic DR (6-DoF pose) — episode bias(리셋) + frame-wise jitter(30 Hz)
+#
+# ■ 좌표계 계약 (transform 합성부와 함께 읽을 것)
+#   Camera key        : top | wrist | front            (obs/dataset key)
+#   Scene asset       : f"{key}_camera"                (TiledCamera)
+#   Parent prim       : top   = /World/envs/env_i                  (정적 xform)
+#                       wrist = /World/envs/env_i/Robot/gripper    (articulation link)
+#                       front = /World/envs/env_i/Robot/shoulder   (articulation link)
+#                       → ★셋 다 "부모 prim 기준 local xform" 갱신 하나로 동일 처리.
+#                         top 만 부모가 정적일 뿐, front 도 wrist 처럼 링크에 붙어 있다.
+#   Delta frame       : camera_local — nominal 카메라 축 기준
+#   Camera convention : prim 에 저장된 local quat = **OpenGL/USD 카메라**(fwd −Z, up +Y, right +X).
+#                       cfg 의 ``OffsetCfg.convention="world"`` 는 author 시점 표기일 뿐,
+#                       런타임 prim 값과 다르다 → nominal 을 prim 에서 읽어 변환 왕복을 없앤다.
+#                       그래서 delta 축 이름을 roll/pitch/yaw 가 아니라 **x/y/z** 로 쓴다:
+#                         x = right (tilt), y = up (pan), z = backward(= −optical, roll)
+#   Quaternion order  : wxyz (IsaacLab 전역 · XFormPrim.get/set_local_poses 동일)
+#   Euler order       : math_utils.quat_from_euler_xyz → XYZ 규약, R = Rz(z)·Ry(y)·Rx(x)
+#   Composition order : pos  = pos_nom + R(quat_nom) · Δt        (nominal 축으로 회전 후 더함)
+#                       quat = quat_nom ⊗ Δq                     (nominal **오른쪽**에 delta)
+#   Nominal source    : 최초 1회 ``cam._view.get_local_poses()`` — teleop ``--tune_cameras``
+#                       오버라이드도 자동 반영. 이후 immutable(누적 금지의 기준점).
+#   Update frequency  : env.step() 당 1회 = 30 Hz = 카메라 프레임율
+#                       (sim 120 Hz / decimation 4 / render_interval 4 / update_period 1/30 →
+#                        control·render·camera 가 같은 tick. per-camera frame counter 불필요)
+#   Temporal model    : smooth_correlated(기본, exponential smoothing) | iid
+#
+# ■ 왜 step 최상단인가: ``ManagerBasedRLEnv.step()`` 은 decimation 루프 **안**에서 렌더하고,
+#   mode="interval" EventTerm 은 그 렌더 **뒤**에 돈다 → interval term 으로 하면 1 프레임 늦는다.
+#   PickCubeEnv.step() 최상단에서 write 하면 같은 step 의 render 가 새 pose 를 쓰고, obs manager
+#   가 그 픽셀을 읽는다(RGB ↔ pose 동기, 지연 0).
+#
+# ■ Fabric 반영 (2026-07-30 실측 PASS): USD local xform write 는 세 카메라 모두 Fabric 렌더에
+#   반영된다(정지 씬 픽셀 diff: noop 0.04 vs 0.20 m 이동 14~44/255). articulation 링크 자식
+#   (wrist/front)도 동일. robot color DR 이 겪은 "USD-edit 무반영" 함정은 material 한정이었다.
+#   단 RTX 시간축 누적(TAA/denoise) 때문에 큰 점프 직후 1 프레임에 잔상이 남는다(측정 restored
+#   diff 1.2~2.8) → iid 모드가 비현실적으로 보이는 또 하나의 이유. 기본은 smooth_correlated.
+# ---------------------------------------------------------------------------
+
+
+CAMERA_DR_KEYS: tuple[str, ...] = ("top", "wrist", "front")
+"""extrinsic DR 대상 카메라 key. scene asset 이름은 ``f"{key}_camera"``."""
+
+
+@configclass
+class CameraExtrinsicDRTermCfg:
+    """카메라 1대의 extrinsic DR 범위. 모든 값은 **± 대칭 half-range**(비대칭 필요 없음).
+
+    축 = nominal 카메라 로컬(OpenGL) 축: ``x=right`` · ``y=up`` · ``z=backward(−optical)``.
+    회전도 같은 축 기준(x=tilt, y=pan, z=roll)이라 roll/pitch/yaw 로 부르지 않는다.
+
+    - ``bias_*``   : 에피소드 내 고정(리셋마다 재추첨) — 카메라 재설치/캘리브 잔차 모델.
+    - ``jitter_*`` : 매 카메라 프레임 갱신 — 미세 진동/pose 불확실성 모델.
+    """
+
+    enabled: bool = True
+    bias_trans_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    bias_rot_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    jitter_trans_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    jitter_rot_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    jitter_trans_alpha: float = 0.9
+    """translation smoothing 계수. 1 에 가까울수록 느리게 변한다(=강한 시간 상관).
+
+    ★``jitter_*`` 범위는 **hard clamp** 이고 실제로 실현되는 진폭은 그보다 훨씬 작다:
+    uniform target 을 exponential smoothing 하면
+    ``std(delta) = half_range/√3 · √((1−α)/(1+α))`` 이다. α=0.9 면 half_range 의 **0.229 배**
+    (±3 mm → std 0.40 mm, 실측 0.39~0.41 mm 일치). 진폭을 키우려면 범위를 넓히기보다 α 를
+    낮추는 게 직접적이다(대신 프레임간 변화가 커진다).
+    """
+    jitter_rot_alpha: float = 0.9
+
+
+@configclass
+class CameraExtrinsicDRCfg:
+    """카메라 3종 extrinsic DR 설정. ``PickCubeDREnvCfg.camera_extrinsic_dr`` 로 주입.
+
+    이 필드가 없거나 ``enabled=False`` 면 step 훅이 즉시 return → DR-off 변형 무영향.
+    카메라가 씬에서 제거된 경로(SM state-only, ``remove_pick_cube_cameras``)도 자동 no-op.
+    """
+
+    enabled: bool = True
+    temporal_mode: str = "smooth_correlated"
+    """``smooth_correlated``(기본) | ``iid``.
+
+    ``iid`` = 매 프레임 전 범위에서 독립 샘플 → smoothing 없음. 카메라가 순간이동하는 것처럼
+    보이고 비현실적인 optical flow·플리커가 생긴다(RTX 시간축 누적 때문에 잔상까지 섞인다).
+    frame-wise DR 논문 재현이나 강한 robustness ablation 전용 — 학습 기본값 아님.
+    """
+    use_episode_bias: bool = True
+    """리셋마다 에피소드 고정 bias 를 추첨(per-frame 비용 0). 실기기 갭의 주범은 진동이 아니라
+    설치·캘리브 오차라서 기본 on 이다. False 면 frame jitter 만 남는다."""
+    initialize_random_offset: bool = True
+    """True = 리셋 직후 첫 프레임부터 jitter 가 범위 안 임의값. False = nominal 에서 출발."""
+    target_update_interval_frames: int = 1
+    """새 jitter target 을 몇 카메라 프레임마다 뽑을지. 1 = 매 프레임(기본).
+    2/4/8 로 늘리면 target 이 유지되는 동안 delta 가 그 target 으로 수렴해 더 느린 표류가 된다."""
+
+    top: CameraExtrinsicDRTermCfg = CameraExtrinsicDRTermCfg(
+        bias_trans_m=(0.015, 0.015, 0.015),
+        bias_rot_deg=(1.5, 1.5, 1.5),
+        jitter_trans_m=(0.003, 0.003, 0.003),
+        jitter_rot_deg=(0.4, 0.4, 0.4),
+        jitter_trans_alpha=0.90,
+        jitter_rot_alpha=0.90,
+    )
+    """world 고정 oblique 부감(수직 top-down 아님, 하향 26.5°). 삼각대/클램프 재설치 오차를
+    감당해야 하므로 bias 를 가장 크게 준다."""
+    wrist: CameraExtrinsicDRTermCfg = CameraExtrinsicDRTermCfg(
+        bias_trans_m=(0.003, 0.003, 0.003),
+        bias_rot_deg=(1.0, 1.0, 1.0),
+        jitter_trans_m=(0.001, 0.001, 0.001),
+        jitter_rot_deg=(0.3, 0.3, 0.3),
+        jitter_trans_alpha=0.95,
+        jitter_rot_alpha=0.95,
+    )
+    """gripper 링크 자식(eye-in-hand). 로봇 모션 자체가 시야를 크게 흔들므로 범위를 가장 좁게,
+    smoothing 을 가장 강하게. 나사 체결 mount 라 실제 설치 오차도 작다."""
+    front: CameraExtrinsicDRTermCfg = CameraExtrinsicDRTermCfg(
+        bias_trans_m=(0.005, 0.005, 0.005),
+        bias_rot_deg=(1.0, 1.0, 1.0),
+        jitter_trans_m=(0.0015, 0.0015, 0.0015),
+        jitter_rot_deg=(0.3, 0.3, 0.3),
+        jitter_trans_alpha=0.92,
+        jitter_rot_alpha=0.92,
+    )
+    """★shoulder 링크 자식 — 고정 3인칭이 아니라 shoulder_pan 회전을 따라간다. pan 회전이
+    이미 큰 시점 변화를 주므로 wrist 급으로 좁게 잡는다."""
+
+
+class CameraExtrinsicDR:
+    """카메라 3종의 6-DoF extrinsic DR 상태 + 매 프레임 pose write.
+
+    상태는 ``(C, N, 6)`` 텐서 하나로 유지한다(C=카메라, N=env, ``[:3]``=translation m,
+    ``[3:]``=rotation rad). 카메라 3개 루프만 Python 이고 env 방향은 전부 vectorized.
+
+    ★누적 금지: pose 는 매 프레임 **nominal 에서 다시** 계산한다(현재 pose 에 delta 를 곱하지
+    않는다). temporal state 는 bounded delta 값으로만 들고 있어 장시간 실행에도 발산하지 않는다.
+    """
+
+    def __init__(self, env: ManagerBasedRLEnv, cfg: CameraExtrinsicDRCfg):
+        self.cfg = cfg
+        self._env = env
+        self._frame = 0
+        self._cams: list = []
+        self._keys: list[str] = []
+        half_bias: list[list[float]] = []
+        half_jit: list[list[float]] = []
+        alpha: list[list[float]] = []
+        pos_nom: list[torch.Tensor] = []
+        quat_nom: list[torch.Tensor] = []
+
+        for key in CAMERA_DR_KEYS:
+            term: CameraExtrinsicDRTermCfg | None = getattr(cfg, key, None)
+            if term is None or not term.enabled:
+                continue
+            cam = env.scene.sensors.get(f"{key}_camera")
+            # 카메라가 없거나(SM state-only 경로) 아직 초기화 전이면 대상에서 제외.
+            if cam is None or getattr(cam, "_view", None) is None:
+                continue
+            # nominal = prim 에 실제 저장된 local pose (OpenGL 카메라 규약, wxyz).
+            p, q = cam._view.get_local_poses()
+            pos_nom.append(p.clone().to(env.device))
+            quat_nom.append(q.clone().to(env.device))
+            self._cams.append(cam)
+            self._keys.append(key)
+            half_bias.append([*term.bias_trans_m, *(math.radians(d) for d in term.bias_rot_deg)])
+            half_jit.append([*term.jitter_trans_m, *(math.radians(d) for d in term.jitter_rot_deg)])
+            alpha.append([term.jitter_trans_alpha] * 3 + [term.jitter_rot_alpha] * 3)
+
+        self.num_cameras = len(self._cams)
+        if self.num_cameras == 0:
+            return
+        dev, n = env.device, env.num_envs
+        self._pos_nom = torch.stack(pos_nom)                       # (C, N, 3)
+        self._quat_nom = torch.stack(quat_nom)                     # (C, N, 4) wxyz
+        self._half_bias = torch.tensor(half_bias, device=dev).unsqueeze(1)   # (C, 1, 6)
+        self._half_jit = torch.tensor(half_jit, device=dev).unsqueeze(1)     # (C, 1, 6)
+        self._alpha = torch.tensor(alpha, device=dev).unsqueeze(1)           # (C, 1, 6)
+        self._bias = torch.zeros((self.num_cameras, n, 6), device=dev)
+        self._delta = torch.zeros((self.num_cameras, n, 6), device=dev)
+        self._target = torch.zeros((self.num_cameras, n, 6), device=dev)
+
+    @property
+    def keys(self) -> list[str]:
+        """DR 이 실제로 적용되는 카메라 key 목록(씬에 없거나 disabled 는 제외됨)."""
+        return list(self._keys)
+
+    def _sample(self, half: torch.Tensor, num_envs: int) -> torch.Tensor:
+        """``(C, num_envs, 6)`` uniform ``[-half, +half]``. half=0 인 축은 분기 없이 0."""
+        u = torch.rand((self.num_cameras, num_envs, 6), device=half.device) * 2.0 - 1.0
+        return u * half
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        """리셋된 env 의 temporal state 만 초기화(+ episode bias 재추첨).
+
+        리셋되지 않은 env 의 상태는 건드리지 않는다. 여기서 pose 를 즉시 write 하는 이유:
+        ``_reset_idx`` 직후 ``num_rerenders_on_reset`` 재렌더가 새 bias 를 보게 하려는 것.
+        """
+        if self.num_cameras == 0:
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self._env.num_envs, device=self._delta.device)
+        elif not torch.is_tensor(env_ids):
+            env_ids = torch.as_tensor(list(env_ids), device=self._delta.device)
+        if env_ids.numel() == 0:
+            return
+        env_ids = env_ids.to(self._delta.device)
+        n = int(env_ids.numel())
+
+        if self.cfg.use_episode_bias:
+            self._bias[:, env_ids] = self._sample(self._half_bias, n)
+        else:
+            self._bias[:, env_ids] = 0.0
+        fresh = self._sample(self._half_jit, n) if self.cfg.initialize_random_offset else \
+            torch.zeros((self.num_cameras, n, 6), device=self._delta.device)
+        self._delta[:, env_ids] = fresh
+        self._target[:, env_ids] = fresh
+        self._write(env_ids)
+
+    def update(self) -> None:
+        """카메라 프레임 1개분 jitter 갱신 + pose write. ``env.step()`` 최상단에서 호출."""
+        if self.num_cameras == 0:
+            return
+        n = self._env.num_envs
+        if self.cfg.temporal_mode == "iid":
+            # 매 프레임 독립 샘플 — smoothing 없음(ablation 전용, 클래스 docstring 참조).
+            self._delta = self._sample(self._half_jit, n)
+        else:
+            if self._frame % max(1, int(self.cfg.target_update_interval_frames)) == 0:
+                self._target = self._sample(self._half_jit, n)
+            self._delta = self._alpha * self._delta + (1.0 - self._alpha) * self._target
+            # 범위 밖으로 나갈 수는 없지만(볼록 결합) 수치 오차 방어로 clamp.
+            self._delta = torch.clamp(self._delta, -self._half_jit, self._half_jit)
+        self._frame += 1
+        self._write()
+
+    def randomized_local_poses(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """현재 delta 를 nominal 에 합성한 local pose ``((C,N,3), (C,N,4) wxyz)``.
+
+        ★nominal 에서 재계산 — 이전 프레임 pose 를 재사용하지 않는다(발산 방지).
+        회전 delta 는 nominal 오른쪽에 곱한다(= 카메라 로컬 축 기준 회전).
+        """
+        delta = self._bias + self._delta                                   # (C, N, 6)
+        pos = self._pos_nom + math_utils.quat_apply(self._quat_nom, delta[..., :3])
+        dq = math_utils.quat_from_euler_xyz(delta[..., 3], delta[..., 4], delta[..., 5])
+        quat = math_utils.quat_mul(self._quat_nom, dq)
+        return pos, torch.nn.functional.normalize(quat, dim=-1)
+
+    def _write(self, env_ids: torch.Tensor | None = None) -> None:
+        """local xform 을 USD 로 write. env 방향은 batched, 카메라 3개만 Python 루프.
+
+        ``Camera.set_world_poses`` 대신 ``_view.set_local_poses`` 를 쓰는 이유: 전자는 부모
+        world transform 을 USD ``ComputeLocalToWorldTransform`` 으로 재계산해(비용 + Fabric
+        stale 위험) local 을 역산한다. 우리가 원하는 건 애초에 local mount 갱신이다.
+        (private ``_view`` 접근 — IsaacLab 2.3.2 에 local pose 공개 API 가 없다.)
+        view index == env index 는 TiledCamera 관측이 이미 의존하는 규약이다.
+        """
+        from pxr import Sdf
+
+        pos, quat = self.randomized_local_poses()
+        if env_ids is not None:
+            pos, quat = pos[:, env_ids], quat[:, env_ids]
+        # USD write 는 CPU 값을 요구한다(set_local_poses 내부 tolist). 카메라마다 동기화하지
+        # 않도록 한 번에 옮긴다.
+        # ponytail: set_local_poses 는 prim 마다 Python xformOp Set 루프(translate·orient 각
+        # 1회전) 라 프레임당 6×num_envs 회전이다. 16 env 실측 비용 = +2.8 ms/step(79.6→82.4,
+        # +3.5%). 더 줄이려면 xformOp 두 개를 한 루프에서 쓰는 자체 writer 가 필요한데
+        # isaacsim 의 attribute 타입 처리(Quatd/Quatf)를 복제해야 한다 — 그 값어치가 될 때만.
+        pos_c, quat_c = pos.cpu(), quat.cpu()
+        idx = None if env_ids is None else env_ids.tolist()
+        with Sdf.ChangeBlock():
+            for c, cam in enumerate(self._cams):
+                cam._view.set_local_poses(pos_c[c], quat_c[c], indices=idx)
+
+
+def _get_camera_extrinsic_dr(env: ManagerBasedRLEnv) -> CameraExtrinsicDR | None:
+    """env 에 캐시된 DR 상태를 돌려주고, 없으면 만든다. cfg 없거나 off 면 None."""
+    cfg: CameraExtrinsicDRCfg | None = getattr(env.cfg, "camera_extrinsic_dr", None)
+    if cfg is None or not cfg.enabled:
+        return None
+    state: CameraExtrinsicDR | None = getattr(env, "_camera_extrinsic_dr", None)
+    if state is not None:
+        return state
+    state = CameraExtrinsicDR(env, cfg)
+    if state.num_cameras == 0:
+        # 카메라 없음(SM state-only 경로) = 정상 no-op. 캐시하지 않는다 — sensor 초기화가
+        # 아직 안 끝난 이른 호출일 수도 있어서 다음 프레임에 다시 시도한다(비용 = dict get 3회).
+        # 단 씬에 카메라가 **있는데** 잡히지 않으면 조용히 DR-off 가 되므로 한 번 경고한다.
+        if not getattr(env, "_camera_extrinsic_dr_warned", False) and any(
+                f"{k}_camera" in env.scene.sensors for k in CAMERA_DR_KEYS):
+            env._camera_extrinsic_dr_warned = True
+            print("[camera-dr] ⚠ 카메라 asset 은 있는데 sensor view 가 아직 없음 → 이 프레임 no-op",
+                  flush=True)
+        return None
+    env._camera_extrinsic_dr = state
+    print(f"[camera-dr] extrinsic DR on: {state.keys} mode={cfg.temporal_mode} "
+          f"episode_bias={cfg.use_episode_bias}", flush=True)
+    return state
+
+
+def update_camera_extrinsic_dr(env: ManagerBasedRLEnv) -> None:
+    """카메라 extrinsic DR 프레임 갱신 — ``env.step()`` **최상단**(렌더 전)에서 호출.
+
+    cfg 미주입·``enabled=False``·카메라 없는 경로에서는 즉시 return 한다.
+    """
+    state = _get_camera_extrinsic_dr(env)
+    if state is not None:
+        state.update()
+
+
+def _reset_camera_extrinsic_dr_fn(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> None:
+    state = _get_camera_extrinsic_dr(env)
+    if state is not None:
+        state.reset(env_ids)
+
+
+def reset_camera_extrinsic_dr() -> EventTerm:
+    """카메라 extrinsic DR temporal state 리셋 + episode bias 재추첨 EventTerm(reset).
+
+    frame-wise 갱신은 EventTerm 이 아니라 ``PickCubeEnv.step()`` 훅이 한다
+    (mode="interval" 은 렌더 뒤에 돌아서 1 프레임 늦다). 범위·모드는
+    ``env_cfg.camera_extrinsic_dr``(:class:`CameraExtrinsicDRCfg`) 가 단일 소스다.
+    """
+    return EventTerm(func=_reset_camera_extrinsic_dr_fn, mode="reset", params={})

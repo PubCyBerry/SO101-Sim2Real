@@ -306,6 +306,12 @@ offset convention `world`.
 튜너 회전 입력 → 저장된 quat: top `rot_xyz_deg=(63.5, 0, -168.5)`,
 wrist `(-29.5, 0, 0)`, front `(-90, 0, -90)`.
 
+> ⚠ 위 `rot` 은 **cfg author 시점 표기**(`OffsetCfg.convention="world"`, fwd +X·up +Z)다.
+> 런타임에 prim 에 저장된 local quat 은 **OpenGL/USD 카메라 규약**(fwd −Z·up +Y)으로 변환된
+> 값이라 이 표와 다르다. 실측(probe): top `(-0.085197, -0.052698, 0.523579, 0.846067)` ·
+> wrist `(0.967043, -0.254611, 0.0, 0.0)` · front `(-0.5, 0.5, -0.5, 0.5)`.
+> extrinsic DR(§11.6)이 이 prim local 값을 nominal 로 읽는 이유다.
+
 런타임 override API:
 
 | 함수 | 용도 |
@@ -483,6 +489,7 @@ DR-on(`PickCubeDREventCfg`)이 얹는 것:
 | `randomize_cubes` | `reset` | §11.2 |
 | `randomize_lights` | `reset` | dome `(1400.0, 2700.0)`, key `(1100.0, 2400.0)`, `warmth_range=(0.0, 1.0)` |
 | `randomize_camera_focal` | `reset` | `(14.0, 22.0)`, per-env 독립 샘플 |
+| `reset_camera_extrinsic_dr` | `reset` | 카메라 pose DR **상태 초기화 + episode bias 재추첨**. frame-wise 갱신은 event 가 아니라 step 훅 — §11.6 |
 | `randomize_robot_color` | **`prestartup`** | §11.5 |
 | `randomize_cube1_material` | **`startup`** | static friction `(1.4, 2.0)`, dynamic `(1.2, 1.7)`, restitution `(0.0, 0.0)`, `num_buckets=64` |
 | `randomize_cube1_mass` | **`startup`** | `mass_range=(0.9, 1.1)`, `operation="scale"` |
@@ -604,6 +611,67 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 
 `randomize_camera_focal` 기본 glob 3개: `/World/envs/env_.*/TopCamera`,
 `.../Robot/gripper/WristCamera`, `.../Robot/shoulder/FrontCamera`.
+
+### 11.6 카메라 extrinsic DR (6-DoF pose)
+
+`CameraExtrinsicDRCfg` (`utils/domain_randomization.py`) — DR 변형 2종
+(`PickCubeDREnvCfg`·`PickCubeDRBaseEnvCfg`)에 `camera_extrinsic_dr` 필드로 주입. DR-off 변형에는
+이 필드가 없어 step 훅이 즉시 return 한다.
+
+pose = **nominal ⊗ (episode bias + frame jitter)**. 두 성분의 역할이 다르다.
+
+| 성분 | 갱신 시점 | 모델링 대상 |
+|---|---|---|
+| `bias_*` | 리셋(`reset_camera_extrinsic_dr`) | 카메라 재설치·mount 위치차·calibration 잔차 |
+| `jitter_*` | 매 카메라 프레임(= 매 `env.step()`, 30 Hz) | 미세 진동·pose 불확실성 |
+
+기본 범위 (모두 **± 대칭 half-range**, 축 = nominal 카메라 로컬 OpenGL 축 `x=right`·`y=up`·`z=backward`):
+
+| 카메라 | bias trans | bias rot | jitter trans | jitter rot | alpha (trans/rot) |
+|---|---|---|---|---|---|
+| `top` | ±15 mm | ±1.5° | ±3 mm | ±0.4° | 0.90 / 0.90 |
+| `wrist` | ±3 mm | ±1.0° | ±1 mm | ±0.3° | 0.95 / 0.95 |
+| `front` | ±5 mm | ±1.0° | ±1.5 mm | ±0.3° | 0.92 / 0.92 |
+
+- `top` 만 삼각대/클램프 재설치 오차를 감당해야 해서 bias 가 가장 크다.
+- `wrist`·`front` 는 **articulation 링크 자식**이라 로봇 모션이 이미 시야를 흔든다 → 좁게, smoothing 강하게.
+  특히 `front` 는 고정 3인칭이 아니라 `shoulder_pan` 을 따라간다(§7).
+
+기타 설정: `temporal_mode="smooth_correlated"`(기본) | `"iid"`(ablation 전용) ·
+`use_episode_bias=True` · `initialize_random_offset=True` · `target_update_interval_frames=1`.
+
+> ⚠ **`jitter_*` 범위는 clamp 이고 실현 진폭이 아니다.** uniform target 을 exponential
+> smoothing 하면 `std = half_range/√3 · √((1−α)/(1+α))` — α=0.9 면 half_range 의 **0.229 배**다
+> (±3 mm → std 0.40 mm, 실측 0.39~0.41). 진폭을 키우려면 범위보다 α 를 내리는 게 직접적이다.
+> `bias_*` 는 리셋마다 uniform 1회 추첨이라 그대로 실현된다.
+
+좌표계·합성 규약(코드 주석과 동일):
+
+| 항목 | 값 |
+|---|---|
+| delta frame | `camera_local` (nominal 카메라 축) |
+| quaternion | wxyz (IsaacLab 전역) |
+| euler | `quat_from_euler_xyz` XYZ 규약, R = Rz·Ry·Rx |
+| 합성 | `pos = pos_nom + R(quat_nom)·Δt` · `quat = quat_nom ⊗ Δq` |
+| nominal 출처 | 최초 1회 `cam._view.get_local_poses()` (prim local, OpenGL) — 튜너 override 자동 반영 |
+| write | `cam._view.set_local_poses()` (`Sdf.ChangeBlock` 안, env 방향 batched) |
+| 갱신 위치 | `PickCubeEnv.step()` 최상단 = **렌더 전** |
+
+`mode="interval"` EventTerm 을 쓰지 않는 이유와 Fabric 반영 실측은
+`09_TACIT_KNOWLEDGE.md §15`. 검증기 = `scripts/contract/validate_camera_extrinsic_dr.py`.
+
+적용 범위 — **`PickCubeEnv.step()` 을 지나는 경로만**:
+
+| 경로 | 적용 |
+|---|---|
+| cuRobo SM datagen (카메라 녹화) | ✅ |
+| teleop (`teleop_se3_agent.py`) | ✅ (튜너 override 도 nominal 로 반영) |
+| SM state-only(`sweep`/`fail`, 카메라 제거) | 명시적 off (`pickplace_sm.py` 가 `enabled=False`) |
+| DR-off 변형 (`-v0`/`-Eval-v0`) | 필드 없음 → 훅 즉시 return |
+| ROS bridge VLA 폐루프 (`run_cube_desk_ros_bridge.py`) | ❌ — cfg 만 읽고 `gym.make` 를 하지 않아 `PickCubeEnv.step` 을 안 지난다. 폐루프 eval 은 nominal 카메라로 돈다(의도된 동작: eval 은 재현성 우선). |
+
+측정(16 env, 3 cam, 120 step): DR-off **79.6 ms/step** → DR-on **82.4 ms/step** (+3.5 %).
+비용은 프레임당 USD xform write(`3 × num_envs` prim)다.
 
 ---
 
