@@ -7,6 +7,8 @@ exposes the same ``AssetBaseCfg`` indirection so task configs can
 
 from __future__ import annotations
 
+import math
+import os
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
@@ -28,3 +30,71 @@ CUBE_DESK_CFG = AssetBaseCfg(
         usd_path=CUBE_DESK_USD_PATH,
     ),
 )
+
+
+# ── 실공간 스캔 배경 (opt-in) ────────────────────────────────────────────────
+# 3DGS ply → NuRec USDZ 는 ``scripts/convert/gsplat_ply_to_nurec_usdz.py`` 가 굽는다.
+# Isaac Sim 5.1 RTX 렌더러가 NuRec volume 을 내장 지원해서 gaussian 을 그대로 레이트레이싱한다.
+# 시각 전용 static 자산이고 물리 콜라이더가 없다. env 밖 ``/World`` 에 1개만 두므로
+# InteractiveScene 이 env 수만큼 복제하지 않는다(조명과 동일 이유).
+#
+# 스캔 정렬은 실측 보정 대상이라 env var 로 뺀다 — 좌표를 코드에 굽지 않는다:
+#   SO101_BACKGROUND_USD       배경 USD/USDZ 경로. **미설정이면 배경 비활성**
+#   SO101_BACKGROUND_POS       "x,y,z" (m)
+#   SO101_BACKGROUND_RPY_DEG   "roll,pitch,yaw" (deg). Rz(yaw)·Ry(pitch)·Rx(roll) 순 적용.
+#                              roll=90 이 Y-up 스캔을 Isaac Z-up 으로 세운다.
+#   SO101_BACKGROUND_SCALE     등방 스케일
+#
+# 기본값 = test_3dgs_background 스캔 정렬. **손으로 맞춘 값이 아니라
+# ``scripts/environments/fit_scan_background_alignment.py --desk 0`` 출력이다.**
+#   - scale: sim 책상 상판 높이(0.705, 실측 자산)/스캔 책상높이(0.682) = 1.0334.
+#     스캔의 폭·길이로 스케일을 잡으면 안 된다 — 가장자리가 잘려 항상 작게 나온다.
+#   - yaw −71.0°: 스캔 책상 장축(71.0°)을 world X 에, 파티션을 +y 에 둔다
+#     (로봇이 파티션을 바라보는 방향).
+#   - pos: 파티션 쪽 뒷모서리에 sim 책상 뒷변을 붙인 해.
+# 다른 스캔을 쓰면 이 값들은 의미 없다 — 위 스크립트로 다시 뽑아 env var 로 덮어쓴다.
+_DEFAULT_BACKGROUND_POS = (-0.749, -0.230, 0.894)
+_DEFAULT_BACKGROUND_RPY = (90.0, 0.0, -71.0)
+_DEFAULT_BACKGROUND_SCALE = 1.0334
+
+
+def _quat_wxyz_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    """Rz(yaw)·Ry(pitch)·Rx(roll) 합성 쿼터니언 (w, x, y, z). 입력 rad."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+def background_cfg_from_env() -> AssetBaseCfg | None:
+    """``SO101_BACKGROUND_USD`` 가 있을 때만 배경 AssetBaseCfg 를 만든다 (없으면 None)."""
+    usd_path = os.environ.get("SO101_BACKGROUND_USD", "").strip()
+    if not usd_path:
+        return None
+    if not Path(usd_path).is_file():
+        raise FileNotFoundError(f"SO101_BACKGROUND_USD={usd_path} 파일 없음")
+
+    def _triple(name: str, default: tuple[float, float, float]) -> tuple[float, float, float]:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        parts = raw.split(",")
+        if len(parts) != 3:
+            raise ValueError(f'{name} 은 "a,b,c" 형식: {raw!r}')
+        return tuple(float(v) for v in parts)  # type: ignore[return-value]
+
+    pos = _triple("SO101_BACKGROUND_POS", _DEFAULT_BACKGROUND_POS)
+    rpy = [math.radians(v) for v in _triple("SO101_BACKGROUND_RPY_DEG", _DEFAULT_BACKGROUND_RPY)]
+    raw_scale = os.environ.get("SO101_BACKGROUND_SCALE", "").strip()
+    scale = float(raw_scale) if raw_scale else _DEFAULT_BACKGROUND_SCALE
+
+    return AssetBaseCfg(
+        prim_path="/World/Background",
+        spawn=sim_utils.UsdFileCfg(usd_path=usd_path, scale=(scale, scale, scale)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=pos, rot=_quat_wxyz_from_rpy(*rpy)),
+    )

@@ -32,7 +32,7 @@ from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.utils import configclass
 
 from sim_to_real.assets.robots.lerobot import SO101_FOLLOWER_CFG
-from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG
+from sim_to_real.assets.scenes.cube_desk import CUBE_DESK_CFG, background_cfg_from_env
 from so101_contract import SO101_JOINT_ORDER
 from sim_to_real.tasks.common.mdp import SlewLimitedJointPositionActionCfg
 from sim_to_real.tasks.common.utils import SO101_JOINT_TARGET_MAX_VELOCITY
@@ -70,6 +70,10 @@ class SO101BaseSceneCfg(InteractiveSceneCfg):
         # RotateXYZ(-50,0,-35)° 등가 quat(wxyz) — 위에서 비스듬히 내리쬐어 입체감.
         init_state=AssetBaseCfg.InitialStateCfg(rot=(0.8644, -0.4031, -0.1271, -0.2725)),
     )
+
+    # 실공간 스캔 배경 (opt-in, `SO101_BACKGROUND_USD` 미설정이면 None → InteractiveScene 이 스킵).
+    # 조명과 같은 이유로 /World 계층: {ENV_REGEX_NS} 안에 두면 env 수만큼 복제된다.
+    background: AssetBaseCfg | None = background_cfg_from_env()
 
     # cube desk USD (책상·정적 지오메트리·큐브/그릇 prim 포함; 큐브/그릇은 leaf 가 wrap).
     # +y 0.01 shift: 정적 지오메트리를 로봇 기준 1cm 뒤로. 큐브/그릇 rigid body 는

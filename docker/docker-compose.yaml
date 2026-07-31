@@ -262,6 +262,13 @@ services:
       NUM_CUBES:                    "${NUM_CUBES:-1}"
       # 추가 bridge 인자 (--eval, --headless 등)
       BRIDGE_EXTRA_ARGS:            "${BRIDGE_EXTRA_ARGS:-}"
+      # 실공간 스캔 배경(3DGS NuRec, opt-in). 미설정 = 배경 없음.
+      # 생성 = scripts/convert/gsplat_ply_to_nurec_usdz.py
+      # 정렬(pos/rpy/scale)은 스캔마다 실측 보정 대상이라 env var 로 노출한다.
+      SO101_BACKGROUND_USD:         "${SO101_BACKGROUND_USD:-}"
+      SO101_BACKGROUND_POS:         "${SO101_BACKGROUND_POS:-}"
+      SO101_BACKGROUND_RPY_DEG:     "${SO101_BACKGROUND_RPY_DEG:-}"
+      SO101_BACKGROUND_SCALE:       "${SO101_BACKGROUND_SCALE:-}"
       # teleop 모드 (cross-machine teleop + LeRobot v3 record)
       #   LEADER_ENDPOINT 만 Windows leader IP 로 바꾸면 됨. 예: tcp://192.168.0.10:5556
       LEADER_ENDPOINT:              "${LEADER_ENDPOINT:-tcp://localhost:5556}"
