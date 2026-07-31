@@ -62,6 +62,10 @@ parser.add_argument("--planner_step_size", type=float, default=None,
 parser.add_argument("--motion_noise_scale", type=float, default=0.0,
                     help="계획 waypoint 에 더할 gaussian 노이즈 스케일")
 parser.add_argument("--debug_planner", action="store_true", help="planner 진단 로그")
+parser.add_argument("--record_segments", type=str, default=None,
+                    help="생성 에피소드의 **프레임별 구간 출처**를 이 JSON 에 남긴다. 증강본은 "
+                         "[cuRobo 전이 | 보간 | subtask source 재생] 이 이어붙은 결과인데 "
+                         "HDF5 엔 그 경계가 안 남아 사후 역산이 불가능하다. `--num_envs 1` 전용")
 parser.add_argument("--self_test", action="store_true",
                     help="source 없이 planner 1회 왕복 검증만 하고 종료")
 AppLauncher.add_app_launcher_args(parser)
@@ -92,6 +96,7 @@ simulation_app = app_launcher.app
 """이하 kit 부팅 후."""
 
 import asyncio  # noqa: E402
+import json  # noqa: E402
 import random  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
@@ -115,6 +120,70 @@ from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCf
 from sim_to_real.tasks.pick_cube.mimic_env import EEF_NAME  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import remove_pick_cube_cameras  # noqa: E402
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
+
+
+def _install_segment_recorder(out_path: str) -> list[dict]:
+    """생성 프레임마다 어느 구간에서 나왔는지 기록한다(관찰용, opt-in).
+
+    `DataGenerator.generate` 는 매 루프 1 waypoint 를 실행하고, 그 waypoint 는 두 곳
+    중 하나에서 온다 — `_convert_planned_trajectory_to_waypoints`(cuRobo 전이) 또는
+    `merge_eef_subtask_trajectory`(진입 보간 + source subtask 구간). 그래서 두 생성지에
+    waypoint 를 태깅하고 `MultiWaypoint.execute` 에서 태그를 읽어 프레임 순서대로 쌓는다.
+    Isaac Lab 소스는 건드리지 않는다.
+    """
+    from isaaclab_mimic.datagen.data_generator import DataGenerator
+    from isaaclab_mimic.datagen.waypoint import MultiWaypoint
+
+    episodes: list[dict] = []
+    frames: list[str] = []
+
+    def tag(waypoints, label: str, start: int = 0) -> None:
+        for wp in list(waypoints)[start:]:
+            wp._so101_segment = label
+
+    orig_plan = DataGenerator._convert_planned_trajectory_to_waypoints
+    orig_merge = DataGenerator.merge_eef_subtask_trajectory
+    orig_exec = MultiWaypoint.execute
+    orig_generate = DataGenerator.generate
+
+    def plan_wrapped(self, motion_planner, gripper_action):
+        result = orig_plan(self, motion_planner, gripper_action)
+        tag(result, "curobo_transition")
+        return result
+
+    def merge_wrapped(self, env_id, eef_name, subtask_index, prev_executed_traj, subtask_traj):
+        n_src = len(subtask_traj)  # merge 가 소비할 수 있으니 호출 **전에** 잰다
+        result = orig_merge(self, env_id, eef_name, subtask_index, prev_executed_traj, subtask_traj)
+        # 앞쪽은 진입 보간(num_interpolation_steps + num_fixed_steps), 뒤쪽 n_src 개가
+        # source 구간이다. 보간 길이는 pop_first 때문에 계산보다 실제 길이로 자른다.
+        tag(result[: max(len(result) - n_src, 0)], "interp")
+        tag(result, f"subtask{subtask_index}", start=max(len(result) - n_src, 0))
+        return result
+
+    async def exec_wrapped(self, env, success_term, env_id=0, env_action_queue=None):
+        frames.append(getattr(next(iter(self.waypoints.values())), "_so101_segment", "unknown"))
+        return await orig_exec(self, env, success_term, env_id, env_action_queue)
+
+    async def generate_wrapped(self, *a, **kw):
+        frames.clear()
+        result = await orig_generate(self, *a, **kw)
+        runs: list[list] = []
+        for label in frames:
+            if runs and runs[-1][0] == label:
+                runs[-1][2] += 1
+            else:
+                runs.append([label, sum(r[2] for r in runs), 1])
+        episodes.append({"success": bool(result.get("success")), "frames": len(frames),
+                         "segments": [{"label": l, "start": s, "length": n} for l, s, n in runs]})
+        with open(out_path, "w") as fp:
+            json.dump({"episodes": episodes}, fp, indent=1)
+        return result
+
+    DataGenerator._convert_planned_trajectory_to_waypoints = plan_wrapped
+    DataGenerator.merge_eef_subtask_trajectory = merge_wrapped
+    DataGenerator.generate = generate_wrapped
+    MultiWaypoint.execute = exec_wrapped
+    return episodes
 
 
 def _planner_step_size(env) -> float | None:
@@ -227,6 +296,11 @@ def main() -> None:
     output_dir, output_file_name = setup_output_paths(args_cli.output_file)
     task_name = args_cli.task.split(":")[-1] if args_cli.task else None
     env_name = task_name or get_env_name_from_dataset(args_cli.input_file)
+
+    if args_cli.record_segments:
+        if args_cli.num_envs != 1:
+            parser.error("--record_segments 는 --num_envs 1 전용(구간 로그가 env 간 섞인다)")
+        _install_segment_recorder(args_cli.record_segments)
 
     env, success_term = _make_env(env_name, output_dir, output_file_name)
 

@@ -305,7 +305,9 @@ def main() -> int:
             # 완수하지 못한 데모는 재생해도 성공 판정을 통과할 수 없으므로 주석 대상이 아니다 —
             # 분모에 넣으면 주석 성공률이 source 실패율만큼 깎여 보인다.
             # isaaclab2lerobotv3.py 와 같은 규약(--include_failed 로 해제).
-            if episode.success is False and not args_cli.include_failed:
+            # attr 은 h5py 가 numpy.bool_ 로 준다 — `is False` 는 항상 거짓이라 쓰면 안 된다.
+            # attr 자체가 없으면 None 이고, 그때는 판정 불가라 주석을 시도한다.
+            if episode.success is not None and not episode.success and not args_cli.include_failed:
                 skipped += 1
                 print(f"\n에피소드 #{index} ({episode_name}) 건너뜀 — source success=False")
                 continue
