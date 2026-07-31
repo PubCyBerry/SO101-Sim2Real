@@ -625,7 +625,7 @@ per-env robot **root** 에 OmniPBR 1개를 `strongerThanDescendants` 로 바인�
 | `_ROBOT_POS` | `(0.0, 0.0, 0.6749)` | `src/sim_to_real/tasks/so101_base_env_cfg.py::_ROBOT_POS` |
 | `_ROBOT_ROT` | `(0.0, 0.0, 0.0, 1.0)` | `src/sim_to_real/tasks/so101_base_env_cfg.py::_ROBOT_ROT` |
 | `BOWL_SUCCESS_RADIUS` | `0.06` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_SUCCESS_RADIUS` |
-| `BOWL_HEIGHT_RANGE` | `(0.005, 0.12)` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_HEIGHT_RANGE` |
+| `BOWL_HEIGHT_RANGE` | `(0.005, 0.06)` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_HEIGHT_RANGE` |
 | `_DESK_TOP_WORLD_Z` | `0.705` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_DESK_TOP_WORLD_Z` |
 | `_CUBE_Z_SLACK` | `0.001` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_CUBE_Z_SLACK` |
 | `_CUBE_LAYOUT` | `{'Cube1': (-0.015, 0.255, 0.0)}` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_CUBE_LAYOUT` |

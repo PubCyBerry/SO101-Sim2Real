@@ -90,6 +90,9 @@ flowchart TD
 | 로봇 actuator 튜닝 | `src/sim_to_real/assets/robots/lerobot.py` |
 | 데이터셋 스키마 | `src/sim_to_real/data/lerobot_recorder.py` |
 | cuRobo robot config (54 sphere · `tcp_grasp`) | `assets/robots/so101.yml` |
+| cuRobo 계획 프레임(USD↔URDF) · 충돌 씬 기하(그릇 ring · 큐브 dims) | `src/so101_contract/curobo_frames.py` |
+| 5-DOF 도달 orientation manifold `(pan, α, ρ)` · 목표 pose 투영 | `src/so101_contract/grasp_manifold.py` |
+| fixed jaw pad 기하(`FIXED_INNER_CENTER` · `PAD_LOW_OFF` · `TABLE_TOP_BASE`) | `src/so101_contract/grasp_geometry.py` |
 | 씬 물리 상수 | `scripts/environments/author_pick_cube_scene.py` |
 
 이 명세서의 수치는 위 파일들의 **사본**이다. 갈라지면 코드가 옳다.

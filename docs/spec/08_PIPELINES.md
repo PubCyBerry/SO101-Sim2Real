@@ -14,6 +14,7 @@ flowchart LR
         R2["sim teleop record"]
         R3["SM datagen"]
         R4["cuRobo 2-proc SM<br/>(현행 주력)"]
+        R5["Mimic/SkillGen 증강<br/>(in-process cuRobo v0.8)"]
     end
     subgraph conv["변환"]
         C1["isaaclab2lerobotv3"]
@@ -29,6 +30,7 @@ flowchart LR
     R3 --> C1 --> T
     R4 --> C1
     R4 --> T
+    R4 --> R5 --> C1
     T --> I --> E
     T --> C3
     R1 --> C2
@@ -39,6 +41,7 @@ flowchart LR
 | 목표 | 경로 |
 |---|---|
 | 대량 VLA 학습 데이터(sim, 결정적) | §5 cuRobo SM |
+| 소수 데모를 배치 다양성으로 증강 | §5.9 Mimic/SkillGen (source = §5.6 녹화본) |
 | 사람 시연 데이터(sim) | §4 sim teleop |
 | 실기기 시연 데이터 | §2 실기기 record |
 | 실기기 데이터를 sim 에서 replay | §7.2 + `04_IO_CONTRACT.md §4` |
@@ -459,6 +462,123 @@ v3 레이아웃상 아래를 전부 맞춰야 한다 — 단순 파일 복사로
 | `meta/tasks.parquet` | 단일 task 라 그대로 복사 |
 
 **검증**: `python scripts/contract/validate_lerobot_schema.py <v3_dir>` (오류 0 · 경고 0).
+
+---
+
+### 5.9 Isaac Lab Mimic / SkillGen 증강
+
+**입력**: §5.6 `--record_hdf5` 산출물(소수 데모) — `initial_state` + `actions` 필요.
+**출력**: 새 물체 배치로 증강된 HDF5(성공/실패 분리 파일).
+
+datagen 코어는 **이미지 설치본**(`isaaclab_mimic` 1.0.16, cuRobo 무관)을 그대로 쓴다. 우리가
+가진 것은 env 어댑터·subtask 계약·cuRobo v0.8 planner 뿐이다.
+
+| 구성 | 위치 |
+|---|---|
+| Mimic env(`ManagerBasedRLMimicEnv` 8 훅) | `src/sim_to_real/tasks/pick_cube/mimic_env.py` |
+| subtask 계약(`datagen_config`·`subtask_configs`) | `.../mimic_env_cfg.py` |
+| SkillGen 전이 planner(cuRobo **v0.8**) | `src/sim_to_real/datagen/skillgen_planner.py` |
+| 프레임·충돌 씬 기하 단일 소스 | `src/so101_contract/curobo_frames.py` |
+| 등록 env | `SimToReal-SO101-PickCube-Mimic-v0`(DR-off) · `-Mimic-DR-v0`(DR-on) |
+
+subtask 2개: `Cube1`/`cube_grasped` → `Bowl`/`place_cube1`.
+
+planner 가 **in-process** 라 §5.1 의 ZMQ planner 컨테이너를 띄우지 않는다. 셋 다
+`curobo-datagen` 서비스 하나에서 돈다(cuRobo v0.8 이 있는 이미지가 그것뿐이다).
+
+```bash
+DC="docker compose --env-file .env -f docker/docker-compose.yaml run --rm curobo-datagen"
+
+# ① self-check (source 불요 — 프레임 왕복·IK 투영·plan_cspace·retiming)
+$DC python /workspace/scripts/datagen/generate_mimic_dataset.py --self_test \
+    --task SimToReal-SO101-PickCube-Mimic-v0 --headless
+
+# ② subtask 주석 (공식 annotate_demos.py 의 --auto 경로 이식본)
+$DC python /workspace/scripts/datagen/annotate_mimic_demos.py \
+    --task SimToReal-SO101-PickCube-Mimic-v0 \
+    --input_file /workspace/datasets/src.hdf5 \
+    --output_file /workspace/datasets/src_annotated.hdf5 --headless
+
+# ③ 증강 생성
+$DC python /workspace/scripts/datagen/generate_mimic_dataset.py \
+    --task SimToReal-SO101-PickCube-Mimic-DR-v0 \
+    --input_file /workspace/datasets/src_annotated.hdf5 \
+    --output_file /workspace/datasets/mimic_gen.hdf5 \
+    --generation_num_trials 100 --headless --enable_cameras
+```
+
+② 는 왜 우리 스크립트인가: 이미지의 공식 `annotate_demos.py` 는 `isaaclab_mimic.envs` 와
+`isaaclab_tasks` 만 import 해서 **우리 gym 등록을 못 본다**(`NameNotFound:
+SimToReal-SO101-PickCube-Mimic`). `--auto` 경로만 최소 이식했고 대화형 수동 주석은 없다.
+
+`--no_skillgen` 은 planner 없이 순수 Mimic 보간 전이로 생성한다(대조군).
+
+**recorder 규약** — `--enable_cameras` 면 ③ 이 SM datagen 과 **같은** `SO101DatagenRecorderManagerCfg`
+를 쓴다. 그래야 생성본이 §7.1 변환기 계약(`obs_x/joint_pos` · `obs_x/images/*` · `applied_target`)을
+그대로 만족해 **변환기를 손대지 않고** LeRobot v3 로 넘어간다. 공식 `setup_env_config` 의 stock
+`ActionStateRecorderManagerCfg` 는 `actions`/`obs`/`states` 만 남겨 변환이 불가하다.
+⚠ 대신 생성본에는 `obs/datagen_info` 가 없어 **다시 mimic source 로는 못 쓴다**(학습 데이터셋 용도).
+source 가 더 필요하면 §5.6 SM 녹화본을 늘린다.
+
+```bash
+# ④ LeRobot v3 변환 + 스키마 검증 (기존 스크립트 그대로)
+$DC python /workspace/scripts/convert/isaaclab2lerobotv3.py \
+    --hdf5_files /workspace/datasets/mimic_gen.hdf5 \
+    --output_dir /workspace/datasets/mimic_gen_v3 --overwrite
+$DC python /workspace/scripts/contract/validate_lerobot_schema.py \
+    /workspace/datasets/mimic_gen_v3
+```
+
+**★공식본과 의도적으로 다른 3가지** (`skillgen_planner.py` docstring 이 정본):
+
+1. **pose-goal 대신 IK 투영 + `plan_cspace`.** SO-101 은 5축이라 임의 6-DOF pose goal 이
+   대체로 불가다. 목표 pose 를 `SO101BoundedIK`(position 우선)로 도달 manifold 에 투영한 뒤
+   그 관절 배치로 계획한다 → 도착 자세가 이어질 subtask 구간 시작 자세와 **동일**.
+2. **USD stage 자동 추출 대신 선언적 씬.** v0.8 은 obstacle 집합이 생성 시 굳는다. 또 우리 씬은
+   책상을 obstacle 로 넣으면 안 되고(로봇 base 구가 상판 안 → 전 plan start-collision) 그릇은
+   오목이라 hollow rim ring 으로 근사해야 한다.
+3. **sphere/plan 시각화 미이식** — 진단 전용, v0.8 대응 API 없음.
+
+**알려진 함정 3**:
+
+| 증상 | 원인·조치 |
+|---|---|
+| cuRobo 커널 임포트가 `TypeError: func() got an unexpected keyword argument 'module'` | env 생성이 kit `omni.warp.core`(1.8.2)를 먼저 물었다. **`import warp` 를 AppLauncher 보다 먼저** (드라이버 첫 줄) |
+| 모든 계획이 `Start or End state in collision`, obstacle 을 다 꺼도 실패 | ⓐ 홈 자세가 URDF limit 밖(USD ±105° > URDF ±100°) → start clamp ⓑ parked 자세 sphere sub-mm 오겹침 4쌍 → planner 파생 yml 의 `self_collision_ignore` 완화. 진단 = `planner.diagnose_state(q)` 가 제약 이름으로 알려준다 |
+| 모든 전이가 `element 0 of tensors does not require grad` | `env_loop` 이 `torch.inference_mode()` 로 감싸는데 cuRobo v0.8 LBFGS 는 autograd 가 필요. planner 가 `torch.inference_mode(False)` 로 자체 해제한다(이미 반영) |
+
+**검증 상태(as-built, 2026-07-30 GPU 스모크)** — source → 주석 → 증강 → **LeRobot v3** 전부 관통:
+
+| 단계 | 결과 |
+|---|---|
+| ① source (SM `random --auto_trials 5 --num_envs 2`) | **10/10** placed · 3.8 GB |
+| ② 주석 | **8/10** export (2건 = 개루프 재생이 성공 판정 미달, 접촉 카오스) |
+| ③ 증강 생성 (source 8, `--generation_num_trials 5`, 카메라 on) | **5/11 시도 = 45.5%** |
+| ④ LeRobot v3 변환 | **5 에피소드 · 1,748 프레임 · 3-cam mp4 · 46 MB** |
+| ⑤ `validate_lerobot_schema` | **PASS — 오류 0 · 경고 0** (`v3.0` · `so_follower` · 30 fps) |
+| planner self-check | adapter FK ↔ cuRobo FK 차이 **0.000000** · start 제약 전부 0 · 도착오차 0.0 mm |
+| planner IK 경로 | full-pose DLS **20** / position-only 폴백 **9** / 실패 2 |
+| 속도 연속성 | `wrist_roll` p99 **1.065** rad/s · 상한(5.0) 초과 **0** 프레임 |
+
+**속도 연속성(전환 경계)** — 증강본은 전환마다 손목을 후려치기 쉽다. source 대비 검증치:
+
+| joint | cap | source max | 증강 max |
+|---|---|---|---|
+| shoulder_pan | 5.00 | 1.64 | 1.28 |
+| shoulder_lift | 5.00 | 1.59 | 1.62 |
+| elbow_flex | 5.00 | 1.52 | 1.69 |
+| wrist_flex | 5.00 | 1.25 | 1.32 |
+| wrist_roll | 5.00 | 0.77 | 3.30(2 프레임 blip 1회) |
+| gripper | 2.50 | **2.50** | **2.50** |
+
+`gripper` 포화는 **source 고유**다(SM 이 상한보다 빠르게 개폐 명령 → 슬루가 16 프레임에 걸쳐 깎음).
+`wrist_roll` 이 상한에 붙으면 회귀다 — 원인·해법 = `TROUBLESHOOTING.md` "wrist_roll 을 슬루 상한으로
+후려침". 측정 = `scratch/measure_velocity.py <v3_dir>`.
+
+⚠ **45.5% 는 튜닝 전 수치다.** source 8개·`action_noise=0`·기본 subtask 파라미터로 잰 것이고,
+5-DOF 팔에서 object-centric SE(3) 변환 목표가 도달 manifold 밖으로 나가는 구조적 한계가 남아 있다
+(구 v0.7 이식본은 같은 벽에서 튜닝 끝에 70.2% 였다 — 메모리 `skillgen-curobo-integration-done`).
+성공률 개선은 별건이며 레버는 source 풀 크기 · subtask 경계 offset · `mimic_approach_radius_m` 이다.
 
 ---
 

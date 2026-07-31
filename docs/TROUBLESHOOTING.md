@@ -4435,3 +4435,154 @@ Isaac Sim 은 **Fabric(flatcache)** 로 렌더한다 → **런타임 USD materia
 
 ### 확인 방법
 `-DR-v0` num_envs=3 top_camera 캡처 = 3 로봇이 서로 다른 팔레트 단일색(pairwise 패치 diff ~34–49, 고장 시 ~2). grasp 물리 무영향(replicate_physics=False 서 sweep 21/23≈91%).
+
+## cuRobo v0.8 커널 임포트가 `wp.kernel(module=…)` 미지원으로 죽음 (Isaac kit 이 warp 1.8.2 를 선점)
+
+### 현상
+Isaac Sim/Isaac Lab 프로세스 안에서 cuRobo v0.8 을 쓰려 하면(SkillGen 전이 planner 등) env 를
+만든 뒤 `curobo.motion_planner` 임포트가 실패한다. `import curobo` 와 `Kinematics`(FK)까지는
+멀쩡하고, collision 커널 모듈에서만 터진다.
+
+### 오류 메시지
+```
+File ".../curobo/_src/geom/collision/wp_collision_kernel.py", line 58, in <module>
+TypeError: func() got an unexpected keyword argument 'module'
+```
+
+### 원인
+이미지 kit site-packages 에는 warp **1.11** 이 있고 거기엔 `wp.kernel(..., module=…)` 이 있다.
+그러나 IsaacLab env 생성이 kit 확장 `omni.warp.core`(**1.8.2**)를 먼저 로드하면 그 warp 가
+`sys.modules["warp"]` 를 차지하고, cuRobo v0.8 커널이 없는 kwarg 를 쓰게 된다.
+★2026-07-01 에 이 증상을 "cuRobo v0.8 ↔ physx CUDA 컨텍스트 공존 불가" 로 오진해 datagen 을
+2-프로세스로 확정한 이력이 있다. **CUDA 문제가 아니다.**
+
+### 해결 방법
+진입 스크립트 **첫 줄**에서 warp 를 선점한다(AppLauncher 보다 먼저).
+
+```python
+import warp as _warp  # noqa: F401  ← kit site-packages 1.11 을 sys.modules 에 박는다
+from isaaclab.app import AppLauncher
+```
+
+적용: `scripts/datagen/generate_mimic_dataset.py` · `scripts/datagen/annotate_mimic_demos.py`.
+in-process 는 **curobo-datagen 이미지에서만** 돈다 — clean `so101-isaac-sim` 이미지는 nvrtc
+force-reinstall 이 없어 별개다(반대로 그 재설치가 clean 이미지의 torch libnvrtc 를 깬다).
+
+### 확인 방법
+`scratch/inproc_probe.py` 6단계(kit 부팅 → gym.make+reset → import curobo → Kinematics FK →
+MotionPlanner warmup → plan_pose) 전부 통과하고 각 단계 뒤 physx step 이 정상. 실측 2026-07-30.
+
+## cuRobo 전 계획이 `Start or End state in collision` (obstacle 을 다 꺼도 실패)
+
+### 현상
+SkillGen 전이 planner 가 홈(parked) 자세에서 출발하는 모든 계획을 실패한다. `plan_cspace` 도
+`plan_pose` 도 실패하고, 큐브·그릇 obstacle 을 **전부 비활성화해도** 그대로 실패한다.
+목표를 `default_joint_state` 에서 출발시키면 성공한다 → start 자세만 문제.
+
+### 오류 메시지
+```
+[logging.py] WARNING: Start or End state in collision
+# result.success=False 인데 result.position_error ≈ 5e-08 (목표는 도달한 셈)
+```
+
+### 원인
+두 개가 겹쳐 있다. obstacle 이 아니라 **로봇 내재 제약**이다.
+
+1. **joint bound**: sim USD joint limit(±105°)이 cuRobo URDF(±100°)보다 넓어, 홈 자세가 URDF 밖
+   (실측 `shoulder_lift` −1.7926 rad < URDF −1.74533). cuRobo 는 bound 위반도 이 메시지로 낸다.
+2. **parked 자세 sphere 오겹침**: 팔이 접혀 그리퍼가 어깨·전면 카메라 마운트 옆을 스치는 자세에서
+   collision sphere 4쌍이 겹친다 — `shoulder_link↔wrist_link` · `gripper_link↔shoulder_link` ·
+   `front_cam_mount_link↔gripper_link` · `front_cam_mount_link↔moving_jaw_so101_v1_link`.
+   공식 `RobotDebugger` 실측 관통량은 **0.13~0.65 mm**(sub-mm) 로, sim 이 매 에피소드 이 자세로
+   접촉 없이 도는 것을 보면 보수적 근사의 **false positive** 다.
+
+### 해결 방법
+① start 자세를 URDF limit 안으로 clamp(`_clamp_to_urdf_limits`, 여유 0.005 rad). attach blob 배치는
+   **측정 자세**로 계산해 1 cm 오배치를 피한다.
+② 4쌍을 `self_collision_ignore` 에 더한 **런타임 파생 robot yml** 로 planner 를 만든다
+   (`skillgen_planner.PARKED_POSE_SELF_COLLISION_IGNORE` → `_write_robot_model`).
+   공유 `assets/robots/so101.yml` 은 **건드리지 않는다** — SM planner(124/124·372/372 A/B 검증본)에
+   회귀를 만들지 않기 위해서다. SM 은 홈 자세를 start 로 hard-check 하지 않아 이 완화가 필요 없다.
+   ★dict 를 `MotionPlannerCfg.create(robot=…)` 에 직접 주입하면 `RobotCfg.create` 중복 kwarg
+   버그가 재현되므로 반드시 **경로**로 넘긴다.
+
+진단 지름길: `planner.diagnose_state(q)` 가 `cspace` / `self_collision` / `scene_collision` 위반량을
+이름으로 출력한다. 쌍 특정은 `RobotDebugger(yml).check_collision_at_config(q)`.
+
+### 확인 방법
+`generate_mimic_dataset.py --self_test` → `start 제약: cspace=0.0000 self_collision=0.0000
+scene_collision=0.0000` + `plan_cspace ok` + 도착 위치 오차 0.0 mm.
+
+## mimic 주석 recorder 가 `list indices must be integers` 로 죽음 (`obs` 키 충돌)
+
+### 현상
+Mimic subtask 주석(annotate) 중 첫 에피소드 재생 첫 스텝에서 RecorderManager 가 터진다.
+
+### 오류 메시지
+```
+File ".../isaaclab/utils/datasets/episode_data.py", line 122, in add
+    current_dataset_pointer[sub_keys[sub_key_index]] = dict()
+TypeError: list indices must be integers or slices, not str
+```
+
+### 원인
+stock `PreStepFlatPolicyObservationsRecorder` 가 키 `"obs"` 에 `obs_buf["policy"]` 를 그대로 넣는다.
+우리 policy 관측은 **concat 된 텐서**(6-dim joint)라 `obs` 가 스텝별 텐서 **리스트**가 되고,
+뒤이어 `obs/datagen_info/...` 를 쓸 때 리스트를 dict 처럼 인덱싱한다. 공식 franka mimic env 는
+`concatenate_terms=False` 라 `obs` 가 dict → 충돌하지 않는다.
+
+### 해결 방법
+주석용 recorder cfg 에서 `record_pre_step_flat_policy_observations = None`
+(`scripts/datagen/annotate_mimic_demos.py::MimicAnnotationRecorderCfg`). mimic 이 소비하는 것은
+`actions`·`initial_state`·`obs/datagen_info` 뿐이라 손실이 없다.
+(대안: `env_cfg.observations.policy.concatenate_terms = False` — 생성 경로의 공식
+`setup_env_config` 가 쓰는 방식이지만 관측을 스텝마다 dict 로 쌓아 파일이 커진다.)
+
+### 확인 방법
+`annotate_mimic_demos.py` 가 에피소드를 끝까지 재생하고 `obs/datagen_info/{object_pose,eef_pose,
+target_eef_pose,subtask_term_signals,subtask_start_signals}` 를 포함한 hdf5 를 export.
+
+## Mimic/SkillGen 증강본이 subtask 경계마다 wrist_roll 을 슬루 상한으로 후려침
+
+### 현상
+SkillGen 증강 데이터셋에서 phase(subtask) 전환마다 손목이 순간적으로 확 돈다. 속도를 재면
+`wrist_roll` 이 **정확히 슬루 상한 5.0 rad/s 에 붙어 8~14 프레임 유지**되고, 순변화가
+**−76°~−134°** 다. source 데이터엔 없다(source `wrist_roll` max 0.772 rad/s = 상한의 15%).
+
+### 오류 메시지
+```
+# 에러 없음(silent). 데이터로만 보인다:
+#   증강 wrist_roll  p50 0.11  p95 5.000  p99 5.000  max 5.000   ← 상한 포화
+#   source wrist_roll p50 0.015 p95 0.436 p99 0.686 max 0.772
+#   에피소드당 2회 = 전환 2개(홈→grasp 시작, grasp 끝→place 시작)와 정확히 일치
+```
+
+### 원인
+전이 계획 목표를 **position-only IK**(`ToolPoseCriteria.track_position()`, 회전 weight 0)로
+풀면 도착 관절 배치의 **손목 각이 방임**된다. 곧이어 재생되는 source 구간은 특정 wrist_roll 을
+요구하므로, 경계에서 그 차이를 슬루 상한으로 쓸어야 한다. 물리적으론 실행 가능하지만 source
+엔 없는 bang-bang 구간이라 BC 학습에 해롭다(이 레포의 jerky-data 실패 모드와 같은 계열).
+
+position-only 자체는 필요했다 — full-pose 로만 풀면 5-DOF 에서 SE(3) 변환 목표가 도달 manifold
+밖이라 position 잔차 12~79 mm 로 전이가 전멸한다.
+
+### 해결 방법
+`skillgen_planner._project_target_to_manifold` 를 2단으로 만든다.
+
+1. **full-pose DLS 를 먼저** 푼다(`SO101BoundedIK`, 현재 자세 seed). 이 해는 곧
+   `target_eef_pose_to_action` 이 다음 스텝에 명령할 바로 그 자세라, 통과하면 경계가
+   **구조적으로 연속**이다. position 잔차만 게이트(5-DOF 라 orientation 은 best-effort).
+2. 실패하면 **position-only 멀티시드**(`solve_pose(return_seeds=16)`)로 떨어지되, 후보 중
+   **①의 최선해에 관절공간 L2 로 가장 가까운 것**을 고른다. 위치를 포기해도 손목은 물려준다.
+
+### 확인 방법
+같은 레시피 재실행(source 10 → 주석 8 → 증강 5): IK 경로 **full-pose 20 / position-only 9 /
+실패 2**(수정 전엔 전부 position-only). `wrist_roll` p95 **5.000 → 0.966** · p99 **5.000 →
+1.065** · max **5.000 → 3.301** · 상한 초과 프레임 **18 → 0**. 5 에피소드 중 4개는 스파이크가
+완전히 사라지고(max 0.53~1.34 = source 범위), 1개만 **2 프레임** 잔여 blip(≈13° 스윕).
+`shoulder_lift` max 3.18 → 1.62 · `elbow_flex` 4.93 → 1.69 도 함께 source 범위로 복귀.
+측정 도구 = `scratch/measure_velocity.py <v3_dir>`.
+
+⚠ **gripper 포화(2.5 rad/s, 에피소드당 3회 13~16 프레임)는 이 결함이 아니다** — SM 이 상한보다
+빠르게 개폐를 명령해 슬루가 깎는 것으로 **source 에도 그대로 있다**(70 프레임/10 데모). 산수:
+70 feat × 1.1°/feat = 77° = 1.344 rad ÷ 2.5 = 16.1 프레임 = 관측치와 일치.
