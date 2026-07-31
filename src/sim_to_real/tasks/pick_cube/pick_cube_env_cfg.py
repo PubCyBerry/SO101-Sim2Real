@@ -60,7 +60,12 @@ from sim_to_real.tasks.so101_base_env_cfg import (
 # 맞춰 y 0.315→0.265 (책상 앞 모서리 env y=-0.035 에서 +30cm).
 BOWL_CENTER_XY: tuple[float, float] = spawn_area.BOWL_CENTER_XY  # 단일 소스=spawn_area
 BOWL_SUCCESS_RADIUS: float = 0.06
-BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
+# 그릇 **로컬 프레임** 기준 큐브 중심 허용 높이(m). 상한이 rim 을 넘으면 "rim 에 얹힘"·
+# "그릇 위에 떠 있음"이 성공으로 새어든다.
+# 실측 기하: 그릇 원점 → 내부 바닥 ≈ +0.005, rim 상단 ≈ +0.080(BOWL_RING_H 0.075 기준).
+# 안착한 큐브 중심 = +0.025~0.028(실측). 상한을 rim 상단 − 큐브 반변(0.020) = 0.060 으로 잡아
+# 큐브가 **rim 아래**에 있을 때만 통과시킨다. (옛 0.12 는 rim 위 40 mm 까지 허용했다.)
+BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.06)
 
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
@@ -404,6 +409,11 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
             func=task_mdp.object_in_container,
             params={
                 "object_cfg": SceneEntityCfg("Cube1"),
+                # ★container_cfg 필수: 없으면 높이 게이트가 `_geometry.DESK_TOP_Z`(0.76, pen
+                # 잔재)를 기준으로 잡혀 실제 상판 0.705 와 5.5cm 어긋나고, 그릇 안 큐브
+                # (z≈0.728)가 `> 0.765` 를 못 넘어 **이 신호가 구조적으로 발화 불가**가 된다.
+                # 그릇 asset 을 주면 실제 그릇 z 기준이 되고 DR 이동도 자동 추종한다.
+                "container_cfg": SceneEntityCfg(BOWL_NAME),
                 "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,

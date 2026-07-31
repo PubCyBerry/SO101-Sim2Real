@@ -59,27 +59,33 @@ from curobo.types import GoalToolPose, JointState, Pose
 ROBOT = "/workspace/assets/robots/so101.yml"
 DIAG_LOG = "/workspace/outputs/planner_diag.log"  # 호스트 마운트(./outputs) — 컨테이너 소멸 후 잔존
 
-# ═══ 프레임 정합 (bridge TF ↔ cuRobo URDF) ═══════════════════════════════════════
-# bridge TF(base_link)=USD so101_new_calib 규약, cuRobo URDF=so_arm101 규약. 두 체인의
-# shoulder_pan 프레임 일치 조건에서 T(urdf←usd)=Rz(90°)+BASE_T (실측 유도 — 미보정 시 ~3cm 빗나감).
-BASE_YAW = 90.0
-BASE_T = (0.01576, -0.02079, -0.03248)
+# ═══ 프레임 정합·충돌 씬 기하 = so101_contract/curobo_frames.py 단일 소스 ═══════════════
+# SkillGen motion planner(sim_to_real/datagen/mimic/curobo_planner.py)와 **같은 값**을 써야 한다
+# — 갈리면 같은 씬을 서로 다르게 피해 계획이 조용히 어긋난다. so101_contract 는 isaaclab 무의존
+# 이라 kit 부팅 없는 이 프로세스에서도 import 된다. 두 컨테이너 모두 PYTHONPATH=/workspace/src.
+from so101_contract.curobo_frames import (  # noqa: E402
+    BASE_T,
+    BASE_YAW,
+    BOWL_RING_DIMS,
+    BOWL_RING_H,
+    BOWL_RING_N,
+    BOWL_RING_RC,
+    CUBE_DIMS,
+    TABLE_TOP,
+    assert_bowl_ring_sealed,
+    bowl_ring as _bowl_ring,
+    rotz,
+    usd_to_urdf,
+)
 
 # ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
 PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face 선택 기준점(URDF)
 # fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
-# 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
-from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
-# 책상 상판 z (urdf 프레임) — base_link 실측 단일 소스에서 파생. descend clamp 가 쓴다.
-TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF  # noqa: E402
 # 큐브 반변 — face_center = cube_center + half·closing_axis.
 # ★실제 값은 요청의 `cube_half` 로 온다(SM 이 cube_specs 단일 소스에서 읽어 pose 와 함께 전송).
 # 아래 상수는 그 필드가 없는 구버전 SM 요청용 폴백일 뿐이다.
 CUBE_HALF = 0.020
-# 큐브 obstacle/attach blob 한 변(m) — cube_specs 최대값(50 mm) 고정.
-# collision 은 과대근사가 안전측이고, world obstacle dims 는 planner 초기화 시 굳어
-# 요청마다 못 바꾼다 → 보수적 최대값을 쓴다(40 mm 큐브면 살짝 뚱뚱한 박스로 계획).
-CUBE_DIMS = 0.05
 CONTACT_LINKS = ["gripper_link", "moving_jaw_so101_v1_link"]   # descend 중 collision off
 DESCEND_EXTRA_OFF = ["wrist_link", "wrist_cam_mount_link"]     # 〃 — grasp 자세서 wrist sphere 가
                       # 큐브 obstacle 과 모델상 겹침(짧은 wrist, 물리 접촉 없음=sphere 보수 근사)
@@ -168,16 +174,9 @@ GRASP_HOLD_STEPS = 5  # 폐합 직후 정지: 접촉 안정화 후 lift(즉시 l
 OPEN_STEPS = 10     # ⑤ release 개방 ramp 프레임(정지 상태 투하)
 SETTLE_STEPS = 5    # ⑤ release 전 그릇 상공 정지 hold 프레임
 
-# ═══ bowl obstacle = hollow rim ring (오목 그릇 fit) ══════════════════════════════
-# cuRobo world obstacle 은 solid convex 뿐 — 오목 그릇을 solid box 로 넣으면 내부(빈 공간)가
-# retreat 자세와 허위충돌. rim 벽만 N× cuboid octagon 으로 근사(내부 hole+상단 open) →
-# keep-out 유지·허위충돌 제거, empty-world swap 없이 full scene 계획.
-# 박스 = 다각형 '변': tangential w≈변길이+겹침, radial d 는 코너 azimuth 벽 구멍이 없을 만큼
-# 두껍게 — 0-gap 은 _assert_bowl_ring_sealed 가 임포트 시 강제(scratch/search_ring.py 근거).
-BOWL_RING_N = 8
-BOWL_RING_RC = 0.080   # box 중심 반경(m) — 벽 band [RC±d/2] 이 실제 rim 0.075 포함
-BOWL_RING_H = 0.075    # ring 높이(테이블→rim)
-BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height]
+# bowl obstacle(hollow rim ring) 기하 = curobo_frames 단일 소스. 여기서는 이 planner 의 드롭
+# 오프셋(BOWL_PULL)+pad 여유로 hole 하한만 강제한다.
+assert_bowl_ring_sealed(BOWL_PULL + 0.028)
 
 
 def _pre_back(cube):
@@ -227,51 +226,6 @@ def _descend_tstar(pre_tcp_z, zaz, cube):
     return tstar
 
 
-def _bowl_ring(bx, by):
-    """오목 그릇 rim → hollow octagon ring(BOWL_RING_N× cuboid) dict{name:{dims,pose}}.
-    각 box = 다각형 '변'(local-x=radial, quat=Rz(θ)), 배치 반경 RC → 내부 hole+상단 open.
-    중심(bx,by) 이동(DR)마다 재계산."""
-    z_c = TABLE_TOP + BOWL_RING_H / 2
-    ring = {}
-    for i in range(BOWL_RING_N):
-        th = 2 * math.pi * i / BOWL_RING_N
-        qw, qz = math.cos(th / 2), math.sin(th / 2)
-        ring[f"bowl_{i}"] = {
-            "dims": list(BOWL_RING_DIMS),
-            "pose": [bx + BOWL_RING_RC * math.cos(th),
-                     by + BOWL_RING_RC * math.sin(th), z_c, qw, 0.0, 0.0, qz]}
-    return ring
-
-
-def _assert_bowl_ring_sealed():
-    """로드시 1-check: (a) hole 이 drop+pad 여유 (b) rim 원둘레 전 azimuth 벽 연속(gap 없음).
-    얇은 radial d 는 코너에 벽 구멍→팔이 그릇 파고듦 → 임포트서 즉시 실패."""
-    hole = BOWL_RING_RC - BOWL_RING_DIMS[0] / 2
-    assert hole >= BOWL_PULL + 0.028, f"bowl ring hole {hole:.3f}m < drop+pad(~0.028)"
-    ring = _bowl_ring(0.0, 0.0)
-
-    def _inside(px, py, e):
-        x, y, _z, qw, _qx, _qy, qz = e["pose"]
-        dx, dy, _dz = e["dims"]
-        th = 2 * math.atan2(qz, qw)
-        c, s = math.cos(-th), math.sin(-th)
-        return abs(c * (px - x) - s * (py - y)) <= dx / 2 and abs(s * (px - x) + c * (py - y)) <= dy / 2
-
-    for k in range(720):
-        ph = 2 * math.pi * k / 720
-        px, py = 0.075 * math.cos(ph), 0.075 * math.sin(ph)  # 실제 rim 원
-        assert any(_inside(px, py, e) for e in ring.values()), \
-            f"bowl ring wall gap @ {math.degrees(ph):.0f}° — radial d↑ 또는 N↑"
-
-
-_assert_bowl_ring_sealed()
-
-
-def rotz(x, y, deg):
-    a = math.radians(deg); c, s = math.cos(a), math.sin(a)
-    return c * x - s * y, s * x + c * y
-
-
 def _rz(a):
     c, s = math.cos(a), math.sin(a)
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
@@ -288,12 +242,6 @@ def wrap90(a):
 
 
 TCP_TWIST = _ry(TCP_TWIST_RY)  # tcp_grasp ↔ wrist_roll 축 2.79° 원뿔 보정(상수 블록 참조)
-
-
-def usd_to_urdf(p):
-    """bridge TF(base_link, USD 규약) 좌표 → cuRobo URDF(so_arm101) 좌표: Rz(90)+BASE_T."""
-    x, y = rotz(p[0], p[1], BASE_YAW)
-    return (x + BASE_T[0], y + BASE_T[1], p[2] + BASE_T[2])
 
 
 def _mat2quat(R):

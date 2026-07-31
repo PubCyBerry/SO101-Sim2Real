@@ -1,0 +1,322 @@
+"""SO-101 pick-place **Isaac Lab Mimic / SkillGen** env 어댑터.
+
+`isaaclab.envs.ManagerBasedRLMimicEnv` 가 요구하는 8개 훅을 구현한다. mimic 데이터 생성은
+"source 데모를 object-centric 구간으로 쪼개고, 새 물체 배치에 맞춰 각 구간을 SE(3) 변환해
+이어붙인다"가 전부라, env 는 **pose ↔ action 변환**과 **subtask 경계 신호**만 제공하면 된다.
+
+## 프레임 — 하나만 쓴다
+
+mimic 이 다루는 모든 pose(EEF·object)는 **cuRobo URDF solver 프레임**이다(tool = `tcp_grasp`).
+
+이유: `so101_contract.eef_kinematics.SO101EndEffectorKinematics` 가 **같은 URDF + 같은
+`so101.yml` 의 `tcp_grasp` extra_link** 를 읽으므로, 레포의 EEF 계약 FK/IK 와 cuRobo SkillGen
+planner 가 **원래 같은 프레임**이다. 그래서 sim USD ↔ URDF 변환을 이 클래스에서 **정확히 1회**
+(`so101_contract.curobo_frames.T_URDF_FROM_USD`) 하고, planner 쪽은 변환하지 않는다.
+★두 곳에서 변환하면 오차가 상쇄돼 조용히 어긋난다 — 프레임 불일치는 이 파이프라인에서 가장
+비싼 종류의 버그다(gripper 프레임 자세를 tcp 목표로 쓴 과거 이식본이 증강 성공률 0% 였다).
+
+## action 공간 — 관절을 유지한다
+
+이 env 의 action 은 기존과 같은 **6-dim 절대 joint target**(canonical sim radian)이다.
+Franka mimic 처럼 IK-rel action term 을 새로 넣지 않는다:
+
+* `target_eef_pose_to_action` = `SO101BoundedIK`(현재 자세 seed, position 우선) → 관절 목표
+* `action_to_target_eef_pose` = 관절 FK
+
+이렇게 두면 생성 데이터셋이 기존 HDF5→LeRobot 변환기·`joint_absolute` 스키마와 그대로 호환되고,
+5-DOF 투영(임의 6-DOF pose 는 도달 불가)이 **action 경계에서 명시적으로 1회** 일어난다.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import numpy as np
+import torch
+
+import isaaclab.utils.math as PoseUtils
+from isaaclab.envs import ManagerBasedRLMimicEnv
+
+from so101_contract.curobo_frames import T_URDF_FROM_USD
+from so101_contract.eef_ik import SO101BoundedIK
+from so101_contract.eef_kinematics import encode_rotation_matrices
+from so101_contract.feature_codec import SO101_JOINT_ORDER
+from so101_contract.grasp_manifold import project_pose_best_pan
+
+from .pick_cube_env import PickCubeEnv
+
+#: subtask_configs 의 단일 eef 키.
+EEF_NAME = "so101"
+
+
+class SO101PickCubeMimicEnv(PickCubeEnv, ManagerBasedRLMimicEnv):
+    """pick-place mimic/SkillGen env.
+
+    `PickCubeEnv` 를 먼저 상속해 동적 gripper effort clamp(step 훅)를 그대로 물려받고,
+    mimic 훅만 여기서 더한다. 둘 다 `ManagerBasedRLEnv` 자손이라 MRO 가 성립한다.
+    """
+
+    #: 상태 복원 시 rigid object 를 이만큼 띄운다(m). 근거는 :meth:`reset_to`.
+    RESTORE_LIFT_M: float = 6e-4
+
+    def reset_to(self, state, env_ids, seed=None, is_relative=False):
+        """`initial_state` 복원 — 물체를 **0.6 mm 띄워서** 넣는다.
+
+        ★왜 — PhysX 는 rest 상태에서 물체를 접촉면에 **약간 파고든 채**로 유지한다
+        (`restOffset=0`). 녹화가 그 pose 를 그대로 `initial_state` 에 담고, 복원 쪽이 새 솔버에
+        같은 pose 를 꽂으면 솔버는 그걸 **관통**으로 보고 `maxDepenetrationVelocity` 로 밀어낸다.
+        큐브 USD 의 그 값은 **1 m/s** — 실측에서 복원 1 스텝 만에 속도가 1.19 → **1098 mm/s**,
+        각속도 3.95 → **2798 °/s** 로 튀며 큐브가 15~130 mm 날아가 옆면으로 넘어갔다
+        (로봇은 190 mm 밖이라 접촉 아님). 그 결과 계획된 파지점이 어긋나 주석 재생이 실패했다.
+
+        `maxDepenetrationVelocity` 를 낮추는 건 답이 아니다 — `author_pick_cube_scene.py` 에
+        `0.5 로 낮췄더니 grasp grip 이 92.8 → 77 % 로 회귀`해 원복한 이력이 적혀 있다.
+
+        대신 **관통을 애초에 만들지 않는다**: 복원 pose 를 접촉면 위로 살짝 띄우면 솔버가 밀어낼
+        것이 없고, 물체는 그 높이에서 조용히 내려앉아 **기록된 z 로 정확히 되돌아온다**.
+        실측(10/10 데모): 회전 변화 **0.0°**, 이동 = 띄운 양뿐. 0.6 mm 면 충분하고
+        자유낙하 속도도 0.1 m/s 미만이라 튀지 않는다.
+        """
+        objects = state.get("rigid_object") if self.RESTORE_LIFT_M else None
+        if objects:
+            lifted = {}
+            for name, fields in objects.items():
+                if "root_pose" in fields:
+                    pose = fields["root_pose"].clone()
+                    pose[..., 2] += self.RESTORE_LIFT_M
+                    fields = {**fields, "root_pose": pose}
+                lifted[name] = fields
+            # 호출자 dict 는 건드리지 않는다 — 주석 재시도가 같은 state 를 재사용한다.
+            state = {**state, "rigid_object": lifted}
+        return super().reset_to(state, env_ids, seed=seed, is_relative=is_relative)
+
+    # ══ lazy 계약 객체 ═════════════════════════════════════════════════════════════
+    @property
+    def eef_ik(self) -> SO101BoundedIK:
+        """EEF FK/IK — `so101_contract` 단일 소스. planner 투영 IK 와 같은 계약."""
+        if getattr(self, "_eef_ik", None) is None:
+            self._eef_ik = SO101BoundedIK.from_files(
+                self.cfg.mimic_urdf_path, self.cfg.mimic_robot_yaml)
+        return self._eef_ik
+
+    @property
+    def canonical_joint_idx(self) -> list[int]:
+        """articulation joint 순서 → canonical(SO101_JOINT_ORDER) 인덱스."""
+        if getattr(self, "_canonical_joint_idx", None) is None:
+            names = self.scene["robot"].joint_names
+            self._canonical_joint_idx = [names.index(j) for j in SO101_JOINT_ORDER]
+        return self._canonical_joint_idx
+
+    @property
+    def _t_urdf_from_usd(self) -> torch.Tensor:
+        if getattr(self, "_t_urdf_cached", None) is None:
+            self._t_urdf_cached = torch.as_tensor(
+                T_URDF_FROM_USD, dtype=torch.float32, device=self.device)
+        return self._t_urdf_cached
+
+    # ══ 관절 상태 읽기 ═════════════════════════════════════════════════════════════
+    def _canonical_joint_pos(self, env_ids) -> torch.Tensor:
+        """(N, 6) canonical 순서 joint radian."""
+        return self.scene["robot"].data.joint_pos[env_ids][:, self.canonical_joint_idx]
+
+    # ══ mimic 훅: EEF pose ═════════════════════════════════════════════════════════
+    def get_robot_eef_pose(self, eef_name: str, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+        """현재 tool(`tcp_grasp`) pose, URDF solver 프레임 ``(len(env_ids), 4, 4)``.
+
+        측정 관절의 URDF FK 를 쓴다 — `ee_frame` FrameTransformer(USD `gripper` prim)를 쓰면
+        프레임이 달라져 :meth:`target_eef_pose_to_action` 의 IK 와 어긋난다.
+        """
+        if env_ids is None:
+            env_ids = slice(None)
+        arm = self._canonical_joint_pos(env_ids)[:, :5].detach().cpu().numpy().astype(np.float64)
+        matrices = self.eef_ik.kinematics.forward_matrices(arm)
+        return torch.as_tensor(matrices, dtype=torch.float32, device=self.device)
+
+    @property
+    def _slew_step_rad(self) -> np.ndarray:
+        """한 스텝에 허용되는 arm 관절 변화량(rad) = 슬루 상한 × `step_dt`.
+
+        ★**축별 추가 clamp 는 두지 않는다.** wrist_roll 만 0.3× 로 조여봤더니 IK 가 지각하며
+        새 상한에 그대로 포화했다 — grasp 근방 wrist_roll 평균이 0.037 → **0.625 rad/s** 로
+        오히려 올라갔다(2026-07-30 실측). clamp 는 매끄럽게 만드는 도구가 아니다.
+        같은 각변위를 부드럽게 만드는 건 **시간을 늘리는 것**이고, 그 레버는 두 개다:
+        `SubTaskConfig.num_interpolation_steps`(구간 진입 보간 프레임)와
+        planner 의 `motion_step_size`(전이 waypoint 간격 → 프레임 수).
+
+        여기 남은 bound 는 인위적 제한이 아니라 **물리적 사실**이다 — 액션 term 의 슬루 리미터가
+        어차피 같은 값으로 깎으므로, IK 가 애초에 그 범위에서 해를 찾게 해 브랜치 점프만 막는다.
+        """
+        if getattr(self, "_slew_step_cached", None) is None:
+            caps = self.cfg.actions.arm.max_velocity
+            values = [float(caps[joint]) for joint in SO101_JOINT_ORDER[:5]] \
+                if isinstance(caps, dict) else [float(caps)] * 5
+            step = np.asarray(values, dtype=np.float64) * float(self.step_dt)
+            self._slew_step_cached = step * float(self.cfg.mimic_step_bound_scale)
+        return self._slew_step_cached
+
+    def target_eef_pose_to_action(
+        self,
+        target_eef_pose_dict: dict,
+        gripper_action_dict: dict,
+        action_noise_dict: dict | None = None,
+        env_id: int = 0,
+    ) -> torch.Tensor:
+        """목표 tool pose(4×4, solver 프레임) → 6-dim 절대 joint target action.
+
+        5-DOF 라 임의 6-DOF pose 는 도달 불가다. IK 는 position 우선·orientation best-effort 로
+        **도달 가능 manifold 에 투영**한다(수렴 실패도 최선해를 쓴다 — 여기서 시도를 버리면
+        mimic 이 전체 데모를 폐기한다).
+
+        ★그 "최선해"를 **날것으로 명령하면 안 된다**. mimic 목표는 source 자세를 새 물체 pose 로
+        SE(3) 변환한 것이라 구간 중간에 manifold 밖으로 나가고, 게이트 없는 DLS 는 그때
+        **해 브랜치를 갈아타며 멀리 튄다**. 실측 실패 4건 분해(pad↔큐브, 성공군 26~30 mm):
+
+        ==========  =========  =========  ==========  ============
+        실패        closing    lateral    pad→cube    명령↔실측
+        ==========  =========  =========  ==========  ============
+        demo_1      +63.2      −12.4      64.6        0.0
+        demo_2      +28.1      **−153.5** **156.4**   28.1
+        demo_3      **−143.4** +28.3      146.7       **92.6**
+        ==========  =========  =========  ==========  ============
+
+        그래서 **step bound** 를 건다: IK 가 `측정 자세 ± 슬루상한×step_dt` 안에서만 해를 찾는다
+        (`SO101BoundedIK.solve` 의 `step_lower_rad`/`step_upper_rad`). 도달 불가 목표는 "멀리
+        튀는" 대신 **한 스텝만큼만 다가가다 멈추는** 형태로 열화하고, 해 브랜치 점프도 막힌다.
+
+        ★**seed·bound 기준은 반드시 "측정 자세"** 다. 직전 **명령**을 기준으로 삼아봤더니
+        피드백이 끊겨 **적분 와인드업**이 생겼다 — 팔이 막히거나 늦으면 명령만 계속 전진해
+        실패 demo 추종오차가 0~93 mm → 3.6~139 mm 로 폭증하고 증강 성공률이 27.8% → 16.9%
+        로 떨어졌다(2026-07-30 실측). 측정 자세 기준이면 늦은 만큼 다음 스텝이 자동 보정한다.
+
+        노이즈는 관절공간에서 더한 뒤 step bound·URDF limit 으로 다시 clamp 한다.
+        """
+        (target_eef_pose,) = target_eef_pose_dict.values()
+        matrix = target_eef_pose.detach().cpu().numpy().astype(np.float64).reshape(4, 4)
+
+        seed = self._canonical_joint_pos([env_id])[0, :5].detach().cpu().numpy().astype(np.float64)
+        step = self._slew_step_rad
+        # ★목표를 **5-DOF 도달 manifold** 로 투영한 뒤 IK 를 푼다. 투영 없이 풀면 IK 가
+        #   position 과 orientation 을 절충해 위치까지 어긋난다(실측 실패 5/5: 위치 잔차
+        #   20~181 mm · 회전 20~93°, 팔이 허공을 집었다). 같은 함수를 planner 도 쓴다 —
+        #   전이 목표와 구간 목표가 다르게 투영되면 그 간극이 곧 추종오차다.
+        projected = project_pose_best_pan(self.eef_ik, matrix, seed)
+        pose_vec = np.concatenate([
+            projected[:3, 3], encode_rotation_matrices(projected[:3, :3][None], "rot6d")[0]])
+        result = self.eef_ik.solve(pose_vec, seed, representation="rot6d",
+                                   step_lower_rad=seed - step, step_upper_rad=seed + step)
+        arm_target = np.asarray(result.joint_radians, dtype=np.float64)
+
+        if action_noise_dict is not None:
+            scale = float(action_noise_dict[EEF_NAME])
+            if scale > 0.0:
+                arm_target = arm_target + scale * np.random.randn(5)
+        arm_target = np.clip(arm_target, seed - step, seed + step)
+        limits = self.eef_ik.joint_limits_rad
+        arm_target = np.clip(arm_target, limits[:, 0], limits[:, 1])
+
+        (gripper_action,) = gripper_action_dict.values()
+        arm_tensor = torch.as_tensor(arm_target, dtype=torch.float32, device=self.device)
+        return torch.cat([arm_tensor, gripper_action.to(self.device).reshape(-1)], dim=0)
+
+    def action_to_target_eef_pose(self, action: torch.Tensor) -> dict[str, torch.Tensor]:
+        """:meth:`target_eef_pose_to_action` 의 역 — 관절 target FK.
+
+        5-DOF 투영이 들어간 만큼 왕복이 정확히 항등은 아니다. 그래서 mimic 이 source 데모에서
+        복원하는 pose 열은 **실현 가능한 pose 열**이 되고, 구간 변환도 그 위에서 이뤄진다.
+        """
+        arm = action[:, :5].detach().cpu().numpy().astype(np.float64)
+        matrices = self.eef_ik.kinematics.forward_matrices(arm)
+        return {EEF_NAME: torch.as_tensor(matrices, dtype=torch.float32, device=self.device)}
+
+    def actions_to_gripper_actions(self, actions: torch.Tensor) -> dict[str, torch.Tensor]:
+        """action 의 마지막 차원 = gripper joint target(radian)."""
+        return {EEF_NAME: actions[..., -1:]}
+
+    # ══ mimic 훅: object pose ══════════════════════════════════════════════════════
+    def get_object_poses(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+        """mimic 대상 물체 pose ``(N,4,4)``, **URDF solver 프레임**.
+
+        기본 구현은 env-origin 상대 USD pose 를 주는데, 우리는 로봇이 책상 위(env-local
+        z≈0.675)에 장착돼 있어 그 좌표계는 EEF pose 와 다른 프레임이다. robot root full SE(3)
+        를 빼고 USD→URDF 변환까지 적용해 **EEF pose 와 같은 프레임**으로 맞춘다.
+        """
+        if env_ids is None:
+            env_ids = list(range(self.num_envs))
+        env_ids = list(env_ids)
+        robot = self.scene["robot"]
+        root_pos = robot.data.root_pos_w[env_ids]
+        root_quat = robot.data.root_quat_w[env_ids]
+
+        poses: dict[str, torch.Tensor] = {}
+        for name, obj in self.scene.rigid_objects.items():
+            pos_b, quat_b = PoseUtils.subtract_frame_transforms(
+                root_pos, root_quat,
+                obj.data.root_pos_w[env_ids], obj.data.root_quat_w[env_ids],
+            )
+            pose_usd = PoseUtils.make_pose(pos_b, PoseUtils.matrix_from_quat(quat_b))
+            poses[name] = self._t_urdf_from_usd @ pose_usd
+        return poses
+
+    # ══ mimic 훅: subtask 경계 ═════════════════════════════════════════════════════
+    def get_subtask_term_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+        """subtask **종료** 신호 — `observations.subtask_terms` 그룹을 그대로 노출."""
+        if env_ids is None:
+            env_ids = slice(None)
+        terms = self.obs_buf["subtask_terms"]
+        return {name: terms[name][env_ids].reshape(-1) for name in self.cfg.mimic_term_signals}
+
+    def get_subtask_start_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+        """subtask **시작** 신호 — SkillGen(`use_skillgen=True`)에서 필수.
+
+        SkillGen 은 ``[이전 subtask 종료 → 이번 subtask 시작]`` 구간을 motion planner 로 다시
+        계획하고 ``[시작, 종료]`` 구간만 source 에서 재생한다. 그래서 시작 지점은
+
+        * **그리퍼가 아직 열려 있을 때** 여야 한다. 폐합 뒤로 잡으면 planner 가 닫힌 그리퍼로
+          접근 구간을 계획해 큐브를 밀어낸다.
+        * 이전 subtask 종료보다 **엄격히 뒤** 여야 한다(`datagen_info_pool` 이 단조성을 assert).
+
+        키는 종료 신호와 **같은 이름**을 쓴다(`datagen_info_pool` 이 그렇게 조회한다).
+        임계값 2개는 cfg 의 knob 이다 — 큐브 크기·grasp 튜닝이 바뀌면 실측으로 다시 잡는다.
+        """
+        if env_ids is None:
+            env_ids = list(range(self.num_envs))
+        env_ids = list(env_ids)
+
+        grasp_signal, place_signal = self.cfg.mimic_term_signals
+        cube_name = self.cfg.mimic_grasp_object
+
+        tool_pos = self.get_robot_eef_pose(EEF_NAME, env_ids=env_ids)[:, :3, 3]
+        cube_pos = self.get_object_poses(env_ids=env_ids)[cube_name][:, :3, 3]
+        distance = torch.linalg.vector_norm(tool_pos - cube_pos, dim=-1)
+        gripper = self._canonical_joint_pos(env_ids)[:, 5]
+
+        approaching = (distance < self.cfg.mimic_approach_radius_m) & (
+            gripper > self.cfg.mimic_gripper_open_rad)
+
+        # place 시작 = 파지 확정 + 추가 상승. grasp 종료(min_lift)보다 확실히 뒤가 되도록 더 높게.
+        grasped = self.obs_buf["subtask_terms"][grasp_signal][env_ids].reshape(-1) > 0.5
+        cube_world_z = self.scene[cube_name].data.root_pos_w[env_ids, 2]
+        lifted = cube_world_z > (self.cfg.mimic_desk_top_world_z + self.cfg.mimic_place_start_lift_m)
+
+        return {
+            grasp_signal: approaching.float(),
+            place_signal: (grasped & lifted).float(),
+        }
+
+    # ══ SkillGen 훅: 구간별 부착 물체 ══════════════════════════════════════════════
+    def get_expected_attached_object(self, eef_name: str, subtask_index: int, env_cfg) -> str | None:
+        """이 subtask 를 수행하는 동안 들고 있어야 하는 물체(없으면 None).
+
+        planner 가 잡은 큐브 부피를 포함해 전이를 계획하도록 알려주는 값이다.
+        규칙: place 계열 subtask 는 **직전 grasp subtask 의 대상**을 들고 있다.
+        """
+        configs = env_cfg.subtask_configs.get(eef_name, [])
+        if not 0 <= subtask_index < len(configs):
+            return None
+        current = str(configs[subtask_index].subtask_term_signal or "").lower()
+        if "place" not in current or subtask_index == 0:
+            return None
+        previous = configs[subtask_index - 1]
+        if "grasp" in str(previous.subtask_term_signal or "").lower():
+            return previous.object_ref
+        return None

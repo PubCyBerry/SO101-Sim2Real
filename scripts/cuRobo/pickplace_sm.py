@@ -795,12 +795,67 @@ class PickPlaceSM:
         _step(env, self.hold)
         env._force_done_mask = None
 
+    def settle_objects(self, rounds: int = 6, steps: int = 45, move_tol: float = 5e-4):
+        """물체를 **재생과 동일한 자극**으로 흔들어, 흔들어도 안 움직일 때까지 안정화한다.
+
+        ★왜 속도 임계만으로는 부족한가 — 큐브 USD 는 `sleepThreshold=0.0005` ·
+        `stabilizationThreshold=0.002`(resting jitter 대책으로 올린 값)로 **sleep 이 켜져 있다.**
+        착지 후 천천히 기울던 큐브는 각속도가 임계 아래로 내려가는 순간 **기운 자세 그대로
+        얼어붙는다.** 녹화에는 그게 '완전 정지'로 보이지만 실제로는 넘어가던 중이었다.
+
+        그 상태를 `initial_state` 로 저장하면, 복원하는 쪽(mimic 주석 재생)의 `reset_to` 는
+        텔레포트라서 body 를 **강제로 깨운다** → 얼려뒀던 전도가 재개돼 큐브가 굴러간다
+        (실측: 4/10 데모에서 16~130 mm · 24~92°). **속도를 0 으로 지워도 재현되므로
+        원인은 잔여 속도가 아니라 얼어붙은 준안정 자세다.**
+
+        그래서 여기서 재생과 같은 자극을 미리 준다: 매 라운드 시작에 root pose·velocity 를
+        **제자리로 다시 써서**(no-op 텔레포트) sleep 을 깨우고, 그 뒤 물리를 돌린다. 깨워도
+        움직이지 않는 라운드가 나오면 그 자세는 재생에서도 그대로 유지된다.
+
+        Args:
+            rounds: 최대 wake-settle 라운드 수.
+            steps: 라운드당 물리 스텝(1.5 s @30 Hz).
+            move_tol: 한 라운드 동안 허용할 최대 이동(m). 5e-4 = 0.5 mm.
+
+        Returns:
+            실제로 돈 총 스텝 수.
+        """
+        env = self.env
+        objects = list(env.scene._rigid_objects.values())
+        total = 0
+        for round_index in range(rounds):
+            before = [obj.data.root_pos_w.clone() for obj in objects]
+            for obj in objects:
+                # 제자리 재기록 = sleep wake. 값이 같아도 PhysX 는 body 를 깨운다.
+                obj.write_root_pose_to_sim(obj.data.root_state_w[:, :7].clone())
+                obj.write_root_velocity_to_sim(torch.zeros_like(obj.data.root_vel_w))
+            for _ in range(steps):
+                _step(env, self.hold)
+                total += 1
+            moved = max(float((obj.data.root_pos_w - prev).norm(dim=-1).max().item())
+                        for obj, prev in zip(objects, before))
+            if moved < move_tol:
+                return total
+        print(f"[sm] settle: {rounds} 라운드에도 준안정 (마지막 이동 {moved * 1000:.2f} mm)", flush=True)
+        return total
+
     def manipulate_record(self, preroll_steps):
         """record 트라이얼 1회: plan(step 없음=미기록) → 버퍼 폐기+initial_state →
         pre-roll 정지 → 궤적 replay → 전 env 종료 대기(auto-reset=export). → (status, val)."""
         env = self.env
         rm = env.recorder_manager
         tm = env.termination_manager
+        # ★**계획 전에** 큐브가 실제로 멈출 때까지 기다린다. 순서가 핵심이다:
+        #     정착 → 계획 → 스냅샷
+        #   `z_range` 로 띄워 떨군 큐브는 착지 반동이 남는다(실측 |v| 0.4~1.2 mm/s ·
+        #   |w| 0.4~4.0 °/s). 그 상태를 `initial_state` 에 담으면, `reset_to` 로 **복원**하는 쪽
+        #   (mimic 주석 재생)에서 차가운 솔버가 잔여 각속도를 못 흡수해 큐브가 인접 면으로
+        #   굴러간다 — 로봇이 닿기도 전에 최대 **130 mm 이동·92.6° 회전**(2026-07-30 실측).
+        #   20 mm 이상 구른 3건이 전부 주석 재생 실패였다.
+        #
+        #   ⚠ 정착을 **계획 뒤에** 넣으면 안 된다 — 계획은 흔들리던 시점의 좌표를 겨냥하는데
+        #   큐브가 그 뒤 움직이므로 **녹화 자체가** 파지에 실패한다.
+        self.settle_objects()
         status, plan = self.plan_batch()
         if status == "closed":
             return "closed", None
