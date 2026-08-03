@@ -575,10 +575,52 @@ $DC python /workspace/scripts/contract/validate_lerobot_schema.py \
 `wrist_roll` 이 상한에 붙으면 회귀다 — 원인·해법 = `TROUBLESHOOTING.md` "wrist_roll 을 슬루 상한으로
 후려침". 측정 = `scratch/measure_velocity.py <v3_dir>`.
 
-⚠ **45.5% 는 튜닝 전 수치다.** source 8개·`action_noise=0`·기본 subtask 파라미터로 잰 것이고,
-5-DOF 팔에서 object-centric SE(3) 변환 목표가 도달 manifold 밖으로 나가는 구조적 한계가 남아 있다
-(구 v0.7 이식본은 같은 벽에서 튜닝 끝에 70.2% 였다 — 메모리 `skillgen-curobo-integration-done`).
-성공률 개선은 별건이며 레버는 source 풀 크기 · subtask 경계 offset · `mimic_approach_radius_m` 이다.
+⚠ **45.5% 는 튜닝 전 수치다.** 아래 §5.10 이 개선 경과와 현재값이다.
+
+### 5.10 증강 성공률 — 무엇이 성공을 가르는가
+
+**`pad ↔ 큐브` 거리가 성공을 가른다.** 여기서 pad 는 fixed jaw 접촉면 중심
+(`grasp_geometry.FIXED_INNER_CENTER`)이고, TCP 에서 54 mm 떨어져 있다.
+
+실측(증강 53 trial, `--record_segments` 의 `cube.pad_gap_min_mm`):
+
+| pad_gap | n | 성공률 |
+|---|---|---|
+| ≤ 26 mm | 29 | **96.6 %** |
+| 26~30 mm | 14 | 78.6 % |
+| 30~45 mm | 7 | **0 %** |
+| > 45 mm | 3 | 33.3 % |
+
+30 mm 를 넘으면 전멸한다. **회전 잔차 θ 가 pad 에서 54 mm·θ 로 증폭**되므로, TCP 기준으로
+좋아 보이는 목표가 pad 에서는 절벽 너머일 수 있다. 그래서 목표 선택·생성이 **전부 pad 기준**이다:
+
+| 지점 | 무엇을 pad 기준으로 | 단일 소스 |
+|---|---|---|
+| 파지 목표 후보 채점 | TCP 위치 잔차 → **pad 오차** | `grasp_manifold.project_pose_best_pan` |
+| 파지 목표 위치 보정 | 회전 스냅 후 pad 가 제자리에 오도록 TCP 를 되민다 | 〃 |
+| 합성 투하 지점 | 그릇 중심 위에 **pad** 를 놓는다(TCP 아님) | `generate_mimic_dataset._synth_place_waypoints` |
+
+**구간 구성** — source 재생은 파지 하나뿐이다(`--synth_place`):
+
+```
+cuRobo(접근) + subtask0(파지) + cuRobo(들어올리기+운반) + [합성: 투하·retreat·hold]
+```
+
+place 를 source 에서 재생하면 안 되는 이유: 그 구간은 `object_ref=Bowl` 로 변환되는데 담고
+있는 동작(들어올리기·운반·홈 복귀)은 물리적으로 큐브·로봇 기준이다. 실측으로 홈 복귀가
+그릇 변위만큼 밀렸다(INIT 대비 중앙 14.8°·최대 26.2°).
+
+**개선 경과(40 성공 기준, 같은 source 120)**:
+
+| 변경 | 성공률 |
+|---|---|
+| 기준 | 71.4 % |
+| + `plan_cspace` 실패 시 **대체 목표 IK 해**로 재계획 | 76.9 % |
+| + 후보 채점을 **pad 오차**로 | 80.0 % |
+| + 합성 place · 투영 pad 보존 · mute 강등 · entry interp 복원 | **81.6 %** (40/49) |
+
+잔여 실패의 성격(49 trial 중 9건): 파지 실패(조준 정상) 4 · 조준 이탈 3 · 계획 실패 1 ·
+운반 중 미끄러짐 1. **투하 실패는 0건**이다(합성 place 도입 전에는 실패의 40 %였다).
 
 ---
 
