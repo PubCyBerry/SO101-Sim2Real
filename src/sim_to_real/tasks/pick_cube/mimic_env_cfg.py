@@ -70,12 +70,16 @@ def mimic_subtask_configs() -> dict[str, list[SubTaskConfig]]:
         # ★결정적 최근접(nn_k=1). 상위 k 중 무작위로 고르면 부적합 source 를 뽑아 큰 SE(3)
         # 변환을 겪고, 5-DOF 투영에서 측방으로 밀린다.
         #
-        # ★`rot_weight` 를 낮추는 건 **틀렸다**(A/B 로 확인). 거리 =
-        # `pos_weight·‖Δpos‖ + rot_weight·‖Δrot‖` 인데 위치는 0.02~0.15 m, 회전은 0~π rad
-        # 라 기본값에서 회전이 10배 넘게 지배한다. 큐브가 4회 대칭이니 yaw 항이 과하다고
-        # 보고 `rot_weight` 를 0.05 로 내려봤더니 증강 성공률이 **76.1 % → 52~57 %** 로
-        # 떨어졌다. 어느 face 를 잡느냐가 5-DOF 도달성을 실제로 가르기 때문이다.
-        # 기본 가중(1.0, 1.0)을 그대로 쓴다.
+        # ★거리 지표는 **원본 그대로** 둔다. `pos_weight·‖Δpos‖ + rot_weight·‖Δrot‖` 에서
+        # 위치(0.02~0.46 m)와 회전(0~π rad)의 스케일이 10배 어긋나 회전이 지배하고, 큐브가
+        # z 축 4회 대칭인 것도 모른다 — 그래서 위치가 128.6 mm 나 먼 데모를 고른다.
+        # **그런데 그게 옳다.** 두 번 실측으로 확인했다:
+        #   · `rot_weight` 0.05(회전 경시)  → 증강 76.1 % → 52~57 %
+        #   · 대칭 접기 + 회전을 길이 환산  → 81.6 % → 22.2 %,
+        #     `pad_gap >30 mm` 6.2 % → 40.0 % (`sim_to_real.datagen.selection_strategy`,
+        #     오프라인에선 큐브 이동 128.6 → 21.2 mm 로 좋아 보였다)
+        # 위치 변환량은 pad_gap 을 키우지 않는다. **어느 face 를 무느냐**(회전)가 5-DOF
+        # 도달성을 가르고 그게 절벽을 만든다. "위치를 가깝게" 는 틀린 목적함수다.
         selection_strategy="nearest_neighbor_object",
         selection_strategy_kwargs={"nn_k": 1},
         action_noise=0.0,
