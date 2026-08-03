@@ -399,7 +399,22 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
                 "gripper_sensor_cfg": SceneEntityCfg("contact_gripper"),
                 "cubes": CUBE_NAMES,
                 "desk_top_z": _DESK_TOP_WORLD_Z,
-                "min_lift": 0.03,
+                # ★**그리퍼 폐합 각도로 바꾸려 하지 말 것** — 실측으로 폐기했다.
+                #   "종료 시점 gripper 가 +0.35~0.48 rad 니 아직 닫히는 중"이라는 판단은 틀렸다.
+                #   30 mm 큐브가 턱을 막아 **측정 관절이 0.324~0.476 rad 에서 물리적으로 멈춘다**
+                #   (명령은 −0.175 까지 가지만 관절은 못 간다). 즉 그 값이 곧 완전 폐합 상태다.
+                #   `max_gripper_rad=0.1` 로 바꿔봤더니 조건이 도달 불가라 주석이 **118/118 전부
+                #   실패**했다(`term 신호가 한 번도 발화하지 않았다`).
+                #   타이밍도 이미 옳다 — 첫 접촉 f167 → 눌림 완료 f169~177 → 이 신호 f179~183.
+                #   속도 기반(스톨 검출)도 부적합: 파지 중 |vel| p90 이 1.04 rad/s 로 턱이 큐브에
+                #   눌린 채 떨어 폐합 구간과 안 갈린다.
+                #   참고: `min_lift` 는 큐브 **중심** 기준이라 반높이 20 mm 가 이미 먹고 들어간다
+                #   — 0.03 은 실제로 10 mm 상승만 요구했다(의도된 30 mm 가 아니다).
+                #
+                # 현재: **접촉만**으로 판정한다(`min_lift=None`). subtask0 을 "파지 개시"에
+                #   맞춰 끊어, 들어올리기는 다음 구간(운반)이 맡게 한다. 실측 발화 시점이
+                #   f179~183(lift 기준) → f167(첫 양손가락 접촉)로 12~16프레임 당겨진다.
+                "min_lift": None,
                 "warmup_steps": 15,
                 "force_threshold": 0.5,
             },

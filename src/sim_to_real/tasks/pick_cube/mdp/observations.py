@@ -47,7 +47,7 @@ def any_cube_grasped(
     gripper_sensor_cfg: "SceneEntityCfg",
     cubes: list[str],
     desk_top_z: float = 0.705,
-    min_lift: float = 0.03,
+    min_lift: float | None = 0.03,
     warmup_steps: int = 15,
     force_threshold: float = 0.5,
     require_both_fingers: bool = True,
@@ -64,7 +64,10 @@ def any_cube_grasped(
         cubes: 큐브 asset 이름 리스트(센서 filter_prim_paths_expr 순서와 일치해야 함).
         desk_top_z: 책상 상판 world z. lift 판정 기준(pick_cube=0.705; common
             ``_geometry.DESK_TOP_Z`` 0.76 은 pen 잔재라 쓰지 않음).
-        min_lift: 상판 위로 이만큼(m) 큐브 중심이 올라오면 "들림". 초기 grasp 에만 요구.
+        min_lift: 상판 위로 이만큼(m) 큐브 **중심**이 올라오면 "들림". 초기 grasp 에만 요구.
+            ``None`` 이면 들림을 보지 않고 **접촉만으로** 판정한다(mimic subtask0 종료를
+            파지 개시에 맞추는 설정). ★중심 기준이라 큐브 반높이(20 mm)가 이미 먹고 들어간다
+            — 0.03 은 실제로 10 mm 상승만 요구한다.
         warmup_steps: 리셋 직후 이 스텝 동안은 grasp 무시(초기 접촉 노이즈 차단).
         force_threshold: 손가락별 접촉력(N) 임계.
         require_both_fingers: True 면 jaw·gripper 둘 다 같은 큐브 접촉 요구(envelope).
@@ -97,13 +100,15 @@ def any_cube_grasped(
 
     any_contact = torch.zeros(num_envs, dtype=torch.bool, device=device)
     new_grasp = torch.zeros(num_envs, dtype=torch.bool, device=device)
-    lift_threshold = desk_top_z + min_lift
 
     for cube_idx, cube_name in enumerate(cubes):
-        cube: "RigidObject" = env.scene[cube_name]
-        cube_z = cube.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
         contact_i = finger_contact[:, cube_idx]
-        lifted_i = cube_z > lift_threshold
+        if min_lift is None:
+            lifted_i = torch.ones_like(contact_i)
+        else:
+            cube: "RigidObject" = env.scene[cube_name]
+            cube_z = cube.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+            lifted_i = cube_z > desk_top_z + min_lift
 
         any_contact = any_contact | contact_i
         new_grasp = new_grasp | (contact_i & lifted_i & (~env._cube_is_holding))
@@ -197,4 +202,17 @@ if __name__ == "__main__":
     r = any_cube_grasped(env2, jaw_cfg, grip_cfg, ["Cube1"], warmup_steps=15)
     assert r.item() == 0.0, f"리셋 직후(warmup) 0 이어야, got {r.item()}"
 
-    print("any_cube_grasped self-check PASSED (6 cases)")
+    # 7) min_lift=None: 들림 없이 **접촉만**으로 grasp (mimic subtask0 설정)
+    env3 = make_env(20, contact(5.0), contact(5.0), REST_Z)
+    r = any_cube_grasped(env3, jaw_cfg, grip_cfg, ["Cube1"], warmup_steps=15, min_lift=None)
+    assert r.item() == 1.0, f"접촉만으로 1 이어야, got {r.item()}"
+    # 대조: 같은 상태에서 lift 기준은 아직 0
+    r = any_cube_grasped(make_env(20, contact(5.0), contact(5.0), REST_Z),
+                         jaw_cfg, grip_cfg, ["Cube1"], warmup_steps=15)
+    assert r.item() == 0.0, "lift 기준은 상판 위 21mm 에서 아직 0 이어야(대조군)"
+    # 8) min_lift=None 이어도 접촉이 없으면 0 — envelope 는 그대로 요구
+    env4 = make_env(20, contact(5.0), contact(0.0), REST_Z)
+    r = any_cube_grasped(env4, jaw_cfg, grip_cfg, ["Cube1"], warmup_steps=15, min_lift=None)
+    assert r.item() == 0.0, f"한 손가락만이면 0 이어야, got {r.item()}"
+
+    print("any_cube_grasped self-check PASSED (8 cases)")

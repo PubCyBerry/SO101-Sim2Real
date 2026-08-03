@@ -79,12 +79,19 @@ def mimic_subtask_configs() -> dict[str, list[SubTaskConfig]]:
         selection_strategy="nearest_neighbor_object",
         selection_strategy_kwargs={"nn_k": 1},
         action_noise=0.0,
-        # ★구간 진입 보간 프레임. **시간을 늘려** 경계 각변위를 펴는 레버다(clamp 아님).
-        #   전이 도착 자세 ↔ source 구간 시작 자세 차이를 이 프레임 수로 나눠 소화한다.
-        #   5 → 10: 같은 wrist_roll 차이를 2배 시간에 걸쳐 돌린다. 20 은 접촉 타이밍이 밀리고
-        #   에피소드가 길어져 과했다.
+        # ★구간 **진입** 보간. 전이 도착 자세 ↔ source 구간 시작 자세 차이를 이 프레임 수로
+        # 나눠 소화한다(clamp 이 아니라 **시간을 늘리는** 레버다).
+        #
+        # 0/0 으로 지웠다가 **되돌렸다**. 계획 goal 을 `project_pose_best_pan` 으로 구간 시작
+        # 자세와 같은 함수에 투영하니 차이가 거의 없어 보였지만, 실제 증강 영상에서 경계 튐이
+        # 그대로 드러났다 — 사용자 관측 10건 중 5건이 "subtask0 시작할 때 그리퍼가 순간적으로
+        # 텔레포트/덜컹/속도 급증"이었고, 그중 하나는 그 튐으로 **큐브 꼭지점을 내리찔러**
+        # 파지를 망쳤다. 투영 잔차는 0 이 아니고, 경계에서 한 스텝에 소화하면 슬루 상한까지
+        # 후려친다.
+        #
+        # 비용은 에피소드당 26프레임(13×2, 0.87 s)이다. ①멈칫과 맞바꾼 값이지만 ④를 깨는
+        # 쪽이 더 크다.
         num_interpolation_steps=10,
-        # 보간 끝에서 목표 자세를 붙잡는 추가 프레임 — 도착 오차를 흡수한다.
         num_fixed_steps=3,
         apply_noise_during_interpolation=False,
     )
@@ -113,6 +120,8 @@ class _MimicKnobs:
     mimic_urdf_path: str = "/workspace/assets/robots/urdf/so_arm101.urdf"
     mimic_term_signals: tuple[str, str] = MIMIC_TERM_SIGNALS
     mimic_grasp_object: str = MIMIC_GRASP_OBJECT
+    #: place subtask 의 기준 물체(그릇). 시작 신호가 "그릇 상공 도달"을 재는 데도 쓴다.
+    mimic_place_object: str = MIMIC_PLACE_OBJECT
     mimic_desk_top_world_z: float = _DESK_TOP_WORLD_Z
 
     #: grasp subtask **시작** 판정: tool(`tcp_grasp`) ↔ 큐브 중심 거리 상한(m).
@@ -130,9 +139,33 @@ class _MimicKnobs:
     mimic_approach_radius_m: float = 0.090
     #: 위 판정의 "그리퍼가 아직 열려 있다" 기준(rad). sim gripper: 닫힘 ≈ -0.17, 열림 ≈ +1.4.
     mimic_gripper_open_rad: float = 0.6
-    #: place subtask **시작** 판정 상승고(m, 상판 기준). grasp 종료 판정의 `min_lift`(0.03)보다
-    #: 커야 한다 — `datagen_info_pool` 이 subtask 경계 단조성을 assert 한다.
+    #: place subtask **시작** 판정 상승고(m, 상판 기준). grasp 종료 판정보다 커야 한다 —
+    #: `datagen_info_pool` 이 subtask 경계 단조성을 assert 한다.
+    #:
+    #: ★0.05 → 0.09. subtask1 은 `object_ref="Bowl"` 이라 **그릇 기준으로 SE(3) 변환**되는데,
+    #: 0.05 에서는 신호가 켜지는 순간 팔이 아직 **큐브에 붙어 있다**(실측 eef↔큐브 63~65 mm,
+    #: eef↔그릇 207~398 mm). 그 앞 15~21 프레임은 수직 들어올리기 — 큐브 좌표에 종속인 동작인데
+    #: 그릇 델타(산포 14 mm)로만 보정돼, 최근접 짝지어도 남는 큐브 오차(중앙 11.4 mm ·
+    #: p90 23.3 mm)가 그대로 실린다. 그래서 전이가 파지 지점에서 **source 큐브 자리로 갔다가**
+    #: 다시 그릇으로 향한다(사용자 영상 관측: "그릇과 멀어지는 방향으로 이동했다가").
+    #:
+    #: 지금은 **단조성 확보용 하한**으로만 쓴다(실제 경계는 아래 `bowl_xy` 가 정한다).
+    #: 파지 확정과 같은 프레임에 place 가 켜지면 `datagen_info_pool` 의 단조성 assert 가 터진다.
     mimic_place_start_lift_m: float = 0.05
+
+    #: place subtask **시작** 판정: 큐브가 그릇 중심에서 이 xy 거리 안(m).
+    #:
+    #: ★상승고가 아니라 **그릇 상공 도달**로 끊는다. subtask1 은 그릇 기준으로 변환되므로
+    #: 그 구간은 전부 그릇 상대 동작이어야 한다. 이 값이면 남는 구간이
+    #: **하강+투하+retreat+hold**(실측 중앙 55프레임)뿐이고, 들어올리기·운반은 앞쪽 cuRobo
+    #: 전이가 큐브를 든 채 담당한다:
+    #:
+    #:     cuRobo(접근) + subtask0(파지) + cuRobo(들어올리기+운반) + subtask1(하강·투하·retreat·hold)
+    #:
+    #: 0.08 m 근거: 실측 이 시점의 그리퍼가 **아직 닫혀 있다**(+0.33~0.48 rad). cuRobo 전이의
+    #: 그리퍼 명령은 다음 구간 첫 waypoint 에서 오므로 투하 이후로 잡으면 전이 내내 열린 채라
+    #: 큐브를 도중에 떨군다. 스폰 최소 큐브↔그릇 거리는 140 mm 라 파지 전 오발화도 없다.
+    mimic_place_start_bowl_xy_m: float = 0.08
 
     #: `target_eef_pose_to_action` 의 IK step bound = 슬루 상한 × `step_dt` × 이 계수.
     #: 1.0 = 물리적으로 정확히 따라갈 수 있는 최대. 1.0 초과는 추종오차를 다시 만든다.

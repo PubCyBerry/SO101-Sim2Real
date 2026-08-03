@@ -43,6 +43,57 @@ DEFAULT_EPS = 0.0007       # rad/step ≈ 0.02 rad/s @30 Hz
 DEFAULT_MAX_RUN = 8
 DEFAULT_HEAD, DEFAULT_TAIL = 60, 30   # pre-roll 2 s / post-hold 1 s
 
+#: 투하 후 남길 retreat 프레임 / hold 프레임. 0 이면 꼬리 재구성을 끈다.
+DEFAULT_RETREAT, DEFAULT_HOLD = 15, 15
+#: 그리퍼 폐합 판정(rad) · 재개방 판정(rad/step). `SubtaskCfg.cube_grasped` 의 게이트와 같은 값.
+DEFAULT_GRIPPER_CLOSED, DEFAULT_OPEN_EPS = 0.1, 0.01
+
+
+def release_index(gripper: np.ndarray, closed_rad: float, open_eps: float,
+                  open_rad: float = 0.6) -> int | None:
+    """폐합 뒤 그리퍼가 **다시 열리기 시작**하는 프레임(=투하 시점). 못 찾으면 None.
+
+    물체 pose 를 안 쓰고 그리퍼 명령만 본다 — 그래야 **주석 전**에 돌릴 수 있다(주석이
+    `datagen_info` 를 잘라낸 궤적 위에서 새로 만들어 subtask 경계가 자동 정합된다).
+
+    ★에피소드는 INIT(그리퍼 −0.17 rad = **닫힘**)에서 시작한다. 그래서 "첫 폐합 → 첫 개방"
+    으로 찾으면 파지가 아니라 **접근 직전의 개방**(실측 f61)을 투하로 오인한다. 개방 → 폐합
+    → 재개방 순서를 강제해야 한다.
+    """
+    opened = np.flatnonzero(gripper > open_rad)          # 접근을 위해 활짝 연 시점
+    if opened.size == 0:
+        return None
+    closed = np.flatnonzero(gripper < closed_rad)
+    closed = closed[closed > opened[0]]                  # 그 뒤의 파지 폐합
+    if closed.size == 0:
+        return None
+    opening = np.flatnonzero(np.diff(gripper) > open_eps)
+    opening = opening[opening > closed[0]]               # 그 뒤의 재개방 = 투하
+    return int(opening[0]) + 1 if opening.size else None
+
+
+def rebuild_tail(index: np.ndarray, gripper: np.ndarray, retreat: int, hold: int,
+                 closed_rad: float, open_eps: float) -> np.ndarray:
+    """투하 뒤 **긴 홈 복귀**를 짧은 retreat + hold 로 바꾼 프레임 인덱스.
+
+    ★왜 — 복귀 구간은 마지막 subtask(`object_ref=Bowl`) 안에 있어서 증강 때 **그릇 변위만큼
+    SE(3) 변환된다**. 실측: source 는 마지막 프레임이 INIT 에서 0.5° 인데 증강본은 14.8°
+    (최대 26.2°) 어긋났다 — 홈으로 안 돌아가고 그릇 따라 밀린 자리로 간다.
+
+    그릇에서 물러나는 **짧은** retreat 는 그릇 상대 동작이라 변환이 오히려 옳다. 그래서 긴
+    복귀만 잘라내고 retreat + 정지 hold 로 끝낸다. subtask 를 늘리지 않으므로 cuRobo 전이도
+    늘지 않는다(전이 1개당 계획 실패 ≈5% 실측).
+    """
+    if retreat <= 0 and hold <= 0:
+        return index
+    release = release_index(gripper[index], closed_rad, open_eps)
+    if release is None:
+        return index
+    cut = min(release + retreat, len(index))
+    if cut < 1:
+        return index
+    return np.concatenate([index[:cut], np.repeat(index[cut - 1], hold)])
+
 
 def dwell_keep_mask(actions: np.ndarray, eps: float, max_run: int,
                     head: int, tail: int) -> np.ndarray:
@@ -70,7 +121,9 @@ def dwell_keep_mask(actions: np.ndarray, eps: float, max_run: int,
 
 
 def compress(path_in: str, path_out: str, eps: float, max_run: int,
-             head: int, tail: int) -> None:
+             head: int, tail: int, retreat: int = 0, hold: int = 0,
+             gripper_closed: float = DEFAULT_GRIPPER_CLOSED,
+             open_eps: float = DEFAULT_OPEN_EPS) -> None:
     with h5py.File(path_in, "r") as src, h5py.File(path_out, "w") as dst:
         data_in = src["data"]
         data_out = dst.create_group("data")
@@ -86,7 +139,12 @@ def compress(path_in: str, path_out: str, eps: float, max_run: int,
             stream = "applied_target" if "applied_target" in demo_in else "actions"
             actions = np.asarray(demo_in[stream], dtype=np.float64)
             keep = dwell_keep_mask(actions, eps, max_run, head, tail)
-            n_before, n_after = len(actions), int(keep.sum())
+            # bool 마스크 → **프레임 인덱스**. 꼬리 재구성은 프레임을 반복해야 해서
+            # 마스크로는 표현할 수 없다(hold = 같은 프레임 N회).
+            index = np.flatnonzero(keep)
+            n_dwell = len(index)
+            index = rebuild_tail(index, actions[:, -1], retreat, hold, gripper_closed, open_eps)
+            n_before, n_after = len(actions), len(index)
             total_before += n_before
             total_after += n_after
 
@@ -100,13 +158,14 @@ def compress(path_in: str, path_out: str, eps: float, max_run: int,
                     if isinstance(item, h5py.Group):
                         copy(item, target.create_group(key))
                     elif item.shape and item.shape[0] == n_before:
-                        target.create_dataset(key, data=np.asarray(item)[keep],
+                        target.create_dataset(key, data=np.asarray(item)[index],
                                               compression="lzf")
                     else:
                         target.create_dataset(key, data=np.asarray(item))
 
             copy(demo_in, demo_out)
-            print(f"[dwell] {name}: {n_before} → {n_after} 프레임 (−{n_before - n_after})")
+            print(f"[dwell] {name}: {n_before} → dwell {n_dwell} → 꼬리재구성 {n_after} 프레임 "
+                  f"(−{n_before - n_after})")
 
         print(f"[dwell] 합계 {total_before} → {total_after} 프레임 "
               f"(−{total_before - total_after}, {100 * (1 - total_after / total_before):.1f}%)")
@@ -128,8 +187,25 @@ def _self_test() -> None:
     assert keep[-tail:].all(), "꼬리(post-hold)를 지웠다"
     # 단조 자세 열은 그대로 남아야 한다(자세 연속성)
     assert actions[keep][0, 0] == 0.0 and actions[keep][-1, 0] == 6.0
+    # ── 꼬리 재구성 ────────────────────────────────────────────────────────────────
+    # ★INIT 폐합(−0.17) → 접근 개방(1.2) → 파지 폐합(0.0) → 투하 재개방(0.8) → 긴 복귀 20f.
+    #   맨 앞 INIT 폐합을 파지로 오인하면 안 된다(실측에서 f61 을 투하로 잘못 짚었다).
+    grip = np.concatenate([np.full(4, -0.17), np.full(5, 1.2), np.full(6, 0.0), np.full(20, 0.8)])
+    idx = np.arange(len(grip))
+    out = rebuild_tail(idx, grip, retreat=3, hold=4, closed_rad=0.1, open_eps=0.01)
+    release = release_index(grip, 0.1, 0.01)
+    assert release == 15, f"투하 프레임 15 이어야(INIT 폐합 무시), got {release}"
+    assert len(out) == release + 3 + 4, f"길이 {release + 7} 이어야, got {len(out)}"
+    assert (out[-4:] == out[release + 2]).all(), "hold 는 마지막 프레임 반복이어야"
+    assert (out[:release + 3] == idx[:release + 3]).all(), "retreat 까지는 원본 순서 유지"
+    # 폐합이 없으면(파지 실패 데모) 손대지 않는다
+    assert len(rebuild_tail(idx, np.full(len(grip), 1.2), 3, 4, 0.1, 0.01)) == len(idx)
+    # retreat=hold=0 이면 기능 꺼짐 — 기존 동작 보존
+    assert len(rebuild_tail(idx, grip, 0, 0, 0.1, 0.01)) == len(idx)
+
     print("compress_source_dwell self-test PASS "
-          f"(총 {len(actions)} → {int(keep.sum())} 프레임, dropped={dropped})")
+          f"(dwell {len(actions)} → {int(keep.sum())} 프레임 dropped={dropped} · "
+          f"꼬리재구성 {len(idx)} → {len(out)})")
 
 
 def main() -> None:
@@ -142,6 +218,15 @@ def main() -> None:
                         help="이 길이 이하 정지만 압축(그보다 길면 기능적 hold 로 보존)")
     parser.add_argument("--head", type=int, default=DEFAULT_HEAD, help="보존할 선두 프레임")
     parser.add_argument("--tail", type=int, default=DEFAULT_TAIL, help="보존할 말미 프레임")
+    parser.add_argument("--retreat", type=int, default=DEFAULT_RETREAT,
+                        help="투하 후 남길 retreat 프레임. 0 이면 꼬리 재구성을 끈다 "
+                             "(긴 홈 복귀를 그대로 둔다 — 증강 때 그릇 변위만큼 변환된다)")
+    parser.add_argument("--hold", type=int, default=DEFAULT_HOLD,
+                        help="retreat 끝 자세를 유지할 정지 프레임")
+    parser.add_argument("--gripper-closed", type=float, default=DEFAULT_GRIPPER_CLOSED,
+                        help="폐합 판정(rad). 이 값 미만이면 닫힌 것으로 본다")
+    parser.add_argument("--open-eps", type=float, default=DEFAULT_OPEN_EPS,
+                        help="재개방 판정(rad/step)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -150,7 +235,8 @@ def main() -> None:
         return
     if not args.path_in or not args.path_out:
         parser.error("--in / --out 필요 (또는 --self-test)")
-    compress(args.path_in, args.path_out, args.eps, args.max_run, args.head, args.tail)
+    compress(args.path_in, args.path_out, args.eps, args.max_run, args.head, args.tail,
+             args.retreat, args.hold, args.gripper_closed, args.open_eps)
 
 
 if __name__ == "__main__":

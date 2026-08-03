@@ -207,7 +207,11 @@ class SO101PickCubeMimicEnv(PickCubeEnv, ManagerBasedRLMimicEnv):
         arm_target = np.asarray(result.joint_radians, dtype=np.float64)
 
         if action_noise_dict is not None:
-            scale = float(action_noise_dict[EEF_NAME])
+            # ★값이 `None` 일 수 있다. `Waypoint.noise` 의 기본값이 None 이고
+            #   `MultiWaypoint.execute` 는 그 값을 그대로 dict 에 담는다 — dict 존재 여부만
+            #   보고 `float()` 하면 `TypeError: float() argument ... not 'NoneType'` 로
+            #   생성이 통째로 죽는다(실측: 합성 waypoint 를 noise=None 로 만들었다가 run 전멸).
+            scale = float(action_noise_dict.get(EEF_NAME) or 0.0)
             if scale > 0.0:
                 arm_target = arm_target + scale * np.random.randn(5)
         arm_target = np.clip(arm_target, seed - step, seed + step)
@@ -293,14 +297,32 @@ class SO101PickCubeMimicEnv(PickCubeEnv, ManagerBasedRLMimicEnv):
         approaching = (distance < self.cfg.mimic_approach_radius_m) & (
             gripper > self.cfg.mimic_gripper_open_rad)
 
-        # place 시작 = 파지 확정 + 추가 상승. grasp 종료(min_lift)보다 확실히 뒤가 되도록 더 높게.
+        # place 시작 = 파지 확정 + 상승 + **그릇 상공 도달**.
+        #
+        # ★상승만으로 끊으면 안 된다. subtask1 은 `object_ref="Bowl"` 이라 그릇 기준으로 SE(3)
+        # 변환되는데, 상승 직후 자세는 아직 **큐브에 종속**이다(실측 eef↔큐브 63~65 mm,
+        # eef↔그릇 207~398 mm). 그 구간이 그릇 델타(산포 14 mm)로만 보정되면 최근접 짝지어도
+        # 남는 큐브 오차(중앙 11.4 mm · p90 23.3 mm)가 그대로 실려, 전이가 파지 지점에서
+        # **source 큐브 자리로 갔다가** 다시 그릇으로 향한다(사용자 영상 관측).
+        #
+        # 그릇 상공까지 온 뒤에 끊으면 남는 구간이 하강+투하+retreat+hold(실측 중앙 55프레임)
+        # 뿐이라 전부 그릇 상대 동작이고, 들어올리기·운반은 앞쪽 cuRobo 전이가 큐브를 든 채
+        # 충돌회피로 담당한다.
+        #
+        # ★시작 시점에 그리퍼가 **아직 닫혀 있어야** 한다(실측 +0.33~0.48 rad). cuRobo 전이의
+        # 그리퍼 명령은 다음 구간 첫 waypoint 에서 오므로, 투하 이후로 잡으면 전이 내내 열린
+        # 채라 큐브를 도중에 떨군다.
         grasped = self.obs_buf["subtask_terms"][grasp_signal][env_ids].reshape(-1) > 0.5
-        cube_world_z = self.scene[cube_name].data.root_pos_w[env_ids, 2]
-        lifted = cube_world_z > (self.cfg.mimic_desk_top_world_z + self.cfg.mimic_place_start_lift_m)
+        cube_world = self.scene[cube_name].data.root_pos_w[env_ids]
+        bowl_world = self.scene[self.cfg.mimic_place_object].data.root_pos_w[env_ids]
+        lifted = cube_world[:, 2] > (self.cfg.mimic_desk_top_world_z
+                                     + self.cfg.mimic_place_start_lift_m)
+        over_bowl = (torch.linalg.vector_norm(cube_world[:, :2] - bowl_world[:, :2], dim=-1)
+                     < self.cfg.mimic_place_start_bowl_xy_m)
 
         return {
             grasp_signal: approaching.float(),
-            place_signal: (grasped & lifted).float(),
+            place_signal: (grasped & lifted & over_bowl).float(),
         }
 
     # ══ SkillGen 훅: 구간별 부착 물체 ══════════════════════════════════════════════
