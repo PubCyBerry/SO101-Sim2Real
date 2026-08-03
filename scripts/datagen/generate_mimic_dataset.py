@@ -62,6 +62,9 @@ parser.add_argument("--planner_step_size", type=float, default=None,
 parser.add_argument("--motion_noise_scale", type=float, default=0.0,
                     help="계획 waypoint 에 더할 gaussian 노이즈 스케일")
 parser.add_argument("--debug_planner", action="store_true", help="planner 진단 로그")
+parser.add_argument("--synth_place", action="store_true",
+                    help="마지막 subtask 를 source 재생 대신 **합성**한다(그릇 pose 에서 직접 "
+                         "투하·retreat·hold 생성). 운반은 cuRobo 전이가 담당한다")
 parser.add_argument("--record_segments", type=str, default=None,
                     help="생성 에피소드의 **프레임별 구간 출처**를 이 JSON 에 남긴다. 증강본은 "
                          "[cuRobo 전이 | 보간 | subtask source 재생] 이 이어붙은 결과인데 "
@@ -120,6 +123,89 @@ from sim_to_real.tasks.common.mdp.recorders import SO101DatagenRecorderManagerCf
 from sim_to_real.tasks.pick_cube.mimic_env import EEF_NAME  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import remove_pick_cube_cameras  # noqa: E402
 from sim_to_real.utils.constant import BOWL_NAME, CUBE_NAMES  # noqa: E402
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER  # noqa: E402
+from so101_contract.grasp_manifold import project_pose_best_pan  # noqa: E402
+
+
+#: 합성 place 구간 프레임 배분 — [정착 | 개방 | retreat | hold].
+_SYNTH_SETTLE, _SYNTH_OPEN, _SYNTH_RETREAT, _SYNTH_HOLD = 6, 10, 12, 12
+#: 그릇 중심 위 **큐브(pad)** 높이(m, 그릇 원점 기준). source 투하 높이 실측 중앙 135.4 mm
+#: (범위 129~165, n=8)에 맞춘다. rim 은 75 mm 라 그 위에서 놓는다.
+_SYNTH_HOVER_M = 0.135
+#: 개방 후 물러나는 높이(m).
+_SYNTH_RETREAT_M = 0.060
+
+
+def _synth_place_waypoints(env, env_id: int, source_traj):
+    """마지막 subtask 를 source 재생 대신 **합성**한다.
+
+    ★왜 — source 의 place 구간은 그릇 기준으로 SE(3) 변환되는데, 그 구간이 담고 있는 동작
+    (들어올리기·운반·홈 복귀)은 물리적으로 큐브·로봇 기준이다. 그래서 변환이 어긋나 전이가
+    엉뚱한 방향으로 가고(사용자 관측: "그릇과 멀어지는 방향으로 이동했다가"), 홈 복귀는
+    그릇 변위만큼 밀린다(실측 INIT 대비 14.8°, 최대 26.2°).
+
+    여기서는 그 구간을 통째로 버리고 **그릇 pose 에서 직접** 만든다:
+
+        cuRobo(접근) + subtask0(파지) + cuRobo(들어올리기+운반) + [합성: 투하·retreat·hold]
+
+    첫 waypoint 가 곧 cuRobo 전이의 목표라, "그릇 위 hover" 를 첫 점으로 두면 운반을 planner
+    가 담당한다. 그 뒤는 그리퍼 개방 → 상승 → 정지뿐이라 source 가 필요 없다.
+
+    ★첫 waypoint 의 그리퍼는 **닫힌 값**이어야 한다. cuRobo 전이는 다음 구간 첫 waypoint 의
+    그리퍼 명령을 그대로 쓰므로, 열린 값이면 운반 내내 열린 채라 큐브를 도중에 떨군다.
+    """
+    from isaaclab_mimic.datagen.waypoint import Waypoint
+
+    # ★`list(source_traj)` 로 쓰면 안 된다. `WaypointTrajectory.__getitem__` 은 범위를 넘으면
+    #   `IndexError` 가 아니라 **`AssertionError`** 를 던져서, 옛 반복 규약을 쓰는 `list()` 가
+    #   종료하지 못하고 그대로 터진다(실측: generate 가 AssertionError 로 죽어 run 전멸).
+    points = [source_traj[i] for i in range(len(source_traj))]
+    closed_action = points[0].gripper_action     # 쥔 상태(구간 시작)
+    open_action = points[-1].gripper_action      # 놓은 상태(구간 끝 = 꼬리 hold)
+    reference = points[0].pose                   # dtype/device 를 그대로 물려받는다
+
+    bowl = env.get_object_poses(env_ids=[env_id])[BOWL_NAME][0]
+    with torch.no_grad():
+        bowl_np = np.asarray(bowl.detach().cpu(), dtype=np.float64).reshape(4, 4)
+        seed = env._canonical_joint_pos([env_id])[0, :5].detach().cpu().numpy().astype(np.float64)
+
+    pad_offset = np.asarray(FIXED_INNER_CENTER, dtype=np.float64)
+    base_rotation = np.asarray(points[0].pose.detach().cpu(), dtype=np.float64)[:3, :3]
+
+    def pose_at(height: float) -> torch.Tensor:
+        """**pad**(=큐브가 물려 있는 점)를 그릇 중심 위 `height` 에 놓는 tool pose.
+
+        ★TCP 를 겨누면 안 된다. 큐브는 TCP 가 아니라 pad 에 있고, pad 은 top-down 자세에서
+        TCP 로부터 world 기준 (14.7, 21.5, **−46.3**) mm 떨어져 있다. TCP 를 그릇 중심 위
+        115 mm 에 두면 큐브는 수평 26 mm 어긋난 채(성공반경 60 mm 의 43%) 68.7 mm 에 놓여
+        rim(75 mm)보다 낮다 — 그리퍼가 그릇 안으로 들어가 rim 을 친다.
+        실측 실패: 최소 xy 20.5 mm 까지 갔다가 최종 178 mm 로 튕겨나감.
+
+        pose = pad_target − R @ pad_offset 인데 R 은 투영 결과라 p 에 의존한다. 2회 반복이면
+        수렴한다(manifold 투영은 위치를 보존하고 회전만 스냅하므로 변화가 작다).
+        """
+        pad_target = bowl_np[:3, 3] + np.array([0.0, 0.0, height])
+        target = np.eye(4, dtype=np.float64)
+        target[:3, :3] = base_rotation
+        target[:3, 3] = pad_target - base_rotation @ pad_offset
+        for _ in range(2):
+            # 그릇 위 자세도 5-DOF 도달 manifold 로 투영한다 — env·planner 와 같은 함수.
+            snapped = project_pose_best_pan(env.eef_ik, target, seed)
+            target = snapped.copy()
+            target[:3, 3] = pad_target - snapped[:3, :3] @ pad_offset
+        return torch.as_tensor(target, dtype=reference.dtype, device=reference.device)
+
+    hover, lifted = pose_at(_SYNTH_HOVER_M), pose_at(_SYNTH_HOVER_M + _SYNTH_RETREAT_M)
+    plan: list[Waypoint] = []
+    plan += [Waypoint(hover, closed_action, 0.0) for _ in range(_SYNTH_SETTLE)]
+    plan += [Waypoint(hover, open_action, 0.0) for _ in range(_SYNTH_OPEN)]
+    for step in range(1, _SYNTH_RETREAT + 1):
+        ratio = step / _SYNTH_RETREAT
+        blend = hover.clone()
+        blend[:3, 3] = (1.0 - ratio) * hover[:3, 3] + ratio * lifted[:3, 3]
+        plan.append(Waypoint(blend, open_action, 0.0))
+    plan += [Waypoint(lifted, open_action, 0.0) for _ in range(_SYNTH_HOLD)]
+    return plan
 
 
 def _install_segment_recorder(out_path: str) -> list[dict]:
@@ -136,15 +222,34 @@ def _install_segment_recorder(out_path: str) -> list[dict]:
 
     episodes: list[dict] = []
     frames: list[str] = []
+    cube_track: list[list[float]] = []   # 프레임별 [cube xyz, bowl xyz] (mm, world)
 
     def tag(waypoints, label: str, start: int = 0) -> None:
         for wp in list(waypoints)[start:]:
             wp._so101_segment = label
 
+    picks: list[dict] = []   # subtask 별로 고른 source demo 인덱스
+
     orig_plan = DataGenerator._convert_planned_trajectory_to_waypoints
     orig_merge = DataGenerator.merge_eef_subtask_trajectory
     orig_exec = MultiWaypoint.execute
     orig_generate = DataGenerator.generate
+    orig_select = DataGenerator.select_source_demo
+
+    # ★호출부가 **키워드 인자**를 쓴다 — 파라미터 이름을 원본과 한 글자도 다르게 두면
+    #   TypeError 로 생성이 통째로 죽는다.
+    def select_wrapped(self, eef_name, eef_pose, object_pose,
+                       src_demo_current_subtask_boundaries, subtask_object_name,
+                       selection_strategy_name, selection_strategy_kwargs=None):
+        index = orig_select(self, eef_name, eef_pose, object_pose,
+                            src_demo_current_subtask_boundaries, subtask_object_name,
+                            selection_strategy_name, selection_strategy_kwargs)
+        # ★`generation_select_src_per_subtask=True` 라 subtask 마다 source 를 **따로** 고른다.
+        #   grasp 를 A 데모에서, place 를 B 데모에서 가져오면 큐브가 그리퍼 안에 물린 위치가
+        #   서로 달라 투하 지점이 그만큼 어긋난다("완주했는데 그릇에 없음" 가설). 어느 데모를
+        #   골랐는지 남겨 실패와의 상관을 본다.
+        picks.append({"ref": subtask_object_name, "src": int(index)})
+        return index
 
     def plan_wrapped(self, motion_planner, gripper_action):
         result = orig_plan(self, motion_planner, gripper_action)
@@ -152,6 +257,10 @@ def _install_segment_recorder(out_path: str) -> list[dict]:
         return result
 
     def merge_wrapped(self, env_id, eef_name, subtask_index, prev_executed_traj, subtask_traj):
+        if args_cli.synth_place and subtask_index == len(self.env_cfg.subtask_configs[eef_name]) - 1:
+            synth = _synth_place_waypoints(self.env, env_id, subtask_traj)
+            tag(synth, "synth_place")
+            return synth
         n_src = len(subtask_traj)  # merge 가 소비할 수 있으니 호출 **전에** 잰다
         result = orig_merge(self, env_id, eef_name, subtask_index, prev_executed_traj, subtask_traj)
         # 앞쪽은 진입 보간(num_interpolation_steps + num_fixed_steps), 뒤쪽 n_src 개가
@@ -162,10 +271,30 @@ def _install_segment_recorder(out_path: str) -> list[dict]:
 
     async def exec_wrapped(self, env, success_term, env_id=0, env_action_queue=None):
         frames.append(getattr(next(iter(self.waypoints.values())), "_so101_segment", "unknown"))
+        # ★생성 HDF5 에는 프레임별 물체 pose 가 없다(actions·applied_target·obs_x 뿐).
+        #   물리 실패(완주했는데 그릇에 없음)를 수치로 짚으려면 큐브 궤적이 필요해서 여기서
+        #   같이 적는다. 계측이 생성을 죽이면 안 되므로 통째로 감싼다.
+        try:
+            cube = env.scene[CUBE_NAMES[0]].data.root_pos_w[env_id]
+            bowl = env.scene[BOWL_NAME].data.root_pos_w[env_id]
+            # ★pad↔큐브 거리도 같이 잰다 — 실패 12/13 이 "한 번도 안 들림"이라 파지 자체가
+            #   범인이고, 그 직접 지표가 이것이다. env 의 mimic 훅은 `datagen_info` 와 **같은
+            #   base 프레임** pose 를 주므로 source(주석본)의 24.5 mm 와 바로 비교된다.
+            #   world 좌표로 손수 변환하면 base↔USD affine 때문에 조용히 틀린다(실측 300 mm).
+            eef = env.get_robot_eef_pose(EEF_NAME, env_ids=[env_id])[0]
+            obj = env.get_object_poses(env_ids=[env_id])[CUBE_NAMES[0]][0]
+            pad = eef[:3, 3] + eef[:3, :3] @ torch.as_tensor(
+                FIXED_INNER_CENTER, dtype=eef.dtype, device=eef.device)
+            gap = float(torch.linalg.vector_norm(pad - obj[:3, 3]) * 1000)
+            cube_track.append([round(float(v) * 1000, 1) for v in (*cube, *bowl)] + [round(gap, 1)])
+        except Exception:  # noqa: BLE001
+            cube_track.append([])
         return await orig_exec(self, env, success_term, env_id, env_action_queue)
 
     async def generate_wrapped(self, *a, **kw):
         frames.clear()
+        cube_track.clear()
+        picks.clear()
         result = await orig_generate(self, *a, **kw)
         runs: list[list] = []
         for label in frames:
@@ -173,8 +302,32 @@ def _install_segment_recorder(out_path: str) -> list[dict]:
                 runs[-1][2] += 1
             else:
                 runs.append([label, sum(r[2] for r in runs), 1])
-        episodes.append({"success": bool(result.get("success")), "frames": len(frames),
-                         "segments": [{"label": l, "start": s, "length": n} for l, s, n in runs]})
+        episode = {"success": bool(result.get("success")), "frames": len(frames),
+                   "segments": [{"label": l, "start": s, "length": n} for l, s, n in runs],
+                   "source_picks": list(picks),
+                   # subtask 끼리 다른 source 를 골랐나(파지↔투하 기하 불일치 후보)
+                   "src_mismatch": len({p["src"] for p in picks}) > 1}
+        track = [row for row in cube_track if len(row) == 7]
+        if track:
+            arr = np.asarray(track)                       # (T, 7) mm — cube xyz, bowl xyz, pad gap
+            xy = np.linalg.norm(arr[:, :2] - arr[:, 3:5], axis=1)
+            episode["cube"] = {
+                "final_xy_to_bowl_mm": round(float(xy[-1]), 1),
+                "min_xy_to_bowl_mm": round(float(xy.min()), 1),
+                "final_z_mm": round(float(arr[-1, 2]), 1),
+                "max_z_mm": round(float(arr[:, 2].max()), 1),
+                "max_z_frame": int(arr[:, 2].argmax()),
+                "start_z_mm": round(float(arr[0, 2]), 1),
+                "bowl_z_mm": round(float(arr[-1, 5]), 1),
+                # subtask0(파지 구간) 안에서의 pad↔큐브 최소 거리 = 집게가 얼마나 잘 물었나.
+                # source 성공 파지 실측 24.5 mm 가 기준선이다.
+                "pad_gap_min_mm": round(float(arr[:, 6].min()), 1),
+                "pad_gap_min_frame": int(arr[:, 6].argmin()),
+                "pad_gap_at_subtask0_end_mm": round(float(arr[
+                    min(next((s["start"] + s["length"] - 1 for s in episode["segments"]
+                              if s["label"] == "subtask0"), len(arr) - 1), len(arr) - 1), 6]), 1),
+            }
+        episodes.append(episode)
         with open(out_path, "w") as fp:
             json.dump({"episodes": episodes}, fp, indent=1)
         return result
@@ -183,6 +336,7 @@ def _install_segment_recorder(out_path: str) -> list[dict]:
     DataGenerator.merge_eef_subtask_trajectory = merge_wrapped
     DataGenerator.generate = generate_wrapped
     MultiWaypoint.execute = exec_wrapped
+    DataGenerator.select_source_demo = select_wrapped
     return episodes
 
 
