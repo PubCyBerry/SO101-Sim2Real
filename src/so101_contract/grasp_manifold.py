@@ -23,6 +23,8 @@ import math
 
 import numpy as np
 
+from so101_contract.grasp_geometry import FIXED_INNER_CENTER as _FIXED_INNER_CENTER
+
 #: 캐노니컬 top-down(pan=0): x̂=+y(tangential=closing), ŷ=+x(radial), ẑ=-z(접근·하향).
 R_TOPDOWN = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 
@@ -100,6 +102,10 @@ POSE_RESIDUAL_TIE_M = 1e-3
 #: 연속성 비교 시 축별 가중치(arm 5축). `wrist_roll` 을 무겁게 둔다 — manifold 의 ρ 가 곧
 #: wrist_roll 이라 후보가 바뀌면 이 축이 튀고, 사용자가 지적한 증상이 정확히 그것이다.
 CONTINUITY_WEIGHTS = np.array([1.0, 1.0, 1.0, 1.0, 3.0])
+
+#: 후보 채점의 기준점 = fixed jaw **pad center**(tool 프레임 오프셋, m).
+#: `grasp_geometry.FIXED_INNER_CENTER` 의 사본이 아니라 그 값을 그대로 쓴다 — 단일 소스다.
+_PAD_OFFSET = np.array(_FIXED_INNER_CENTER, dtype=np.float64)
 
 #: fixed jaw pad center ↔ 큐브 face center 의 목표 clearance(m). SM 의
 #: `FIXED_JAW_CLEAR_TARGET` 과 같은 값 — pad 가 face 를 긁지 않게 두는 양의 여유.
@@ -232,8 +238,9 @@ def project_pose_best_pan(ik, pose: np.ndarray, seed_joint_radians: np.ndarray) 
     pose = np.asarray(pose, dtype=np.float64).reshape(4, 4)
     rotation, position = pose[:3, :3], pose[:3, 3]
 
-    def vector(matrix_3x3):
-        return np.concatenate([position, encode_rotation_matrices(matrix_3x3[None], "rot6d")[0]])
+    def vector(matrix_3x3, origin=None):
+        return np.concatenate([position if origin is None else origin,
+                               encode_rotation_matrices(matrix_3x3[None], "rot6d")[0]])
 
     pan_ik = float(np.asarray(
         ik.solve(vector(rotation), seed_joint_radians, representation="rot6d")
@@ -242,12 +249,32 @@ def project_pose_best_pan(ik, pose: np.ndarray, seed_joint_radians: np.ndarray) 
     seed = np.asarray(seed_joint_radians, dtype=np.float64).reshape(-1)[:5]
     bases = (pan_from_position(position), pan_ik)
 
+    # ★채점 기준은 TCP 가 아니라 **pad** 다. 큐브를 무는 건 pad 이고, pad 은 TCP 에서 54 mm
+    #   떨어져 있어(`FIXED_INNER_CENTER`) 회전 잔차 θ 가 pad 에서 54 mm·θ 로 증폭된다.
+    #   실측(증강 53 trial): pad↔큐브 거리별 성공률이 ≤26 mm 96.6 % / 26~30 mm 78.6 % /
+    #   30~45 mm **0 %** 로 절벽이다. TCP 위치 잔차만 보고 고르면 그 절벽을 못 피한다.
+    pad_target = position + rotation @ _PAD_OFFSET
+
     def evaluate(pan, alpha, rho):
         candidate = manifold_rotation(pan, alpha, rho)
-        result = ik.solve(vector(candidate), seed_joint_radians, representation="rot6d")
+        # ★회전을 스냅하면 pad 가 (R_new − R_old)·offset 만큼 끌려간다(최대 54 mm). 그래서
+        #   TCP 위치를 **pad 가 제자리에 오도록** 되민다. 이 보정을 IK 에 넣지 않고 나중에
+        #   더하면, 채점한 pose 와 호출자가 푸는 pose 가 달라져 점수가 거짓말이 된다.
+        #
+        #   실측 A/B(최근접 source + SE(3) 변환, n=70): pad 오차 중앙 37.7 → 28.1 mm,
+        #   `≤26 mm` 40.0 → 47.1 %, `>30 mm` 57.1 → 47.1 %. 성공률 절벽이 26/30 mm 에 있으니
+        #   이 두 비율이 곧 ④다.
+        #   ★후보마다 보정 유무를 **둘 다** 풀어 좋은 쪽을 고르는 안도 재봤다. 나빠지는 케이스가
+        #   21/70 → 3/70 으로 줄지만 중앙·`≤26 mm` 는 동일하고 **IK 호출이 2배**(143 → 286 ms/건)
+        #   다. 이 함수는 매 스텝 호출돼 생성 시간의 대부분을 차지하므로 채택하지 않았다.
+        origin = pad_target - candidate @ _PAD_OFFSET
+        result = ik.solve(vector(candidate, origin), seed_joint_radians, representation="rot6d")
         joints = np.asarray(result.joint_radians, dtype=np.float64).reshape(-1)[:5]
-        return (float(result.position_residual_m),
-                float((np.abs(joints - seed) * CONTINUITY_WEIGHTS).max()), candidate)
+        achieved = np.asarray(ik.kinematics.forward_matrices(joints.reshape(1, -1))[0],
+                              dtype=np.float64)
+        pad = achieved[:3, 3] + achieved[:3, :3] @ _PAD_OFFSET
+        return (float(np.linalg.norm(pad - pad_target)),
+                float((np.abs(joints - seed) * CONTINUITY_WEIGHTS).max()), candidate, origin)
 
     scored = []
     for base in bases:
@@ -267,6 +294,7 @@ def project_pose_best_pan(ik, pose: np.ndarray, seed_joint_radians: np.ndarray) 
 
     out = pose.copy()
     out[:3, :3] = chosen[2]
+    out[:3, 3] = chosen[3]   # pad 보존 보정 위치 — 채점한 pose 를 그대로 돌려준다
     return out
 
 
