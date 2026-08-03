@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import tempfile
 from dataclasses import dataclass, field
 
@@ -73,6 +74,8 @@ from so101_contract.eef_ik import SO101BoundedIK
 from so101_contract.eef_kinematics import encode_rotation_matrices
 from so101_contract.feature_codec import SO101_JOINT_ORDER
 
+from sim_to_real.utils.cube_specs import CUBE_SIZES
+
 ARM_JOINT_NAMES = tuple(SO101_JOINT_ORDER[:5])
 
 # descend/contact 구간에서 collision 을 끄는 링크 — SM planner 와 같은 집합.
@@ -88,6 +91,18 @@ _LIMIT_MARGIN_RAD = 0.005
 #: 손가락 안쪽 중심에서 46 mm 떨어져 있어, 파지 자세에서도 tcp↔큐브가 60~90 mm 다.
 #: 100 mm 면 그걸 덮으면서 옆 큐브(최소 이격 > 100 mm)는 회피 대상으로 남긴다.
 _GRASP_MUTE_RADIUS_M = 0.10
+
+
+def _diagnosis_is_clean(diagnosis: str) -> bool:
+    """:meth:`SO101SkillGenPlanner.diagnose_state` 한 줄에 제약 위반이 하나도 없나.
+
+    형식은 ``"start 제약: cspace=0.0000 self_collision=0.0000 scene_collision=0.7602"``.
+    항목 이름을 하드코딩하지 않고 `이름=값` 을 전부 훑는다 — cuRobo 가 제약 항목을 늘려도
+    조용히 통과하지 않게 한다. 파싱할 값이 하나도 없으면(진단 불가 문자열) 깨끗하다고
+    보지 않는다.
+    """
+    values = re.findall(r"=\s*([-\d.eE+]+)", diagnosis)
+    return bool(values) and all(abs(float(v)) < 1e-9 for v in values)
 
 #: ★parked(홈) 자세에서만 만나는 sphere 오겹침 쌍 — self_collision_ignore 에 더한다.
 #:
@@ -141,6 +156,10 @@ class SO101SkillGenPlannerCfg:
     #: position-only 폴백에서 받아올 후보 해 개수. 이 중 **DLS 최선해에 관절공간으로 가장 가까운**
     #: 해를 고른다 — 도착 자세를 이어질 source 구간과 맞춰 경계 wrist_roll 후려치기를 줄인다.
     ik_return_seeds: int = 16
+    # `plan_cspace` 가 양끝 무충돌인데 실패했을 때 시도할 **대체 목표 배치** 수. 실측
+    # (56 trial) 계획 실패 6건 중 5건이 이 부류라 예산이 아니라 목표가 문제였다.
+    # 첫 후보가 성공하면 실행되지 않는 경로다(기존 성공 케이스 동작 불변).
+    max_goal_alternates: int = 4
 
     # ── 계획 후처리 ──────────────────────────────────────────────────────────────
     #: linear retiming step(관절공간 rad). None = retiming 끔.
@@ -163,8 +182,17 @@ class SO101SkillGenPlannerCfg:
     visualize_spheres: bool = False
     visualize_plan: bool = False
 
-    #: 큐브 obstacle/attach blob 한 변(m). 기본은 cube_specs 최대값 고정(보수적 과대근사).
+    #: 큐브 크기를 sim 에서 못 읽었을 때의 **최후 폴백**(m). 평소엔 쓰이지 않는다 —
+    #: 실제 값은 :meth:`SO101SkillGenPlanner._cube_size_m` 이 매번 env 에서 해석한다.
     cube_dims: float = CUBE_DIMS
+    #: **world obstacle** 한 변에 더할 여유(m). obstacle 은 planner 생성 시 dims 가 굳어
+    #: 나중에 못 바꾸므로(v0.8 은 pose/enable 만 가능), 큐브 크기 DR(25~40 mm 예정) 상한을
+    #: 덮도록 여유를 준다. **obstacle 과대근사는 안전한 방향**이다 — 더 크게 피할 뿐이다.
+    cube_obstacle_margin_m: float = 0.012
+    #: attach blob 은 매 attach 마다 새로 만들므로 **여유 없이 실측 크기 그대로** 쓴다.
+    #: 여기를 과대하게 잡으면 잡은 큐브가 그릇 rim 과 허위 충돌해 계획이 거부된다
+    #: (실측: 0.05 blob vs 실제 0.040 = 부피 1.95배, run 당 START 충돌 1건).
+    attach_dims_margin_m: float = 0.0
 
     #: parked 자세 sphere 오겹침 완화 쌍(:data:`PARKED_POSE_SELF_COLLISION_IGNORE` 참조).
     #: `{}` 로 두면 완화를 끈다 — 그러면 홈 자세에서 첫 전이가 전멸한다.
@@ -186,6 +214,8 @@ class SO101SkillGenPlanner(MotionPlannerBase):
     ) -> None:
         super().__init__(env=env, robot=robot, env_id=env_id, debug=config.debug)
         self.config = config
+        # `_write_scene_model()` 이 곧바로 `_cube_size_m()` 을 부르므로 **그 전에** 준비한다.
+        self._logged_cube_size: dict[str, float] = {}
 
         # DataGenerator 가 직접 읽는 속성 3개
         self.step_size: float | None = config.motion_step_size
@@ -248,16 +278,59 @@ class SO101SkillGenPlanner(MotionPlannerBase):
     def _cube_obstacle(self, cube_name: str) -> str:
         return f"cube_{cube_name}"
 
+    def _cube_size_m(self, cube_name: str) -> float:
+        """이 큐브의 **현재** 한 변(m). 매 호출마다 sim 에서 다시 읽는다.
+
+        큐브 크기는 DR 대상이 될 예정이라(25~40 mm) 상수로 굳히면 조용히 틀린다. 우선순위:
+
+        1. ``env.cube_size_m`` — 크기 DR 훅이 쓰는 per-env 텐서(스칼라/(E,)/(E,C) 모두 허용)
+        2. ``env.scene[name]`` prim 의 world scale × 저작 크기 — DR 이 USD scale 로 걸린 경우
+        3. :data:`CUBE_SIZES` 정적 표(cube_specs 단일 소스)
+        4. ``config.cube_dims`` 최후 폴백
+
+        해석 결과는 값이 바뀔 때만 로그로 남긴다(매 프레임 도배 방지).
+        """
+        size = None
+        table = CUBE_SIZES.get(cube_name)
+        raw = getattr(self.env, "cube_size_m", None)
+        if raw is not None:
+            try:
+                with torch.no_grad():
+                    # float64 로 받는다 — float32 로 두면 0.025 가 0.0250000004 로 새어
+                    # 로그·비교가 지저분해진다.
+                    tensor = torch.as_tensor(raw, dtype=torch.float64).reshape(-1)
+                index = self.env_id if tensor.numel() > 1 else 0
+                if tensor.numel() > 1 and tensor.numel() % max(len(self.config.cube_names), 1) == 0:
+                    # (E, C) 레이아웃이면 이 큐브 열을 고른다.
+                    per_env = tensor.reshape(-1, len(self.config.cube_names))
+                    index = None
+                    size = float(per_env[self.env_id, self.config.cube_names.index(cube_name)])
+                else:
+                    size = float(tensor[index])
+            except Exception as exc:  # noqa: BLE001 — 해석 실패는 폴백으로
+                self._log(f"cube_size_m 해석 실패({type(exc).__name__}) — 정적 표로 폴백")
+                size = None
+        if size is None:
+            size = table if table is not None else self.config.cube_dims
+        if self._logged_cube_size.get(cube_name) != size:
+            self._logged_cube_size[cube_name] = size
+            self._log(f"{cube_name} 크기 {size * 1000:.1f} mm "
+                      f"(정적표 {(table or 0) * 1000:.1f} mm)")
+        return float(size)
+
     def _write_scene_model(self) -> str:
         """obstacle 집합(그릇 rim ring + 큐브 N개)을 임시 yml 로 굳힌다.
 
         v0.8 은 생성 후 obstacle 을 **추가**할 수 없다(pose/enable 만 가능) → 여기서 전부 선언하고
         실제 좌표는 :meth:`_sync_world` 가 매 계획마다 주입한다. placeholder 는 먼 좌표.
         """
+        # ★obstacle dims 는 여기서 굳으면 못 바꾼다 → 크기 DR 상한을 덮도록 여유를 더한다.
+        #   피하는 쪽 과대근사는 안전하다. 반대로 **attach blob 은 여유 0** 이다(허위 충돌).
         world = {"cuboid": {
             **bowl_ring(9.0, 9.0),
-            **{self._cube_obstacle(name): {"dims": [self.config.cube_dims] * 3,
-                                           "pose": [9.0, 9.0, 0.02, 1.0, 0.0, 0.0, 0.0]}
+            **{self._cube_obstacle(name): {
+                "dims": [self._cube_size_m(name) + self.config.cube_obstacle_margin_m] * 3,
+                "pose": [9.0, 9.0, 0.02, 1.0, 0.0, 0.0, 0.0]}
                for name in self.config.cube_names},
         }}
         handle = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
@@ -364,11 +437,15 @@ class SO101SkillGenPlanner(MotionPlannerBase):
         `world_objects_pose_offset=None`(identity) — so101.yml 의 `attached_object` 가
         `tcp_grasp` 와 **같은 transform** 이라 blob 이 정확히 pinch 점에 놓인다.
         """
+        # ★blob 은 **실측 크기 그대로**(여유 0). attach 는 매번 새로 만드니 크기 DR 도 따라간다.
+        #   과대하게 잡으면 잡은 큐브가 그릇 rim 과 허위 충돌해 `plan_cspace` 가 START 충돌로
+        #   거부한다(실측: 0.05 blob vs 실제 0.040 = 부피 1.95배).
+        blob = self._cube_size_m(cube_name) + self.config.attach_dims_margin_m
         try:
             self._attachment_manager.attach(
                 self._joint_state(arm_rad),
                 [Cuboid(name=f"attached_{cube_name}", pose=[0, 0, 0, 1, 0, 0, 0],
-                        dims=[self.config.cube_dims] * 3)],
+                        dims=[blob] * 3)],
                 link_name=self.config.attached_object_link,
                 num_spheres=self.config.attach_num_spheres,
                 sphere_fit_type=SphereFitType.VOXEL,
@@ -550,11 +627,37 @@ class SO101SkillGenPlanner(MotionPlannerBase):
             return None
 
         distances = np.linalg.norm(candidates[keep] - reference_q[None, :], axis=1)
-        pick = keep[int(np.argmin(distances))]
+        order = keep[np.argsort(distances)]
+        # 나머지 후보는 버리지 않고 남긴다 — `_plan_cspace` 가 **양끝 무충돌인데** 실패하면
+        # 목표 배치 자체가 경로상 곤란한 것이므로 다음 후보로 다시 시도한다(`_alternate_goals`).
+        self._goal_alternates = [candidates[i] for i in order[1:]]
+        pick = int(order[0])
         self._log(f"IK 투영 ok(cuRobo position-only, {keep.size}/{len(candidates)} 후보): "
                   f"pos {errors[pick] * 1000:.2f}mm · DLS 대비 관절거리 "
                   f"{distances.min():.3f} rad (최악 후보 {distances.max():.3f})")
         return candidates[pick]
+
+    def _alternate_goals(self, position: np.ndarray, rotation: np.ndarray,
+                         reference_q: np.ndarray) -> list[np.ndarray]:
+        """1차 목표로 계획이 실패했을 때 쓸 **대체 목표 관절배치** 목록.
+
+        실측(증강 56 trial): `plan_cspace` 실패 6건 중 **5건이 START·GOAL 둘 다 제약 위반 0**
+        이었다. 충돌이 아니라 그 목표 배치로 가는 경로를 못 찾은 것이다. `max_attempts` 를
+        3→8 로 올려도 남은 부류라 예산 문제가 아니다 — **목표를 바꿔야** 한다.
+
+        같은 tool position 을 만족하는 IK 해는 여럿이라(5-DOF·position-only 라 더 많다) 그중
+        하나는 경로가 열려 있을 수 있다. `_curobo_position_ik` 가 이미 계산해두고 버리던
+        후보를 재사용하며, 없으면 그때 한 번 더 푼다.
+
+        **첫 후보가 성공하면 이 경로는 아예 실행되지 않는다** — 기존 성공 케이스의 동작은
+        비트 단위로 같다.
+        """
+        alternates = list(getattr(self, "_goal_alternates", []))
+        if not alternates:
+            # DLS 가 바로 통과해 position-only IK 를 안 푼 경우 — 여기서 한 번 푼다.
+            self._curobo_position_ik(position, rotation, reference_q)
+            alternates = list(getattr(self, "_goal_alternates", []))
+        return alternates[: self.config.max_goal_alternates]
 
     def _plan_cspace(self, goal_arm_rad: np.ndarray, start_arm_rad: np.ndarray) -> bool:
         """관절 목표까지 충돌회피 계획 → `self._plan_q` 채움.
@@ -585,7 +688,8 @@ class SO101SkillGenPlanner(MotionPlannerBase):
             # start 와 goal 을 **둘 다** 진단한다. 어느 쪽도 위반이 없으면 남는 건 경로 탐색
             # 예산 부족이므로 `max_planning_attempts` 를 올리는 게 맞고, 한쪽이 위반이면
             # 그 배치를 고쳐야 한다 — 로그만으로 갈리도록 이름을 붙여 남긴다.
-            self._log(f"plan_cspace 실패 — START {self.diagnose_state(start_arm_rad)}"
+            self._last_start_diagnosis = self.diagnose_state(start_arm_rad)
+            self._log(f"plan_cspace 실패 — START {self._last_start_diagnosis}"
                       f" | GOAL {self.diagnose_state(goal_arm_rad)}")
             return False
 
@@ -696,13 +800,35 @@ class SO101SkillGenPlanner(MotionPlannerBase):
             raw = np.asarray(target_pose.detach().cpu(), dtype=np.float64).reshape(4, 4)
         snapped = project_pose_best_pan(self.ik, raw, measured_arm)
         target_pose = torch.as_tensor(snapped, dtype=target_pose.dtype, device=target_pose.device)
-        muted = self._mute_cubes_near_target(target_pose)
+        # ★큐브 obstacle mute 는 **마지막 수단**이다. mute 는 목표뿐 아니라 **경로 전체**에
+        #   걸려서 계획이 큐브를 관통해도 막지 못한다 — 사용자 영상 관측으로 확인했다
+        #   ("첫 cuRobo 구간에서 큐브와 충돌해서 큐브를 굴림", 실패 5건 중 3건).
+        #   그래서 순서를 뒤집는다: 큐브를 **켠 채로** 먼저 풀고, 그게 안 될 때만 끈다.
+        muted: list[str] = []
         try:
+            self._goal_alternates = []
             goal_arm = self._project_target_to_manifold(target_pose, start_arm)
             if goal_arm is None:
                 return False
             if not self._plan_cspace(goal_arm, start_arm):
-                return False
+                # ★START 가 제약 위반이면 목표를 바꾸든 큐브를 끄든 안 풀린다 — 실측에서
+                #   그 케이스가 대체 목표 4개를 전부 태우고 같은 START 진단으로 4번 실패했다.
+                if not _diagnosis_is_clean(getattr(self, "_last_start_diagnosis", "")):
+                    self._log("START 가 제약 위반 상태 — 재시도 무의미하므로 생략")
+                    return False
+                # ① 같은 tool position 의 다른 IK 해로 재시도(큐브는 켜둔 채).
+                alternates = self._alternate_goals(snapped[:3, 3], snapped[:3, :3], goal_arm)
+                for index, alternate in enumerate(alternates, 1):
+                    self._log(f"대체 목표 {index}/{len(alternates)} 로 재계획 "
+                              f"(관절거리 {float(np.linalg.norm(alternate - goal_arm)):.3f} rad)")
+                    if self._plan_cspace(alternate, start_arm):
+                        break
+                else:
+                    # ② 그래도 안 되면 그때 큐브를 끈다(목표가 정말 큐브에 막힌 경우).
+                    muted = self._mute_cubes_near_target(target_pose)
+                    if not muted or not self._plan_cspace(goal_arm, start_arm):
+                        return False
+                    self._log("큐브 mute 후에야 계획 성공 — 이 경로는 큐브를 통과할 수 있다")
         finally:
             for name in muted:
                 self._scene_checker.enable_obstacle(self._cube_obstacle(name), True, env_idx=0)
