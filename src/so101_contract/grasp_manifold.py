@@ -349,7 +349,7 @@ def _with_rotation(pose: np.ndarray, rotation: np.ndarray) -> np.ndarray:
     return out
 
 
-def _pre_back(cube: np.ndarray) -> float:
+def pre_back(cube: np.ndarray) -> float:
     """큐브(solver frame) → pan 축 거리 r 로 pre-grasp 후퇴량 보간(m)."""
     r = math.hypot(float(cube[0]) - PAN_AXIS_XY[0], float(cube[1]) - PAN_AXIS_XY[1])
     t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
@@ -454,7 +454,7 @@ def cand_pose_manifold(xyz: np.ndarray, faces: list, alpha_deg: float, tau: floa
     if abs(dpsi) * abs(math.tan(a)) > tau:
         return None
 
-    pre_pos = tcp_tgt - _pre_back(xyz) * R[:, 2]
+    pre_pos = tcp_tgt - pre_back(xyz) * R[:, 2]
     quat = _mat2quat(R)
     return pre_pos, quat, {
         "mode": "manifold",

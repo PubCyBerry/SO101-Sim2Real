@@ -78,7 +78,7 @@ from so101_contract.grasp_manifold import (  # noqa: E402
     E_TANGENT_MAX, E_HEIGHT_MAX, SIMPLE_FACE_GATE_MAX_DEG,
     WRIST_ROLL_DELTA_LIMIT_DEG, PAN_AXIS_XY, PRE_BACK_MIN, PRE_BACK_MAX,
     PRE_BACK_R0, PRE_BACK_R1, PAN_FIXPOINT_ITER, RHO_CAP_RAD,
-    cand_pose_manifold, unreachable_rotation_axis,
+    cand_pose_manifold, pre_back, unreachable_rotation_axis,
     grasp_geometry, grasp_face_error, gate_grasp_geometry,
 )
 # 책상 상판 z (urdf 프레임) — base_link 실측 단일 소스에서 파생. descend clamp 가 쓴다.
@@ -199,7 +199,7 @@ BOWL_RING_H = 0.075    # ring 높이(테이블→rim)
 BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height]
 
 
-# ponytail: _pre_back, _assert_pre_back_clears_cube = grasp_manifold 단일 소스로 이동
+# pre_back·_assert_pre_back_clears_cube = grasp_manifold 단일 소스(import)
 
 
 def _descend_tstar(pre_tcp_z, zaz, cube):
@@ -210,7 +210,7 @@ def _descend_tstar(pre_tcp_z, zaz, cube):
     table 은 world obstacle 이 아니라(로봇이 상판 위에 장착 → 전 plan start-collision) 이 clamp 가
     대신한다: pad 최저점(tcp + PAD_LOW_OFF·ẑ)이 TABLE_TOP+TABLE_MARGIN 아래로 못 내려간다.
     """
-    tstar = _pre_back(cube)
+    tstar = pre_back(cube)
     if zaz < -1e-3:  # 하강 중일 때만 clamp 의미 있음
         tstar = min(tstar, (TABLE_TOP + TABLE_MARGIN - float(pre_tcp_z)) / zaz - PAD_LOW_OFF)
     return tstar
