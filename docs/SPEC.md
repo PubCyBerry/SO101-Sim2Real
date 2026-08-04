@@ -90,6 +90,8 @@ flowchart TD
 | 로봇 actuator 튜닝 | `src/sim_to_real/assets/robots/lerobot.py` |
 | 데이터셋 스키마 | `src/sim_to_real/data/lerobot_recorder.py` |
 | cuRobo robot config (54 sphere · `tcp_grasp`) | `assets/robots/so101.yml` |
+| cuRobo 계획 프레임·base 좌표·상수 | `src/so101_contract/curobo_frames.py` |
+| 5-DOF orientation manifold·grasp 기하 게이트 | `src/so101_contract/grasp_manifold.py` |
 | 씬 물리 상수 | `scripts/environments/author_pick_cube_scene.py` |
 
 이 명세서의 수치는 위 파일들의 **사본**이다. 갈라지면 코드가 옳다.

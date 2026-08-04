@@ -46,25 +46,30 @@ PickCubeEnvCfg                 ← leaf (태스크 고유분)
 
 ---
 
-## 2. 등록 환경 6종
+## 2. 등록 환경 8종
 
 등록 지점은 `src/sim_to_real/tasks/pick_cube/__init__.py` **한 곳뿐**이다.
 `import sim_to_real` 한 번에 monkey patch + 등록이 모두 일어난다
 (`src/sim_to_real/__init__.py`, 하위 config 자동 수집 = `tasks/__init__.py`).
 
-| env id | cfg 클래스 | DR | 성공 종료 | 용도 |
-|---|---|---|---|---|
-| `SimToReal-SO101-Teleop-v0` | `SO101TeleopEnvCfg` | 없음 | **없음(무종료)** | base substrate. teleop·씬 author·무카메라 스모크 |
-| `SimToReal-SO101-PickCube-v0` | `PickCubeEnvCfg` | 없음(고정 실측 배치) | 순간 판정 | **기본**. 결정적 재현 |
-| `SimToReal-SO101-PickCube-DR-v0` | `PickCubeDREnvCfg` | **full**(종모양 scatter) | 순간 판정 | datagen — 다양성 |
-| `SimToReal-SO101-PickCube-DRBase-v0` | `PickCubeDRBaseEnvCfg` | **base**(좁은 사각형) | 순간 판정 | nominal 주변만 |
-| `SimToReal-SO101-PickCube-Eval-v0` | `PickCubeEvalEnvCfg` | 없음 | **디바운스**(15 step) | 재현성 최고 평가 |
-| `SimToReal-SO101-PickCube-DR-Eval-v0` | `PickCubeEvalDREnvCfg` | full | 디바운스 | DR 하 성공률 평가 |
+| env id | cfg 클래스 | entry_point | DR | 성공 종료 | 용도 |
+|---|---|---|---|---|---|
+| `SimToReal-SO101-Teleop-v0` | `SO101TeleopEnvCfg` | `ManagerBasedRLEnv` | 없음 | **없음(무종료)** | base substrate. teleop·씬 author·무카메라 스모크 |
+| `SimToReal-SO101-PickCube-v0` | `PickCubeEnvCfg` | `PickCubeEnv` | 없음(고정 실측 배치) | 순간 판정 | **기본**. 결정적 재현 |
+| `SimToReal-SO101-PickCube-DR-v0` | `PickCubeDREnvCfg` | `PickCubeEnv` | **full**(종모양 scatter) | 순간 판정 | datagen — 다양성 |
+| `SimToReal-SO101-PickCube-DRBase-v0` | `PickCubeDRBaseEnvCfg` | `PickCubeEnv` | **base**(좁은 사각형) | 순간 판정 | nominal 주변만 |
+| `SimToReal-SO101-PickCube-Eval-v0` | `PickCubeEvalEnvCfg` | `PickCubeEnv` | 없음 | **디바운스**(15 step) | 재현성 최고 평가 |
+| `SimToReal-SO101-PickCube-DR-Eval-v0` | `PickCubeEvalDREnvCfg` | `PickCubeEnv` | full | 디바운스 | DR 하 성공률 평가 |
+| `SimToReal-SO101-PickCube-Mimic-v0` | `SO101PickCubeMimicEnvCfg` | `SO101PickCubeMimicEnv` | 없음 | **순간 판정** | Mimic source 데모 주석·재현 검증(공식 isaaclab 드라이버 호환) |
+| `SimToReal-SO101-PickCube-Mimic-DR-v0` | `SO101PickCubeMimicDREnvCfg` | `SO101PickCubeMimicEnv` | **full** | **순간 판정** | **Mimic/SkillGen 증강** — 데이터 생성 본 경로(공식 isaaclab 드라이버 호환) |
 
 - 전부 `disable_env_checker=True`
-- `Teleop-v0` 만 entry point 가 stock `isaaclab.envs:ManagerBasedRLEnv`, 나머지 5종은
-  `PickCubeEnv`
+- `Teleop-v0` 만 entry point 가 stock `isaaclab.envs:ManagerBasedRLEnv`, PickCube 5종은
+  `sim_to_real.tasks.pick_cube.pick_cube_env:PickCubeEnv`, Mimic 2종은
+  `sim_to_real.tasks.pick_cube.mimic_env:SO101PickCubeMimicEnv`
 - **DR-off 가 기본**이다. datagen 은 `-DR`, closed-loop eval 은 `-Eval` 을 쓴다.
+- Mimic 2종은 **공식 isaaclab annotate_demos / generate_dataset 스크립트**가 `ManagerBasedRLMimicEnv` 기반
+  entry_point 만 수용하므로 별도 class 다(§2.1 참조).
 - `scene.num_envs = 1`, `env_spacing = 2.5` (cfg 기본값; 스크립트가 `--num_envs` 로 override)
 
 > ⚠ **PickCube 5종은 `--enable_cameras` 가 필요하다** — 씬에 static 카메라 3대가 있다(§7).
@@ -78,6 +83,18 @@ per-env material 바인딩을 쓰는데 Fabric replication 이 켜지면 전 env
 
 viewer(RecordVideo 가 쓰는 카메라): `eye = (0.06, 1.515, 0.98)`, `lookat = (0.01, 0.245, 0.76)`,
 `resolution = (1280, 720)`.
+
+### 2.1 Mimic/SkillGen 환경 (IsaacLab 공식 드라이버 호환)
+
+`SO101PickCubeMimicEnv` 는 `isaaclab.envs.ManagerBasedRLMimicEnv` 를 상속한다. 공식 스크립트
+(`/workspace/isaaclab/scripts/imitation_learning/isaaclab_mimic/annotate_demos.py` · `generate_dataset.py`)는
+entry_point 가 `ManagerBasedRLMimicEnv` 자손이어야만 인식한다.
+
+**환경 설정**:
+- `SO101PickCubeMimicEnvCfg`: 기본(DR-off), `PickCubeEnvCfg` 를 기반으로 subtask contract 추가
+- `SO101PickCubeMimicDREnvCfg`: DR-on(full mode), 증강 생성 본 경로
+
+**주석 및 생성 파이프라인** = `08_PIPELINES.md §5` 참조.
 
 ---
 
@@ -112,7 +129,7 @@ viewer(RecordVideo 가 쓰는 카메라): `eye = (0.06, 1.515, 0.98)`, `lookat =
 | `warmup_steps` | `15` |
 | `force_threshold` | `0.5` (N) |
 
-`place_cube1`: `container_center_xy = (-0.22, 0.265)`, `radius = 0.06`, `height_range = (0.005, 0.12)`.
+`place_cube1`: `container_center_xy = (-0.22, 0.265)`, `radius = 0.06`, `height_range = (0.005, 0.06)`.
 
 ### 3.2 grasp 신호 판정 로직
 
@@ -136,7 +153,56 @@ env-state hysteresis:
 `python3 src/sim_to_real/tasks/pick_cube/mdp/observations.py`.
 
 > `desk_top_z` 를 **명시 주입**하는 이유: 공유 상수 `_geometry.DESK_TOP_Z`(0.76)는 이전 태스크
-> 잔재라 쓰지 않는다. 코드 주석이 그렇게 명시한다. 관련 결함 = §10.3.
+> 잔재라 쓰지 않는다. 코드 주석이 그렇게 명시한다.
+
+### 3.3 성공 판정 (`task_done`)
+
+2026-07-30 수정: `DESK_TOP_Z` **0.76 → 0.705**, 성공 기하 재정의.
+
+**임계 근거**: robot base world z 0.6749 + `grasp_geometry.TABLE_TOP_BASE` 0.02976 = 0.7047 ≈ 0.705.
+이전 0.76 은 pen 태스크 잔재라 **성공 창이 실물보다 5.5 cm 높았고, 성공 판정이 구조적으로 발화 불가**였다.
+
+**판정 규칙**:
+
+1. **컨테이너 로컬 좌표**: gripper 자세를 container 자세 기준 로컬 프레임으로 변환.
+   - 중심(0, 0): 큐브 중심이 그릇 중심과 같은 xy
+   - 높이: 큐브 중심 z (그릇 rim 기준 측정, 아래로 갈수록 음수)
+
+2. **성공 조건 (모두 만족)**:
+   - radial: `√(x² + y²) < radius` (0.06 m)
+   - height: `height_range` 내 (기본 0.005~0.06 m, 즉 rim 아래 5~60 mm)
+   - **upright**: 큐브 z축(world +z 기준)이 그릇 z축과 30° 이내
+
+→ rim 위 얹힘·뒤집힌 그릇을 배제한다. 앵커: `src/sim_to_real/tasks/pick_cube/mdp/terminations.py::task_done`
+
+**`BOWL_HEIGHT_RANGE` 동적 계산**:
+- 기준: rim 상단(그릇 root +0.080 m) − 큐브 반변(size 파생)
+- per-env 크기 대응 표:
+
+| 큐브 크기 | 대각선/2 | 임계 | 여유 |
+|---|---|---|---|
+| 25 mm | 21.65 mm | 27.05 mm | 5.40 mm |
+| 30 mm | 25.98 mm | 31.38 mm | 5.40 mm |
+| 35 mm | 30.31 mm | 35.71 mm | 5.40 mm |
+| 40 mm | 34.64 mm | 40.04 mm | 5.40 mm |
+
+(계산: s·√3/2 + margin, 여유 균일 5.4 mm)
+
+### 3.4 파지 신호 판정 로직 수정
+
+**`any_cube_grasped` 로직 변경**:
+
+| 파라미터 | 이전 | 현재 | 근거 |
+|---|---|---|---|
+| `hold_steps` | - | 3 | 래치(dwell 카운터 아님) — 같은 step 에서 두 번 계산돼도 개시 캐치 안 됨 |
+| `min_lift` | 0.03 | per-env 파생 | `s·√3/2 + 0.0054` — 꼭짓점 서기 높이 |
+
+**gripper 컬럼 명시**:
+- `object_grasped` / `object_in_container` 의 gripper force 계산이 **joint 이름 해석**(`joint_names=["gripper"]`)
+  으로 변경됨. articulation 컬럼 순서 가정 금지. 앵커: `src/sim_to_real/tasks/pick_cube/mdp/observations.py::any_cube_grasped`
+
+⚠ **무효화 고지**: 성공 판정 z 임계가 5.5 cm 내려갔으므로 `-Eval` env 과거 성공률·bridge eval 수치는
+**전부 무효**다. 재측정 필요.
 
 ---
 
@@ -759,7 +825,7 @@ pose = **nominal ⊗ (episode bias + frame jitter)**. 두 성분의 역할이 �
 | `_ROBOT_POS` | `(0.0, 0.0, 0.6749)` | `src/sim_to_real/tasks/so101_base_env_cfg.py::_ROBOT_POS` |
 | `_ROBOT_ROT` | `(0.0, 0.0, 0.0, 1.0)` | `src/sim_to_real/tasks/so101_base_env_cfg.py::_ROBOT_ROT` |
 | `BOWL_SUCCESS_RADIUS` | `0.06` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_SUCCESS_RADIUS` |
-| `BOWL_HEIGHT_RANGE` | `(0.005, 0.12)` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_HEIGHT_RANGE` |
+| `BOWL_HEIGHT_RANGE` | `(0.005, 0.06)` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::BOWL_HEIGHT_RANGE` |
 | `_DESK_TOP_WORLD_Z` | `0.705` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_DESK_TOP_WORLD_Z` |
 | `_CUBE_Z_SLACK` | `0.001` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_CUBE_Z_SLACK` |
 | `_CUBE_LAYOUT` | `{'Cube1': (-0.015, 0.255, 0.0)}` | `src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py::_CUBE_LAYOUT` |
@@ -786,7 +852,7 @@ pose = **nominal ⊗ (episode bias + frame jitter)**. 두 성분의 역할이 �
 | `PAN_AXIS_XY` | `(-0.021, 0.023)` | `src/sim_to_real/tasks/pick_cube/spawn_area.py::PAN_AXIS_XY` |
 | `MIN_BASE_SEP` | `0.123` | `src/sim_to_real/tasks/pick_cube/spawn_area.py::MIN_BASE_SEP` |
 | `CUBE_SIZE_CHOICES` | `(0.025, 0.03, 0.035, 0.04)` | `src/sim_to_real/utils/cube_specs.py::CUBE_SIZE_CHOICES` |
-| `DESK_TOP_Z` | `0.76` | `src/sim_to_real/tasks/common/mdp/_geometry.py::DESK_TOP_Z` |
+| `DESK_TOP_Z` | `0.705` | `src/sim_to_real/tasks/common/mdp/_geometry.py::DESK_TOP_Z` |
 | `JAW_GRASP_OFFSET` | `(-0.021, -0.07, 0.02)` | `src/sim_to_real/tasks/common/mdp/_geometry.py::JAW_GRASP_OFFSET` |
 | `CONTAINER_DEFAULT_CENTER_XY` | `(0.36, 0.395)` | `src/sim_to_real/tasks/common/mdp/_geometry.py::CONTAINER_DEFAULT_CENTER_XY` |
 | `SO101_JOINT_TARGET_MAX_VELOCITY` | `{'shoulder_pan': 5.0, 'shoulder_lift': 5.0, 'elbow_flex': 5.0, 'wrist_flex': 5.0, 'wrist_roll': 5.0, 'gripper': 5.0}` | `src/sim_to_real/tasks/common/utils.py::SO101_JOINT_TARGET_MAX_VELOCITY` |

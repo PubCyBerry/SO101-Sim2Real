@@ -339,19 +339,41 @@ gripper 를 2.5 로 낮춘 이유는 별개다 — 닫을 때 명령 속도를 �
 핀 목록과 "어기면" 은 `06_RUNTIME_SPEC.md §7.2` 에 있다. 요약하면 numpy 1.26 · pyarrow<19 ·
 h5py<3.16 · torchcodec 0.5.x · torch 2.7.0+cu128 이 Isaac Sim 5.1 번들과 ABI 로 묶여 있다.
 
-### 7.5 cuRobo 는 Isaac 과 in-process 공존이 불가능하다
+### 7.5 ★ cuRobo v2 in-process 가 되는 이유 (2026-07-01 오진 정정)
 
-- **결정**: planner 를 별도 프로세스로 분리하고 ZMQ 로 통신한다.
-- **근거**: import 순서로 회피 가능한 충돌 외에, 런타임에 cuda-core `Device().set_current()` 와
-  physx 가 충돌해 `"unspecified launch failure"` 가 나고 회피 수단이 없다. 추가로 datagen
-  이미지의 nvrtc 가 Isaac 번들 torch 의 libnvrtc 를 깨뜨린다.
-- **앵커**: `scripts/cuRobo/curobo_batch_planner.py` 상단 주석 · `07_INTERFACES.md §6`
+- **결정**: Mimic/SkillGen 증강 생성(`generate_mimic_dataset.py`)은 **cuRobo v0.8 in-process** 로
+  구동한다. 공식 isaaclab 은 cuRobo v0.7 까지만 지원했다.
+- **진범**: 2026-07-01 에 "cuRobo v0.8 + Isaac in-process = cuda 컨텍스트 공존 불가 → 2-프로세스 확정"
+  이라고 판정했는데, 이는 **오진**이었다. 실제 원인은 **warp shadowing 한 줄**이다.
+- **정정**: `import warp as _warp` 를 `AppLauncher` 보다 **먼저**(파일 맨 앞)에 두면 kit 확장
+  `omni.warp.core` 1.8.2 대신 이미지 site-packages 의 warp 1.11 이 `sys.modules` 를 선점한다.
+  그러면 cuRobo v0.8 커널이 정상 임포트된다.
+- **증상 (없음 시)**: `TypeError: func() got an unexpected keyword argument 'module'` —
+  cuRobo 가 warp 1.8.2 API 를 기대하는데 warp 1.11 이 `module` 파라미터를 모른다.
+- **어기면**: 2-프로세스 오버헤드 + IPC latency + 복잡한 protocol. 단일 process 로 단순화되면서
+  3-cam 캡처·subtask 신호·생성기 루프가 동기화된다.
+- **앵커**: `scripts/datagen/generate_mimic_dataset.py::import warp` (파일 첫 줄) ·
+  `scripts/datagen/annotate_mimic_demos.py::import warp` (파일 첫 줄)
 
-### 7.6 `cube_specs.py` 는 stdlib 전용
+### 7.6 cuRobo v1 vs v2 결정 기록 — 공식 v1 아카이브
 
-- **근거**: author 스크립트가 AppLauncher 부팅 **전에** importlib 로 이 파일만 직접 로드한다.
-  상대 import 가 있으면 패키지 `__init__`(→ isaaclab)이 끌려온다.
-- **앵커**: `src/sim_to_real/utils/cube_specs.py`
+- **결정**: feat/skillgen-datagen 브랜치는 공식 Isaac Lab 2.3.2 SkillGen + cuRobo **v1**(commit
+  `ebb71702`, 공식 검증 commit)을 별도 이미지(`Dockerfile.skillgen`)에 설치했다. 우리 정본은
+  **v2 in-process** 로 택했다.
+- **이유** (성공률 아님 — 백엔드·베이스·파이프라인이 달라 비등가):
+  ① **IPC·별도 이미지 불필요**: in-process 로 매 trial 초기화가 없고, planner 단일 기동.
+  ② **planner 백엔드 동일화**: main SM(`curobo_batch_planner.py`)과 같은 v0.8 을 써서
+     `grasp_manifold.py`·`curobo_frames.py` **단일 소스 가능**. v1 은 API 가 달라 별개로 관리했다.
+- **v1 사용 예약**: 공식 추천이 있으면 재검토. 현재는 아카이브(branch `feat/skillgen-datagen` 보존).
+- **앵커**: `scripts/datagen/generate_mimic_dataset.py::SO101SkillGenPlanner` 클래스 주석
+
+### 7.7 cuRobo main planner(§5) 와 Mimic planner(§5.9) 는 같은 객체
+
+- **결정**: Mimic 생성기가 쓰는 `SO101SkillGenPlanner` 는 `scripts/cuRobo/curobo_batch_planner.py`
+  의 같은 `SO101CuRoboPlanner` 로 부터 상속한다.
+- **근거**: grasp 기하·manifold·계획 세팅이 둘 다 동일해야 source 와 증강이 **같은 수준의
+  도달 가능성**을 갖는다. 따로 만들면 수식 드리프트 위험.
+- **앵커**: `src/sim_to_real/datagen/skillgen_planner.py::SO101SkillGenPlanner`
 
 ---
 
@@ -969,3 +991,110 @@ reset 상태 초기화는 EventTerm 으로 해도 된다(`reset_camera_extrinsic
 - 계약 수식 → `04_IO_CONTRACT.md`
 - 핀·설치 → `06_RUNTIME_SPEC.md §7`
 - 에러 사례집 → `docs/TROUBLESHOOTING.md` (92개 항목, 별 도메인)
+
+---
+
+## 16. Mimic/SkillGen 증강 데이터 생성
+
+### 16.1 ★ 5-DOF 부분 pose — 못 만드는 축은 1개뿐이다
+
+- **결정**: 도달 가능 orientation manifold = 3-parameter 족
+  ```
+  R(pan, α, ρ) = Rz(pan) · Ry(−α) · R_TOPDOWN · Rz(ρ) · Ry(TCP_TWIST_RY)
+  ```
+  이 밖의 회전은 어떤 관절값으로도 만들 수 없다.
+- **증상** (manifold 무시 시): IK 가 position 까지 어긋난다(실측: 증강 실패 5/5 가 위치 잔차
+  20~181 mm · 회전 잔차 20~93°, 팔이 허공을 집었다).
+- **여축 식별**: manifold 위치는 pan 으로 고정되므로 자유 파라미터는 α·ρ 둘. 생성할 수 없는
+  회전 축 = 이 둘의 가중합 영역 complement 다. 캐노니컬 top-down 에서 그것은 **tool ŷ**(pitch).
+  그래서 orientation 의 pitch 를 free parameter 로 쓰면 안 된다.
+- **함정 반대 신호**: cuRobo 의 jacobian 부호에 따라 spatial frame vs tool frame 축이 뒤바뀐다.
+  `track_position()` 으로 회전 3축을 다 풀면 `wrist_roll` 이 free 가 되어 **경계에서 슬루 상한에
+  붙는다**. 증상이 조용하다 — 성공률 소폭 악화.
+- **우리 방식**: tool 프레임 pitch(ŷ) 에 정확히 weight 0, 나머지는 soft cost. 자기검사 ⑤ 에서
+  `(0,0,0)→[0,1,0]` 불가 검증한다.
+- **앵커**: `so101_contract/grasp_manifold.py` 전체 · `_self_check` ⑤
+
+### 16.2 main SM 이 99.9% 인 이유 — 오차 큰 후보를 버려서
+
+- **결정**: cuRobo batch planner 의 성공률 99.9% 는 IK 오차를 줄인 것이 아니라 **오차 큰
+  후보를 게이트로 버린 것**이다.
+- **동작**: `_gate_candidate` 가 **IK 해의 FK 를 다시 계산**해 파지 기하를 검사한다:
+  `e_n ∈ [2, 8] mm` · `|e_t| ≤ 22` · `|e_h| ≤ 28` · `|face| ≤ 40°` · `|Δwrist_roll| ≤ 100°`.
+  실패하면 다음 후보, clearance 만 어긋나면 조준 되먹임한다.
+- **주의**: 게이트는 **해/궤적 끝점** 기준이어야 한다. plan 목표 시점 게이트는 판별력이
+  없다(목표 산포는 source 수준이고 벗어나는 건 실행이다). 그 임계로 조기 중단했으면 **성공할
+  시도의 90%를 죽였을 것**.
+- **앵커**: `scripts/cuRobo/curobo_batch_planner.py::_gate_candidate`
+
+### 16.3 ★ 재시도 금지 목록 — 측정 결과 무효화된 접근법 10건
+
+실제 데이터로 반증된 것들이다. 같은 실수를 반복하지 말 것:
+
+| 시도 | 결과 | 근거 |
+|---|---|---|
+| 대칭 인지 source 선택(회전을 길이로 환산) | **81.6 → 22.2%** | offset 사다리 vs 분산 오프라인 지표 비정합 |
+| `rot_weight` 0.05 (회전 경시) | **76.1 → 52~57%** | orientation 이 5-DOF 도달성 절벽 결정 |
+| Δψ 인지 source 선택 | **83.3% → 70.2%** (대표본) | 소표본 오버핏 |
+| source 풀 24→40→80 | **전부 70.2%** (대표본 동일) | 다양성 ceiling |
+| `(α, ρ)` 구간 내 동결 | **46.7 → 16.7%** | 알파+로 제약 과강 |
+| `n_repeat` 축소 | **stall 불변** + 재개 충격 악화 | 무차원 스케일 반사슷 |
+| `num_interpolation_steps` 15→40 | **0.29 → 0.26%** (정체) | 명령 포화 스캔 해상도 한계 |
+| replay retiming | **+11.2%p → +2.1%p** (seed 다름) | seed 간 분산 >seed 내 수정 효과 |
+| tcp 위치 보존 보정 | **3 지표 전부 악화** | 목적함수 왜곡 |
+| `wrist_roll` 축별 clamp 0.3× | **평균 0.037 → 0.625 rad/s 악화** | clamp 는 부드럽기 도구 아님 |
+
+**결론**: 세 번 독립 확증 — **"위치를 가깝게"는 틀린 목적함수다**. 어느 face 를 무느냐(회전)가
+5-DOF 도달성을 가르고 그게 성공률 절벽을 만든다.
+
+### 16.4 ★ A/B 방법론 — 단일 seed 판정 금지
+
+- **교훈**: retry retiming 이 seed 41000 에서 +11.2%p → seed 42000 에서 +2.1%p 로 무너졌다.
+- **정책**: **최소 2 seed × 2 조건(4칸 matrix)**. seed 간 분산이 조건 간 차이보다 크다.
+- **이유**: attempt 간 chaotic behavior(밤뮤 여역률) — 개루프 재생이 미세한 물리 변동에 극민감.
+
+### 16.5 측정 지표가 오판을 낸 사례 — 명령 포화율이 정답
+
+- **잘못된 지표**: 물리 joint 속도의 "재개 충격"(0→max 가속도).
+  - 보간 0→15: 물리 **25.1 → 27.4 rad/s²**(악화), 명령 **1.89 → 0.29%** 포화(개선)
+  - 사람 관찰: "확 튐" = slew limiter 가 cap 에 붙어 최대속도 램프를 만드는 구간.
+- **정답**: **명령 포화율**(post-slew target 이 per-joint cap 에 붙은 프레임 비율).
+- **교훈**: 지표 선택이 결론을 결정한다. 물리 센서도 신뢰성 보증 구간만 쓴다.
+
+### 16.6 ★ 성공률 측정의 함정 — OR-latch 오탐
+
+- **결정**: 공식 generator 는 성공을 에피소드 전체에 **OR-latch** 한다
+  (`isaaclab_mimic/datagen/data_generator.py:886`,  `generated_success = generated_success or ...`).
+- **증상**: 한 프레임만 조건을 만족하면 성공으로 굳고 종료 시점에 재확인하지 않는다. 큐브가
+  그릇 반경을 잠깐 지나갔다가 밀려남 = **성공으로 집계**(50 demo 중 4건 실측, 그릇을 40.7°
+  엎은 것 포함).
+- **대응**: `validate_place_success.py` 로 **종료 시점 재검증** 필수(§5.9.5). 기존 81.6%
+  는 오탐 미보정 값이다.
+- **앵커**: `scripts/contract/validate_place_success.py`
+
+### 16.7 큐브 mute 는 구조적으로 필요하다
+
+- **증상**: 파지 목표는 정의상 손가락이 큐브를 감싼 자세라 cuRobo 가 `scene_collision` 으로
+  계획을 거부한다(모든 실패 64건 중 **45건(70%)** = START 깨끗·GOAL `scene_collision`,
+  전부 파지 전 approach 전이).
+- **시도**: `max_attempts` 3→8 올림 → 68%에 머뭄 (예산 문제 아니라 **목표 불가능**).
+- **해법**: `cubes.cubes[0].disable()` 으로 grasp 계획 시 mute, approach 후 enable.
+- **사후 검사**: retiming 이후 큐브를 켠 상태로 waypoint 별 사후 충돌 검사. 꼬리(파지 접근)
+  밖 관통을 잡는다(full post-eval 아님 — 성능상).
+- **앵커**: `src/sim_to_real/datagen/skillgen_planner.py::attach_detach_cube`
+
+### 16.8 꼭짓점 서기 수식 — 반 두 번은 1/4다
+
+- **실수**: `s·√3/4` (정확 `s·√3/2 ÷ 2`) 는 값이 **절반**이다. 40 mm 에서 17.3 mm 로
+  계산되면 들림 게이트가 무력해진다(검증기 assert 도 못 막음).
+- **정답**: `s·√3/2` + margin.
+- **단일 소스**: `pick_cube/mdp/observations.py::min_lift_for_cube` 하나만 수정한다.
+- **앵커**: `so101_contract/grasp_manifold.py` 주석 + `src/sim_to_real/tasks/pick_cube/mdp/observations.py`
+
+### 7.6 `cube_specs.py` 는 stdlib 전용
+
+- **근거**: author 스크립트가 AppLauncher 부팅 **전에** importlib 로 이 파일만 직접 로드한다.
+  상대 import 가 있으면 패키지 `__init__`(→ isaaclab)이 끌려온다.
+- **앵커**: `src/sim_to_real/utils/cube_specs.py`
+
+---
