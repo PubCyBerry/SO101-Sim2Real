@@ -67,11 +67,20 @@ BASE_YAW = 90.0
 BASE_T = (0.01576, -0.02079, -0.03248)
 
 # ═══ 로봇/큐브 기하 (실측 단일 소스) ═══════════════════════════════════════════════
-PAN_AXIS_XY = (0.0388353, 0.0)  # shoulder_pan 축의 solver-frame XY — face 선택 기준점(URDF)
 # fixed jaw pad 기하 = so101_contract.grasp_geometry 단일 소스(SM 진단 로그와 같은 값 공유).
 # 두 컨테이너 모두 PYTHONPATH=/workspace/src (Dockerfile.isaac_sim, cuRobo 이미지가 상속).
+# pan 축·grasp 후보 상수들 = so101_contract.grasp_manifold 단일 소스(아래 import에서 가져옴).
 from so101_contract.grasp_geometry import FIXED_INNER_CENTER, PAD_LOW_OFF, TABLE_TOP_BASE  # noqa: E402
 from so101_contract.feature_codec import POLICY_GRIPPER_RANGE, SIM_GRIPPER_RANGE_DEG  # noqa: E402
+from so101_contract.grasp_manifold import (  # noqa: E402
+    ALPHA_SCAN_DEG, TAU_MAX_DEG, RHO_CAP_DEG, CHORD_CENTER_RATIO,
+    FIXED_JAW_CLEAR_TARGET, FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX,
+    E_TANGENT_MAX, E_HEIGHT_MAX, SIMPLE_FACE_GATE_MAX_DEG,
+    WRIST_ROLL_DELTA_LIMIT_DEG, PAN_AXIS_XY, PRE_BACK_MIN, PRE_BACK_MAX,
+    PRE_BACK_R0, PRE_BACK_R1, PAN_FIXPOINT_ITER, RHO_CAP_RAD,
+    cand_pose_manifold, unreachable_rotation_axis,
+    grasp_geometry, grasp_face_error, gate_grasp_geometry,
+)
 # 책상 상판 z (urdf 프레임) — base_link 실측 단일 소스에서 파생. descend clamp 가 쓴다.
 TABLE_TOP = TABLE_TOP_BASE + BASE_T[2]
 # 큐브 반변 — face_center = cube_center + half·closing_axis.
@@ -109,31 +118,6 @@ R_TOPDOWN = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 # 2.79° 어긋나 ρ 에 따라 원뿔운동. trailing Ry(-0.0486795) 미포함 시 후보가 2.79° off-manifold
 # (cuRobo 회전 수렴 예산 ~0.05rad 소진 + pad 조준 ~2.4mm 편향) → 상수로 bake.
 TCP_TWIST_RY = -0.0486795
-# |α| 오름차순 ± interleave = 검사 우선순위(top-down 우선). +α=접근축이 base 반대로 기울어
-# wrist 를 base 쪽으로 당김(원거리 2R 해소), -α=반대(근거리 최소반경 해소).
-ALPHA_SCAN_DEG = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0,
-                  30.0, -30.0, 35.0, -35.0, 40.0, -40.0, 45.0, -45.0, 50.0, -50.0]
-# 결합 게이트 |Δψ·tanα| 상한(knobs.tau_max_deg 로 조정). 전 도달구간 상수 —
-# 옛 reach-adaptive 램프(10°→25°)의 최대치를 그대로 상수화했다(_manifold_candidates 주석 참조).
-TAU_MAX_DEG = 25.0
-# ★worst-yaw wrist-cap: |Δψ| 큰 셀서 auto ρ=-Δψ/cosα 가 |ρ| 크면 wrist_roll 을 위험대로 밀어
-# grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL).
-# 54-sphere 모델 targeted replay(8건): cap 12/14/16/18° = 5/6/7/8 성공. 다만 18°는
-# 64-env 첫 planning만 약 17분이 걸려 기본값으로 부적합했다. 기본 12°를 유지하고
-# `rho_cap_deg` knob으로만 A/B한다. diagonal grasp miss는 아래 chord-center 로 보완한다.
-# 정상(|auto ρ|≤이값) 셀 무영향 = face 정렬 보존.
-RHO_CAP_DEG = 12.0
-RHO_CAP_RAD = math.radians(RHO_CAP_DEG)
-# rho cap 셀의 face-center chord miss 보정. baseline 실패 8건을 reset/plan seed 0/1/2로
-# 반복한 결과 ratio=0은 5/8, ratio=0.5는 24/24 성공. 완전 보정보다 여유를 둔 반 보정을 사용.
-CHORD_CENTER_RATIO = 0.5
-# ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
-# 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
-# per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
-# pan/ρ 고정점 반복 횟수(실측 튜닝: 3회면 ~0.8° 잔차, 5회면 근거리도 수렴).
-# 등거리 face(yaw 45°) 셀은 face 선택이 번갈리는 limit cycle 이라 수렴 자체가 불가능하다 —
-# 그래서 수렴을 요구하지 않고 잔차만 meta(pan_resid_deg·closing_resid_deg)로 노출한다.
-PAN_FIXPOINT_ITER = 5
 # ★후보 채택 정책: 게이트를 **처음** 통과한 후보가 아니라, 앞쪽 이만큼의 pass 를 모두 검사한
 # 뒤 `_candidate_score` 가 가장 낮은 후보를 쓴다(2026-07-30).
 #   옛 동작: |α| 오름차순으로 돌다 첫 통과 즉시 채택 — score 는 계산해 diag 에 싣기만 했다.
@@ -143,17 +127,7 @@ PAN_FIXPOINT_ITER = 5
 #   통과한 env 도 이 pass 수까지는 batch slot 을 계속 쓰므로 plan 호출은 늘지 않는다
 #   (어차피 미통과 env 때문에 pass 를 더 돈다).
 CANDIDATE_SCAN_PASSES = 3
-SIMPLE_FACE_GATE_MAX_DEG = 40.0  # FK gate 안전망: solver XY face_angle 허용 절댓값
-WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
-# 게이트(IK 성공만으론 불충분 — IK-후-FK 실측 pad center 를 face center 와 3D 비교):
-#   e_normal(closing clearance) = 3~5mm 범위를 목표로 한다.
-#   fixed_inner 는 pad centroid proxy 라서 IK/FK 잔차를 감안해도 face 를 긁지 않게 양의 여유를 둔다.
-# tangent/height 폭 = fingers-down branch 실측 도달 범위(40mm 큐브 kinematic 한계) — manifold
-# 후보로 통과율 확보 후 조임은 별도 튜닝.
-FIXED_JAW_CLEAR_TARGET = 0.004  # pad center proxy 조준 clearance(4mm 부근)
-FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.002, 0.008  # R3: 3-5mm→2-8mm 창 완화(D3, IK undershoot 수용)
-E_TANGENT_MAX = 0.022
-E_HEIGHT_MAX = 0.028
+# ponytail: FK gate 상수들·grasp geometry 상수들 = grasp_manifold 단일 소스 import
 WRIST_ROLL_DELTA_LIMIT = math.radians(WRIST_ROLL_DELTA_LIMIT_DEG)
 
 # ═══ phase 파라미터 ═══════════════════════════════════════════════════════════════
@@ -169,11 +143,7 @@ LIFT_BACK = 0.10    # ③ lift: grasp 서 tool -z 최대 역행(approach 되감�
 TRANSIT_Z = 0.21    # ④ transit 그릇 상공 고도(urdf, m). 0.25→0.21: ring keep-out 이 rim 을
                     # 스스로 피해 인하(드롭 과고 해소). 스침 재발 시 ring dims 먼저, 그다음 ↑.
 BOWL_PULL = 0.03    # ④ 드롭 XY 를 그릇 중심서 base 쪽으로 당김(m) — near-rim 착지
-# pre-grasp 후퇴(=descend 거리, m) — 큐브 pan-축 거리 r 적응(사용자 제안). jaw tip 이 큐브
-# obstacle 위로 떠 approach 를 jaw-collision ON 으로 계획. 고정 0.12 는 pad-center 조준(+4.6cm)
-# 과 겹쳐 근거리(r≈0.12) pre IK 전멸(실측 pre z 0.186 unreachable / 0.146 solved).
-PRE_BACK_MIN, PRE_BACK_MAX = 0.06, 0.12
-PRE_BACK_R0, PRE_BACK_R1 = 0.13, 0.24   # r≤R0→MIN · r≥R1→MAX (사이 선형)
+# ponytail: pre-grasp 후퇴량·범위 = grasp_manifold 단일 소스
 
 # ═══ gripper 시퀀스 (feature [0,100]) ═════════════════════════════════════════════
 GRIP_OPEN, GRIP_CLOSE = 75.0, 5.0  # open 75=straddle 마진(60 은 tangential 3mm 오차로 squirt)
@@ -229,37 +199,7 @@ BOWL_RING_H = 0.075    # ring 높이(테이블→rim)
 BOWL_RING_DIMS = (0.030, 0.083, BOWL_RING_H)  # [radial, tangential, height]
 
 
-def _pre_back(cube):
-    """큐브(solver frame) → pan 축 거리 r 로 pre-grasp 후퇴량 보간(0.06~0.12m)."""
-    r = math.hypot(cube[0] - PAN_AXIS_XY[0], cube[1] - PAN_AXIS_XY[1])
-    t = min(1.0, max(0.0, (r - PRE_BACK_R0) / (PRE_BACK_R1 - PRE_BACK_R0)))
-    return PRE_BACK_MIN + t * (PRE_BACK_MAX - PRE_BACK_MIN)
-
-
-def _assert_pre_back_clears_cube(max_cube_half=0.025, clear=0.005):
-    """로드시 1-check: 최소 pre-back(PRE_BACK_MIN)이 **jaw tip 을 큐브 위로 띄우는가**.
-
-    ``_pre_back`` 의 r-램프는 도달거리별 planning 여유를 담은 실측 튜닝이지만, 그 존재 이유는
-    "pre-grasp 자세에서 fixed jaw tip 이 큐브 obstacle 위에 있어야 approach 를 jaw-collision ON
-    으로 계획할 수 있다"는 기하 조건이다. 그 조건은 **큐브 크기에 의존**하는데 램프 공식에는
-    큐브 크기가 안 들어간다 → 큐브를 키우면 조용히 조건이 깨진다.
-
-    pre 자세 jaw tip 고도 = tcp_tgt_z + (t − PAD_LOW_OFF)·cosα, tcp_tgt_z − cube_top
-    = FIXED_INNER_CENTER[2] − half (조준식에서 pad center 가 face center 높이에 오므로).
-    ⇒ 필요한 t ≥ PAD_LOW_OFF − (FIXED_INNER_CENTER[2] − half − clear)/cosα.
-    cosα ≤ 1 이라 α=0(top-down)이 최악 — 그 값으로 검사한다.
-
-    ponytail: 램프를 이 유도식으로 **대체**하지 않는다. 실측상 필요치(≈59 mm @50 mm 큐브)가
-    PRE_BACK_MIN(60 mm)보다 작아 램프가 이미 조건을 만족하고, 램프는 그 위에 원거리 planning
-    여유까지 담고 있어 교체하면 근거 없는 회귀 위험만 산다. 조건이 깨지면 여기서 터뜨린다.
-    """
-    need = PAD_LOW_OFF - (FIXED_INNER_CENTER[2] - max_cube_half - clear)
-    assert PRE_BACK_MIN >= need, (
-        f"PRE_BACK_MIN {PRE_BACK_MIN:.3f}m < jaw-tip clearance 필요치 {need:.3f}m "
-        f"(cube half {max_cube_half}, clear {clear}) — pre-grasp 서 jaw 가 큐브에 박힌다")
-
-
-_assert_pre_back_clears_cube()
+# ponytail: _pre_back, _assert_pre_back_clears_cube = grasp_manifold 단일 소스로 이동
 
 
 def _descend_tstar(pre_tcp_z, zaz, cube):
@@ -419,88 +359,7 @@ def _grip(arm_deg, grip):
     return np.hstack([arm_deg, g])
 
 
-def cand_pose_manifold(xyz, faces, alpha_deg, tau, rho_cap_rad=RHO_CAP_RAD,
-                       chord_center_ratio=CHORD_CENTER_RATIO, cube_half=CUBE_HALF):
-    """(pan,α,ρ) manifold 위 full TCP pose 1개 — 구성상 5-DOF 도달 가능(상수 블록 §manifold).
-
-    ψ_face = 수평 face normal 방위(90° 대칭이라 어느 face 든 Δψ 동일 → faces[0] 사용).
-    pan 고정점 ×3: TCP lateral offset(R·FIXED_INNER_CENTER)이 ρ 와 함께 돌아 tcp 목표가
-    pan 평면을 벗어나는 것을 목표 방위로 재정렬(pink select_grasp l.347-358 이식).
-    fixed jaw 가 놓일 face n̂ = closing 축(R x̂) 최근접 내적 — ρ 보상 후 자동 결정.
-    τ 초과(|Δψ·tanα| = closing 수평이탈) 또는 face 부재 시 None.
-    returns (pre_pos, quat_wxyz, meta) — pre_pos = tcp 목표서 approach 축 _pre_back 후퇴."""
-    if not faces:
-        return None
-    cc = np.array(xyz[:3], dtype=np.float64)
-    a = math.radians(float(alpha_deg))
-    n0 = faces[0][1]
-    psi = math.atan2(n0[1], n0[0])
-    pan = math.atan2(cc[1] - PAN_AXIS_XY[1], cc[0] - PAN_AXIS_XY[0])
-    fic = np.array(FIXED_INNER_CENTER, dtype=np.float64)
-    rho_corr = 0.0
-    # 고정점 반복: 근거리(r≈0.10)는 tcp lateral offset 비중이 커 pan 이 감쇠진동(~0.3/iter)한다.
-    # 반복 횟수는 실측 튜닝값 고정(PAN_FIXPOINT_ITER=5; 3회면 ~0.8° 잔차).
-    # ★수렴을 **강제하지 않는다**: cube yaw 45° 처럼 두 face 가 등거리인 셀은 face 선택이
-    #   매 반복 번갈려 limit cycle 이 된다(수렴 실패 시 후보를 버리게 했더니 근거리·yaw45 셀
-    #   후보가 전멸 — self_check_geom 이 잡았다). 대신 **잔차를 meta 에 남겨** 조용한
-    #   off-manifold 를 관측 가능하게만 만든다. 품질 판정은 FK 게이트가 독립적으로 한다.
-    d_pan = 0.0
-    resid = 0.0
-    for _ in range(PAN_FIXPOINT_ITER):
-        pan_prev = pan
-        dpsi = wrap90(psi - (pan + math.pi / 2.0))
-        raw_rho = -dpsi / math.cos(a)
-        capped = abs(raw_rho) > rho_cap_rad   # ★worst-yaw wrist-cap: |ρ| 제한(상수/knob)
-        rho = (max(-rho_cap_rad, min(rho_cap_rad, raw_rho)) if capped
-               else raw_rho + rho_corr)
-        pan_R = pan  # 이 반복의 R/tcp 구축에 쓴 pan — meta 는 이 값(갱신 전)을 기록해야 정합
-        R = _rz(pan_R) @ _ry(-a) @ R_TOPDOWN @ _rz(rho) @ TCP_TWIST
-        face_label, n_face = max(faces, key=lambda f: float(np.dot(f[1], R[:, 0])))
-        # ρ 잔차 feedback: -Δψ/cosα 는 1차 근사 + TCP twist 가 closing 수평방위를 α 비례로
-        # 끌어당김(α=50° 서 ~1.7°) → 실측 closing 방위 잔차를 다음 반복 ρ 에 흡수(수렴 <0.1°).
-        # d(closing_az)/dρ = -cosα 이므로 잔차 상쇄 부호는 +.
-        resid = 0.0
-        if not capped:  # capped 셀은 의도적 미스얼라인 — 정렬 feedback 안 함
-            resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
-            rho_corr += resid / math.cos(a)
-        # closing 축이 face normal과 어긋나면 face-center에서 시작한 jaw chord가 cube center를
-        # 비켜 moving jaw가 모서리를 밀어낸다. face tangent 방향으로 h*tan(theta)만큼 옮겨
-        # closing chord를 cube center 쪽으로 통과시킨다(ratio=1 완전 보정, knob으로 A/B).
-        closing = R[:, 0]
-        face_tangent = np.array([-n_face[1], n_face[0], 0.0], dtype=np.float64)
-        c_normal = max(1e-6, float(np.dot(closing, n_face)))
-        tangent_shift = (float(chord_center_ratio) * cube_half
-                         * float(np.dot(closing, face_tangent)) / c_normal)
-        pad_target = (cc + (cube_half + FIXED_JAW_CLEAR_TARGET) * n_face
-                      + tangent_shift * face_tangent)
-        tcp_tgt = pad_target - R @ fic
-        pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
-        d_pan = math.atan2(math.sin(pan - pan_prev), math.cos(pan - pan_prev))
-    if abs(dpsi) * abs(math.tan(a)) > tau:
-        return None
-    pre_pos = tcp_tgt - _pre_back(xyz) * R[:, 2]
-    quat = _mat2quat(R)
-    return pre_pos, quat, {
-        "mode": "manifold",
-        # tilt_deg/face_rank = 레거시 score·로그 키 호환(_candidate_score, diag 문자열)
-        "tilt_deg": float(alpha_deg),
-        "alpha_deg": float(alpha_deg),
-        "rho_deg": math.degrees(rho),
-        "rho_capped": bool(capped),  # worst-yaw wrist-cap 트리거 여부(프리뷰)
-        "chord_shift_mm": float(tangent_shift * 1000.0),
-        # 고정점 잔차 — 크면 후보가 manifold 에서 그만큼 벗어나 있다(진단용, 게이트 아님).
-        "pan_resid_deg": math.degrees(d_pan),
-        "closing_resid_deg": math.degrees(resid),
-        "dpsi_deg": math.degrees(dpsi),
-        "pan_deg": math.degrees(pan_R),
-        "face_label": face_label,
-        "face_index": face_label,
-        "face_rank": 0,
-        "face_normal": n_face.astype(float).tolist(),
-        "tcp_target": tcp_tgt.astype(float).tolist(),
-        "pre_target": pre_pos.astype(float).tolist(),
-        "quat_wxyz": quat.astype(float).tolist(),
-    }
+# ponytail: cand_pose_manifold = grasp_manifold 단일 소스 import (상수 값 사용 제외 이 파일에서는 정의 불필요)
 
 
 def _resolve_cube_halves(cube_half, n_env):
