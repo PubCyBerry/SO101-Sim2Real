@@ -66,6 +66,10 @@ parser.add_argument("--record_segments", type=str, default=None,
                     help="생성 에피소드의 **프레임별 구간 출처**를 이 JSON 에 남긴다. 증강본은 "
                          "[cuRobo 전이 | 보간 | 합성 place] 가 이어붙은 결과인데 HDF5 엔 그 "
                          "경계가 안 남아 사후 역산이 불가능하다. `--num_envs 1` 전용")
+parser.add_argument("--cube_sizes", default=None,
+                    help="큐브 크기 DR 후보를 이 목록으로 덮어쓴다(콤마 구분, m). "
+                         "★source 녹화의 `pickplace_sm.py --cube_sizes` 와 **같은 값**이어야 "
+                         "파지 기하가 맞는다. 예 `0.040` = 전 env 40 mm 고정")
 parser.add_argument("--self_test", action="store_true",
                     help="source 없이 planner 1회 왕복 검증만 하고 종료")
 AppLauncher.add_app_launcher_args(parser)
@@ -423,6 +427,16 @@ def _make_env(env_name: str, output_dir: str, output_file_name: str):
     # 는 카메라 제거로 부팅/스텝을 크게 줄인다. 학습 데이터 생성은 --enable_cameras 로 켠다.
     if not getattr(args_cli, "enable_cameras", False):
         remove_pick_cube_cameras(env_cfg)
+    if args_cli.cube_sizes:
+        # ★source 녹화(`pickplace_sm.py --cube_sizes`)와 **같은 값으로 고정**해야 한다.
+        #   source 를 40 mm 로 찍고 25 mm 로 증강하면 파지 기하가 통째로 어긋난다 — 실측에서
+        #   그 불일치가 성공률을 절반 아래로 떨어뜨렸다. 크기별 성공률을 재려면 양쪽 다 고정한다.
+        event = getattr(env_cfg.events, "randomize_cube_sizes", None)
+        if event is None:
+            raise SystemExit(f"--cube_sizes 는 크기 DR 이 있는 env 에서만 쓴다 "
+                             f"(task={env_name} 에 randomize_cube_sizes 없음)")
+        event.params["sizes"] = [float(v) for v in str(args_cli.cube_sizes).split(",") if v.strip()]
+        print(f"[gen] cube size DR override → {event.params['sizes']}", flush=True)
     env = gym.make(env_name, cfg=env_cfg).unwrapped
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError(f"{env_name} 은 ManagerBasedRLMimicEnv 자손이 아니다")
