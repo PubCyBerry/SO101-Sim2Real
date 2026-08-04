@@ -41,6 +41,10 @@ parser.add_argument("--trace_divergence", action="store_true",
 parser.add_argument("--include_failed", action="store_true",
                     help="source 의 success=False 에피소드도 주석 시도(기본은 건너뜀). "
                          "SM --record_hdf5 는 실패도 저장하므로 기본 필터가 맞다")
+parser.add_argument("--cube_sizes", default=None,
+                    help="큐브 크기 DR 후보를 이 목록으로 덮어쓴다(콤마 구분, m). "
+                         "★source 녹화·증강 생성과 **같은 값**이어야 한다 — 개루프 재생이라 "
+                         "크기가 다르면 파지 기하가 어긋난다. 크기 DR 이 있는 `-DR` 변형 전용")
 parser.add_argument("--retries", type=int, default=3,
                     help="에피소드별 재생 재시도 횟수. 개루프 재생은 접촉 물리가 비결정적이라 "
                          "marginal grasp 가 시도마다 뒤집힌다(같은 입력·같은 코드로 실패자가 "
@@ -336,6 +340,16 @@ def main() -> int:
 
     if not getattr(args_cli, "enable_cameras", False):
         remove_pick_cube_cameras(env_cfg)
+    if args_cli.cube_sizes:
+        # ★주석은 source 를 **개루프 재생**한다 — 큐브 크기가 녹화 때와 다르면 파지 기하가
+        #   어긋나 재생이 실패하거나(신호 미발화) 조용히 다른 궤적이 된다. 녹화·주석·증강
+        #   세 단계가 같은 크기여야 한다(`pickplace_sm.py` / 여기 / `generate_mimic_dataset.py`).
+        event = getattr(env_cfg.events, "randomize_cube_sizes", None)
+        if event is None:
+            raise SystemExit(f"--cube_sizes 는 크기 DR 이 있는 env 에서만 쓴다 "
+                             f"(task={env_name} 에 randomize_cube_sizes 없음 — `-DR` 변형을 쓰라)")
+        event.params["sizes"] = [float(v) for v in str(args_cli.cube_sizes).split(",") if v.strip()]
+        print(f"[annotate] cube size DR override → {event.params['sizes']}", flush=True)
 
     env = gym.make(env_name, cfg=env_cfg).unwrapped
     if not isinstance(env, ManagerBasedRLMimicEnv):
