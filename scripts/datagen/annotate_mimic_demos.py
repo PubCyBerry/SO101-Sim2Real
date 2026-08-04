@@ -250,10 +250,59 @@ def annotate_episode(env: ManagerBasedRLMimicEnv, episode: EpisodeData, success_
     ok = True
     for kind, signal_dict in groups:
         for name, flags in signal_dict.items():
-            if not torch.any(torch.as_tensor(flags, device=env.device)):
-                print(f'\tsubtask "{name}" 의 {kind} 신호가 한 번도 발화하지 않았다 — 제외')
-                ok = False
+            values = torch.as_tensor(flags, device=env.device).reshape(-1).float()
+            if torch.any(values > 0):
+                continue
+            # ★"한 번도 발화 안 함"만 남기면 원인 추적이 막힌다. 신호가 **얼마나 근접했는지**와
+            #   종료 시점 기하를 같이 남긴다 — 실측에서 이 로그가 없어 재생 자체를 의심하느라
+            #   프로브를 따로 짜야 했다(2026-08-04).
+            print(f'\tsubtask "{name}" 의 {kind} 신호가 한 번도 발화하지 않았다 — 제외 '
+                  f'(T={values.numel()} max={float(values.max()):.3f})')
+            report_signal_gates(env, name)
+            ok = False
     return ok
+
+
+def report_signal_gates(env: ManagerBasedRLMimicEnv, signal_name: str) -> None:
+    """subtask 신호가 안 뜬 이유 — 그 term 의 **하위 조건**을 종료 시점 값으로 찍는다.
+
+    `place_cube1`(= `object_in_container`)은 4조건 AND 다: xy < radius · 상대높이 ∈ height_range ·
+    그리퍼 열림. 어느 하나만 걸려도 0 이 나오는데 그걸 구분 못 하면 "재생이 틀렸나"부터 의심하게 된다.
+    """
+    term_cfg = getattr(env.cfg.observations.subtask_terms, signal_name, None)
+    params = dict(getattr(term_cfg, "params", {}) or {})
+    object_cfg = params.get("object_cfg")
+    container_cfg = params.get("container_cfg")
+    if object_cfg is None or container_cfg is None:
+        return
+
+    origins = env.scene.env_origins[0]
+    obj = env.scene[object_cfg.name].data.root_pos_w[0] - origins
+    box = env.scene[container_cfg.name].data.root_pos_w[0] - origins
+    radius = float(params.get("radius", 0.06))
+    low, high = tuple(params.get("height_range", (0.005, 0.06)))
+    threshold = float(params.get("grasp_threshold", 0.60))
+
+    robot_cfg = params.get("robot_cfg")
+    joint_ids = getattr(robot_cfg, "joint_ids", None)
+    index = joint_ids[0] if isinstance(joint_ids, list) and joint_ids else -1
+    gripper = float(env.scene["robot"].data.joint_pos[0, index])
+
+    xy = float(torch.linalg.vector_norm(obj[:2] - box[:2]))
+    dz = float(obj[2] - box[2])
+    print(f"\t  종료 시점: xy={xy * 1000:.1f}mm(<{radius * 1000:.0f}) "
+          f"dz={dz * 1000:.1f}mm(∈{low * 1000:.0f}~{high * 1000:.0f}) "
+          f"gripper={gripper:+.3f}(>{threshold:.2f})")
+    blocked = [n for n, good in (("xy", xy < radius), ("dz", low < dz < high),
+                                 ("gripper_open", gripper > threshold)) if not good]
+    print(f"\t  걸린 조건: {', '.join(blocked) if blocked else '없음(중간 프레임에서만 만족)'}")
+
+    # 기하가 멀쩡한데 신호가 0 이면 **신호 경로**가 범인이다 — obs_buf 와 hook 을 같이 본다.
+    live_obs = env.obs_buf.get("subtask_terms", {}) if isinstance(env.obs_buf, dict) else {}
+    raw = live_obs.get(signal_name)
+    hook = env.get_subtask_term_signals().get(signal_name)
+    print(f"\t  live obs_buf[{signal_name}]={None if raw is None else raw.reshape(-1).tolist()} "
+          f"· hook={None if hook is None else hook.reshape(-1).tolist()}")
 
 
 def main() -> int:

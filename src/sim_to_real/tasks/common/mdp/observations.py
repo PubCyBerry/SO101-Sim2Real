@@ -27,12 +27,20 @@ from ._geometry import CONTAINER_DEFAULT_CENTER_XY, DESK_TOP_Z
 
 
 def _get_gripper_joint_index(robot_cfg: SceneEntityCfg) -> int:
-    """robot_cfg.joint_names 에서 'gripper' 찾기. 없으면 -1."""
-    if hasattr(robot_cfg, "joint_names") and robot_cfg.joint_names:
-        try:
-            return list(robot_cfg.joint_names).index("gripper")
-        except ValueError:
-            pass
+    """그리퍼 축의 **articulation 컬럼 인덱스**. 지정이 없으면 마지막 컬럼(-1).
+
+    ★`joint_names` 리스트 **안에서의** 위치를 돌려주면 안 된다. `SceneEntityCfg("robot",
+    joint_names=["gripper"])` 는 길이 1 이라 그 방식은 항상 `0`(= `shoulder_pan`)을 가리킨다.
+    실측(2026-08-04): 그 탓에 `object_in_container` 의 `gripper_open` 이 `shoulder_pan≈0 > 0.60`
+    으로 **항상 False** 가 돼 `place_cube1` 이 한 번도 발화하지 않았고, Mimic 주석이 0/8 로
+    전멸했다. 기하 4조건은 전부 만족한 상태였다 — 신호 경로만 죽어 있어 원인이 안 보였다.
+
+    쓸 값은 `SceneEntityCfg.resolve()` 가 채우는 **`joint_ids`** 다(articulation 컬럼 인덱스).
+    미지정이면 `slice(None)` 이므로 그때만 `-1` 로 폴백한다.
+    """
+    joint_ids = getattr(robot_cfg, "joint_ids", None)
+    if isinstance(joint_ids, (list, tuple)) and len(joint_ids) == 1:
+        return int(joint_ids[0])
     return -1
 
 
