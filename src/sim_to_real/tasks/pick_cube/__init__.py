@@ -7,6 +7,10 @@ leisaac Workshop 사다리(base teleop → task leaf + DR/Eval 변형) 대응:
 - PickCube-DRBase-v0 : DR-on **base 모드**(큐브 스폰을 nominal 주변 좁은 사각형으로 제한, 그 외 full 동일).
 - PickCube-Eval-v0 : DR-off + 디바운스 성공 종료 — 재현성 평가.
 - PickCube-DR-Eval-v0 : DR-on + 디바운스 성공 종료.
+
+Isaac Lab Mimic / SkillGen 변형(`ManagerBasedRLMimicEnv` + subtask 계약):
+- PickCube-Mimic-v0    : DR-off — source 데모 주석(annotate)·재현 검증용.
+- PickCube-Mimic-DR-v0 : DR-on  — 증강 데이터 생성 본 경로.
 """
 
 import gymnasium as gym
@@ -36,5 +40,21 @@ for _env_id, _cfg_cls in _PICK_CUBE_VARIANTS.items():
         disable_env_checker=True,
         kwargs={
             "env_cfg_entry_point": f"{__name__}.pick_cube_env_cfg:{_cfg_cls}",
+        },
+    )
+
+# Mimic/SkillGen 변형 — entry_point 가 `ManagerBasedRLMimicEnv` 자손이라야 공식 드라이버
+# (annotate·generate)가 받아준다.
+_PICK_CUBE_MIMIC_VARIANTS = {
+    "SimToReal-SO101-PickCube-Mimic-v0": "SO101PickCubeMimicEnvCfg",
+    "SimToReal-SO101-PickCube-Mimic-DR-v0": "SO101PickCubeMimicDREnvCfg",
+}
+for _env_id, _cfg_cls in _PICK_CUBE_MIMIC_VARIANTS.items():
+    gym.register(
+        id=_env_id,
+        entry_point=f"{__name__}.mimic_env:SO101PickCubeMimicEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.mimic_env_cfg:{_cfg_cls}",
         },
     )
