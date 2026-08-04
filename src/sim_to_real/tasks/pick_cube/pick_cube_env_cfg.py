@@ -64,7 +64,10 @@ from sim_to_real.tasks.so101_base_env_cfg import (
 # 맞춰 y 0.315→0.265 (책상 앞 모서리 env y=-0.035 에서 +30cm).
 BOWL_CENTER_XY: tuple[float, float] = spawn_area.BOWL_CENTER_XY  # 단일 소스=spawn_area
 BOWL_SUCCESS_RADIUS: float = 0.06
-BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.12)
+# BOWL_HEIGHT_RANGE 상한 = rim 상단(0.08m) - 큐브 반변(s/2).
+# ponytail: 현재는 40mm 기준 상한 0.06m 로 고정. per-env 크기 대응은 후속 작업.
+# 25mm: 0.0675m, 30mm: 0.065m, 35mm: 0.0625m, 40mm: 0.06m
+BOWL_HEIGHT_RANGE: tuple[float, float] = (0.005, 0.06)
 
 
 # 큐브 world 좌표 = SCENE_OFFSET(0.36, 0.045, 0.705) + scene-local 위치 (+ y 0.01 shift).
@@ -391,6 +394,7 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
         """서브태스크 신호: contact-sensor grasp + 그릇 안 배치."""
 
         # contact-sensor grasp 신호(leisaac any_vial_grasped 이식, 양 손가락 envelope).
+        # ponytail: min_lift는 큐브 크기 파생. 25mm→0.027m, 40mm→0.04m 기본값. hold_steps=3(100ms dwell).
         cube_grasped = ObsTerm(
             func=task_mdp.any_cube_grasped,
             params={
@@ -398,16 +402,19 @@ class PickCubeObservationsCfg(SO101PolicyObservationsCfg):
                 "gripper_sensor_cfg": SceneEntityCfg("contact_gripper"),
                 "cubes": CUBE_NAMES,
                 "desk_top_z": _DESK_TOP_WORLD_Z,
-                "min_lift": 0.03,
+                "min_lift": 0.040,  # 40mm 기준(DR 상한). 파생: s·√3/2 + 0.0054. env.cube_size_m 미지원 시 env_cfg override.
                 "warmup_steps": 15,
                 "force_threshold": 0.5,
+                "hold_steps": 3,  # 3프레임(100ms) dwell = step 래치
             },
         )
 
         place_cube1 = ObsTerm(
             func=task_mdp.object_in_container,
             params={
+                "robot_cfg": SceneEntityCfg("robot", joint_names=["gripper"]),  # 그리퍼 컬럼 명시
                 "object_cfg": SceneEntityCfg("Cube1"),
+                "container_cfg": SceneEntityCfg(BOWL_NAME),  # 로컬 프레임 판정(rim/tilt gate)
                 "container_center_xy": BOWL_CENTER_XY,
                 "radius": BOWL_SUCCESS_RADIUS,
                 "height_range": BOWL_HEIGHT_RANGE,

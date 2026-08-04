@@ -22,6 +22,21 @@ from ._geometry import CONTAINER_DEFAULT_CENTER_XY, DESK_TOP_Z
 
 
 # ---------------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------------
+
+
+def _get_gripper_joint_index(robot_cfg: SceneEntityCfg) -> int:
+    """robot_cfg.joint_names 에서 'gripper' 찾기. 없으면 -1."""
+    if hasattr(robot_cfg, "joint_names") and robot_cfg.joint_names:
+        try:
+            return list(robot_cfg.joint_names).index("gripper")
+        except ValueError:
+            pass
+    return -1
+
+
+# ---------------------------------------------------------------------------
 # 완료 판정 함수
 # ---------------------------------------------------------------------------
 
@@ -42,7 +57,8 @@ def object_grasped(
     obj_pos = obj.data.root_pos_w
     jaw_pos = ee_frame.data.target_pos_w[:, 1, :]
     pos_diff = torch.linalg.vector_norm(obj_pos - jaw_pos, dim=1)
-    return torch.logical_and(pos_diff < diff_threshold, robot.data.joint_pos[:, -1] < grasp_threshold)
+    gripper_idx = _get_gripper_joint_index(robot_cfg)
+    return torch.logical_and(pos_diff < diff_threshold, robot.data.joint_pos[:, gripper_idx] < grasp_threshold)
 
 
 def object_in_container(
@@ -65,7 +81,8 @@ def object_in_container(
         radius=radius,
         height_range=height_range,
     )
-    gripper_open = robot.data.joint_pos[:, -1] > grasp_threshold
+    gripper_idx = _get_gripper_joint_index(robot_cfg)
+    gripper_open = robot.data.joint_pos[:, gripper_idx] > grasp_threshold
     return torch.logical_and(inside, gripper_open)
 
 
