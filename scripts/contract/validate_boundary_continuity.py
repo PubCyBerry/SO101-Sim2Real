@@ -73,18 +73,39 @@ def command_saturation(group: h5py.Group, *, dt: float = DEFAULT_DT) -> tuple[in
     return int(saturated.sum()), int(len(saturated)), np.nonzero(saturated)[0].tolist()
 
 
+#: 측정 관절 속도의 출처. 앞이 있으면 그걸 쓰고, 없으면 위치를 차분한다.
+_VELOCITY_KEY = "states/articulation/robot/joint_velocity"
+_POSITION_KEY = "obs_x/joint_pos"
+
+
+def _arm_joint_velocity(group: h5py.Group, *, dt: float = DEFAULT_DT) -> np.ndarray:
+    """arm 5축 **측정** 관절 속도 (T, 5) rad/s.
+
+    ★레코더 스키마가 둘이다. 이 레포의 `--record_hdf5`/mimic 생성기는 전체 씬 state 를 남기지
+    않고 `obs_x/joint_pos` 만 남긴다(이미지가 커서 state 를 뺐다). 그때는 **위치를 차분**해
+    속도를 만든다 — 같은 30 Hz 격자라 슬루 판정에 필요한 정밀도는 같다.
+    """
+    if _VELOCITY_KEY in group:
+        return np.asarray(group[_VELOCITY_KEY])[:, :ARM_DOF]
+    if _POSITION_KEY not in group:
+        raise KeyError(f"속도도 위치도 없다 (찾은 것: {list(group)}); "
+                       f"기대: {_VELOCITY_KEY} 또는 {_POSITION_KEY}")
+    q = np.asarray(group[_POSITION_KEY])[:, :ARM_DOF]
+    return np.gradient(q, dt, axis=0)
+
+
 def _arm_joint_speed(group: h5py.Group) -> np.ndarray:
-    """arm 5축 joint 속도 노름 (rad/s) — source·generated 공통 키."""
-    qdot = np.asarray(group["states/articulation/robot/joint_velocity"])
-    return np.linalg.norm(qdot[:, :ARM_DOF], axis=-1)
+    """arm 5축 joint 속도 노름 (rad/s)."""
+    return np.linalg.norm(_arm_joint_velocity(group), axis=-1)
 
 
 def _wrist_roll_speed(group: h5py.Group) -> np.ndarray | None:
-    """wrist_roll 축 속도 (rad/s) — 단독 분석용."""
+    """wrist_roll 축 속도 (rad/s) — 단독 분석용.
+
+    SO-101 arm: shoulder_pan(0) · shoulder_lift(1) · elbow_flex(2) · wrist_flex(3) · wrist_roll(4).
+    """
     try:
-        qdot = np.asarray(group["states/articulation/robot/joint_velocity"])
-        # SO-101 arm joints: shoulder_pan(0), shoulder_lift(1), elbow_flex(2), wrist_flex(3), wrist_roll(4)
-        return np.abs(qdot[:, 4])
+        return np.abs(_arm_joint_velocity(group)[:, 4])
     except Exception:
         return None
 

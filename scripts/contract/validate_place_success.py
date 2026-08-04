@@ -24,6 +24,7 @@ import ast
 import sys
 from pathlib import Path
 
+import json
 import h5py
 import numpy as np
 
@@ -89,6 +90,78 @@ def analyse_demo(group: h5py.Group, *, radius: float, height_range: tuple[float,
         # 판정: 종료 시점에도 그릇 안 + 그릇이 교란되지 않음
         "verified": bool(inside[-1]) and shift <= BOWL_SHIFT_LIMIT_M and tilt <= BOWL_TILT_LIMIT_DEG,
     }
+
+
+def analyse_segments(episode: dict, *, radius: float, height_range: tuple[float, float]) -> dict:
+    """`--record_segments` JSON 한 에피소드로 재검증 — HDF5 에 물체 궤적이 없을 때.
+
+    ★이 레포의 mimic 생성 HDF5 는 `states/rigid_object/...` 를 남기지 않는다(이미지가 커서
+    전체 씬 state 를 뺐다). 대신 생성기가 프레임별 큐브·그릇 좌표를 구간 로그에 적어 둔다 —
+    종료 시점 재검증에 필요한 건 그게 전부다.
+
+    한계: 구간 로그에는 그릇 **자세**가 없어 tilt 를 못 잰다(shift 는 잰다). 그릇을 엎은
+    오탐은 HDF5 경로에서만 잡힌다 — 여기서는 tilt 를 `nan` 으로 두고 판정에서 뺀다.
+    """
+    cube = episode.get("cube") or {}
+    if not cube:
+        # frames=0 = 전이 계획이 거부돼 한 프레임도 실행되지 않은 시도.
+        return {"recorded_success": bool(episode.get("success")), "frames": 0,
+                "inside_final": False, "inside_first": -1, "inside_last": -1,
+                "final_distance_m": float("nan"), "bowl_shift_m": float("nan"),
+                "bowl_tilt_deg": float("nan"), "verified": False, "not_executed": True}
+
+    final_xy = float(cube["final_xy_to_bowl_mm"]) / 1000.0
+    dz = (float(cube["final_z_mm"]) - float(cube["bowl_z_mm"])) / 1000.0
+    inside_final = final_xy < radius and height_range[0] < dz < height_range[1]
+    return {
+        "recorded_success": bool(episode.get("success")),
+        "frames": int(episode.get("frames", 0)),
+        "inside_final": inside_final,
+        "inside_first": -1,
+        "inside_last": -1,
+        "final_distance_m": final_xy,
+        "bowl_shift_m": float("nan"),
+        "bowl_tilt_deg": float("nan"),
+        "verified": inside_final,
+        "not_executed": False,
+    }
+
+
+def cmd_validate_segments(path: str, *, radius: float, height_range: tuple[float, float]) -> int:
+    """구간 JSON 으로 OR-latch 오탐을 검사한다."""
+    with open(path, encoding="utf-8") as handle:
+        episodes = json.load(handle)["episodes"]
+    if not episodes:
+        print("[FAIL] 에피소드 0개 — 빈 입력은 통과가 아니다")
+        return 1
+
+    results = [analyse_segments(e, radius=radius, height_range=height_range) for e in episodes]
+    executed = [r for r in results if not r["not_executed"]]
+    recorded = [r for r in results if r["recorded_success"]]
+    verified = [r for r in results if r["verified"]]
+    false_success = [i for i, r in enumerate(results) if r["recorded_success"] and not r["verified"]]
+
+    print(f"\n{'ep':>4} {'기록':>5} {'검증':>5} {'프레임':>7} {'최종거리':>10}")
+    for i, r in enumerate(results):
+        if r["not_executed"]:
+            print(f"{i:>4} {'False':>5} {'-':>5} {0:>7}  (전이 폐기 — 미실행)")
+            continue
+        mark = "" if r["recorded_success"] == r["verified"] else "  ← 오탐"
+        print(f"{i:>4} {str(r['recorded_success']):>5} {str(r['verified']):>5} "
+              f"{r['frames']:>7} {r['final_distance_m'] * 1000:>9.1f}mm{mark}")
+
+    print(f"\n[place] 시도={len(results)} 미실행(전이 폐기)={len(results) - len(executed)} "
+          f"실행={len(executed)}")
+    print(f"[place] 기록성공={len(recorded)} 검증통과={len(verified)} 오탐={len(false_success)}")
+    if executed:
+        print(f"[place] 성공률: 전체 {len(verified)}/{len(results)} = "
+              f"{100 * len(verified) / len(results):.1f}% · "
+              f"실행분 {len(verified)}/{len(executed)} = {100 * len(verified) / len(executed):.1f}%")
+    if false_success:
+        print(f"[place] 오탐 목록: ep {false_success}")
+        return 1
+    print("[place] OR-latch 오탐 없음 — 기록 성공 = 종료 시점 검증 성공")
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -217,6 +290,7 @@ def cmd_self_check() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("hdf5", nargs="?", help="검사할 generated HDF5")
+    parser.add_argument("--segments", help="`--record_segments` JSON (HDF5 에 물체 궤적이 없을 때)")
     parser.add_argument(
         "--fix-success-attr",
         action="store_true",
@@ -226,8 +300,15 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_check:
         return cmd_self_check()
+    if args.segments:
+        constants = literal_constants(ENV_CFG)
+        return cmd_validate_segments(
+            args.segments,
+            radius=float(constants["BOWL_SUCCESS_RADIUS"]),
+            height_range=tuple(float(v) for v in constants["BOWL_HEIGHT_RANGE"]),  # type: ignore[arg-type]
+        )
     if not args.hdf5:
-        parser.error("hdf5 경로가 필요하다 (또는 --self-check)")
+        parser.error("hdf5 경로 또는 --segments 가 필요하다 (또는 --self-check)")
     return cmd_validate(args)
 
 
