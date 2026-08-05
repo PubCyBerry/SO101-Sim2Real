@@ -490,10 +490,16 @@ v3 레이아웃상 아래를 전부 맞춰야 한다 — 단순 파일 복사로
 python scripts/cuRobo/pickplace_sm.py random \
   --task SimToReal-SO101-PickCube-Mimic-DR-v0 \
   --record_hdf5 datasets/mimic_src.hdf5 \
-  --auto_trials 100 --enable_cameras --headless
+  --num_envs 8 --auto_trials 15 --cube_sizes 0.040 \
+  --enable_cameras --headless
 ```
 
 §5.5 `random` 서브커맨드와 동일하되 env = **Mimic-DR-v0**(공식 드라이버 호환, subtask 신호 자동 기록).
+
+★ **`--cube_sizes` 는 녹화·주석·생성 3단계가 같은 값이어야 한다.** 크기 DR 은 prestartup USD
+scale 이라 env 당 런 내내 고정인데, 단계마다 다른 크기가 뽑히면 변환된 파지 목표가 도달
+불가가 되고 전이가 계속 폐기된다. 실측: 불일치 시 **전이 폐기 45.7 %(16/35) · 성공률 34.3 %**,
+정합 시 **전이 폐기 4.1 %(2/49) · 성공률 81.6 %**. 근거 = `09_TACIT_KNOWLEDGE.md §16.9`.
 
 **출력 HDF5**: 원본(uncompressed) ≈ 1 ep = 3~5 MB. dwell(plan 요청 전 정지) 구간이 많아
 **주석 전에 반드시 압축**해야 한다.
@@ -517,12 +523,15 @@ frame 극도로 줄이고 `initial_state` 와 action 대응만 유지하면서 *
 **명령**:
 
 ```bash
-python scripts/datagen/annotate_mimic_demos.py --auto \
-  --task SimToReal-SO101-PickCube-Mimic-v0 \
+python scripts/datagen/annotate_mimic_demos.py \
+  --task SimToReal-SO101-PickCube-Mimic-DR-v0 --cube_sizes 0.040 \
   --input_file datasets/mimic_src_compressed.hdf5 \
-  --output_file datasets/mimic_src_annotated.hdf5 \
-  --headless --enable_cameras
+  --output_file datasets/mimic_src_annotated.hdf5 --headless
 ```
+
+★ env 는 **`-Mimic-DR-v0`** 다. 크기 DR 이 있는 변형이라야 `--cube_sizes` 로 §5.9.1 과 크기를
+맞출 수 있다(DR-off `-Mimic-v0` 는 authored 크기 고정). 주석은 **개루프 재생**이라 크기가
+다르면 파지 기하가 어긋난다. `--enable_cameras` 는 불필요 — 주석에 이미지를 쓰지 않는다.
 
 **동작**: 각 에피소드를 `initial_state` 로 되돌려 기록된 action 을 재생해 매 step 의
 subtask term(grasp·place)과 subtask start signal 을 기록한다. 성공 + 모든 신호가 발화한
@@ -540,9 +549,15 @@ python scripts/datagen/generate_mimic_dataset.py \
   --task SimToReal-SO101-PickCube-Mimic-DR-v0 \
   --input_file datasets/mimic_src_annotated.hdf5 \
   --output_file datasets/mimic_augmented.hdf5 \
-  --generation_num_trials 100 \
-  --headless --enable_cameras
+  --generation_num_trials 40 --cube_sizes 0.040 \
+  --record_segments outputs/seg.json \
+  --num_envs 1 --headless --enable_cameras
 ```
+
+`--generation_num_trials` 는 시도 수가 아니라 **성공 목표**다(`generation_guarantee=True`).
+`--cube_sizes` 는 §5.9.1 과 **같은 값**. `--record_segments` 는 프레임별 구간 출처와 큐브·그릇
+궤적을 남긴다 — 생성 HDF5 에는 물체 pose 가 없어 §5.9.5 의 place 재검증이 이걸 입력으로 쓴다
+(`--num_envs 1` 전용).
 
 **동작**: 공식 isaaclab SkillGen 생성기가 source trajectory 의 각 subtask 를 **cuRobo v2 planner**
 로 재계획한다. source 의 cuRobo(§5)와 같은 manifold 도달 기하를 쓰므로 계약이 단일이다
@@ -560,23 +575,31 @@ python scripts/datagen/generate_mimic_dataset.py \
 
 ### 5.9.5 품질 검증
 
-3개 통합 검증기 실행:
-
 ```bash
-# 1. 명령 포화율(경계 불연속)
+# 1. 경계 불연속 — 주 지표 = 명령 포화율. source 와 A/B 로 본다
 python scripts/contract/validate_boundary_continuity.py \
-  --input_file datasets/mimic_augmented.hdf5
+  --generated datasets/mimic_augmented.hdf5 --source datasets/mimic_src.hdf5
 
-# 2. 성공 재확인(OR-latch 오탐)
-python scripts/contract/validate_place_success.py \
-  --input_file datasets/mimic_augmented.hdf5 --retries 3
+# 2. place 성공 종료시점 재검증(OR-latch 오탐) — 구간 JSON 을 읽는다
+python scripts/contract/validate_place_success.py --segments outputs/seg.json
 
-# 3. 파지 기하(진단용)
-python scripts/contract/validate_grasp_quality.py \
-  --input_file datasets/mimic_augmented.hdf5
+# 3. 파지 기하(★진단 전용 — 이걸로 성공 데모를 걸러내지 말 것)
+python scripts/contract/validate_grasp_quality.py datasets/mimic_augmented.hdf5
 ```
 
-상세 = `09_TACIT_KNOWLEDGE.md §12~14`.
+**as-built 실측 (2026-08-05, source 120 · 큐브 40 mm · 40 성공 기준)**
+
+| 지표 | source | 증강 | 판정 |
+|---|---|---|---|
+| 성공률 | — | **40/49 = 81.6 %** (실행분 40/47 = 85.1 %) | — |
+| 전이 폐기 | — | 2/49 = 4.1 % | — |
+| place 오탐(OR-latch) | — | **0** (기록성공 40 = 검증통과 40) | PASS |
+| 명령 포화율 | 0.00 % (0/42460) | **0.00 %** (0/7794, 40 demo 중 0건) | PASS (판정선 0.10 %) |
+| `wrist_roll` p95 / max | 0.250 / 1.303 rad/s | 0.968 / 1.403 rad/s | — |
+
+주석은 119/119 export(재시도 0). LeRobot v3 변환 40 ep, 스키마 오류 0·경고 0(7.9 GB → 240 MB).
+
+상세 = `09_TACIT_KNOWLEDGE.md §16`.
 
 ---
 

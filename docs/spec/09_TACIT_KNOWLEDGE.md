@@ -1098,3 +1098,69 @@ reset 상태 초기화는 EventTerm 으로 해도 된다(`reset_camera_extrinsic
 - **앵커**: `src/sim_to_real/utils/cube_specs.py`
 
 ---
+
+### 16.9 ★ 3단계 큐브 크기 정합 — 어긋나면 전이가 계속 폐기된다
+
+증강 파이프라인은 **녹화 → 주석 → 생성** 세 단계가 각각 env 를 띄운다. 크기 DR
+(`randomize_cube_sizes`)은 **prestartup USD scale** 이라 env 당 크기가 런 내내 고정이고,
+단계마다 따로 뽑힌다. 세 단계가 다른 크기를 쓰면:
+
+* 주석은 **개루프 재생**이라 파지 기하가 어긋난다.
+* 생성은 source 자세를 새 큐브 pose 로 SE(3) 변환하는데, 변환된 목표가 **도달 불가**가 돼
+  전이 계획이 계속 폐기된다.
+
+실측(2026-08-05, 같은 코드·같은 source 절차, 크기 정합만 다름):
+
+| | 불일치(source 25/40/30/25 ↔ 생성 25 mm) | 정합(전 단계 40 mm) |
+|---|---|---|
+| 전이 폐기 | **45.7 %** (16/35) | **4.1 %** (2/49) |
+| 성공률 | 34.3 % (12/35) | **81.6 %** (40/49) |
+
+→ `--cube_sizes` 를 **세 스크립트 모두**에 같은 값으로 준다
+(`pickplace_sm.py` · `annotate_mimic_demos.py` · `generate_mimic_dataset.py`).
+주석·생성 env 는 크기 DR 이 있는 **`-Mimic-DR-v0`** 여야 한다.
+
+⚠ 성공률만 보면 "증강 알고리즘이 나쁘다"로 오독한다. **전이 폐기율을 같이 보면** 목표가
+도달 불가라는 게 바로 드러난다 — 생성 로그의 폐기 카운트를 항상 함께 기록할 것.
+
+### 16.10 place 신호가 죽으면 주석이 0 이 되고 원인이 안 보인다
+
+`object_in_container` 는 `xy < radius` ∧ `dz ∈ height_range` ∧ **`gripper_open`** 4조건 AND 다.
+그리퍼 컬럼을 `robot_cfg.joint_names` **리스트 안에서의 위치**로 잡으면 `["gripper"]` 는 항상
+`0`(= `shoulder_pan`)이라 `gripper_open` 이 **영구 False** 가 된다(→ `§16.8` 옆 실수와 같은 계열).
+
+증상이 고약하다 — 재생·물리·기하가 전부 정상인데 주석만 0/N 이다:
+
+```
+종료 시점: xy=10.6mm(<60)  dz=20.8mm(∈5~60)  gripper=+1.180(>0.60)
+걸린 조건: 없음            ← 그런데 기록된 신호 max=0.000
+```
+
+- **정답**: `SceneEntityCfg.resolve()` 가 채우는 **`joint_ids`**(articulation 컬럼 인덱스).
+  미지정(`slice(None)`)일 때만 `-1` 폴백.
+- **대응**: `annotate_mimic_demos.py` 가 신호 미발화 시 **하위 조건별 종료 기하 + live
+  `obs_buf`/hook** 을 찍는다. 이 로그가 없으면 별도 프로브를 짜야 한다.
+- **회귀 테스트**: `scripts/contract/validate_container_judgement.py::test_gripper_joint_index`
+
+### 16.11 심볼 이동 리팩토링은 정적 검사를 전부 통과하고 GPU 에서 터진다
+
+`_pre_back` 을 모듈로 올리며 호출부를 안 고쳤는데 **`py_compile`·import·self-check 가 전부
+통과**했다. 그 이름이 **함수 안**에서만 참조되기 때문이다. 게다가 planner 가 예외를 잡아
+`ok=False` 로 응답하므로 프로세스도 안 죽는다 — **전 env 계획 실패가 "성공률 0 %" 로만** 보인다.
+
+```
+[sm] planner ERROR: NameError: name '_pre_back' is not defined
+[sm] plan FAIL (all 4 envs)
+```
+
+- **게이트**: `scripts/contract/validate_no_undefined_names.py` (AST 로 Load 문맥 미정의 전역 검출).
+- **규약**: 모듈 간 계약이 되는 함수는 `_` 접두사를 떼고 **공개 이름**으로 올린다.
+
+### 16.12 운영 함정 — `pgrep -f` 자기매칭 · 유휴 planner GPU 점유
+
+- **`pgrep -f <pattern>` 은 자기 자신을 찾는다.** 대기 스크립트의 커맨드라인에 그 패턴 문자열이
+  들어 있으면 `until ! pgrep -f X` 가 **영원히 거짓**이라 체인이 멈춘다(실측: 압축 완료 후
+  주석이 착수되지 않은 채 방치). 파일 존재·로그 문자열로 판정하라. `pkill` 자기 kill 과 같은 계열.
+- **`curobo-planner` 는 source 녹화 전용이다.** 증강 생성은 **in-process cuRobo** 라 planner
+  컨테이너가 필요 없다. 안 내리면 **GPU 26~27 GB 를 계속 점유**한다(실측 16시간 방치).
+  녹화가 끝나면 바로 `docker stop curobo-planner`.
