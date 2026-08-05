@@ -138,7 +138,7 @@ dry-run runner 는 **non-promoting** 이다 — 외부 report 가 검증돼도 P
 |---|---|
 | `assets/` | 기존 로봇 USD 물리 편집 (collision·joint limit) |
 | `environments/` | sim 환경 구성·상호작용: 씬 author, env 조회, teleop, 머티리얼 |
-| `datagen/` | **새 데이터 생성**: SM·실기기·pink 궤적 record + SM replay |
+| `datagen/` | **새 데이터 생성**: cuRobo SM 원본·Mimic/SkillGen 증강·실기기·pink 궤적 record + SM replay |
 | `cuRobo/` | **cuRobo 2-proc pick-place SM**: planner · executor · sweep 시각화 |
 | `convert/` | 기존 데이터셋·checkpoint **포맷·프레임 변환**(EEF 파생셋·representation migration 포함) |
 | `data/` | 데이터셋 **사후 ops**(변환 아님): stats 생성·병합·업로드 |

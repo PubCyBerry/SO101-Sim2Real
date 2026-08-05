@@ -4481,3 +4481,256 @@ Isaac Sim 은 **Fabric(flatcache)** 로 렌더한다 → **런타임 USD materia
 
 ### 확인 방법
 `-DR-v0` num_envs=3 top_camera 캡처 = 3 로봇이 서로 다른 팔레트 단일색(pairwise 패치 diff ~34–49, 고장 시 ~2). grasp 물리 무영향(replicate_physics=False 서 sweep 21/23≈91%).
+
+---
+
+## cuRobo v0.8 커널 임포트가 TypeError (warp shadowing)
+
+**현상**: Mimic/SkillGen 증강 생성 스크립트(`generate_mimic_dataset.py`, `annotate_mimic_demos.py`)를 실행하면 환경은 부팅되지만 cuRobo planner 가 로드되지 않는다.
+
+**오류 메시지**:
+
+```
+Traceback (most recent call last):
+  File "...", line X, in <module>
+    from sim_to_real.datagen.skillgen_planner import SO101SkillGenPlanner
+  File "src/sim_to_real/datagen/skillgen_planner.py", line Y, in <module>
+    from curobo.wrap_batch.motion_gen import MotionGenRobotConfig
+  File "...", line Z, in <module>
+    ...curobo kernel function...
+TypeError: func() got an unexpected keyword argument 'module'
+```
+
+### 원인
+
+AppLauncher 가 초기화되면서 kit 확장 `omni.warp.core` 1.8.2 가 `sys.modules['warp']` 을 선점한다. cuRobo v0.8 은 warp 1.11 API 를 기대하는데(`module` 파라미터) 1.8.2 에는 그 파라미터가 없다. 그래서 임포트 시 `TypeError` 가 난다.
+
+### 해결 방법
+
+`import warp` 를 **`AppLauncher` 보다 먼저**(파일 맨 앞)에 둔다. 이렇게 하면 site-packages 의 warp 1.11 이 먼저 `sys.modules` 를 차지해 kit 확장을 가린다(shadowing).
+
+**적용**:
+```python
+# 파일 최상단
+import warp as _warp  # noqa: F401  isort:skip
+
+import argparse
+from isaaclab.app import AppLauncher
+# ... 나머지 import
+```
+
+### 확인 방법
+
+```bash
+python scripts/datagen/generate_mimic_dataset.py --task SimToReal-SO101-PickCube-Mimic-DR-v0 \
+  --input_file datasets/mimic_annotated.hdf5 --output_file datasets/mimic_gen.hdf5 \
+  --generation_num_trials 10 --headless
+```
+
+첫 trial 의 planner initialization 로그가 출력되면 성공:
+```
+[INFO] [curobo.wrap.motion_gen] MotionGen config loading...
+```
+
+---
+
+## cuRobo 전 계획이 "Start or End state in collision" 으로 실패 (parked 자세 self-collision)
+
+**현상**: cuRobo 그리퍼를 닫은(parked) 자세에서 planning 을 시도하면 모든 phase 가 `Start or End state in collision` 으로 실패한다. 가능해 보이는 pose 도 마찬가지다.
+
+**오류 메시지**:
+
+```
+[curobo.wrap_batch.motion_gen] phase-fail: approach=False, lift=False, transit=False, ...
+```
+
+### 원인
+
+파지 후 들어올리는 pose(특히 wrist 접힘)가 self-collision sphere 모델에서 **비인접 링크쌍이 겹친다**. 예: `lower_arm ↔ wrist_flex` 4.3mm 침투, `gripper_link ↔ upper_arm` 2.1mm 침투(실측). 이 겹침은 작업 중(팔 전방 신전)에는 없지만 초기화·대기 자세(접힌 상태)에서 경계를 넘는다.
+
+### 해결 방법
+
+so101.yml 의 `self_collision_ignore` 리스트에 parked 자세서만 겹치는 링크쌍을 추가한다. robotics-debugger 나 `robot_spheres` 슬라이스로 겹침쌍을 pinpoint 한 뒤:
+
+```yaml
+self_collision_ignore:
+  - [lower_arm_link, wrist_flex_link]
+  - [gripper_link, upper_arm_link]
+```
+
+이 쌍들은 **집기·옮기 중에는 떨어져** 있으므로 경계 체크에 영향을 주지 않는다.
+
+### 확인 방법
+
+diag 명령으로 각 phase 마다 start/end state reachability 를 확인:
+
+```bash
+python scripts/cuRobo/curobo_batch_planner.py --diag-ik-seed 0 --num_envs 1 --headless
+```
+
+parked pose 서 `[start] self_reachable=True, approach=True, ...` 모두 True.
+
+---
+
+## cuRobo LBFGS/TrajOpt 가 torch.inference_mode() 안에서 RuntimeError
+
+**현상**: Mimic 생성기 내부에서 `torch.inference_mode()` 컨텍스트 안에서 cuRobo planner 를 호출하면 TrajOpt 또는 LBFGS 최적화 단계에서 갑자기 크래시된다.
+
+**오류 메시지**:
+
+```
+RuntimeError: element 0 of tensors does not require grad and has requires_grad=True
+```
+
+또는
+
+```
+RuntimeError: element 0 of tensors does not require grad
+```
+
+### 원인
+
+`torch.inference_mode()` 는 **모든 연산의 gradient 를 비활성화**한다. 그런데 cuRobo 의 LBFGS/TrajOpt solver 는 **손실 함수의 gradient 를 계산**해야 최적화를 진행한다. inference_mode 하에서 gradient 를 요구하는 tensor 를 만들려고 하면 PyTorch 가 타입 불일치 에러를 낸다.
+
+### 해결 방법
+
+**`update_world_and_plan_motion()` 호출 구간만 inference_mode 를 끈다**:
+
+```python
+# 틀린 방식
+with torch.inference_mode():
+    planner.update_world_and_plan_motion(...)  # ✗ 크래시
+
+# 올바른 방식
+with torch.inference_mode(False):
+    with torch.enable_grad():
+        planner.update_world_and_plan_motion(...)  # ✓ 정상
+```
+
+더 안전한 방식은 **외부 루프에서만 inference_mode** 를 쓰고, planner 호출 직전에 컨텍스트를 빠져나온다:
+
+```python
+with torch.inference_mode():
+    # 다른 연산들...
+    pass
+
+# inference_mode 바깥
+planner_result = planner.update_world_and_plan_motion(...)
+
+with torch.inference_mode():
+    # 결과 후처리...
+    pass
+```
+
+### 확인 방법
+
+Mimic 생성기의 planner 호출 구간 로그:
+
+```bash
+python scripts/datagen/generate_mimic_dataset.py ... 2>&1 | grep -E "phase-ok|RuntimeError"
+```
+
+전 trial 에서 `phase-ok` 가 나오고 RuntimeError 가 없으면 성공. 실패하면:
+
+```
+phase-ok: approach=True, lift=True, transit=True, release=True
+```
+
+이 메시지가 안 나오고 `RuntimeError: element 0 of tensors` 가 나온다.
+
+## Mimic 주석이 0/N — `place_cube1` 신호가 한 번도 발화하지 않음
+
+### 현상
+`annotate_mimic_demos.py` 가 모든 에피소드를 제외한다. 재생 자체는 정상이고(성공 판정 통과),
+종료 시점 기하도 전부 조건 안이다. 그런데 기록된 신호는 전 프레임 0 이다.
+
+### 오류 메시지
+```
+	subtask "place_cube1" 의 term 신호가 한 번도 발화하지 않았다 — 제외 (T=289 max=0.000)
+	  종료 시점: xy=10.6mm(<60)  dz=20.8mm(∈5~60)  gripper=+1.180(>0.60)
+	  걸린 조건: 없음
+	  live obs_buf[place_cube1]=[False] · hook=[False]
+주석 export 0/8 에피소드
+```
+
+### 원인
+`object_in_container` 의 그리퍼 컬럼 인덱스를 `robot_cfg.joint_names` **리스트 안에서의 위치**로
+잡았다. `SceneEntityCfg("robot", joint_names=["gripper"])` 는 길이 1 이라 항상 `0` 이 나오고,
+그건 articulation 의 `shoulder_pan`(≈0 rad)이다. 그래서 `gripper_open = 0 > 0.60` 이 **영구 False** 다.
+기하 3조건이 모두 참이어도 AND 가 깨지므로 증상이 "이유 없이 안 뜬다"로 보인다.
+옛 `-1` 폴백은 그리퍼가 마지막 컬럼이라 우연히 맞았고, "이름 해석" 수정이 오히려 신호를 죽였다.
+
+### 해결 방법
+`SceneEntityCfg.resolve()` 가 채우는 **`joint_ids`**(articulation 컬럼 인덱스)를 쓴다.
+미지정(`slice(None)`)일 때만 `-1` 폴백:
+
+```python
+joint_ids = getattr(robot_cfg, "joint_ids", None)
+return int(joint_ids[0]) if isinstance(joint_ids, (list, tuple)) and len(joint_ids) == 1 else -1
+```
+
+### 확인 방법
+```bash
+python scripts/contract/validate_container_judgement.py   # test_gripper_joint_index
+```
+`gripper 컬럼 해석: articulation 인덱스 OK (5→5 · 0→0 · 미지정→-1)` 이 나와야 한다.
+이후 주석은 119/119 export(재시도 0)로 통과했다.
+
+## cuRobo SM 이 전 env 계획 실패 — `NameError` 를 planner 가 삼킨다
+
+### 현상
+`pickplace_sm.py` 가 모든 env 에서 `placed=0/N`. 정적 검사(`py_compile`·import·self-check)는
+전부 통과한 상태였다. 심볼을 다른 모듈로 옮긴 직후 리팩토링에서 나온다.
+
+### 오류 메시지
+```
+[sm] recv plan_reply #1: ok=False
+[sm] planner ERROR: NameError: name '_pre_back' is not defined
+[sm] plan FAIL (all 4 envs)
+```
+
+### 원인
+함수를 `so101_contract/grasp_manifold.py` 로 올리면서 `curobo_batch_planner.py` 호출부를 안 고쳤다.
+그 이름이 **함수 본문 안**에서만 참조돼 import 시점에는 해석되지 않으므로 정적 검사가 못 잡는다.
+planner 는 예외를 잡아 `ok=False` 로 응답하므로 프로세스도 죽지 않아, 겉으로는 "성공률 0 %" 로만 보인다.
+
+### 해결 방법
+모듈 간 계약이 되는 함수는 `_` 접두사를 떼고 공개 이름으로 올린 뒤 import 한다.
+재발 방지 게이트를 상시로 돌린다:
+
+```bash
+python scripts/contract/validate_no_undefined_names.py
+```
+
+### 확인 방법
+`PASS — 0/9 파일에 미정의 이름`. 그 뒤 SM 재실행에서 `placed=8/8` 로 복구됐다.
+
+## 증강 성공률이 낮고 전이가 계속 폐기됨 (큐브 크기 불일치)
+
+### 현상
+Mimic 증강 성공률이 30 %대에 머문다. 생성 로그에 계획 실패가 잦고, 실행조차 못 한 시도
+(`frames=0`)가 절반 가까이 된다.
+
+### 오류 메시지
+```
+[place] 시도=35 미실행(전이 폐기)=16 실행=19
+[place] 성공률: 전체 12/35 = 34.3% · 실행분 12/19 = 63.2%
+```
+
+### 원인
+큐브 크기 DR(`randomize_cube_sizes`)은 **prestartup USD scale** 이라 env 당 런 내내 고정이고
+**단계마다 새로 뽑힌다**. 녹화·주석·생성이 서로 다른 크기로 돌면 source 자세를 SE(3) 변환한
+파지 목표가 **도달 불가**가 돼 전이 계획이 계속 폐기된다.
+
+### 해결 방법
+세 스크립트에 **같은 `--cube_sizes`** 를 준다. 주석·생성 env 는 크기 DR 이 있는 `-Mimic-DR-v0` 를 쓴다.
+
+```bash
+pickplace_sm.py random        ... --cube_sizes 0.040
+annotate_mimic_demos.py       ... --task ...-Mimic-DR-v0 --cube_sizes 0.040
+generate_mimic_dataset.py     ... --task ...-Mimic-DR-v0 --cube_sizes 0.040
+```
+
+### 확인 방법
+생성 로그에 `[gen] cube size DR override → [0.04]`. 정합 후 실측:
+전이 폐기 45.7 % → **4.1 %**, 성공률 34.3 % → **81.6 %**(40/49).

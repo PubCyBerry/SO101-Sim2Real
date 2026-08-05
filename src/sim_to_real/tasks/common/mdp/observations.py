@@ -22,6 +22,29 @@ from ._geometry import CONTAINER_DEFAULT_CENTER_XY, DESK_TOP_Z
 
 
 # ---------------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------------
+
+
+def _get_gripper_joint_index(robot_cfg: SceneEntityCfg) -> int:
+    """그리퍼 축의 **articulation 컬럼 인덱스**. 지정이 없으면 마지막 컬럼(-1).
+
+    ★`joint_names` 리스트 **안에서의** 위치를 돌려주면 안 된다. `SceneEntityCfg("robot",
+    joint_names=["gripper"])` 는 길이 1 이라 그 방식은 항상 `0`(= `shoulder_pan`)을 가리킨다.
+    실측(2026-08-04): 그 탓에 `object_in_container` 의 `gripper_open` 이 `shoulder_pan≈0 > 0.60`
+    으로 **항상 False** 가 돼 `place_cube1` 이 한 번도 발화하지 않았고, Mimic 주석이 0/8 로
+    전멸했다. 기하 4조건은 전부 만족한 상태였다 — 신호 경로만 죽어 있어 원인이 안 보였다.
+
+    쓸 값은 `SceneEntityCfg.resolve()` 가 채우는 **`joint_ids`** 다(articulation 컬럼 인덱스).
+    미지정이면 `slice(None)` 이므로 그때만 `-1` 로 폴백한다.
+    """
+    joint_ids = getattr(robot_cfg, "joint_ids", None)
+    if isinstance(joint_ids, (list, tuple)) and len(joint_ids) == 1:
+        return int(joint_ids[0])
+    return -1
+
+
+# ---------------------------------------------------------------------------
 # 완료 판정 함수
 # ---------------------------------------------------------------------------
 
@@ -42,7 +65,8 @@ def object_grasped(
     obj_pos = obj.data.root_pos_w
     jaw_pos = ee_frame.data.target_pos_w[:, 1, :]
     pos_diff = torch.linalg.vector_norm(obj_pos - jaw_pos, dim=1)
-    return torch.logical_and(pos_diff < diff_threshold, robot.data.joint_pos[:, -1] < grasp_threshold)
+    gripper_idx = _get_gripper_joint_index(robot_cfg)
+    return torch.logical_and(pos_diff < diff_threshold, robot.data.joint_pos[:, gripper_idx] < grasp_threshold)
 
 
 def object_in_container(
@@ -65,7 +89,8 @@ def object_in_container(
         radius=radius,
         height_range=height_range,
     )
-    gripper_open = robot.data.joint_pos[:, -1] > grasp_threshold
+    gripper_idx = _get_gripper_joint_index(robot_cfg)
+    gripper_open = robot.data.joint_pos[:, gripper_idx] > grasp_threshold
     return torch.logical_and(inside, gripper_open)
 
 
