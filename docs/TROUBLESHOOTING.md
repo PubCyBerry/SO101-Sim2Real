@@ -4734,3 +4734,37 @@ generate_mimic_dataset.py     ... --task ...-Mimic-DR-v0 --cube_sizes 0.040
 ### 확인 방법
 생성 로그에 `[gen] cube size DR override → [0.04]`. 정합 후 실측:
 전이 폐기 45.7 % → **4.1 %**, 성공률 34.3 % → **81.6 %**(40/49).
+
+## bridge VLA eval 성공률이 부풀려진다 (z 창이 책상 상판 + fudge 기준)
+
+### 현상
+`run_cube_desk_ros_bridge.py --eval` 의 성공률이 실제보다 높다. 큐브가 그릇 **위에 떠 있는데도**
+성공으로 집계된다. env term(`object_in_container`)과 판정이 어긋난다.
+
+### 오류 메시지
+```
+# 에러 없음(silent). eval 로그의 z 창으로만 보인다:
+[bridge] 🎯 EVAL 시작: ... z∈[0.710,0.865]     ← 옛 동작(상판 0.705 + range + 0.10 fudge)
+                                                  올바른 창은 [0.720,0.775] (그릇 root 0.715 기준)
+```
+
+### 원인
+`BOWL_HEIGHT_RANGE` 는 **그릇 root z 기준** 상대 창인데 bridge 는 **책상 상판 상수**에 더하고
+거기에 `+0.10` fudge 까지 얹고 있었다. 그 fudge 는 common `_geometry.DESK_TOP_Z` 가 pen 잔재
+0.76 이라 성공 판정이 죽어 있던 시절의 우회다. 그 상수가 0.705 로 바로잡힌 뒤에도 우회가 남아
+창 상한이 **90 mm 초과**가 됐다 — rim 상단(그릇 +0.080)보다 **70 mm 위**까지 성공 처리한다.
+
+### 해결 방법
+판정을 **실제 그릇 pose 기준**으로 바꾼다(env term 과 동일 규약). fudge 제거:
+
+```python
+in_z = (bp[2] + BOWL_HEIGHT_RANGE[0]) < z < (bp[2] + BOWL_HEIGHT_RANGE[1])
+```
+
+로그·JSON 표기용 nominal 창은 `_BOWL_INIT_STATE[0][2] + BOWL_HEIGHT_RANGE` 로 유도한다.
+
+### 확인 방법
+eval 배너의 창이 `z∈[0.720,0.775] (그릇 root 기준)` 로 찍힌다.
+`python3 scripts/contract/validate_container_judgement.py` 의 term end-to-end 12 케이스가
+같은 규약(그릇 root 기준·DR 추종·rim 위 배제)을 고정한다.
+⚠ 이 수정 전 bridge eval 수치는 **전부 무효**다.

@@ -480,7 +480,7 @@ except Exception:
     REST_Q6 = [math.radians(v) for v in (0.0, -100.0, 90.0, 50.0, 0.0, -10.0)]
 # user 지시: REST = 위 중심값 자세에서 wrist_roll 만 -90° 로 돌린 상태.
 REST_Q6[SO101_JOINT_ORDER.index("wrist_roll")] = math.radians(-90.0)
-DESK_TOP_Z = 0.705           # world 책상 상판 (bridge CUBE_DESK_TOP_Z 정합)
+DESK_TOP_Z = 0.705           # world 책상 상판 (common/mdp/_geometry.py::DESK_TOP_Z 단일 소스 정합)
 CUBE_WORLD_Z_40MM = 0.726    # 40mm 큐브 중심 world z (desk+half+slack, _CUBE_INIT_STATES 정합)
 # bowl world = pick_cube_env_cfg._BOWL_INIT_STATE (bridge place_defaults 와 동일).
 BOWL_WORLD = [-0.22, 0.265, 0.715]

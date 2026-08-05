@@ -73,6 +73,7 @@ from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler  # noqa:
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 import sim_to_real.tasks  # noqa: F401,E402  gym 등록 — 공식 스크립트가 못 하는 바로 그 부분
+from sim_to_real.tasks.common.mdp._geometry import DESK_TOP_Z  # noqa: E402
 from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import remove_pick_cube_cameras  # noqa: E402
 from so101_contract.feature_codec import SO101_JOINT_ORDER  # noqa: E402
 
@@ -214,13 +215,15 @@ def report_success_gates(env: ManagerBasedRLMimicEnv, success_term) -> None:
     params = dict(success_term.params)
     container_cfg = params.get("container_cfg")
     radius = float(params.get("radius", 0.06))
-    height_range = tuple(params.get("height_range", (0.005, 0.12)))
+    height_range = tuple(params.get("height_range", (0.005, 0.06)))
     origins = env.scene.env_origins[0]
     if container_cfg is not None:
         container = env.scene[container_cfg.name].data.root_pos_w[0] - origins
     else:
+        # 폴백 기본값은 term 쪽(`common/mdp/terminations.py::task_done`)과 **같아야** 한다.
+        # 옛 0.76 은 pen 잔재라 진단 로그가 실제 게이트와 다른 창을 보고했다.
         center = params.get("container_center_xy", (0.0, 0.0))
-        container = torch.tensor([center[0], center[1], 0.76], device=env.device)
+        container = torch.tensor([center[0], center[1], DESK_TOP_Z], device=env.device)
 
     for object_cfg in params.get("objects_cfg", []):
         position = env.scene[object_cfg.name].data.root_pos_w[0] - origins

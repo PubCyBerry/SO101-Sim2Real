@@ -218,9 +218,18 @@ from sim_to_real.tasks.pick_cube.pick_cube_env_cfg import (  # noqa: E402
     _WRIST_CAM_LOCAL_ROT,
     _WRIST_CAMERA_FOCAL,
 )
-# cube recorder/state machine이 실제 cube_desk 상판과 맞춰 사용하는 z 기준.
-# common MDP의 0.760은 pen desk 기준 stale 값이라 bowl 안 cube(z≈0.73~0.76)를 실패 처리한다.
-CUBE_DESK_TOP_Z = 0.705
+# ``BOWL_HEIGHT_RANGE`` 는 **그릇 root z 기준** 상대 창이다(env term `object_in_container` 와
+# 동일 규약). eval 판정은 아래 `cube_in_bowl` 이 **실제 그릇 pose** 를 읽어 쓰고, 이 상수는
+# 로그·JSON 표기용 nominal 값이다.
+#
+# ★옛 코드는 책상 상판 0.705 + range + **0.10 fudge** 로 창을 손보정했다 — common
+# `_geometry.DESK_TOP_Z` 가 pen 잔재 0.76 이라 성공 판정이 죽어 있던 시절의 우회다. 그 상수는
+# 이제 0.705 로 바로잡혔고(§`09_TACIT_KNOWLEDGE.md`), 우회를 남겨두면 창 상한이 **90 mm 초과**
+# ([0.710, 0.865] vs 올바른 [0.720, 0.775])라 **rim 위 70 mm 에 떠 있는 큐브도 성공**으로 센다.
+_BOWL_Z_WINDOW = (
+    _BOWL_INIT_STATE[0][2] + BOWL_HEIGHT_RANGE[0],
+    _BOWL_INIT_STATE[0][2] + BOWL_HEIGHT_RANGE[1],
+)
 from sim_to_real.utils.constant import (  # noqa: E402
     BOWL_NAME,
     CUBE_NAMES,
@@ -998,9 +1007,8 @@ def main() -> None:
         dxy = float(np.hypot(cp[0] - bp[0], cp[1] - bp[1]))
         z = float(cp[2])
         in_xy = dxy < BOWL_SUCCESS_RADIUS
-        in_z = (CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]) < z < (
-            CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10
-        )
+        # z 창은 **실제 그릇 root** 기준 — 그릇이 DR 로 움직여도 따라간다(env term 과 동일 규약).
+        in_z = (bp[2] + BOWL_HEIGHT_RANGE[0]) < z < (bp[2] + BOWL_HEIGHT_RANGE[1])
         return (in_xy and in_z), dxy, z
 
     # ── grasp sweep 검증: 궤적 JSON replay + 잡은 시점 4뷰 2x2 캡처 ────────────
@@ -1124,8 +1132,8 @@ def main() -> None:
         episodes: list[dict] = []
         print(f"[bridge] 🎯 EVAL 시작: {args.eval} 에피소드 × {args.eval_seconds}s "
               f"(settle {args.eval_settle}s) · {n_active} 큐브 · success radius "
-              f"{BOWL_SUCCESS_RADIUS}m · z∈[{CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0]:.3f},"
-              f"{CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10:.3f}]", flush=True)
+              f"{BOWL_SUCCESS_RADIUS}m · z∈[{_BOWL_Z_WINDOW[0]:.3f},"
+              f"{_BOWL_Z_WINDOW[1]:.3f}] (그릇 root 기준)", flush=True)
         # 진단 dump: bridge 렌더 3캠 annotator(render_product 직결 = 정책이 받는 이미지와 동일).
         _dump_annots = []
         if args.dump_obs:
@@ -1306,10 +1314,7 @@ def main() -> None:
                 "avg_cubes_placed": round(avg_placed, 3),
                 "per_cube_ever_rate": round(ever_rate, 4),
                 "success_radius_m": BOWL_SUCCESS_RADIUS,
-                "z_window": [
-                    CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[0],
-                    CUBE_DESK_TOP_Z + BOWL_HEIGHT_RANGE[1] + 0.10,
-                ],
+                "z_window": list(_BOWL_Z_WINDOW),
                 "episodes": episodes,
             }
             out_path = _repo_path(args.eval_out)

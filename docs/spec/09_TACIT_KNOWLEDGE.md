@@ -1033,7 +1033,7 @@ reset 상태 초기화는 EventTerm 으로 해도 된다(`reset_camera_extrinsic
 
 | 시도 | 결과 | 근거 |
 |---|---|---|
-| 대칭 인지 source 선택(회전을 길이로 환산) | **81.6 → 22.2%** | offset 사다리 vs 분산 오프라인 지표 비정합 |
+| 대칭 인지 source 선택(회전을 길이로 환산) | **81.6 → 22.2%** | 오프라인 지표(큐브 이동 128.6→21.2 mm)는 좋아졌는데 폐루프가 무너졌다. 구현은 `worktree-rewrite-mimic:src/sim_to_real/datagen/selection_strategy.py` 에만 남겼다(main 미이식) |
 | `rot_weight` 0.05 (회전 경시) | **76.1 → 52~57%** | orientation 이 5-DOF 도달성 절벽 결정 |
 | Δψ 인지 source 선택 | **83.3% → 70.2%** (대표본) | 소표본 오버핏 |
 | source 풀 24→40→80 | **전부 70.2%** (대표본 동일) | 다양성 ceiling |

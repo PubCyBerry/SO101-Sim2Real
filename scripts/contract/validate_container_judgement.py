@@ -9,6 +9,7 @@ task_done 컨테이너 판정이 아래를 지키는지 확인한다:
 
 import importlib.util
 import math
+import types
 import sys
 from pathlib import Path
 
@@ -166,6 +167,116 @@ def test_gripper_joint_index() -> None:
     print("gripper 컬럼 해석: articulation 인덱스 OK (5→5 · 0→0 · 미지정→-1)")
 
 
+def test_terms_end_to_end() -> None:
+    """`object_in_container` · `task_done` 을 **stub env 로 실제 호출**한다.
+
+    상수·수식만 보는 검사로는 **AND 합성 지점**이 안 잡힌다 — 실제로 그리퍼 조건 하나가 죽어
+    기하 3조건이 다 참인데도 신호가 0 이던 사고가 있었다(`09_TACIT_KNOWLEDGE.md §16.10`).
+    isaaclab 은 호스트에서 못 띄우지만 두 함수는 런타임에 torch 와 `env.scene` dict 만 쓴다.
+    """
+    import torch
+
+    _install_isaaclab_stub()
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+    import importlib
+
+    obs = importlib.import_module("sim_to_real.tasks.common.mdp.observations")
+    term = importlib.import_module("sim_to_real.tasks.common.mdp.terminations")
+    geometry = importlib.import_module("sim_to_real.tasks.common.mdp._geometry")
+    env_cfg = _load_module("_env_cfg_ast", _REPO_ROOT / "scripts/contract/validate_place_success.py")
+    constants = env_cfg.literal_constants(
+        _REPO_ROOT / "src/sim_to_real/tasks/pick_cube/pick_cube_env_cfg.py")
+
+    RADIUS = float(constants["BOWL_SUCCESS_RADIUS"])
+    HEIGHT = tuple(float(v) for v in constants["BOWL_HEIGHT_RANGE"])
+    # `BOWL_CENTER_XY` 는 `spawn_area` 가 단일 소스다(env_cfg 는 거기서 재수출).
+    spawn = env_cfg.literal_constants(
+        _REPO_ROOT / "src/sim_to_real/tasks/pick_cube/spawn_area.py")
+    BOWL_XY = tuple(float(v) for v in spawn["BOWL_CENTER_XY"])
+    BOWL_Z = 0.715                    # `_BOWL_INIT_STATE` 의 z(리터럴 튜플이라 AST 로 못 읽는다)
+    IN_BOWL_Z = BOWL_Z + 0.028        # 캐비티 바닥 위 안착 큐브 중심(실측)
+    ABOVE_RIM_Z = BOWL_Z + 0.090      # rim(+0.080) 위에 들고 있는 상태
+
+    assert geometry.DESK_TOP_Z == 0.705, f"DESK_TOP_Z 는 0.705 여야, got {geometry.DESK_TOP_Z}"
+
+    class Cfg:                        # SceneEntityCfg.resolve() 결과만 흉내
+        def __init__(self, name, joint_ids=slice(None), joint_names=None):
+            self.name, self.joint_ids, self.joint_names = name, joint_ids, joint_names
+
+    class Body:
+        def __init__(self, xyz, quat=(1.0, 0.0, 0.0, 0.0)):
+            self.data = type("D", (), {})()
+            self.data.root_pos_w = torch.tensor([list(xyz)], dtype=torch.float32)
+            # `task_done` 은 컨테이너 **로컬 프레임** 판정이라 자세도 본다(wxyz, 기본 = 정립).
+            self.data.root_quat_w = torch.tensor([list(quat)], dtype=torch.float32)
+
+    class Robot(Body):
+        def __init__(self, joints):
+            self.data = type("D", (), {})()
+            self.data.joint_pos = torch.tensor([list(joints)], dtype=torch.float32)
+
+    class Scene(dict):
+        env_origins = torch.zeros(1, 3)
+
+    def make_env(cube, bowl=None, joints=(0.0,) * 5 + (1.0,), bowl_quat=(1.0, 0.0, 0.0, 0.0)):
+        e = types.SimpleNamespace(num_envs=1, device=torch.device("cpu"))
+        e.scene = Scene(Cube1=Body(cube),
+                        Bowl=Body(bowl or (*BOWL_XY, BOWL_Z), bowl_quat),
+                        robot=Robot(joints))
+        return e
+
+    CUBE, BOWL = Cfg("Cube1"), Cfg("Bowl")
+    ROBOT_LAST = Cfg("robot")                                    # 미지정 → 마지막 컬럼
+    ROBOT_NAMED = Cfg("robot", joint_ids=[5], joint_names=["gripper"])   # SO-101 실제 컬럼
+
+    def inside(env, robot_cfg=ROBOT_LAST, container_cfg=BOWL):
+        return bool(obs.object_in_container(
+            env, robot_cfg=robot_cfg, object_cfg=CUBE, container_cfg=container_cfg,
+            container_center_xy=BOWL_XY, radius=RADIUS, height_range=HEIGHT).item())
+
+    def done(env, container_cfg=BOWL):
+        return bool(term.task_done(
+            env, objects_cfg=[CUBE], container_center_xy=BOWL_XY, container_cfg=container_cfg,
+            radius=RADIUS, height_range=HEIGHT, require_rest_pose=False).item())
+
+    settled = make_env((*BOWL_XY, IN_BOWL_Z))
+    assert inside(settled), "안착 큐브가 obs 에서 True 여야"
+    assert done(settled), "안착 큐브가 termination 에서 True 여야"
+    assert not inside(make_env((*BOWL_XY, ABOVE_RIM_Z))), "rim 위로 들고 있으면 False 여야"
+    assert not inside(make_env((BOWL_XY[0] + 0.20, BOWL_XY[1], 0.726))), "그릇 밖은 False 여야"
+    assert not inside(make_env((*BOWL_XY, BOWL_Z))), "창 하한 아래는 False 여야"
+
+    # 그릇 DR(arc 최대 61 mm) 추종 — 판정원이 그릇을 따라가야 한다.
+    moved = (BOWL_XY[0] + 0.061, BOWL_XY[1])
+    e_moved = make_env((*moved, IN_BOWL_Z), bowl=(*moved, BOWL_Z))
+    assert inside(e_moved), "그릇이 움직이면 판정원도 따라와야"
+    assert done(e_moved), "termination 도 움직인 그릇을 따라와야"
+    assert not inside(e_moved, container_cfg=None), "상수 폴백은 이동한 그릇을 놓쳐야(대조군)"
+
+    # z 기준이 **컨테이너** 임을 확인 — 그릇이 올라가면 같은 큐브 z 는 창 아래.
+    assert not inside(make_env((*BOWL_XY, IN_BOWL_Z), bowl=(*BOWL_XY, BOWL_Z + 0.05))), \
+        "그릇이 5 cm 올라가면 같은 큐브 z 는 창 밖이어야"
+
+    # 그리퍼 조건 — 닫혀 있으면 배치 아님.
+    assert not inside(make_env((*BOWL_XY, IN_BOWL_Z), joints=(0.0,) * 5 + (0.2,))), \
+        "그리퍼 닫힘이면 False 여야"
+
+    # ★핵심 회귀: articulation 컬럼 5 = gripper(열림), 컬럼 0 = shoulder_pan(0.0).
+    #   옛 구현은 `joint_names` 리스트 내 위치(=0)를 봐서 shoulder_pan 을 읽고 **항상 False** 였다.
+    odd = make_env((*BOWL_XY, IN_BOWL_Z), joints=(0.0, 0.0, 0.0, 0.0, 0.0, 1.2))
+    assert inside(odd, robot_cfg=ROBOT_NAMED), \
+        "joint_ids=[5] 를 봐야 한다 — 리스트 내 위치(0=shoulder_pan)를 보면 영구 False"
+
+    # ★그릇 tilt 게이트(main 개선분) — 40° 엎으면 안착 큐브라도 실패.
+    import math as _m
+    half = _m.radians(40.0) / 2.0
+    tilted = make_env((*BOWL_XY, IN_BOWL_Z), bowl_quat=(_m.cos(half), _m.sin(half), 0.0, 0.0))
+    assert not done(tilted), "그릇이 40° 기울면 task_done False 여야(로컬 프레임 + upright 게이트)"
+
+    print("term end-to-end: 12 케이스 PASS (안착·rim위·그릇밖·창하한·DR추종·대조군·그릇상승·"
+          "그리퍼닫힘·컬럼해석·그릇40°기울임)")
+
+
 if __name__ == "__main__":
     try:
         import pytest
@@ -177,6 +288,7 @@ if __name__ == "__main__":
     test_height_range_vs_cube_size()
     test_min_lift_vs_corner_tilt()
     test_gripper_joint_index()
+    test_terms_end_to_end()
     if has_pytest:
         test_container_tilt_gate()
 
