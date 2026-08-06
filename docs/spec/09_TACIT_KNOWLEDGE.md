@@ -357,14 +357,16 @@ h5py<3.16 · torchcodec 0.5.x · torch 2.7.0+cu128 이 Isaac Sim 5.1 번들과 A
 
 ### 7.6 cuRobo v1 vs v2 결정 기록 — 공식 v1 아카이브
 
-- **결정**: feat/skillgen-datagen 브랜치는 공식 Isaac Lab 2.3.2 SkillGen + cuRobo **v1**(commit
+- **결정**: v1 경로는 공식 Isaac Lab 2.3.2 SkillGen + cuRobo **v1**(commit
   `ebb71702`, 공식 검증 commit)을 별도 이미지(`Dockerfile.skillgen`)에 설치했다. 우리 정본은
   **v2 in-process** 로 택했다.
 - **이유** (성공률 아님 — 백엔드·베이스·파이프라인이 달라 비등가):
   ① **IPC·별도 이미지 불필요**: in-process 로 매 trial 초기화가 없고, planner 단일 기동.
   ② **planner 백엔드 동일화**: main SM(`curobo_batch_planner.py`)과 같은 v0.8 을 써서
      `grasp_manifold.py`·`curobo_frames.py` **단일 소스 가능**. v1 은 API 가 달라 별개로 관리했다.
-- **v1 사용 예약**: 공식 추천이 있으면 재검토. 현재는 아카이브(branch `feat/skillgen-datagen` 보존).
+- **v1 사용 예약**: 공식 추천이 있으면 재검토. 현재는 태그 `archive/skillgen-datagen-curobo-v1`
+  에 보존(main 미이식). ★브랜치가 아니라 **태그**를 가리킨다 — 브랜치는 정리되면 사라진다:
+  `git show archive/skillgen-datagen-curobo-v1:docker/Dockerfile.skillgen`
 - **앵커**: `scripts/datagen/generate_mimic_dataset.py::SO101SkillGenPlanner` 클래스 주석
 
 ### 7.7 cuRobo main planner(§5) 와 Mimic planner(§5.9) 는 같은 객체
