@@ -1697,6 +1697,161 @@ python -c "import pyarrow.parquet as pq; print(b'pandas' in (pq.read_table('meta
 
 ---
 
+## `LeRobotDataset.create` 로 데이터셋을 만들 때 schema v2 joint 블록·코덱 이름 2가지 함정
+
+**현상**: 벤치마크용 dummy LeRobot v3 데이터셋(`scripts/benchmark/make_dummy_dataset.py`)을 만들 때
+① schema v2 `so101_action_representation` 블록을 쓰고 stats profile 을 계산하는 단계에서 KeyError,
+② `RGBEncoderConfig(vcodec="libx264")` 로 프로젝트 recorder 와 코덱을 맞추려 하면 ValueError.
+
+**오류 메시지**:
+
+```
+# ① joint topology metadata 이름 불일치
+KeyError: "joint topology metadata is missing for ['shoulder_pan.pos', 'shoulder_lift.pos',
+ 'elbow_flex.pos', 'wrist_flex.pos', 'wrist_roll.pos']; declare type/period/limits explicitly"
+
+# ② 코덱 이름
+ValueError: Invalid vcodec 'libx264'. Must be one of: ['auto', 'h264', 'h264_nvenc', 'h264_qsv',
+ 'h264_vaapi', 'h264_videotoolbox', 'hevc', 'hevc_nvenc', 'hevc_videotoolbox', 'libaom-av1', 'libsvtav1']
+```
+
+**원인**:
+
+- ① `JointTopology.from_feature_metadata` 는 joint metadata 를 **dataset feature 이름**으로 찾는다
+  (`observation.state.names` = `shoulder_pan.pos` …). 반면 `so101_arm_joint_topology().joints` 의
+  `name` 은 접미사 없는 `shoulder_pan` 이라, `joint.to_dict()` 를 그대로 블록에 넣으면 전부 미스한다.
+  (`scripts/contract/create_action_representation_fixture.py` 는 feature 이름을
+  `topology.names + ["gripper.pos"]` 로 만들어 우연히 일치했다 — 실데이터 규약은
+  `so101_contract.feature_codec.JOINT_FEATURE_NAMES` 쪽인 `*.pos` 다.)
+- ② lerobot 0.6.0 은 codec 을 ffmpeg 인코더 이름(`libx264`)이 아니라 **코덱 이름**(`h264`)으로
+  검증한다(`lerobot/configs/video.py: VALID_VIDEO_CODECS`). 기본값은 `libsvtav1`(AV1)이다.
+
+**해결 방법**:
+
+```python
+# ① joint 이름을 dataset feature 이름으로 갈아끼운다
+"joints": [
+    {**joint.to_dict(), "name": feature_name}
+    for joint, feature_name in zip(JOINT_TOPOLOGY.joints, FEATURE_NAMES, strict=False)
+]
+
+# ② vcodec 은 "h264" (프로젝트 recorder 와 동일 코덱). AV1 기본값은 decode 가 더 느려
+#    dataloader 비용 벤치마크를 왜곡한다.
+LeRobotDataset.create(..., rgb_encoder=RGBEncoderConfig(vcodec="h264", crf=23))
+```
+
+**확인 방법**:
+
+```bash
+# 생성 후 코덱·해상도
+python -c "import json;i=json.load(open('<root>/meta/info.json'))['features']['observation.images.top']['info'];print(i['video.codec'],i['video.crf'])"  # h264 23
+# stats artifact 생성 여부 (= joint topology resolve 성공)
+ls <root>/meta/action_representation_stats.json
+# ACT chunk 100 로 로드 (delta_timestamps 경계 확인)
+python -c "
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+ds=LeRobotDataset('<repo_id>',root='<root>',delta_timestamps={'action':[i/30 for i in range(100)]})
+print(ds.num_episodes, ds.num_frames, ds[0]['action'].shape)"   # 20 4000 torch.Size([100, 6])
+```
+
+---
+
+## lerobot 0.6.0 신규 정책(pi05/xvla/vla_jepa/lingbot_va) 학습 실행 차단 3종
+
+**현상**: 벤치마크 스윕(`scripts/benchmark/sweep_train_cost.py`)에서 act/smolvla/groot 는 학습이
+시작되는데 pi05·xvla 는 시작 전에 죽는다.
+
+**오류 메시지**:
+
+```
+# ① policy-entrypoint.sh train 경로 — action_representation 필드가 없는 정책
+draccus.utils.DecodingError: `policy`: Could not decode the value into any of the given types:
+    PreTrainedConfig: The fields `action_representation` are not valid for PI05Config
+
+# ② Pi05 tokenizer (gated)
+OSError: 401 Client Error. Cannot access gated repo for url
+ https://huggingface.co/google/paligemma-3b-pt-224/resolve/main/config.json
+# hf CLI: Error: Access denied. This repository requires approval.
+
+# ③ X-VLA
+ValueError: vision_config is required        # configuration_xvla.get_florence_config()
+```
+
+**원인**:
+
+- ① `docker/policy-entrypoint.sh` 는 `TRAIN_ACTION_REPRESENTATION_MODE="${TRAIN_...:-${ACTION_...:-joint_absolute}}"`
+  로 조립한다. `${VAR:-default}` 는 **빈 문자열도 미설정으로 취급**하므로
+  `-e TRAIN_ACTION_REPRESENTATION_MODE=` 로 끌 수 없고 항상 `joint_absolute` 가 붙는다.
+  `action_representation` 필드는 so101 patch 가 act·smolvla·groot 에만 넣었다.
+- ② `lerobot/policies/pi05/processor_pi05.py` 가 tokenizer 를 `google/paligemma-3b-pt-224` 로
+  **하드코딩**한다(pi0 도 동일). 이 repo 는 `gated: manual` — 토큰만으로는 안 되고 계정이 라이선스를
+  수락해야 한다. Pi05 는 train/finetune 양쪽 다 막힌다.
+- ③ `XVLAConfig.florence_config` 기본값이 `{}` 이고 `get_florence_config()` 가 `vision_config`/
+  `text_config` 를 요구한다. 공개 체크포인트 중에도 이 값이 빈 것이 있다
+  (`jadechoghari/X-VLA-Libero`), `2toINF/X-VLA-*` 는 upstream 포맷이라 lerobot `type` 이 없다.
+  덧붙여 **lerobot 0.6.0 으로 strict 로드되는 공개 X-VLA 체크포인트는 하나도 없다** —
+  구형/신형 VLM 키 레이아웃(`image_projection`+`vision_tower.convs.*` vs
+  `multi_modal_projector.*`)과 action head 폭(`franka_joint7` 이 7D→**20D** 로 바뀌었다)이
+  체크포인트마다 갈린다. 상세 대조표 = `docs/VLA_TRAIN_COST_BENCHMARK.md` §8-③.
+
+**해결 방법**:
+
+```bash
+# ① entrypoint 를 우회해 lerobot-train 을 직접 부르고 필요한 인자만 명시한다.
+#    (entrypoint 가 하던 나머지 일은 ACCELERATE_MIXED_PRECISION export 하나뿐이다)
+docker run --rm --gpus all -e ACCELERATE_MIXED_PRECISION=bf16 \
+  --entrypoint lerobot-train policy-server:0.6.0 --policy.type=pi05 ...
+#    action_representation 은 config 기본값이 이미 joint_absolute 이므로 명시하지 않는다.
+
+# ② https://huggingface.co/google/paligemma-3b-pt-224 에서 라이선스 수락(계정 1회) 후
+hf download google/paligemma-3b-pt-224 --include "*.json" --include "*.model" --include "tokenizer*"
+#    ※ `--include a b` 는 b 가 위치 인자(파일명)로 먹혀 --include 가 무시된다 — 패턴마다 --include.
+
+# ③ florence_config 를 채워 넣는다. lerobot 포맷 SO-101 체크포인트에서 복사하면 된다.
+#    (scripts/benchmark/xvla_florence_config.json = imstevenpmwork/xvla_super_chatton_2 의 값)
+--policy.florence_config='{"model_type":"florence2",...,"vision_config":{...},"text_config":{...}}'
+```
+
+**확인 방법**:
+
+```bash
+# GPU 없이 "학습 루프 진입"까지만 확인 (파라미터 수도 같이 찍힌다)
+python3 scripts/benchmark/sweep_train_cost.py --validate-cpu --modes train
+# → act 52M/52M · smolvla 100M/450M · groot 3144M/3144M · vla_jepa 2770M/2770M · lingbot_va 5089M/5089M PASS
+```
+
+---
+
+## `docker run` 클라이언트를 죽여도 컨테이너는 계속 돌아 다음 측정이 오염됨
+
+**현상**: 벤치마크에서 timeout·조기종료로 `subprocess.Popen(["docker","run",...]).kill()` 을 해도
+컨테이너가 계속 학습을 돌린다. `docker ps` 에 lerobot-train 이 2개 이상 겹쳐 나타나고, 그 뒤 측정한
+스텝 시간이 부풀거나 VRAM 이 남의 것과 섞인다.
+
+**오류 메시지**: 없음(silent). 진단은 `docker ps` 뿐이다.
+
+```
+$ docker ps --filter ancestor=policy-server:0.6.0 --format "{{.Names}} | {{.Command}} | {{.RunningFor}}"
+sweet_wu          | "lerobot-train --pol…" | 2 minutes ago     ← 죽였다고 생각한 것
+priceless_poitras | "lerobot-train --pol…" | 1 second ago      ← 새로 띄운 것
+```
+
+**원인**: `docker run` 은 daemon 에 컨테이너를 만들고 그 출력에 붙어 있는 **클라이언트**일 뿐이다.
+클라이언트를 SIGKILL 하면 attach 만 끊기고 컨테이너는 살아 있다(`--rm` 도 종료 시점에만 동작).
+
+**해결 방법**: 컨테이너에 이름을 주고 이름으로 죽인다. 실행 전에도 잔재를 지운다.
+
+```python
+cmd = ["docker", "run", "--rm", "--name", f"bench_{job_name}", ...]
+...
+subprocess.run(["docker", "rm", "-f", f"bench_{job_name}"], capture_output=True, check=False)
+```
+
+**확인 방법**: timeout 을 짧게(예 `--timeout 60`) 준 뒤 `docker ps` 에 `bench_*` 가 남지 않는지 본다.
+`pkill -f <스크립트>` 로 부모만 죽이는 방식은 쓰지 않는다(자기 셸까지 죽는 self-kill 위험 + 좀비 잔존).
+
+---
+
 ## sim VLA 추론 노드가 잘못된 모델을 로드 (profile 이 -e override 를 덮음)
 
 **현상**: `docker compose run --rm -e POLICY_REPO_ID=<내 모델> vla-ros` 로 추론 모델을 바꿔도, 노드가 **profile(`env/smolvla.env`) 의 `POLICY_REPO_ID`** 를 쓴다(`sent instructions (model=...)` 가 의도한 모델과 다름).

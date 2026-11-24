@@ -144,6 +144,7 @@ dry-run runner 는 **non-promoting** 이다 — 외부 report 가 검증돼도 P
 | `data/` | 데이터셋 **사후 ops**(변환 아님): stats 생성·병합·업로드 |
 | `inference/` | **VLA 폐루프**(정책 경유) + checkpoint 계약 assertion |
 | `contract/` | I/O 계약·스키마·representation 검증 |
+| `benchmark/` | 정책 **학습 비용 측정**(스텝 시간·VRAM) 하네스 → `docs/VLA_TRAIN_COST_BENCHMARK.md` |
 | `real/` | Windows 실기기 native uv CLI |
 | `ece_4560/` | 보관용 과정 프로젝트(격리, 파이프라인 무관) |
 
