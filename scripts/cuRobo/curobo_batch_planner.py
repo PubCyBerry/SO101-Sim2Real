@@ -102,6 +102,13 @@ TCP_TWIST_RY = -0.0486795
 ALPHA_SCAN_DEG = [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0,
                   30.0, -30.0, 35.0, -35.0, 40.0, -40.0, 45.0, -45.0, 50.0, -50.0]
 TAU_MAX_DEG = 10.0  # 결합 게이트 상한(knobs.tau_max_deg 로 조정) — pink 기본과 동일
+# ★worst-yaw wrist-cap: |Δψ| 큰 셀서 auto ρ=-Δψ/cosα 가 |ρ| 크면 wrist_roll 을 위험대로 밀어
+# grasp 실패(sm-eval 물리: ρ-10→wrist+4°=PASS 117mm · ρ-20→+13°=FAIL · ρ-41→+33°=FAIL). |ρ|
+# 를 이 값으로 제한 → wrist 안전대. 대가=closing 축 face 미스얼라인(~30°)이나 jaw 가 큐브보다
+# 넓어 관용(물리 확인: face_angle -29.7°서도 PASS). monotonic: relax 만(wrist 절대 안 키움).
+# 정상(|auto ρ|≤이값) 셀 무영향 = face 정렬 보존.
+RHO_CAP_DEG = 12.0
+RHO_CAP_RAD = math.radians(RHO_CAP_DEG)
 # ρ+π 미러 branch 는 생성 안 함: τ 게이트 하 |ρ| ≤ 45°/cos50° ≈ 70° < 100° 라 기본 branch 가
 # 항상 wrist gate 통과, 미러는 항상 탈락(Δ≥110° + 사용자 금지 이력 wrist ~223° 뒤집기).
 # per-pass 1후보=1 plan_pose 라 보장된 탈락 후보는 latency 만 2배.
@@ -113,7 +120,7 @@ WRIST_ROLL_DELTA_LIMIT_DEG = 100.0
 # tangent/height 폭 = fingers-down branch 실측 도달 범위(40mm 큐브 kinematic 한계) — manifold
 # 후보로 통과율 확보 후 조임은 별도 튜닝.
 FIXED_JAW_CLEAR_TARGET = 0.004  # pad center proxy 조준 clearance(4mm 부근)
-FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.003, 0.005
+FIXED_JAW_CLEAR_MIN, FIXED_JAW_CLEAR_MAX = 0.002, 0.008  # R3: 3-5mm→2-8mm 창 완화(D3, IK undershoot 수용)
 E_TANGENT_MAX = 0.022
 E_HEIGHT_MAX = 0.028
 WRIST_ROLL_DELTA_LIMIT = math.radians(WRIST_ROLL_DELTA_LIMIT_DEG)
@@ -324,15 +331,19 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau):
     # — 3회론 pan 오차 ~0.8° 잔존.
     for _ in range(5):
         dpsi = wrap90(psi - (pan + math.pi / 2.0))
-        rho = -dpsi / math.cos(a) + rho_corr
+        raw_rho = -dpsi / math.cos(a)
+        capped = abs(raw_rho) > RHO_CAP_RAD   # ★worst-yaw wrist-cap: |ρ| 제한(상수 블록)
+        rho = (max(-RHO_CAP_RAD, min(RHO_CAP_RAD, raw_rho)) if capped
+               else raw_rho + rho_corr)
         pan_R = pan  # 이 반복의 R/tcp 구축에 쓴 pan — meta 는 이 값(갱신 전)을 기록해야 정합
         R = _rz(pan_R) @ _ry(-a) @ R_TOPDOWN @ _rz(rho) @ TCP_TWIST
         face_label, n_face = max(faces, key=lambda f: float(np.dot(f[1], R[:, 0])))
         # ρ 잔차 feedback: -Δψ/cosα 는 1차 근사 + TCP twist 가 closing 수평방위를 α 비례로
         # 끌어당김(α=50° 서 ~1.7°) → 실측 closing 방위 잔차를 다음 반복 ρ 에 흡수(수렴 <0.1°).
         # d(closing_az)/dρ = -cosα 이므로 잔차 상쇄 부호는 +.
-        resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
-        rho_corr += resid / math.cos(a)
+        if not capped:  # capped 셀은 의도적 미스얼라인 — 정렬 feedback 안 함
+            resid = wrap90(math.atan2(R[1, 0], R[0, 0]) - math.atan2(n_face[1], n_face[0]))
+            rho_corr += resid / math.cos(a)
         pad_target = cc + (CUBE_HALF + FIXED_JAW_CLEAR_TARGET) * n_face
         tcp_tgt = pad_target - R @ fic
         pan = math.atan2(tcp_tgt[1] - PAN_AXIS_XY[1], tcp_tgt[0] - PAN_AXIS_XY[0])
@@ -346,6 +357,7 @@ def cand_pose_manifold(xyz, faces, alpha_deg, tau):
         "tilt_deg": float(alpha_deg),
         "alpha_deg": float(alpha_deg),
         "rho_deg": math.degrees(rho),
+        "rho_capped": bool(capped),  # worst-yaw wrist-cap 트리거 여부(프리뷰)
         "dpsi_deg": math.degrees(dpsi),
         "pan_deg": math.degrees(pan_R),
         "face_label": face_label,
@@ -407,6 +419,7 @@ class PickPlacePlanner:
             max_batch_size=self.max_batch_size,
             max_goalset=self.max_goalset,
             multi_env=True,
+            num_ik_seeds=64, num_trajopt_seeds=8,  # R1: seed 예산 확대(기본 32/4, D1·D4)
             use_cuda_graph=False))
         self.p.warmup(enable_graph=False, num_warmup_iterations=2)
         self.tf = self.p.tool_frames
@@ -668,8 +681,14 @@ class PickPlacePlanner:
     def _manifold_candidates(self, xyz, faces, knobs=None):
         """(pan,α,ρ) 후보 목록 — ALPHA_SCAN_DEG 순서(|α| 오름차순 ± interleave)가 곧 우선순위."""
         kn = knobs or {}
-        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)))
         pan_r = math.hypot(float(xyz[0]) - PAN_AXIS_XY[0], float(xyz[1]) - PAN_AXIS_XY[1])
+        # R2: reach-adaptive τ (D2) — 근<0.16·원>0.22 극단서 0→1 램프로 τ 10°→최대 25° 완화.
+        # correct-frame 실패셀 r_pan: NEAR 0.11·FAR 0.24~0.28. FK 게이트가 grasp 품질을
+        # 독립보장하므로 τ 확대는 후보 수만 늘리고 나쁜 후보는 게이트가 거른다(안전).
+        # R2': far 0.24→0.22 — marginal far 셀(r=0.246, (0.168,0.180))이 0.24 에 겨우 걸려
+        # τ 미완화이던 것 보정. probe 검증 +1 회복·succ_far 54/54 무회귀.
+        reach_edge = max(0.0, (0.16 - pan_r) / 0.06, (pan_r - 0.22) / 0.06)
+        tau = math.radians(float(kn.get("tau_max_deg", TAU_MAX_DEG)) + min(1.0, reach_edge) * 15.0)
         cands = []
         for a_deg in ALPHA_SCAN_DEG:
             cand = cand_pose_manifold(xyz, faces, a_deg, tau)
@@ -758,7 +777,8 @@ class PickPlacePlanner:
         n_env = len(cubes)
         kn = knobs or {}
         seed = kn.get("seed")
-        max_attempts = 2
+        max_attempts = 4       # R1: 2→4 (attempt 마다 Halton seed 전진=다양성, D1)
+        rescue_attempts = 6    # R1: 동질 rescue batch 는 더 넓게(6) — 굶긴 원거리 row 구제
         disable_cube = bool(kn.get("disable_cube_obstacle_for_approach", False))
         start_pos, start_quat, _ = self._ee_pose_axis_batch(starts)
         per_env = []
@@ -867,7 +887,7 @@ class PickPlacePlanner:
                 try:
                     result = self.p.plan_pose(
                         goal_tool_poses=self._pose_batch(pos, quat),
-                        current_state=dup, max_attempts=max_attempts,
+                        current_state=dup, max_attempts=rescue_attempts,
                         success_ratio=1.0)
                 finally:
                     self.p.enable_link_collision(CONTACT_LINKS + DESCEND_EXTRA_OFF)
@@ -1309,14 +1329,16 @@ def self_check_geom():
                     plane_n = np.array([-math.sin(pan), math.cos(pan), 0.0])
                     off = abs(float(np.dot(R_pre[:, 2], plane_n)))
                     assert off < 1e-9, f"approach off pan-plane {off:.2e}"
-                    # (b) closing 수평방위 ↔ face 정렬
-                    R = R_pre @ TCP_TWIST
-                    nf = np.asarray(meta["face_normal"], dtype=np.float64)
-                    resid = abs(math.degrees(wrap90(
-                        math.atan2(R[1, 0], R[0, 0]) - math.atan2(nf[1], nf[0]))))
-                    assert resid < 1.0, (
-                        f"closing-face resid {resid:.2f}° az={az_deg} r={r} "
-                        f"yaw={yaw_deg} alpha={a_deg}")
+                    # (b) uncapped: closing 수평방위 ⊥ face(resid<1°). rho-cap 셀은 의도적 미스얼라인
+                    #     (넓은 jaw 관용·물리검증) — wrap90 로 ≤45° 보장, 런타임 FK face-gate(±40°)가 필터.
+                    if not meta.get("rho_capped"):
+                        R = R_pre @ TCP_TWIST
+                        nf = np.asarray(meta["face_normal"], dtype=np.float64)
+                        resid = abs(math.degrees(wrap90(
+                            math.atan2(R[1, 0], R[0, 0]) - math.atan2(nf[1], nf[0]))))
+                        assert resid < 1.0, (
+                            f"closing-face resid {resid:.2f}° az={az_deg} r={r} "
+                            f"yaw={yaw_deg} alpha={a_deg}")
                 # (c) top-down 부근(τ 게이트: |Δψ|≤45° 서 α≤10° 는 항상 통과) ≥5개 보장
                 assert cell_kept >= 5, f"cell kept={cell_kept} az={az_deg} r={r} yaw={yaw_deg}"
                 n_kept += cell_kept

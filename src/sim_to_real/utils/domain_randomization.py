@@ -190,6 +190,7 @@ def _randomize_cubes_scattered_fn(
     num_active: int | None = None,
     min_base_sep: float = 0.0,
     robot_cfg: SceneEntityCfg | None = None,
+    base_sep_offset_xy: tuple[float, float] = (0.0, 0.0),
     z_range: tuple[float, float] = (0.0, 0.0),
     full_orient: bool = False,
     volume_inset: float = 0.0,
@@ -241,7 +242,11 @@ def _randomize_cubes_scattered_fn(
     # 어떤 컨트롤러도 수행 불가 — spawn 자체를 막는다.
     base_xy = None
     if min_base_sep > 0.0 and robot_cfg is not None:
-        base_xy = env.scene[robot_cfg.name].data.default_root_state[env_ids, :2]
+        # ★min-reach 중심 = 로봇 root(마운트 원점) + pan축 offset(팔 실제 회전중심).
+        # offset 은 spawn_area.PAN_AXIS_XY (단일소스, pick_cube_env_cfg 가 전달) — 마운트원점
+        # 기준이면 -x 근접 corner 를 도달불가인데 통과시킴(sweep 판정 in_spawn_area 와 동일 중심).
+        root_xy = env.scene[robot_cfg.name].data.default_root_state[env_ids, :2]
+        base_xy = root_xy + torch.tensor(base_sep_offset_xy, device=device, dtype=root_xy.dtype)
     min_base_sep_sq = min_base_sep ** 2
 
     # 누적 배치 xy — 각 큐브를 놓을 때 이전 큐브들과의 거리 확인에 사용
@@ -406,6 +411,7 @@ def randomize_cubes_scattered(
     num_active: int | None = None,
     min_base_sep: float = 0.0,
     robot_name: str = "robot",
+    base_sep_offset_xy: tuple[float, float] = (0.0, 0.0),
     z_range: tuple[float, float] = (0.0, 0.0),
     full_orient: bool = False,
     volume_inset: float = 0.0,
@@ -454,6 +460,7 @@ def randomize_cubes_scattered(
             "num_active": num_active,
             "min_base_sep": float(min_base_sep),
             "robot_cfg": SceneEntityCfg(robot_name) if min_base_sep > 0.0 else None,
+            "base_sep_offset_xy": tuple(float(v) for v in base_sep_offset_xy),
             "z_range": z_range,
             "full_orient": bool(full_orient),
             "volume_inset": float(volume_inset),

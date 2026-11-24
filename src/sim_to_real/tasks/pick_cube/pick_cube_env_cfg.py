@@ -538,6 +538,7 @@ def _make_randomize_cubes(x_range, y_range, bell):
         min_bowl_sep=spawn_area.MIN_BOWL_SEP,   # 큐브-그릇 겹침 금지(spawn_area 단일 소스)
         cube_sizes=[_CUBE_SIZES_M[n] for n in CUBE_NAMES],
         min_base_sep=spawn_area.MIN_BASE_SEP,   # base 발치(inner-reach) 배제
+        base_sep_offset_xy=spawn_area.PAN_AXIS_XY,  # ★min-reach 중심=pan축(마운트원점+offset). sweep 과 단일소스
         x_halfwidth_by_y=bell,             # full=종모양 · base=None(사각형)
         x_exclude_box=_CUBE_ARM_EXCLUDE,   # 로봇암 주변 배제(full·base 공통)
     )

@@ -83,6 +83,9 @@ _p_random.add_argument("--summary_dir", default=None,
                        help="auto-trial summary.json 디렉터리(기본 record_viewport_dir 또는 scratch)")
 _p_random.add_argument("--record_fps", type=int, default=30, help="viewport MP4 FPS")
 _p_random.add_argument("--record_every", type=int, default=1, help="N step 마다 1 프레임 기록")
+# ponytail: 랜덤 DR 대신 특정 셀/yaw 고정 재생(단일 grasp 재현·녹화). auto_trials 와 함께.
+_p_random.add_argument("--fixed_cell", default=None, help="'x,y' env-local — 이 좌표에 큐브 고정")
+_p_random.add_argument("--fixed_yaw", type=float, default=0.0, help="--fixed_cell 큐브 yaw(도)")
 
 _p_fail = _sub.add_parser("fail", parents=[_common], help="sweep 결과의 fail 좌표만 재현")
 _p_fail.add_argument("--results", required=True,
@@ -589,7 +592,12 @@ def main():
                 print(f"[sm] auto trial {trial_i}/{args.auto_trials} seed={trial_seed}", flush=True)
                 status, val = "unknown", None
                 try:
-                    _reset("N", seed=trial_seed, recorder=recorder)
+                    if args.fixed_cell:  # ponytail: 특정 셀/yaw 재현(grasp 녹화)
+                        fx, fy = (float(v) for v in args.fixed_cell.split(","))
+                        _reset_to_targets([(fx, fy)] * env.num_envs,
+                                          [math.radians(args.fixed_yaw)] * env.num_envs, trial_seed)
+                    else:
+                        _reset("N", seed=trial_seed, recorder=recorder)
                     status, val = _manipulate(recorder=recorder, plan_seed=trial_seed)
                 finally:
                     recorder.close()

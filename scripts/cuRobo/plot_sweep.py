@@ -76,14 +76,17 @@ def plot(data, SA, out):
     bx, by = sp.get("bowl_center_xy", list(SA.BOWL_CENTER_XY))
     ax.add_patch(Circle((bx, by), sp.get("bowl_sep", SA.MIN_BOWL_SEP), fill=False,
                         ls="--", ec="#c0392b", lw=1.1, zorder=2))
-    a0, a1 = sp.get("base_xy", [0.0, 0.0])
-    ax.add_patch(Circle((a0, a1), sp.get("base_sep", SA.MIN_BASE_SEP), fill=False,
+    a0, a1 = sp.get("base_xy", [0.0, 0.0])                  # base_link 마운트 원점
+    px, py = sp.get("pan_axis_xy", list(SA.PAN_AXIS_XY))    # shoulder_pan 축 = min-reach 중심
+    # base-sep(min-reach) 원은 ★pan축 중심 (마운트원점 아님 — in_spawn_area·런타임과 동일 기준)
+    ax.add_patch(Circle((px, py), sp.get("base_sep", SA.MIN_BASE_SEP), fill=False,
                         ls="--", ec="#8e44ad", lw=1.1, zorder=2))
     ex0, ex1, ey0, ey1 = sp.get("exclude_box", list(SA.CUBE_ARM_EXCLUDE))
     ax.add_patch(Rectangle((ex0, ey0), ex1 - ex0, ey1 - ey0, fc="#f4d7d7", ec="#c0392b",
                            lw=1.0, hatch="///", alpha=0.7, zorder=1))
     ax.plot([bx], [by], marker="*", ms=20, color="#c0392b", zorder=5)
-    ax.plot([a0], [a1], marker="^", ms=13, color="#8e44ad", zorder=5)
+    ax.plot([a0], [a1], marker="^", ms=13, color="#8e44ad", zorder=5)          # 마운트 원점(base_link)
+    ax.plot([px], [py], marker="P", ms=12, color="#16a085", zorder=5)          # pan축(min-reach 중심)
 
     xs = np.array([c["x"] for c in cells])
     ys = np.array([c["y"] for c in cells])
@@ -127,7 +130,8 @@ def plot(data, SA, out):
         Line2D([0], [0], marker="o", ls="", mfc="#2ecc71", mec="#555", ms=8, label="interior cell"),
         Line2D([0], [0], marker="x", ls="", color="#7f8c8d", ms=9, label="plan fail"),
         Line2D([0], [0], marker="*", ls="", color="#c0392b", ms=14, label="bowl"),
-        Line2D([0], [0], marker="^", ls="", color="#8e44ad", ms=11, label="robot base"),
+        Line2D([0], [0], marker="^", ls="", color="#8e44ad", ms=11, label="robot base (mount)"),
+        Line2D([0], [0], marker="P", ls="", color="#16a085", ms=11, label="pan axis (min-reach ctr)"),
     ]
     ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.92)
     fig.tight_layout()
