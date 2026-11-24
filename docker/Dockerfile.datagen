@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Dockerfile.datagen — cuRobo v0.8 collision-free motion planning 데이터 생성 이미지.
+#
+# Base : so101-isaac-sim:5.1.0 (Dockerfile.isaac_sim 산출물 = isaac-lab:2.3.2 +
+#        datagen deps + sim_to_real PYTHONPATH + entrypoint). 그 위에 cuRobo v0.8 만 얹음.
+#        → bridge(VLA 폐루프)는 cuRobo 불요 → 그 이미지는 불변 유지, datagen 만 분리.
+#
+# 용도 : multi-env pick-place VLA 학습 데이터 생성. cuRobo 가 env batch 를 한 번에
+#        collision-free motion-gen (SM+DLS-IK 백엔드 대체). in-process (ROS/IPC 불요).
+#
+# ■ 선행: so101-isaac-sim:5.1.0 먼저 빌드 (docker compose build isaac-sim).
+# ■ 빌드: docker compose -f docker/docker-compose.yaml build curobo-datagen
+# ■ 검증: docker compose run --rm curobo-datagen \
+#           python -c "import torch,curobo,warp; print('curobo', curobo.__version__)"
+#
+# ■ cuRobo v0.8(v2) 설치 함정 3건 (2026-07-01 Blackwell sm_120 GPU 검증 완료):
+#   ① packaging==23.0 핀 필수 — curobo dep 가 packaging 25.0 을 끌면 Isaac 번들 torch
+#      가 즉사한다(torch._vendor.packaging 가 top-level packaging 로 alias 되는데
+#      25.0 이 _structures 모듈을 제거 → ModuleNotFoundError). "<26" 은 25.0 을 허용해
+#      무효 — 반드시 ==23.0 (이미지 원본 버전). curobo dep 중 >=24 강제하는 것 없음.
+#   ② nvrtc 헤더 force-reinstall — 베이스 이미지의 prebundle nvrtc(ml_archive)는
+#      lib-only(nvrtc.h 없음)라 pip 가 "already satisfied" 로 헤더 wheel 을 스킵한다.
+#      그러면 cuRobo 의 find_nvidia_header_directory("nvrtc") 가 None → JIT 컴파일 크래시.
+#      헤더 포함 wheel 을 kit-site 에 강제 재설치해 nvrtc.h 를 심는다.
+#   ③ cccl 헤더 — [cu12] extra 는 CCCL(cooperative_groups) 헤더를 제외(pyproject 주석)
+#      → 커널 컴파일이 cooperative_groups.h 를 못 찾음 → nvidia-cuda-cccl-cu12 별도 설치.
+#   cuRobo v2 는 nvcc 불요(cuda.core NVRTC 런타임 JIT). numpy 1.26·warp 1.11·torch 2.7
+#   세 ABI 핀은 불변(순수 additive). 상세 = memory curobo-v08-docker-install-recipe.
+# =============================================================================
+
+FROM so101-isaac-sim:5.1.0
+
+# .dockerignore 가 curobo/.git 을 제외 → setuptools_scm 가 버전을 못 읽는다.
+# SETUPTOOLS_SCM_PRETEND_VERSION 으로 우회(패키지 동작엔 무영향).
+COPY ref_repos/curobo /opt/curobo
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.8.0 /isaac-sim/python.sh -m pip install --no-cache-dir \
+        "/opt/curobo[cu12]" "packaging==23.0" nvidia-cuda-cccl-cu12 \
+ && /isaac-sim/python.sh -m pip install --no-cache-dir --force-reinstall --no-deps \
+        "nvidia-cuda-nvrtc-cu12==12.8.93"
+
+# 기본 모드 = datagen (isaac-sim-entrypoint.sh 상속). 현재 datagen 모드는
+# record_state_machine.py(SM+DLS-IK) 를 실행 — cuRobo 드라이버(record_curobo.py)는 후속.
+CMD ["datagen"]
